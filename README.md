@@ -34,6 +34,6 @@ mkdir build
 cd build
 cmake ..
 make -j10
-cd ../../..
+cd ../..
 make -j10 all
 ```
