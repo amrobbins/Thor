@@ -1,5 +1,5 @@
 
-## MLDev is a repo to hold the work in progress Machine Learning framework that I am developing.
+## Thor is a work in progress Machine Learning framework that I am developing.
 
 The goals of this project are:
   1. Create a very high performance AI suite
@@ -25,6 +25,7 @@ Dependencies
 
 Install:
 
+```shell
 git clone https://github.com/amrobbins/MLDev.git
 cd MLDev
 git clone https://github.com/google/googletest.git
@@ -35,3 +36,4 @@ cmake ..
 make -j10
 cd ../../..
 make -j10 all
+```
