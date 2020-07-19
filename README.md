@@ -11,7 +11,7 @@ The goals of this project are:
      1. C++
      2. Java
      3. Python
-  7. Make the defaults the recomended configurations, so that beginners can quickly succeed.
+  7. Make the defaults the recommended configurations, so that beginners can quickly succeed.
   8. Keep up to date on the latest research and bring the promising pieces into this framework.
   9. Educate the users about the different pieces and strategies, tell them for real don't over academia it. Point them to the latest trends and research. Have a newsletter.
 

@@ -47,7 +47,7 @@ TEST(Relu, Works) {
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Relu());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -105,7 +105,7 @@ TEST(Tanh, Works) {
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Tanh());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();

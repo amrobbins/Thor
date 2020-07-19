@@ -57,6 +57,9 @@ class Tensor {
 
     Tensor clone() { return uninitialized ? Tensor() : Tensor(placement, descriptor); }
     Tensor clone(TensorPlacement newPlacement) { return uninitialized ? Tensor() : Tensor(newPlacement, descriptor); }
+    Tensor clone(TensorDescriptor::DataType newDataType) {
+        return uninitialized ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
+    }
 
     TensorPlacement getPlacement() { return placement; }
     void *getMemPtr() { return mem; }
