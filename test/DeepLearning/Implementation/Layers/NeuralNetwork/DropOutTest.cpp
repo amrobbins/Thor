@@ -52,7 +52,7 @@ TEST(DropOut, InferenceWorks) {
         DropOut *dropOutLayer = new DropOut(0.25, false);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
@@ -131,7 +131,7 @@ TEST(DropOut, TrainingNoDropOut) {
         DropOut *dropOutLayer = new DropOut(0.0f, true);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
@@ -210,7 +210,7 @@ TEST(DropOut, TrainingAllDropOut) {
         DropOut *dropOutLayer = new DropOut(1.0f, true);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
@@ -296,7 +296,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         DropOut *dropOutLayer = new DropOut(dropOutRate, true);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();

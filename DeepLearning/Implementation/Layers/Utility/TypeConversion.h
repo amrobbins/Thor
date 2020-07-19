@@ -14,7 +14,7 @@ class TypeConversion : public Layer {
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
         assert(featureInput.get().getDescriptor().getDataType() != dataType);
-        return Tensor(featureInput.get().getPlacement(), TensorDescriptor(dataType, featureInput.get().getDescriptor().getDimensions()));
+        return featureInput.get().clone(dataType);
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {

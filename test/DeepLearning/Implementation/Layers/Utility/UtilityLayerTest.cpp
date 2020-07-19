@@ -59,7 +59,7 @@ TEST(InOut, NoOpWorks) {
 
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(gpuSource, stream));
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor gpuOutput = layers.back()->getFeatureOutput();
@@ -123,7 +123,7 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
 
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Map<unsigned int>(mapping, sourceGpu.getDescriptor().getDimensions()));
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -192,7 +192,7 @@ TEST(Map, MapsCorrectlyToFewerElements) {
 
     layers.push_back(new NetworkInput(sourceGpu, stream));
     layers.push_back(new Map<uint8_t>(mapping, sourceGpu.getDescriptor().getDimensions()));
-    layers.push_back(new NetworkOutput());
+    layers.push_back(new NetworkOutput(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -259,7 +259,7 @@ TEST(Map, MapsCorrectlyToMoreElements) {
 
     layers.push_back(new NetworkInput(sourceGpu, stream));
     layers.push_back(new Map<unsigned long>(mapping, sourceGpu.getDescriptor().getDimensions()));
-    layers.push_back(new NetworkOutput());
+    layers.push_back(new NetworkOutput(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -327,7 +327,7 @@ TEST(Flatten, FlattensCorrectly) {
 
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Flatten(numOutputDimensions));
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -387,7 +387,7 @@ TEST(Reshape, ReshapesCorrectly) {
 
     layers.push_back(new NetworkInput(sourceGpu, stream));
     layers.push_back(new Reshape(newDimensions));
-    layers.push_back(new NetworkOutput());
+    layers.push_back(new NetworkOutput(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -445,7 +445,7 @@ TEST(TypeConversion, Converts) {
 
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new TypeConversion(TensorDescriptor::DataType::INT32));
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -495,12 +495,12 @@ TEST(TensorFanout, CreatesFanout) {
 
     layers.push_back(new NetworkInput(sourceGpu, stream));
     layers.push_back(new TensorFanout());
-    layers.push_back(new NetworkOutput());
+    layers.push_back(new NetworkOutput(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
     // Special case, two outputs
-    layers.push_back(new NetworkOutput());
+    layers.push_back(new NetworkOutput(gpuPlacement));
     layers[1]->connectToNextLayer(layers[3]);
     layers[3]->parentCompile();
     layers[3]->compile();
@@ -619,7 +619,7 @@ TEST(Concatenate, Concatenates) {
             layers[i]->connectToNextLayer(layers.back());
         layers.push_back(new NoOpLayer());
         layers[layers.size() - 2]->connectToNextLayer(layers.back());
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
         layers[layers.size() - 2]->connectToNextLayer(layers.back());
 
         LayerTestHelper::initializeNetwork(layers);
@@ -761,7 +761,7 @@ TEST(Split, Splits) {
             layers.push_back(noOpLayer);
             splitLayer->connectToNextLayer(noOpLayer);
 
-            Layer *networkOutputLayer = new NetworkOutput();
+            Layer *networkOutputLayer = new NetworkOutput(gpuPlacement);
             layers.push_back(networkOutputLayer);
             noOpLayer->connectToNextLayer(networkOutputLayer);
             partsGpu.push_back(networkOutputLayer->getFeatureOutput());
@@ -847,7 +847,7 @@ TEST(DeviceCrossing, Crosses) {
 
     layers.push_back(new NetworkInput(sourceGpu0, stream));
     layers.push_back(new DeviceCrossing(gpu0Placement, gpu1Placement));
-    layers.push_back(new NetworkOutput());
+    layers.push_back(new NetworkOutput(gpu1Placement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -922,7 +922,7 @@ TEST(Pad, Pads) {
 
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Pad(paddingAmount));
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -1044,7 +1044,7 @@ TEST(Extract, Extracts) {
 
         layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Extract(dimensionSpans));
-        layers.push_back(new NetworkOutput());
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
