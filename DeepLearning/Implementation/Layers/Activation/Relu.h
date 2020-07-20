@@ -15,7 +15,6 @@ class Relu : public Layer {
         assert(outputTensor.isPresent());
         TensorPlacement placement = inputTensor.get().getPlacement();
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(placement.getDeviceNum());
         launchRelu((half*)outputTensor.get().getMemPtr(),
                    (half*)inputTensor.get().getMemPtr(),
                    inputTensor.get().getDescriptor().getTotalNumElements(),
@@ -23,12 +22,15 @@ class Relu : public Layer {
     }
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        // FIXME: implement
-        assert(false);
+        assert(dataIn.isPresent());
+        assert(errorIn.isPresent());
+        assert(errorOut.isPresent());
+        TensorPlacement placement = errorOut.get().getPlacement();
+        assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        launchReluBackward((half*)errorOut.get().getMemPtr(),
+                           (half*)dataIn.get().getMemPtr(),
+                           (half*)errorIn.get().getMemPtr(),
+                           errorOut.get().getDescriptor().getTotalNumElements(),
+                           stream);
     }
-
-   private:
-    bool uninitialized;
-
-    TensorDescriptor::DataType dataType;
 };

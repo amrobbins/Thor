@@ -6,11 +6,11 @@
 // Data type will be converted if necessary, memory will be copied across devices if necessary.
 class NetworkInput : public Layer {
    public:
-    NetworkInput(Optional<TensorPlacement> contentPlacement,
+    NetworkInput(Optional<TensorPlacement> networkPlacement,
                  Optional<TensorDescriptor::DataType> contentDataType,
                  Optional<vector<unsigned long>> contentDimensions,
                  Stream stream) {
-        construct(contentPlacement, contentDataType, contentDimensions, stream);
+        construct(networkPlacement, contentDataType, contentDimensions, stream);
     }
 
     NetworkInput(Optional<Tensor> exampleTensor, Stream stream) {
@@ -26,13 +26,13 @@ class NetworkInput : public Layer {
                       stream);
     }
 
-    void construct(Optional<TensorPlacement> contentPlacement,
+    void construct(Optional<TensorPlacement> networkPlacement,
                    Optional<TensorDescriptor::DataType> contentDataType,
                    Optional<vector<unsigned long>> contentDimensions,
                    Stream stream) {
-        assert(contentDimensions.isPresent() == contentPlacement.isPresent());
+        assert(contentDimensions.isPresent() == networkPlacement.isPresent());
         assert(contentDimensions.isPresent() == contentDataType.isPresent());
-        this->contentPlacement = contentPlacement;
+        this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
         this->contentDimensions = contentDimensions;
         this->stream = stream;
@@ -60,7 +60,7 @@ class NetworkInput : public Layer {
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         if (contentDimensions.isPresent())
-            return Tensor(contentPlacement, TensorDescriptor(contentDataType, contentDimensions));
+            return Tensor(networkPlacement, TensorDescriptor(contentDataType, contentDimensions));
         return Optional<Tensor>::empty();
     }
 
@@ -89,6 +89,6 @@ class NetworkInput : public Layer {
 
    protected:
     Optional<vector<unsigned long>> contentDimensions;
-    Optional<TensorPlacement> contentPlacement;
+    Optional<TensorPlacement> networkPlacement;
     Optional<TensorDescriptor::DataType> contentDataType;
 };

@@ -4,7 +4,7 @@
 
 class NetworkOutput : public Layer {
    public:
-    NetworkOutput(Optional<TensorPlacement> contentPlacement) : contentPlacement(contentPlacement) {}
+    NetworkOutput(Optional<TensorPlacement> outputPlacement) : outputPlacement(outputPlacement) {}
 
     virtual void connectToNextLayer(Layer *nextLayer) { assert(false); }
 
@@ -29,11 +29,11 @@ class NetworkOutput : public Layer {
     virtual Event getOutputReadyEvent() { return outputReadyEvent; }
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
-        assert(featureInput.isEmpty() == contentPlacement.isEmpty());
-        if (contentPlacement.isEmpty())
+        assert(featureInput.isEmpty() == outputPlacement.isEmpty());
+        if (outputPlacement.isEmpty())
             return Optional<Tensor>::empty();
         else
-            return featureInput.get().clone(contentPlacement);
+            return featureInput.get().clone(outputPlacement);
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
@@ -52,5 +52,5 @@ class NetworkOutput : public Layer {
    protected:
     Event outputReadyEvent;
 
-    Optional<TensorPlacement> contentPlacement;
+    Optional<TensorPlacement> outputPlacement;
 };
