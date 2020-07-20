@@ -98,7 +98,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         sumScale((half*)weights.getMemPtr(),
                  (half*)weights.getMemPtr(),
                  (half*)weightsGradient.getMemPtr(),
-                 learningRate,
+                 -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
                  weights.getDescriptor().getTotalNumElements(),
                  stream);
         if (hasBias) {
@@ -107,7 +107,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             sumScale((half*)biases.get().getMemPtr(),
                      (half*)biases.get().getMemPtr(),
                      (half*)biasesGradient.get().getMemPtr(),
-                     learningRate,
+                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
                      biases.get().getDescriptor().getTotalNumElements(),
                      stream);
         }
