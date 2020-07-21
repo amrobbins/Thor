@@ -82,7 +82,7 @@ TEST(DropOut, InferenceWorks) {
         }
 
         errorInput.copyFromAsync(errorInputCpu, stream);
-        dropOutLayer->backProp(sourceGpu, errorInput, errorOutput, stream);
+        dropOutLayer->backward(errorInput);
         errorOutputCpu.copyFromAsync(errorOutput, stream);
         stream.synchronize();
 
@@ -162,7 +162,7 @@ TEST(DropOut, TrainingNoDropOut) {
         }
 
         errorInput.copyFromAsync(errorInputCpu, stream);
-        dropOutLayer->backProp(sourceGpu, errorInput, errorOutput, stream);
+        dropOutLayer->backward(errorInput);
         errorOutputCpu.copyFromAsync(errorOutput, stream);
         stream.synchronize();
 
@@ -241,7 +241,7 @@ TEST(DropOut, TrainingAllDropOut) {
         }
 
         errorInput.copyFromAsync(errorInputCpu, stream);
-        dropOutLayer->backProp(sourceGpu, errorInput, errorOutput, stream);
+        dropOutLayer->backward(errorInput);
         errorOutputCpu.copyFromAsync(errorOutput, stream);
         stream.synchronize();
 
@@ -335,7 +335,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         }
 
         errorInput.copyFromAsync(errorInputCpu, stream);
-        dropOutLayer->backProp(sourceGpu, errorInput, errorOutput, stream);
+        dropOutLayer->backward(errorInput);
         errorOutputCpu.copyFromAsync(errorOutput, stream);
         stream.synchronize();
 

@@ -1,4 +1,5 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+#include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
 #include "MLDev.h"
 
@@ -46,8 +47,10 @@ TEST(Relu, Works) {
 
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(featureInGpu, stream));
+        layers.push_back(new NoOpLayer());
         Relu *relu = new Relu();
         layers.push_back(relu);
+        layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
@@ -73,7 +76,7 @@ TEST(Relu, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu(gpuPlacement, descriptor);
+        Tensor errorOutGpu = relu->getErrorOutput();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -130,8 +133,10 @@ TEST(Tanh, Works) {
 
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(featureInGpu, stream));
+        layers.push_back(new NoOpLayer());
         Tanh *tanhLayer = new Tanh();
         layers.push_back(tanhLayer);
+        layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
@@ -154,7 +159,7 @@ TEST(Tanh, Works) {
         Tensor errorInCpu(cpuPlacement, descriptor);
         Tensor errorOutCpu(cpuPlacement, descriptor);
         Tensor errorInGpu(gpuPlacement, descriptor);
-        Tensor errorOutGpu(gpuPlacement, descriptor);
+        Tensor errorOutGpu = tanhLayer->getErrorOutput();
 
         half *errorInMem = (half *)errorInCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
@@ -162,7 +167,7 @@ TEST(Tanh, Works) {
         }
         errorInGpu.copyFromAsync(errorInCpu, stream);
 
-        tanhLayer->backProp(featureInGpu, errorInGpu, errorOutGpu, stream);
+        tanhLayer->backward(errorInGpu);
         errorOutCpu.copyFromAsync(errorOutGpu, stream);
         stream.synchronize();
 

@@ -123,13 +123,13 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual void setLearningRate(float learningRate) { this->learningRate = learningRate; }
 
-    virtual Optional<Tensor> getWeights() { return weights; }
+    virtual Tensor getWeights() { return weights; }
     virtual Optional<Tensor> getBiases() { return biases; }
 
    protected:
     const bool inferenceOnly;
     const bool hasBias;
-    float learningRate;
+    Optional<float> learningRate;
 
     Tensor weights;
     Optional<Tensor> weightsGradient;

@@ -30,9 +30,41 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
           numOutputChannels(numOutputChannels),
           batchSize(batchSize),
           numInputColumns(numInputColumns),
-          numInputRows(numInputRows) {}
+          numInputRows(numInputRows) {
+        string gpuType = MachineEvaluator::instance().getGpuType(0);
+        ConvolutionKernelRequirement tempConvolutionKernelRequirement = ConvolutionKernelRequirement(gpuType,
+                                                                                                     filterWidth,
+                                                                                                     filterHeight,
+                                                                                                     filterHorizontalStride,
+                                                                                                     filterVerticalStride,
+                                                                                                     leftAndRightPadWidth,
+                                                                                                     topAndBottomPadHeight,
+                                                                                                     numInputChannels,
+                                                                                                     numOutputChannels,
+                                                                                                     batchSize,
+                                                                                                     numInputColumns,
+                                                                                                     numInputRows);
+        numOutputRows = tempConvolutionKernelRequirement.getNumOutputRows();
+        numOutputColumns = tempConvolutionKernelRequirement.getNumOutputColumns();
+    }
+
+    virtual Optional<Tensor> createFeatureOutputTensor() {
+        assert(!featureInputs.empty());
+        assert(featureInputs.back().isPresent());
+
+        return Tensor(featureInputs.back().get().getPlacement(),
+                      TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numOutputChannels, numOutputRows, numOutputColumns));
+    }
 
     virtual void compile() {
+        int gpuNum;
+        assert(!featureInputs.empty());
+        assert(featureInputs[0].isPresent());
+        assert(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        assert(!streams.empty());
+        gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
+        ScopedGpu scopedGpu(gpuNum);
+
         string gpuType = MachineEvaluator::instance().getGpuType(streams.front().getGpuNum());
         convolutionKernelRequirement = ConvolutionKernelRequirement(gpuType,
                                                                     filterWidth,
@@ -47,14 +79,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                                                     numInputColumns,
                                                                     numInputRows);
 
-        int gpuNum;
-        assert(!featureInputs.empty());
-        assert(featureInputs[0].isPresent());
-        assert(featureInputs[0].get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(!streams.empty());
-        gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
-        ScopedGpu scopedGpu(gpuNum);
-
         GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, streams[0]);
         GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, streams[0]);
 
@@ -64,8 +88,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         vector<unsigned long> weightsDimensions;
         weightsDimensions.push_back(numOutputChannels);
         weightsDimensions.push_back(numInputChannels);
-        weightsDimensions.push_back(numInputRows);
-        weightsDimensions.push_back(numInputColumns);
+        weightsDimensions.push_back(filterHeight);
+        weightsDimensions.push_back(filterWidth);
         TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
         weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
         weightsGradient = weights.clone();
@@ -162,6 +186,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     const int batchSize;
     const int numInputColumns;
     const int numInputRows;
+    int numOutputColumns;
+    int numOutputRows;
 
     Optional<ConvolutionKernelRequirement> convolutionKernelRequirement;
 
