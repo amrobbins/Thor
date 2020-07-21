@@ -36,8 +36,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
-                build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
+                build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
                 build/test/Utilities/Common/OptionalTest && \
@@ -45,14 +45,15 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCr
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
                 build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest && \
-                build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest && \
                 build/test/DeepLearning/Implementation/Tensor/tensorTest && \
+                build/test/Utilities/ComputeTopology/machineEvaluatorTest && \
+                build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
+                build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
+                build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
                 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
                 build/test/Utilities/WorkQueue/WorkQueueTest && \
-                build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest && \
-                build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
-                build/test/Utilities/ComputeTopology/machineEvaluatorTest \
+                build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
             build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
@@ -67,6 +68,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/Utilities/WorkQueue/WorkQueueTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
+            build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
             build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
@@ -337,6 +339,10 @@ build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply
 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuConvolution
 	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp $(MLDEV)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
+	$(Gpp) -ggdb -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
