@@ -183,9 +183,7 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
     cudnnConvolutionFwdAlgoPerf_t optimalKernel = optimalForwardKernels[convolutionKernelRequirement];
     GpuConvolution::instance().forwardMutex.unlock();
 
-    if (optimalKernel.memory == 0) {
-        assert(workspace.isEmpty());
-    } else {
+    if (optimalKernel.memory > 0) {
         assert(workspace.isPresent());
         assert(optimalKernel.memory == workspace.get().getDescriptor().getArraySizeInBytes());
     }
@@ -226,15 +224,27 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         // Choose the best algo with no workspace
-        cudnnConvolutionFwdAlgo_t algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
-        for (int i = 0; i < maxAlgoCount; ++i) {
+        int i;
+        for (i = 0; i < maxAlgoCount; ++i) {
             if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
                 continue;
             if (perfResults[i].memory != 0)
                 continue;
-            algo = perfResults[i].algo;
             break;
         }
+        if (i < maxAlgoCount) {
+            GpuConvolution::instance().forwardMutex.lock();
+            optimalKernel = perfResults[i];
+            optimalForwardKernels[convolutionKernelRequirement] = optimalKernel;
+            GpuConvolution::instance().forwardMutex.unlock();
+        } else {
+            GpuConvolution::instance().forwardMutex.lock();
+            optimalKernel.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
+            optimalKernel.memory = 0;
+            optimalForwardKernels[convolutionKernelRequirement] = optimalKernel;
+            GpuConvolution::instance().forwardMutex.unlock();
+        }
+
         // printf("!!!!!! Switched to algo %d\n", algo);
         cudnnStatus = cudnnConvolutionForward(stream.getCudnnHandle(),
                                               &ALPHA_NO_SCALE,
@@ -243,7 +253,7 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                               convolutionKernelRequirement.getWeightsFilterDescriptor(),
                                               weights.getMemPtr(),
                                               convolutionKernelRequirement.getConvolutionDescriptor(),
-                                              algo,
+                                              optimalKernel.algo,
                                               nullptr,
                                               optimalKernel.memory,
                                               &BETA_CLEAR,
@@ -254,6 +264,13 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
     if (cudnnStatus == 3) {
         // printf("!!!!!! Still failed, fall back used\n");
         // If it still doesn't work then go with algo CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM which is stable and does not use a workspace.
+
+        GpuConvolution::instance().forwardMutex.lock();
+        optimalKernel.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
+        optimalKernel.memory = 0;
+        optimalForwardKernels[convolutionKernelRequirement] = optimalKernel;
+        GpuConvolution::instance().forwardMutex.unlock();
+
         cudnnStatus = cudnnConvolutionForward(stream.getCudnnHandle(),
                                               &ALPHA_NO_SCALE,
                                               convolutionKernelRequirement.getDataInputTensorDescriptor(),
@@ -261,7 +278,7 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                               convolutionKernelRequirement.getWeightsFilterDescriptor(),
                                               weights.getMemPtr(),
                                               convolutionKernelRequirement.getConvolutionDescriptor(),
-                                              CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
+                                              optimalKernel.algo,
                                               nullptr,
                                               optimalKernel.memory,
                                               &BETA_CLEAR,
@@ -303,9 +320,10 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
     cudnnConvolutionBwdDataAlgoPerf_t optimalKernel = optimalBackwardDataKernels[convolutionKernelRequirement];
     GpuConvolution::instance().backwardDataMutex.unlock();
 
-    if (optimalKernel.memory == 0) {
-        assert(workspace.isEmpty());
-    } else {
+    if (optimalKernel.memory > 0) {
+        if (!workspace.isPresent()) {
+            printf("algo %d workspaceBytes %ld\n", optimalKernel.algo, optimalKernel.memory);
+        }
         assert(workspace.isPresent());
         assert(optimalKernel.memory == workspace.get().getDescriptor().getArraySizeInBytes());
     }
@@ -344,9 +362,7 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
     cudnnConvolutionBwdFilterAlgoPerf_t optimalKernel = optimalBackwardFilterKernels[convolutionKernelRequirement];
     GpuConvolution::instance().backwardFilterMutex.unlock();
 
-    if (optimalKernel.memory == 0) {
-        assert(workspace.isEmpty());
-    } else {
+    if (optimalKernel.memory > 0) {
         assert(workspace.isPresent());
         assert(optimalKernel.memory == workspace.get().getDescriptor().getArraySizeInBytes());
     }

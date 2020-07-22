@@ -192,7 +192,7 @@ class Layer {
     virtual bool isInferenceOnly() { return inferenceOnly; }
     virtual void setInferenceOnly(bool inferenceOnly) { this->inferenceOnly = inferenceOnly; }
 
-    virtual bool isBackPropStub() { return errorOutput.isPresent(); }
+    virtual bool isBackPropStub() { return errorOutput.isEmpty(); }
 
     virtual Optional<Tensor> getFeatureInput() { return featureInput; }
     virtual Optional<Tensor> getFeatureOutput() { return featureOutput; }

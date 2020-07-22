@@ -111,6 +111,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         if (!isBackPropStub()) {
             uint64_t workspaceBackwardDataSizeInBytes =
                 GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
+            GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
             if (workspaceBackwardDataSizeInBytes > 0) {
                 vector<unsigned long> workspaceDimensions;
                 workspaceDimensions.push_back(workspaceBackwardDataSizeInBytes);

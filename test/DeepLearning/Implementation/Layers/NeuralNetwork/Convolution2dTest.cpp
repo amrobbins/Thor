@@ -25,7 +25,7 @@ TEST(Convolution2d, Convolution2dWorks) {
 
     Stream stream(0);
 
-    for (int test = 0; test < 20; ++test) {
+    for (int test = 0; test < 1000; ++test) {
         const int numInputColumns = 1 + (rand() % 50);
         const int numInputRows = 1 + (rand() % 50);
         const int filterHorizontalStride = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));
@@ -41,7 +41,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         const bool hasBias = (rand() % 4) != 0;
         Optional<float> learningRate;
         if (!inferenceOnly)
-            learningRate = (1 + (rand() % 20000)) / 10000;
+            learningRate = (1 + (rand() % 20000)) / 10000.0f;
 
         int numOutputRows =
             ConvolutionTestHelper::computeOutputDimensionSize(numInputRows, topAndBottomPadHeight, filterHeight, filterVerticalStride);
@@ -57,6 +57,8 @@ TEST(Convolution2d, Convolution2dWorks) {
         inputDimensions.push_back(numInputColumns);
         TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
         int numInputElements = inputDescriptor.getTotalNumElements();
+
+        TensorDescriptor errorOutputDescriptor = inputDescriptor;
 
         vector<unsigned long> outputDimensions;
         outputDimensions.push_back(batchSize);
@@ -158,33 +160,99 @@ TEST(Convolution2d, Convolution2dWorks) {
                 printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));
         }
 
-        /*
-                // Backward pass
-                Tensor errorInputGpu = convolution2dLayer->getErrorInputs().front();
-                Tensor errorOutputGpu = convolution2dLayer->getErrorOutputs().front();
-                Tensor errorInputCpu = Tensor(cpuPlacement, errorInputGpu.getDescriptor());
-                Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+        if (inferenceOnly)
+            continue;
 
-                half *errorInputMem = (half *)errorInputCpu.getMemPtr();
-                for (int i = 0; i < numOutputElements; ++i) {
-                    errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-                }
+        // Backward pass
+        Tensor errorInputGpu = convolution2dLayer->getErrorInputs().front();
+        Tensor errorOutputGpu = convolution2dLayer->getErrorOutputs().front();
+        Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+        Tensor errorInputCpu = Tensor(cpuPlacement, errorInputGpu.getDescriptor());
+        Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
 
-                convolution2dLayer->backward(errorInputGpu);
-                errorOutputCpu.copyFromAsync(errorOutputGpu, stream);
-                stream.synchronize();
-        */
-        /*
-        // FIXME compute convolution backward using convolutionTestHelper
-                half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
-                for (int i = 0; i < numInputElements; ++i) {
-                    ASSERT_EQ((float)errorOutputMem[i], (float)errorInputMem[i]);
+        half *errorInputMem = (half *)errorInputCpu.getMemPtr();
+        for (int i = 0; i < numOutputElements; ++i) {
+            errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+
+        errorInputGpu.copyFromAsync(errorInputCpu, stream);
+        convolution2dLayer->backward(errorInputGpu);
+        errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+        stream.synchronize();
+
+        // Backward Data
+        ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputCpu, weightsCpu, errorOutputCpu, convolutionKernelRequirement);
+
+        // Verify CPU and GPU results match
+        for (unsigned int n = 0; n < errorOutputDescriptor.getDimensions()[0]; ++n) {
+            for (unsigned int c = 0; c < errorOutputDescriptor.getDimensions()[1]; ++c) {
+                for (unsigned int h = 0; h < errorOutputDescriptor.getDimensions()[2]; ++h) {
+                    for (unsigned int w = 0; w < errorOutputDescriptor.getDimensions()[3]; ++w) {
+                        float cpuVal = *(half *)errorOutputCpu.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                        float gpuVal = *(half *)errorOutputGpu_h.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                        float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
+                        EXPECT_LT(abs(cpuVal - gpuVal), thresh);
+                        if (abs(cpuVal - gpuVal) >= thresh)
+                            printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, n, c, h, w);
+                    }
                 }
-        */
+            }
+        }
+
+        // Backward Filter
+        Tensor weightsGpu = convolution2dLayer->getWeights();
+        Tensor weightsGpu_h = weightsGpu.clone(cpuPlacement);
+        Tensor weightsGradientCpu = weightsGpu_h.clone();
+        weightsGpu_h.copyFromAsync(weightsGpu, stream);
+        stream.synchronize();
+
+        ConvolutionTestHelper::cpuConvolutionBackwardFilter(
+            featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, false);
+
+        for (int o = 0; o < numOutputChannels; ++o) {
+            for (int i = 0; i < numInputChannels; ++i) {
+                for (int h = 0; h < filterHeight; ++h) {
+                    for (int w = 0; w < filterWidth; ++w) {
+                        float cpuGradient = *(half *)weightsGradientCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                        float cpuWeight = *(half *)weightsCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                        float cpuVal = cpuWeight - cpuGradient * learningRate.get();
+                        float gpuVal = *(half *)weightsGpu_h.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                        float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
+                        EXPECT_LT(abs(cpuVal - gpuVal), thresh);
+                        if (abs(cpuVal - gpuVal) >= thresh)
+                            printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, o, i, h, w);
+                    }
+                }
+            }
+        }
+
+        // Backward Bias
+        if (hasBias) {
+            Tensor biasesGpu = convolution2dLayer->getBiases();
+            Tensor biasesGpu_h = biasesGpu.clone(cpuPlacement);
+            Tensor biasesGradientCpu = biasesGpu_h.clone();
+            biasesGpu_h.copyFromAsync(biasesGpu, stream);
+            stream.synchronize();
+
+            ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu);
+
+            for (int i = 0; i < numOutputChannels; ++i) {
+                float cpuGradient = *(half *)biasesGradientCpu.getElement({(uint64_t)i});
+                float cpuBias = *(half *)biasesCpu.get().getElement({(uint64_t)i});
+                float cpuVal = cpuBias - cpuGradient * learningRate.get();
+                float gpuVal = *(half *)biasesGpu_h.getElement({(uint64_t)i});
+                float thresh = batchSize * 0.001 + abs(cpuVal * 0.005);
+                EXPECT_LT(abs(cpuVal - gpuVal), thresh);
+                if (abs(cpuVal - gpuVal) >= thresh)
+                    printf("%f %f   at [%d] batchSize %d thresh %f\n", cpuVal, gpuVal, i, batchSize, thresh);
+            }
+        }
 
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
+
+// FIXME: make a test for multiple connections
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

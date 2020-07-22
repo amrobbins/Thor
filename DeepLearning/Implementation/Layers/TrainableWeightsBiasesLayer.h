@@ -66,6 +66,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 stillWaitingForErrorInputTensors = allErrorInputTensorIds;
                 stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
             }
+        } else {
+            backProp(featureInputs[0], errorInputs[0], errorOutputs[0], gradientUpdateStream, streams[0], 0, false);
+            processedAllErrorInputs(gradientUpdateStream);
         }
 
         if (previousLayers[connectionNumber].isEmpty())
@@ -88,8 +91,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         applyGradients(stream, weights, weightsGradient, biases, biasesGradient);
         Event gradientAppliedEvent = stream.putEvent();
 
-        assert(weightUpdateCallback != nullptr);
-        weightUpdateCallback(gradientAppliedEvent, weights, weightsGradient, biases, biasesGradient);
+        if (weightUpdateCallback != nullptr)
+            weightUpdateCallback(gradientAppliedEvent, weights, weightsGradient, biases, biasesGradient);
     }
 
     // Default implementation simply updates weights by learningRate*gradient, does not apply momentum or anything else.

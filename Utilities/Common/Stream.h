@@ -139,6 +139,10 @@ class Stream {
             cudnnStatus_t cudnnStatus;
             cudnnHandle_t handle;
             cudnnStatus = cudnnCreate(&handle);
+            if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
+                printf("cudnnStatus %d : %s   gpu:%d\n", cudnnStatus, cudnnGetErrorString(cudnnStatus), gpuNum);
+                fflush(stdout);
+            }
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
             cudnnStatus = cudnnSetStream(handle, cudaStream);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);

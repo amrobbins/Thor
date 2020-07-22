@@ -334,6 +334,7 @@ class ConvolutionTestHelper {
         Tensor biasesGradientFloat(TensorPlacement::MemDevices::CPU,
                                    TensorDescriptor(TensorDescriptor::DataType::FP32, biasesGradient.getDescriptor().getDimensions()));
         float *biasesGradientFloatMem = (float *)biasesGradientFloat.getMemPtr();
+        memset(biasesGradientFloatMem, 0, sizeof(float) * biasesGradientFloat.getDescriptor().getTotalNumElements());
 
         if (omp_get_num_procs() > 1)
             omp_set_num_threads(omp_get_num_procs() - 1);
