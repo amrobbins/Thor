@@ -190,7 +190,7 @@ class MultiConnectionLayer : public Layer {
             assert(featureOutputs.back().get().getPlacement() == errorInputs.back().get().getPlacement());
     }
 
-    virtual bool isBackPropStub() { return getFirstPresentTensor(errorOutputs).isPresent(); }
+    virtual bool isBackPropStub() { return getFirstPresentTensor(errorOutputs).isEmpty(); }
 
     virtual vector<Optional<Tensor>> getFeatureInputs() { return featureInputs; }
     virtual vector<Optional<Tensor>> getFeatureOutputs() { return featureOutputs; }

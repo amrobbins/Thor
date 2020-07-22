@@ -185,9 +185,7 @@ void GpuConvolution::computeConvolutionBiasesGradient(Tensor errorInput, Tensor 
     assert(biasDimensions[0] == channelDimension);
     assert(biasesGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
-    assert(workspaceDimensions.size() == 1);
-    assert(workspaceDimensions[0] == batchDimension * channelDimension);
-    assert(workspace.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    assert(workspace.getDescriptor().getArraySizeInBytes() == batchDimension * channelDimension * sizeof(float));
 
     ScopedGpu scopedGpu(gpuNum);
 
