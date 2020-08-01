@@ -810,17 +810,17 @@ TEST(TensorCoreMatrixMultiply, OptimalMutliplyWithoutWorkspaceProducesCorrectRes
             cCols = bCols;
         }
 
-        TensorCoreMatrixMultiply::instance().chooseOptimalKernel(0, aRows, aCols, bCols);
-
         if (rand() % 2) {
             lda = aCols + (rand() % 150);
             ldb = bCols + (rand() % 150);
             ldc = cCols + (rand() % 150);
+            TensorCoreMatrixMultiply::instance().chooseOptimalKernel(0, aRows, aCols, bCols, lda, ldb, ldc);
             TensorCoreMatrixMultiply::instance().multiply(A, B, C, aRows, aCols, bCols, lda, ldb, ldc, stream);
         } else {
             lda = aCols;
             ldb = bCols;
             ldc = cCols;
+            TensorCoreMatrixMultiply::instance().chooseOptimalKernel(0, aRows, aCols, bCols);
             TensorCoreMatrixMultiply::instance().multiply(A, B, C, aRows, aCols, bCols, stream);
         }
 
@@ -924,8 +924,6 @@ TEST(TensorCoreMatrixMultiply, OptimalMutliplyWithWorkspaceProducesCorrectResult
             cCols = bCols;
         }
 
-        TensorCoreMatrixMultiply::instance().chooseOptimalKernel(0, aRows, aCols, bCols);
-
         if (rand() % 2) {
             lda = aCols + (rand() % 150);
             ldb = bCols + (rand() % 150);
@@ -935,6 +933,8 @@ TEST(TensorCoreMatrixMultiply, OptimalMutliplyWithWorkspaceProducesCorrectResult
             ldb = bCols;
             ldc = cCols;
         }
+
+        TensorCoreMatrixMultiply::instance().chooseOptimalKernel(0, aRows, aCols, bCols, lda, ldb, ldc);
 
         unsigned int workspaceSize;
         if (aCols == lda && bCols == ldb && cCols == ldc)
