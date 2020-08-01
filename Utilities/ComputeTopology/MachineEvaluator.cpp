@@ -17,9 +17,27 @@ MachineEvaluator::MachineEvaluator() {
     getGpuPciBusIds();
     evaluateConnectionSpeeds();
     createCopyStreams();
+
+    for (unsigned int gpuNum = 0; gpuNum < numGpus; ++gpuNum) {
+        ScopedGpu scopedGpu(gpuNum);
+
+        cublasStatus_t cublasStatus;
+        cublasLtHandle_t cublasLtHandle;
+        cublasStatus = cublasLtCreate(&cublasLtHandle);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+        cublasLtHandlePerDevice.push_back(cublasLtHandle);
+    }
 }
 
-MachineEvaluator::~MachineEvaluator() {}
+MachineEvaluator::~MachineEvaluator() {
+    for (unsigned int gpuNum = 0; gpuNum < numGpus; ++gpuNum) {
+        ScopedGpu scopedGpu(gpuNum);
+        cublasStatus_t cublasStatus;
+        cublasStatus = cublasLtDestroy(cublasLtHandlePerDevice[gpuNum]);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+}
 
 int MachineEvaluator::getCurrentGpuNum() {
     int curGpuNum;
@@ -239,4 +257,14 @@ Stream MachineEvaluator::getCopyStreamLocal(int gpuNum) {
     assert(gpuNum < (int)numGpus);
 
     return copyStreamLocal[gpuNum];
+}
+
+unsigned long MachineEvaluator::getTotalGlobalMemBytes(int gpuNum) {
+    assert(gpuNum < (int)deviceProps.size());
+    return deviceProps[gpuNum].totalGlobalMem;
+}
+
+cublasLtHandle_t MachineEvaluator::getCublasLtHandle(int gpuNum) {
+    assert((unsigned int)gpuNum < numGpus);
+    return cublasLtHandlePerDevice[gpuNum];
 }

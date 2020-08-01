@@ -83,6 +83,26 @@ class Event {
         return gpuNum;
     }
 
+    void synchronize() {
+        assert(!uninitialized);
+
+        cudaError_t cudaStatus;
+        cudaStatus = cudaEventSynchronize(*this);
+        assert(cudaStatus == cudaSuccess);
+    }
+
+    float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
+        assert(!uninitialized);
+
+        float milliseconds;
+
+        synchronize();
+        cudaError_t cudaStatus;
+        cudaStatus = cudaEventElapsedTime(&milliseconds, startEvent, *this);
+        assert(cudaStatus == cudaSuccess);
+        return milliseconds;
+    }
+
    private:
     int gpuNum;
     bool uninitialized = false;

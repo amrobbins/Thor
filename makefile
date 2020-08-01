@@ -103,6 +103,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
+                   build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
+                   build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
                    build/Utilities/ComputeTopology/MachineEvaluator.o \
                    build/DeepLearning/Implementation/Tensor/Tensor.o \
                    build/DeepLearning/Implementation/Tensor/DistributedTensor.o \
@@ -301,6 +303,15 @@ build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o: Utilities/Tens
 build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o: Utilities/TensorOperations/GpuConvolution/GpuConvolution.h Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
 	mkdir -p build/Utilities/TensorOperations/GpuConvolution
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
+
+build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.cpp
+	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o
+
+build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp
+	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
+
 
 
 # Test Framework

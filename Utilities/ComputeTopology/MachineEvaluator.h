@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include <cublasLt.h>
 #include "cuda.h"
 #include "cuda_runtime.h"
 
@@ -48,7 +49,7 @@ class MachineEvaluator {
     MachineEvaluator(const MachineEvaluator&) = delete;
     MachineEvaluator& operator=(const MachineEvaluator&) = delete;
 
-    ~MachineEvaluator();
+    virtual ~MachineEvaluator();
 
    private:
     MachineEvaluator();
@@ -74,6 +75,8 @@ class MachineEvaluator {
     unsigned int getNumGpus() { return numGpus; }
     unsigned int getNumMultiProcessors(int gpuNum);
     unsigned int getNumMultiProcessors();
+
+    unsigned long getTotalGlobalMemBytes(int gpuNum);
 
     // returns the previously active device
     static int swapActiveDevice(int newGpuNum);
@@ -106,6 +109,8 @@ class MachineEvaluator {
     Stream getCopyStreamToCpu(int gpuNum);
     Stream getCopyStreamLocal(int gpuNum);
 
+    cublasLtHandle_t getCublasLtHandle(int gpuNum);
+
     // FIXME: add kernel evaluation per gpu type. spread evaluations across all devices of a type. evaluate once per type and lock/block if
     // still evaluating when the kernel type is requested.
 
@@ -136,4 +141,6 @@ class MachineEvaluator {
     void getGpuTypes();
     void getGpuPciBusIds();
     void createCopyStreams();
+
+    vector<cublasLtHandle_t> cublasLtHandlePerDevice;
 };

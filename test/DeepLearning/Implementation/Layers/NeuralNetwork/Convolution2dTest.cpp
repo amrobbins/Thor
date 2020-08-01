@@ -25,7 +25,7 @@ TEST(Convolution2d, Convolution2dWorks) {
 
     Stream stream(0);
 
-    for (int test = 0; test < 1000; ++test) {
+    for (int test = 0; test < 20; ++test) {
         const int numInputColumns = 1 + (rand() % 50);
         const int numInputRows = 1 + (rand() % 50);
         const int filterHorizontalStride = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));
@@ -125,6 +125,8 @@ TEST(Convolution2d, Convolution2dWorks) {
         LayerTestHelper::connectAndInitializeNetwork(layers);
         featureOutputGpu_h = layers.back()->getFeatureOutput();
 
+        // convolution2dLayer->setCallBackWhenGradientsReady(weightUpdateCallback);
+
         convolution2dLayer->getWeights().copyFromAsync(weightsCpu, stream);
         if (hasBias)
             convolution2dLayer->getBiases().get().copyFromAsync(biasesCpu, stream);
@@ -179,6 +181,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         convolution2dLayer->backward(errorInputGpu);
         errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
         stream.synchronize();
+        convolution2dLayer->getGradientUpdateStream().get().synchronize();
 
         // Backward Data
         ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputCpu, weightsCpu, errorOutputCpu, convolutionKernelRequirement);
