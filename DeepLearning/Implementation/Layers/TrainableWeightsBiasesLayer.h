@@ -19,6 +19,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         this->learningRate = learningRate;
     }
 
+    virtual Optional<Stream> getGradientUpdateStream() { return gradientUpdateStream; }
+
     virtual void backward(Optional<Tensor> errorInput) {
         assert(running);
 

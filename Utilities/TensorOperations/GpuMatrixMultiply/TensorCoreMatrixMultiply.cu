@@ -4,17 +4,19 @@ using namespace nvcuda;
 
 //-----------------------------------------------
 //
-// A = | WFIn0FOut0  WFIn1FOut0  WFIn2FOut0 ... |
-//     | WFIn0FOut1  WFIn1FOut1  WFIn2FOut1 ... |
-//     | WFIn0FOut2  WFIn1FOut2  WFIn2FOut2 ... |
+// A = | B0Fin0   B0Fin1   B0Fin2  ... |
+//     | B1Fin0   B1Fin1   B1Fin2  ... |
+//     | B2Fin0   B2Fin1   B2Fin2  ... |
 //
-// B = | FIn0B0      FIn0B1      FIn0B2     ... |
-//     | FIn1B0      FIn1B1      FIn1B2     ... |
-//     | FIn2B0      FIn2B1      FIn2B2     ... |
+// B = | W0Fin0   W1Fin0   W2Fin0  ... |
+//     | W0Fin1   W1Fin1   W2Fin1  ... |
+//     | W0Fin2   W1Fin2   W2Fin2  ... |
 //
-// i.e. WeightFor_feature0_output0, feature0_fromBatch0
+// C = | B0Fout0  B0Fout1  B0Fout2 ... |
+//     | B1Fout0  B1Fout1  B1Fout2 ... |
+//     | B2Fout0  B2Fout1  B2Fout2 ... |
 //
-// C = AB
+// Where C = AB
 //
 // Dimensions:
 // A: A_rows x A_cols
@@ -23,13 +25,30 @@ using namespace nvcuda;
 //
 // All data is regular C++ row major
 //
+// B is |  w  w  w  ... |
+//      |  e  e  e  ... |
+//      |  i  i  i  ... |
+//      |  g  g  g  ... |
+//      |  h  h  h  ... |
+//      |  t  t  t  ... |
+//      |  s  s  s  ... |
+//      |  F  F  F  ... |
+//      |  o  o  o  ... |
+//      |  u  u  u  ... |
+//      |  t  t  t  ... |
+//      |  0  1  2  ... |
+//
+// i.e. one column per output feature, whose height is the number of input features
+//
+// The other 2 matrices A_nxd and C_nxd are matrices with batchSize rows and numFeatures columns
+//
 // ld_A means leading dimension of matrix A,
 // i.e. the number of elements that separate the start
 // of each row of A in memory, usually ld_A = A_cols.
 //
-// A_rows (M): number of outputs
+// A_rows (M): batch size
 // A_cols (K): number of input features
-// B_cols (N): batch size
+// B_cols (N): number of output features
 //-----------------------------------------------
 void TensorCoreMatrixMultiply::multiply(const half *A,
                                         const half *B,
@@ -60,9 +79,9 @@ void TensorCoreMatrixMultiply::multiply(const half *A,
     kernelRequirement.rowsA = A_rows;
     kernelRequirement.colsA = A_cols;
     kernelRequirement.colsB = B_cols;
-    kernelRequirement.ldA = A_cols;  // Note: for optimization purposes, all matrices are evaluated as being packed.
-    kernelRequirement.ldB = B_cols;
-    kernelRequirement.ldC = B_cols;
+    kernelRequirement.ldA = ld_A;
+    kernelRequirement.ldB = ld_B;
+    kernelRequirement.ldC = ld_C;
     kernelRequirement.allowWorkspace = true;
 
     KernelWithSpec kernelWithSpec;
@@ -108,9 +127,9 @@ void TensorCoreMatrixMultiply::multiply(const half *A,
     kernelRequirement.rowsA = A_rows;
     kernelRequirement.colsA = A_cols;
     kernelRequirement.colsB = B_cols;
-    kernelRequirement.ldA = A_cols;  // Note: for optimization purposes, all matrices are evaluated as being packed.
-    kernelRequirement.ldB = B_cols;
-    kernelRequirement.ldC = B_cols;
+    kernelRequirement.ldA = ld_A;
+    kernelRequirement.ldB = ld_B;
+    kernelRequirement.ldC = ld_C;
     kernelRequirement.allowWorkspace = false;
 
     KernelWithSpec kernelWithSpec;
@@ -326,7 +345,12 @@ float TensorCoreMatrixMultiply::computeWaves(KernelRequirement kernelRequirement
     return (aBlocks * bBlocks * kernel.blocksKSplitInto) / blocksPerWave;
 }
 
-void TensorCoreMatrixMultiply::chooseOptimalKernel(int gpuNum, int rowsA, int colsA, int colsB) {
+long minl(long a, long b) { return a < b ? a : b; }
+
+long maxl(long a, long b) { return a > b ? a : b; }
+
+void TensorCoreMatrixMultiply::chooseOptimalKernel(
+    int gpuNum, int rowsA, int colsA, int colsB, const int32_t ld_A, const int32_t ld_B, const int32_t ld_C) {
     assert(gpuNum >= 0);
     assert(gpuNum < MachineEvaluator::instance().getNumGpus());
 
@@ -337,9 +361,9 @@ void TensorCoreMatrixMultiply::chooseOptimalKernel(int gpuNum, int rowsA, int co
     kernelRequirement.rowsA = rowsA;
     kernelRequirement.colsA = colsA;
     kernelRequirement.colsB = colsB;
-    kernelRequirement.ldA = colsA;  // Note: for optimization purposes, all matrices are evaluated as being packed.
-    kernelRequirement.ldB = colsB;
-    kernelRequirement.ldC = colsB;
+    kernelRequirement.ldA = ld_A;
+    kernelRequirement.ldB = ld_B;
+    kernelRequirement.ldC = ld_C;
     kernelRequirement.allowWorkspace = true;
 
     KernelRequirement kernelRequirementNoWorkspace = kernelRequirement;
@@ -404,27 +428,37 @@ void TensorCoreMatrixMultiply::chooseOptimalKernel(int gpuNum, int rowsA, int co
     Stream stream(gpuNum);
 
     constexpr int REPEAT = 40;
+    constexpr long FIVE_HUNDRED_MEGS = 536870912;
 
     vector<KernelWithSpec> eligibleKernels = getEligibleKernels(kernelRequirement);
     assert(eligibleKernels.size() > 0);
     const int numEligibleKernels = eligibleKernels.size();
 
     // Allocate a lot of memory, to ensure subsequent calls are not benefitting from cache hits
-    long FIVE_HUNDRED_MEGS = 536870912;
+    long totalGpuMem = MachineEvaluator::instance().getTotalGlobalMemBytes(gpuNum);
     long memPerInstance = (rowsA * colsA + colsA * colsB + rowsA * colsB) * sizeof(half);
-    long numInstances = (FIVE_HUNDRED_MEGS + (memPerInstance - 1)) / memPerInstance;
+    long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(FIVE_HUNDRED_MEGS, 10 * memPerInstance));
+    long numInstances = totalMatrixMemory / memPerInstance;
     if (numInstances > (REPEAT + 1) * numEligibleKernels)
         numInstances = (REPEAT + 1) * numEligibleKernels;
+    assert(numInstances > 0);
 
     unsigned int maxWorkspaceSize = eligibleKernels[0].getWorkspaceSize(kernelRequirement);
     for (int i = 1; i < numEligibleKernels; ++i) {
         if (eligibleKernels[i].getWorkspaceSize(kernelRequirement) > maxWorkspaceSize)
             maxWorkspaceSize = eligibleKernels[i].getWorkspaceSize(kernelRequirement);
     }
-    long TWO_FIFTY_MEGS = FIVE_HUNDRED_MEGS / 2;
-    long numWorkspaceInstances = (TWO_FIFTY_MEGS + (maxWorkspaceSize - 1)) / maxWorkspaceSize;
-    if (numWorkspaceInstances > (REPEAT + 1) * numEligibleKernels)
-        numWorkspaceInstances = (REPEAT + 1) * numEligibleKernels;
+    long numWorkspaceInstances;
+    if (maxWorkspaceSize == 0) {
+        maxWorkspaceSize = 1;
+        numWorkspaceInstances = 1;
+    } else {
+        long totalWorkspaceMem = minl(totalGpuMem * 0.4, maxl(FIVE_HUNDRED_MEGS, 10 * maxWorkspaceSize));
+        numWorkspaceInstances = totalWorkspaceMem / maxWorkspaceSize;
+        if (numWorkspaceInstances > (REPEAT + 1) * numEligibleKernels)
+            numWorkspaceInstances = (REPEAT + 1) * numEligibleKernels;
+        assert(numWorkspaceInstances > 0);
+    }
 
     half **A;
     half **B;
@@ -610,20 +644,6 @@ void TensorCoreMatrixMultiply::chooseOptimalKernel(int gpuNum, int rowsA, int co
     delete[] workspace;
 }
 
-void TensorCoreMatrixMultiply::chooseOptimalKernel(string gpuType, int rowsA, int colsA, int colsB) {
-    // Find a gpu of the proper type or fail, switch current gpu to that one while in this scope
-    int gpuNum = -1;
-    for (int i = 0; i < MachineEvaluator::instance().getNumGpus(); ++i) {
-        if (MachineEvaluator::instance().getGpuType(i) == gpuType) {
-            gpuNum = i;
-            break;
-        }
-    }
-    assert(gpuNum >= 0);
-
-    chooseOptimalKernel(gpuNum, rowsA, colsA, colsB);
-}
-
 unsigned int TensorCoreMatrixMultiply::getWorkspaceSizeInBytes(int gpuNum, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC) {
     // in case it's not already known (will not measure when it's already known):
     chooseOptimalKernel(gpuNum, rowsA, colsA, colsB);
@@ -638,11 +658,10 @@ unsigned int TensorCoreMatrixMultiply::getWorkspaceSizeInBytes(int gpuNum, int r
     kernelRequirement.ldC = ldC;
     kernelRequirement.allowWorkspace = true;
 
-    // Note: for optimization purposes, all matrices are evaluated as being packed.
     KernelRequirement optimizedKernelRequirement = kernelRequirement;
-    optimizedKernelRequirement.ldA = colsA;
-    optimizedKernelRequirement.ldB = colsB;
-    optimizedKernelRequirement.ldC = colsB;
+    optimizedKernelRequirement.ldA = ldA;
+    optimizedKernelRequirement.ldB = ldB;
+    optimizedKernelRequirement.ldC = ldC;
 
     return TensorCoreMatrixMultiply::instance().optimalKernels[optimizedKernelRequirement].getWorkspaceSize(kernelRequirement);
 }
@@ -658,14 +677,15 @@ unsigned int TensorCoreMatrixMultiply::getWorkspaceSizeInBytes(string gpuType, i
     }
     assert(gpuNum >= 0);
 
-    return getWorkspaceSizeInBytes(gpuNum, rowsA, colsA, colsB);
+    return getWorkspaceSizeInBytes(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC);
 }
 
 /**
  * Return the measured time of the fastest kernel for these matrix multiply dimensions on this type of gpu.
  * If chooseOptimalKernel(...) was not previously called for this kernel on this type of gpu, throws an out_of_range exception
  */
-float TensorCoreMatrixMultiply::getOptimalKernelTime(string gpuType, int rowsA, int colsA, int colsB, bool workspaceAllowed) {
+float TensorCoreMatrixMultiply::getOptimalKernelTime(
+    string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, bool workspaceAllowed) {
     // Don't call getOptimalKernelTime(...) between calls to startingMultiThreadedKernelOptimization() and
     // finishedMultiThreadedKernelOptimization() only call chooseOptimalKernel(...) between those calls
     assert(TensorCoreMatrixMultiply::instance().useLocks == false);
@@ -675,9 +695,9 @@ float TensorCoreMatrixMultiply::getOptimalKernelTime(string gpuType, int rowsA, 
     kernelRequirement.rowsA = rowsA;
     kernelRequirement.colsA = colsA;
     kernelRequirement.colsB = colsB;
-    kernelRequirement.ldA = colsA;
-    kernelRequirement.ldB = colsB;
-    kernelRequirement.ldC = colsB;
+    kernelRequirement.ldA = ldA;
+    kernelRequirement.ldB = ldB;
+    kernelRequirement.ldC = ldC;
     kernelRequirement.allowWorkspace = workspaceAllowed;
 
     auto it = TensorCoreMatrixMultiply::instance().optimalKernelMeasuredTime.find(kernelRequirement);
@@ -689,10 +709,6 @@ float TensorCoreMatrixMultiply::getOptimalKernelTime(string gpuType, int rowsA, 
         throw(TensorCoreMatrixMultiply::Youreusingitwrong(message));
     }
     return it->second;
-}
-
-float TensorCoreMatrixMultiply::getOptimalKernelTime(int gpuNum, int rowsA, int colsA, int colsB, bool workspaceAllowed) {
-    return getOptimalKernelTime(MachineEvaluator::instance().getGpuType(gpuNum), rowsA, colsA, colsB, workspaceAllowed);
 }
 
 void TensorCoreMatrixMultiply::startingMultiThreadedKernelOptimization() {
