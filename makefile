@@ -333,11 +333,11 @@ build/test/googletest/libgtest.a: ./googletest/README.md
 
 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest: build/test/googletest/libgtest.a test/Utilities/WorkQueue/WorkQueueUnorderedTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/WorkQueue/
-	$(Gpp) -ggdb -o build/test/Utilities/WorkQueue/WorkQueueUnorderedTest -O3 -std=c++11 -pthread -IUtilities/WorkQueue/ test/Utilities/WorkQueue/WorkQueueUnorderedTest.cpp $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/WorkQueue/WorkQueueUnorderedTest -O3 -std=c++11 -pthread -IUtilities/WorkQueue/ test/Utilities/WorkQueue/WorkQueueUnorderedTest.cpp $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/WorkQueue/WorkQueueTest: build/test/googletest/libgtest.a test/Utilities/WorkQueue/WorkQueueTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/WorkQueue/
-	$(Gpp) -ggdb -o build/test/Utilities/WorkQueue/WorkQueueTest -O3 -std=c++11 -pthread -IUtilities/WorkQueue/ test/Utilities/WorkQueue/WorkQueueTest.cpp $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/WorkQueue/WorkQueueTest -O3 -std=c++11 -pthread -IUtilities/WorkQueue/ test/Utilities/WorkQueue/WorkQueueTest.cpp $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixTranspose
@@ -353,55 +353,55 @@ build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest: build/t
 
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
-	$(Gpp) -ggdb -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) -ggdb -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/ComputeTopology/machineEvaluatorTest: build/test/googletest/libgtest.a test/Utilities/ComputeTopology/machineEvaluatorTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/ComputeTopology
-	$(Gpp) -ggdb -o build/test/Utilities/ComputeTopology/machineEvaluatorTest test/Utilities/ComputeTopology/machineEvaluatorTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/ComputeTopology/machineEvaluatorTest test/Utilities/ComputeTopology/machineEvaluatorTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/Common/OptionalTest: build/test/googletest/libgtest.a test/Utilities/Common/OptionalTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/Common
-	$(Gpp) -ggdb -o build/test/Utilities/Common/OptionalTest test/Utilities/Common/OptionalTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/Common/OptionalTest test/Utilities/Common/OptionalTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Tensor/tensorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Tensor/tensorTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Tensor
-	$(Gpp) -ggdb -o build/test/DeepLearning/Implementation/Tensor/tensorTest test/DeepLearning/Implementation/Tensor/tensorTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Tensor/tensorTest test/DeepLearning/Implementation/Tensor/tensorTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/TypeConversions/TypeConverterTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/TypeConversions
-	$(Gpp) -ggdb -o build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest test/Utilities/TensorOperations/TypeConversions/TypeConverterTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest test/Utilities/TensorOperations/TypeConversions/TypeConverterTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Arithmetic/ArithmeticTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/Arithmetic/
-	$(Gpp) -ggdb -o build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Arithmetic/ArithmeticTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Arithmetic/ArithmeticTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/Misc/MiscTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/MiscTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/Misc/
-	$(Gpp) -ggdb -o build/test/Utilities/TensorOperations/Misc/MiscTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/MiscTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/MiscTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/MiscTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Utility
-	$(Gpp) -ggdb -o build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Activations
-	$(Gpp) -ggdb -o build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
-	$(Gpp) -ggdb -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
-	$(Gpp) -ggdb -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/DeepLearning/
-	$(Gpp) -ggdb -o build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 
