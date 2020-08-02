@@ -170,12 +170,20 @@ class CublasMatrixMultiply {
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
-    inline void chooseOptimalKernel(string gpuType, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType) {
-        chooseOptimalKernel(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType);
+    inline void chooseOptimalKernel(
+        string gpuType, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType, bool printResults = false) {
+        chooseOptimalKernel(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType, printResults);
     }
 
-    inline void chooseOptimalKernel(
-        string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, TensorDescriptor::DataType ABCDataType) {
+    inline void chooseOptimalKernel(string gpuType,
+                                    int rowsA,
+                                    int colsA,
+                                    int colsB,
+                                    int ldA,
+                                    int ldB,
+                                    int ldC,
+                                    TensorDescriptor::DataType ABCDataType,
+                                    bool printResults = false) {
         // Find a gpu of the proper type or fail
         int gpuNum = -1;
         for (int i = 0; i < (int)MachineEvaluator::instance().getNumGpus(); ++i) {
@@ -186,7 +194,7 @@ class CublasMatrixMultiply {
         }
         assert(gpuNum >= 0);
 
-        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType);
+        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType, printResults);
     }
 
     // Find the optimal kernel for the matrix multiply operation for type of the gpuNum GPU, by measuring it specifically on that gpu.
@@ -197,8 +205,9 @@ class CublasMatrixMultiply {
     // multiple readers are fine lock free so locks are only used during multi-threaded optimization.
     //
     // Note: never run more than one optimization at a time on any gpu.
-    inline void chooseOptimalKernel(int gpuNum, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType) {
-        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType);
+    inline void chooseOptimalKernel(
+        int gpuNum, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType, bool printResults = false) {
+        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType, printResults);
     }
 
     void chooseOptimalKernel(int gpuNum,
@@ -211,12 +220,20 @@ class CublasMatrixMultiply {
                              TensorDescriptor::DataType ABCDataType,
                              bool printResults = false);
 
-    inline unsigned int getWorkspaceSizeInBytes(int gpuNum, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType) {
-        return getWorkspaceSizeInBytes(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType);
+    inline unsigned int getWorkspaceSizeInBytes(
+        int gpuNum, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType, bool &kernelWillRunOnGpu) {
+        return getWorkspaceSizeInBytes(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType, kernelWillRunOnGpu);
     }
 
-    unsigned int getWorkspaceSizeInBytes(
-        int gpuNum, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, TensorDescriptor::DataType ABCDataType);
+    unsigned int getWorkspaceSizeInBytes(int gpuNum,
+                                         int rowsA,
+                                         int colsA,
+                                         int colsB,
+                                         int ldA,
+                                         int ldB,
+                                         int ldC,
+                                         TensorDescriptor::DataType ABCDataType,
+                                         bool &kernelWillRunOnGpu);
 
     // getOptimalKernelTime(...) will give you the average time the kernel took when chooseOptimalKernel was called for the
     // matrix multiply operation with those dimensions on that GPU. It is an error to call this for an operation where the
@@ -269,7 +286,7 @@ class CublasMatrixMultiply {
         string message;
     };
 
-    CublasMatrixMultiply();
+    CublasMatrixMultiply() {}
 
     cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
 
@@ -284,15 +301,15 @@ class CublasMatrixMultiply {
                              bool allowWorkspaces,
                              bool printResults);
 
-    vector<CublasKernel> pruneBadFitKernels(vector<CublasKernel> &kernels);
+    void pruneBadFitKernels(vector<CublasKernel> &kernels, int gpuNum, unsigned int kernelsToKeep);
     void getSupportedCublasAlgorithms(const OperationType &operationType,
                                       vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,
                                       vector<int> &supportedAlgorithmIds,
                                       CublasKernelRequirement cublasKernelRequirement,
                                       int gpuNum);
     vector<cublasLtMatmulTile_t> getSupportedTileSizes(cublasLtMatmulAlgo_t algo);
-    int isSplitKSupported(cublasLtMatmulAlgo_t algo);
-    int getReductionSupportMask(cublasLtMatmulAlgo_t algo);
+    bool isSplitKSupported(cublasLtMatmulAlgo_t algo);
+    uint32_t getReductionSupportMask(cublasLtMatmulAlgo_t algo);
     int getSwizzleMaxValue(cublasLtMatmulAlgo_t algo);
     int getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t algo);
 

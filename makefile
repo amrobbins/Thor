@@ -50,6 +50,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Conv
                 build/test/Utilities/ComputeTopology/machineEvaluatorTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
+                build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
                 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
                 build/test/Utilities/WorkQueue/WorkQueueTest && \
@@ -67,6 +68,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/Utilities/WorkQueue/WorkQueueUnorderedTest \
             build/test/Utilities/WorkQueue/WorkQueueTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
+            build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
             build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
@@ -310,7 +312,7 @@ build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/Ten
 
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
+	$(Gpp) -c -O0 $(DEBUG) -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
 
 
 
@@ -346,6 +348,10 @@ build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest:
 build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
 	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest.cpp $(MLDEV)
+	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
+	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuConvolution

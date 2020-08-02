@@ -99,7 +99,7 @@ TEST(GpuMatrixMultiplyFp32, ProducesTheCorrectResult) {
                                                     ElementOrder::CPP_ROW_MAJOR,
                                                     ElementOrder::CPP_ROW_MAJOR,
                                                     ElementOrder::CPP_ROW_MAJOR,
-                                                    false));
+                                                    true));
         // printf("\n\n");
         // fflush(stdout);
     }
