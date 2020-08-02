@@ -52,10 +52,9 @@ struct RunStats {
     }
 
     inline double getAverageRunTimeMilliseconds() {
-        mtx.lock();
+        // Updates should not be concurrently ongoing when running this function.
         assert(runCount > 0);
         return totalExecutionTimeMilliseconds / runCount;
-        mtx.unlock();
     }
 
     void stashRunStats() {
@@ -84,6 +83,7 @@ struct RunStats {
         return getAverageRunTimeMilliseconds() < rhs.getAverageRunTimeMilliseconds();
     }
 
+   private:
     std::mutex mtx;
 };
 
@@ -125,14 +125,14 @@ class CublasKernel {
     CublasKernel(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, string gpuType) {
         referenceCount = new atomic<int>(1);
 
+        uninitialized = false;
+
         this->cublasKernelRequirement = new CublasKernelRequirement(cublasKernelRequirement);
         this->cublasKernelOptions = new CublasKernelOptions(cublasKernelOptions);
         this->gpuType = gpuType;
         this->algorithmPerGpu = new vector<cublasLtMatmulAlgo_t>(MachineEvaluator::instance().getNumGpus());
 
         allocateCublasResources();
-
-        uninitialized = false;
     }
 
     CublasKernel(const CublasKernel &other) {
@@ -141,7 +141,11 @@ class CublasKernel {
     }
 
     CublasKernel &operator=(const CublasKernel &other) {
-        assert(!other.uninitialized);
+        if (other.uninitialized) {
+            uninitialized = true;
+            return *this;
+        }
+        uninitialized = false;
 
         cublasKernelRequirement = other.cublasKernelRequirement;
         cublasKernelOptions = other.cublasKernelOptions;
@@ -244,7 +248,7 @@ class CublasKernel {
         return *DDesc;
     }
 
-    float getWavesCount(int gpuNum) {
+    float getWavesCount(int gpuNum) const {
         assert(!uninitialized);
 
         cublasStatus_t cublasStatus;
@@ -318,7 +322,9 @@ class CublasKernel {
             workspaceSizeInBytes = 0;
         else
             workspaceSizeInBytes = workspace.get().getDescriptor().getArraySizeInBytes();
-        size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum());
+        bool kernelWillRunOnGpu;
+        size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu);
+        assert(kernelWillRunOnGpu);
         assert(workspaceSizeInBytes >= requiredWorkspaceSize);
 
         assert(runWithoutChecks(A, B, C, D, workspace, accumulate, stream) == CUBLAS_STATUS_SUCCESS);
@@ -371,10 +377,6 @@ class CublasKernel {
                          cublasKernelRequirement->kernelRequirement.colsA) /
                         (timePerKernelMs * 1.0e9);
         string TFLOPSString = std::to_string(TFLOPS);
-        decimalPosition = TFLOPSString.find(".");
-        TFLOPSString = TFLOPSString.substr(decimalPosition, 2);
-
-        decimalPosition = timePerKernelMsString.find(".");
 
         description += " kernelTime: " + timePerKernelMsString + "ms";
         description += " TFLOPS: " + TFLOPSString + "\n";
@@ -382,11 +384,20 @@ class CublasKernel {
         return description;
     }
 
-    unsigned long getWorkspaceSizeInBytes(int gpuNum) {
+    unsigned long getWorkspaceSizeInBytes(int gpuNum, bool &kernelWillRunOnGpu) {
         assert(!uninitialized);
 
         cublasStatus_t cublasStatus;
         cublasLtMatmulHeuristicResult_t result;
+
+        /*
+        printf("rowsA %d colsA %d colsB %d ldA %d ldB %d ldC %d\n", cublasKernelRequirement->kernelRequirement.rowsA,
+        cublasKernelRequirement->kernelRequirement.colsA, cublasKernelRequirement->kernelRequirement.colsB,
+        cublasKernelRequirement->kernelRequirement.ldA, cublasKernelRequirement->kernelRequirement.ldB,
+        cublasKernelRequirement->kernelRequirement.ldC); printf("algorithm %d splitK %d swizzle %d reduction %d custom %d tile %s\n",
+        cublasKernelOptions->algorithmId, cublasKernelOptions->splitK, cublasKernelOptions->swizzleType, cublasKernelOptions->reductionFlag,
+        cublasKernelOptions->customOptionValue, tileEnumToString[cublasKernelOptions->tileSize].c_str());
+        */
 
         cublasStatus = cublasLtMatmulAlgoCheck(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
                                                *operationDesc,
@@ -396,8 +407,12 @@ class CublasKernel {
                                                *DDesc,
                                                &((*algorithmPerGpu)[gpuNum]),
                                                &result);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
+            kernelWillRunOnGpu = false;
+            return 0;
+        }
 
+        kernelWillRunOnGpu = true;
         return result.workspaceSize;
     }
 
@@ -405,6 +420,7 @@ class CublasKernel {
         assert(!uninitialized);
         return *cublasKernelRequirement;
     }
+
     CublasKernelOptions getCublasKernelOptions() {
         assert(!uninitialized);
         return *cublasKernelOptions;

@@ -95,12 +95,12 @@ class Stream {
         }
     }
 
-    Event putEvent() {
+    Event putEvent(bool enableTiming = false) {
         assert(!uninitialized);
 
         ScopedGpu scopedGpu(gpuNum);
 
-        Event event(gpuNum);
+        Event event(gpuNum, enableTiming);
         cudaError_t cudaStatus = cudaEventRecord(event.getEvent(), cudaStream);
         assert(cudaStatus == cudaSuccess);
 

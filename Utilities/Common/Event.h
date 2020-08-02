@@ -20,7 +20,7 @@ class Event {
    public:
     Event() { uninitialized = true; }
 
-    explicit Event(int gpuNum) {
+    explicit Event(int gpuNum, bool enableTiming) {
         uninitialized = false;
 
         ScopedGpu scopedGpu(gpuNum);
@@ -28,7 +28,7 @@ class Event {
         cudaError_t cudaStatus;
         this->gpuNum = gpuNum;
 
-        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, cudaEventDisableTiming);
+        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, enableTiming ? 0 : cudaEventDisableTiming);
         assert(cudaStatus == cudaSuccess);
 
         referenceCount = new atomic<int>(1);
