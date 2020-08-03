@@ -106,6 +106,9 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const bool accumulate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
+    assert(accumulate == false);  // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it
+                                  // fixed. Until then no accumulate.
+
     assert(A_rows > 0);
     assert(A_cols > 0);
     assert(B_cols > 0);
@@ -190,6 +193,9 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const bool accumulate,
                                                               const TensorDescriptor::DataType ABCDataType,
                                                               Stream stream) {
+    assert(accumulate == false);  // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it
+                                  // fixed. Until then no accumulate.
+
     ScopedGpu scopedGpu(stream.getGpuNum());
 
     cublasStatus_t cublasStatus;
