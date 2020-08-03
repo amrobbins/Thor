@@ -274,13 +274,37 @@ class CublasKernel {
     }
 
     void executeKernel(Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, Stream stream) {
+        executeKernel(A,
+                      B,
+                      C,
+                      D,
+                      A.getDescriptor().getDimensions()[1],
+                      B.getDescriptor().getDimensions()[1],
+                      C.getDescriptor().getDimensions()[1],
+                      D.getDescriptor().getDimensions()[1],
+                      workspace,
+                      accumulate,
+                      stream);
+    }
+
+    void executeKernel(Tensor A,
+                       Tensor B,
+                       Tensor C,
+                       Tensor D,
+                       size_t ldA,
+                       size_t ldB,
+                       size_t ldC,
+                       size_t ldD,
+                       Optional<Tensor> workspace,
+                       bool accumulate,
+                       Stream stream) {
         assert(!uninitialized);
 
         // Check that everything matches up
         vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
         assert(ADimensions.size() == 2);
         assert(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
-        assert(ADimensions[1] == (uint64_t)cublasKernelRequirement->kernelRequirement.colsA);
+        assert(ADimensions[1] == ldA);
         if (A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
             assert(cublasKernelRequirement->operationType.getADataType() == CUDA_R_32F);
         else
@@ -289,7 +313,7 @@ class CublasKernel {
         vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
         assert(BDimensions.size() == 2);
         assert(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.colsA);
-        assert(BDimensions[1] == (uint64_t)cublasKernelRequirement->kernelRequirement.colsB);
+        assert(BDimensions[1] == ldB);
         if (B.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
             assert(cublasKernelRequirement->operationType.getBDataType() == CUDA_R_32F);
         else
@@ -298,7 +322,7 @@ class CublasKernel {
         vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
         assert(CDimensions.size() == 2);
         assert(CDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
-        assert(CDimensions[1] == (uint64_t)cublasKernelRequirement->kernelRequirement.colsB);
+        assert(CDimensions[1] == ldC);
         if (C.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
             assert(cublasKernelRequirement->operationType.getCDataType() == CUDA_R_32F);
         else
@@ -307,7 +331,7 @@ class CublasKernel {
         vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
         assert(DDimensions.size() == 2);
         assert(DDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
-        assert(DDimensions[1] == (uint64_t)cublasKernelRequirement->kernelRequirement.colsB);
+        assert(DDimensions[1] == ldD);
         if (D.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
             assert(cublasKernelRequirement->operationType.getDDataType() == CUDA_R_32F);
         else
@@ -317,16 +341,6 @@ class CublasKernel {
         assert(C.getMemPtr() != B.getMemPtr());
         assert(C.getMemPtr() == D.getMemPtr());
 
-        size_t workspaceSizeInBytes;
-        if (workspace.isEmpty())
-            workspaceSizeInBytes = 0;
-        else
-            workspaceSizeInBytes = workspace.get().getDescriptor().getArraySizeInBytes();
-        bool kernelWillRunOnGpu;
-        size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu);
-        assert(kernelWillRunOnGpu);
-        assert(workspaceSizeInBytes >= requiredWorkspaceSize);
-
         assert(runWithoutChecks(A, B, C, D, workspace, accumulate, stream) == CUBLAS_STATUS_SUCCESS);
     }
 
@@ -334,6 +348,17 @@ class CublasKernel {
         Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, Stream stream) {
         assert(!uninitialized);
         ScopedGpu scopedGpu(stream.getGpuNum());
+
+        size_t workspaceSizeInBytes = 0;
+        bool kernelWillRunOnGpu;
+        size_t requiredWorkspaceSize = getWorkspaceSizeInBytes(stream.getGpuNum(), kernelWillRunOnGpu);
+        assert(kernelWillRunOnGpu);
+        if (workspace.isPresent() && requiredWorkspaceSize > 0) {
+            workspaceSizeInBytes = workspace.get().getDescriptor().getArraySizeInBytes();
+        }
+        assert(workspaceSizeInBytes >= requiredWorkspaceSize);
+
+        printf("using beta %f alpha %f\n", accumulate ? BETA_ACCUMULATE : BETA_CLEAR, ALPHA_NO_SCALE);
 
         cublasStatus_t cublasStatus;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
@@ -349,8 +374,8 @@ class CublasKernel {
                                       D.getMemPtr(),
                                       *DDesc,
                                       &((*algorithmPerGpu)[stream.getGpuNum()]),
-                                      workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
-                                      workspace.isPresent() ? workspace.get().getDescriptor().getArraySizeInBytes() : 0,
+                                      requiredWorkspaceSize > 0 ? workspace.get().getMemPtr() : nullptr,
+                                      requiredWorkspaceSize > 0 ? workspace.get().getDescriptor().getArraySizeInBytes() : 0,
                                       stream);
         return cublasStatus;
     }
@@ -450,6 +475,10 @@ class CublasKernel {
         cublasStatus = cublasLtMatmulDescCreate(operationDesc,
                                                 cublasKernelRequirement->operationType.getComputeDataType(),
                                                 cublasKernelRequirement->operationType.getScaleDataType());
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
+        const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
+        cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;

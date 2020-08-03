@@ -36,7 +36,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
+RUN_ALL_TESTS = build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
@@ -50,7 +51,6 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Conv
                 build/test/Utilities/ComputeTopology/machineEvaluatorTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
-                build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
                 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
                 build/test/Utilities/WorkQueue/WorkQueueTest && \
