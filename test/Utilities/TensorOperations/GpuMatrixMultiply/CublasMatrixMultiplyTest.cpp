@@ -75,9 +75,9 @@ inline void checkCudaErrors(cudaError_t cudaStatus) {
 }
 
 TEST(CublasMatrixMultiply, TestOptimize) {
-    int rowsA = 1*768;  // 128 + (rand() % 1024);
-    int colsA = 1*768;  // 128 + (rand() % 1024);
-    int colsB = 1*768;  // 128 + (rand() % 1024);
+    int rowsA = 10 * 1024;  // 128 + (rand() % 1024);
+    int colsA = 8 * 128;    // 128 + (rand() % 1024);
+    int colsB = 10 * 1024;  // 128 + (rand() % 1024);
 
     /*
         int rowsA = 23 * 256 + 16;

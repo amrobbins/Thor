@@ -312,7 +312,7 @@ build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/Ten
 
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) -c -O0 $(DEBUG) -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
+	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
 
 
 
