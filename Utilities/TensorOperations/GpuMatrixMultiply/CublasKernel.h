@@ -368,13 +368,13 @@ class CublasKernel {
         description += " reductionFlag: " + std::to_string(cublasKernelOptions->reductionFlag);
         description += " swizzleType: " + std::to_string(cublasKernelOptions->swizzleType);
         description += " customOption: " + std::to_string(cublasKernelOptions->customOptionValue);
+        bool kernelWillRunOnGpu;
+        int workspaceSize = getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+        description += " workspace: " +  std::to_string(workspaceSize);
 
         double timePerKernelMs = cublasKernelOptions->runStats.getAverageRunTimeMilliseconds();
         string timePerKernelMsString = std::to_string(timePerKernelMs);
-        int decimalPosition = timePerKernelMsString.find(".");
-        timePerKernelMsString = timePerKernelMsString.substr(decimalPosition, 5);
-        double TFLOPS = ((2.0 * cublasKernelRequirement->kernelRequirement.colsA - 1.0) * cublasKernelRequirement->kernelRequirement.rowsA *
-                         cublasKernelRequirement->kernelRequirement.colsA) /
+        double TFLOPS = (2.0 * cublasKernelRequirement->kernelRequirement.rowsA * cublasKernelRequirement->kernelRequirement.colsA * cublasKernelRequirement->kernelRequirement.colsB) /
                         (timePerKernelMs * 1.0e9);
         string TFLOPSString = std::to_string(TFLOPS);
 
@@ -389,15 +389,6 @@ class CublasKernel {
 
         cublasStatus_t cublasStatus;
         cublasLtMatmulHeuristicResult_t result;
-
-        /*
-        printf("rowsA %d colsA %d colsB %d ldA %d ldB %d ldC %d\n", cublasKernelRequirement->kernelRequirement.rowsA,
-        cublasKernelRequirement->kernelRequirement.colsA, cublasKernelRequirement->kernelRequirement.colsB,
-        cublasKernelRequirement->kernelRequirement.ldA, cublasKernelRequirement->kernelRequirement.ldB,
-        cublasKernelRequirement->kernelRequirement.ldC); printf("algorithm %d splitK %d swizzle %d reduction %d custom %d tile %s\n",
-        cublasKernelOptions->algorithmId, cublasKernelOptions->splitK, cublasKernelOptions->swizzleType, cublasKernelOptions->reductionFlag,
-        cublasKernelOptions->customOptionValue, tileEnumToString[cublasKernelOptions->tileSize].c_str());
-        */
 
         cublasStatus = cublasLtMatmulAlgoCheck(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
                                                *operationDesc,

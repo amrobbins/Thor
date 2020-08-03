@@ -301,7 +301,6 @@ class CublasMatrixMultiply {
                              bool allowWorkspaces,
                              bool printResults);
 
-    void pruneBadFitKernels(vector<CublasKernel> &kernels, int gpuNum, unsigned int kernelsToKeep);
     void getSupportedCublasAlgorithms(const OperationType &operationType,
                                       vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,
                                       vector<int> &supportedAlgorithmIds,

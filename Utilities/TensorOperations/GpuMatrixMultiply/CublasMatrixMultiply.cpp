@@ -196,8 +196,31 @@ void CublasMatrixMultiply::chooseOptimalKernel(
     bool bestKernelHasWorkspace = chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType, true, printResults);
 
     // If the best kernel did not have a workspace, then it will be used for the no workspace version of the computation also
-    if (!bestKernelHasWorkspace)
+    if (bestKernelHasWorkspace) {
         chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType, false, printResults);
+
+        // The heuristic that is being used to choose kernels tries to get a kernel as close as possible to 1 wave,
+        // for smaller operations this can be achieved by adding a workspace, but this doesn't create a faster kernel.
+        // So in this case sometimes forcing there to be no workspace and choosing from the remaining kernels,
+        // the kernels with the closest to 1 wave is a better heuristic. Because of this, check if the no workspace
+        // kernel is faster than the workspace one, and if so replace the workspace version with the no workspace version.
+        KernelRequirement kernelRequirement;
+        kernelRequirement.gpuType = MachineEvaluator::instance().getGpuType(gpuNum);
+        kernelRequirement.rowsA = rowsA;
+        kernelRequirement.colsA = colsA;
+        kernelRequirement.colsB = colsB;
+        kernelRequirement.ldA = ldA;
+        kernelRequirement.ldB = ldB;
+        kernelRequirement.ldC = ldC;
+        kernelRequirement.allowWorkspace = false;
+        cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
+        OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+        CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirement, operationType);
+        kernelRequirement.allowWorkspace = true;
+        CublasKernelRequirement workspaceCublasKernelRequirement(kernelRequirement, operationType);
+        if(optimalKernels[noWorkspaceCublasKernelRequirement].getAverageRunTimeMilliseconds() < optimalKernels[workspaceCublasKernelRequirement].getAverageRunTimeMilliseconds())
+            optimalKernels[workspaceCublasKernelRequirement] = optimalKernels[noWorkspaceCublasKernelRequirement];
+    }
 }
 
 bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
@@ -214,10 +237,20 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
     assert(ABCDataType == TensorDescriptor::DataType::FP32 || ABCDataType == TensorDescriptor::DataType::FP16);
 
+    double opSize = (long)rowsA * (long)colsA * (long)colsB;
+    double targetCount;
+    if(opSize < pow(1024.0, 3)) {
+        targetCount = 10000;
+    } else {
+        // Following equation from best fit line from https://www.socscistatistics.com/tests/regression/default.aspx
+        targetCount = -0.000000052825*opSize + 550;
+    }
+    printf("target %lf\n", targetCount);
+    unsigned int initialContestantCount = maxl(100, targetCount);
+    unsigned int finalContestantCount = minl(40, initialContestantCount / 5);
+
     constexpr int initialRun = 5;
-    constexpr int initialContestantCount = 100;
     constexpr int finalRun = 20;
-    constexpr int finalContestantCount = 10;
 
     constexpr long FIVE_HUNDRED_MEGS = 536870912;
     const int ELEMENT_SIZE = (ABCDataType == TensorDescriptor::DataType::FP32 ? sizeof(float) : sizeof(half));
@@ -245,9 +278,6 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         CublasMatrixMultiply::instance().mtx.lock();
 
     // Will only evaluate kernel once per gpu type
-    // First check in memory.
-    // If not in memory, check in file-based map
-    // If not in file based map, measure latency to determine optimal kernel
     if (optimalKernels.count(cublasKernelRequirement) == 1) {
         if (CublasMatrixMultiply::instance().useLocks)
             CublasMatrixMultiply::instance().mtx.unlock();
@@ -335,10 +365,6 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     printf("%ld available kernels\n", kernels.size());
     assert(!kernels.empty());
 
-    pruneBadFitKernels(kernels, gpuNum, initialContestantCount);
-    printf("got %ld kernels\n", kernels.size());
-    assert(!kernels.empty());
-
     /**
      * All fully specified kernels that will be tried are now contained in the kernels vector.
      *
@@ -395,6 +421,32 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
                                TensorDescriptor(TensorDescriptor::DataType::UINT8, maxWorkspaceSizeInBytes));
     }
+
+
+    // Prune all but initialContestantCount provably working kernels
+    vector<CublasKernel> prunedKernels;
+    if (kernels.size() > initialContestantCount) {
+        prunedKernels.reserve(initialContestantCount * 2);
+
+        // Want the kernels nearest to 1 wave.
+        std::sort(kernels.begin(), kernels.end(), [gpuNum](const CublasKernel &lhs, const CublasKernel &rhs) {
+            return abs(1.0f - lhs.getWavesCount(gpuNum)) < abs(1.0f - rhs.getWavesCount(gpuNum));
+        });
+
+        // Keep all kernels that are as good as the kernelsToKeep'th best kernel.
+        float maxWavesDiff = abs(1.0f - kernels[initialContestantCount - 1].getWavesCount(gpuNum));
+        for(unsigned int i = 0; i < kernels.size() && 
+            (abs(1.0f - kernels[i].getWavesCount(gpuNum)) <= maxWavesDiff || prunedKernels.size() < initialContestantCount); ++i) {
+            cublasStatus = kernels[i].runWithoutChecks(
+                A[0], B[0], C[0], C[0], workspace[0], false, stream);
+            if (cublasStatus == CUBLAS_STATUS_SUCCESS)
+                prunedKernels.push_back(kernels[i]);
+        }
+        kernels = prunedKernels;
+    }
+    if(printResults)
+        printf("got %ld kernels\n", kernels.size());
+    assert(!kernels.empty());
 
     int tensorInstance = 0;
     int workspaceInstance = 0;
@@ -543,6 +595,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     }
 
     if (printResults) {
+        std::sort(kernels.begin(), kernels.end(), CublasKernel::executionTimeComparison);
         printf("Kernel optimization results:\n\n");
         for (unsigned int i = 0; i < kernels.size(); ++i) {
             printf("%s\n", kernels[i].toString(gpuNum).c_str());
@@ -573,27 +626,6 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         CublasMatrixMultiply::instance().mtx.unlock();
 
     return bestKernelHasWorkspace;
-}
-
-void CublasMatrixMultiply::pruneBadFitKernels(vector<CublasKernel> &kernels, int gpuNum, unsigned int kernelsToKeep) {
-    if (kernels.size() <= kernelsToKeep)
-        return;
-
-    // Want the kernels nearest to 1 wave.
-    std::sort(kernels.begin(), kernels.end(), [gpuNum](const CublasKernel &lhs, const CublasKernel &rhs) {
-        return abs(1.0f - lhs.getWavesCount(gpuNum)) < abs(1.0f - rhs.getWavesCount(gpuNum));
-    });
-
-    // Keep all kernels that are as good as the kernelsToKeep'th best kernel.
-    float maxWavesDiff = abs(1.0f - kernels[kernelsToKeep - 1].getWavesCount(gpuNum));
-    for (unsigned int i = kernelsToKeep; i < kernels.size(); ++i) {
-        if (abs(1.0f - kernels[i].getWavesCount(gpuNum)) == maxWavesDiff) {
-            kernelsToKeep += 1;
-        } else {
-            break;
-        }
-    }
-    kernels.erase(kernels.begin() + kernelsToKeep, kernels.end());
 }
 
 void CublasMatrixMultiply::getSupportedCublasAlgorithms(const OperationType &operationType,
