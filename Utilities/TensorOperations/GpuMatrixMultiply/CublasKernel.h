@@ -370,11 +370,12 @@ class CublasKernel {
         description += " customOption: " + std::to_string(cublasKernelOptions->customOptionValue);
         bool kernelWillRunOnGpu;
         int workspaceSize = getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
-        description += " workspace: " +  std::to_string(workspaceSize);
+        description += " workspace: " + std::to_string(workspaceSize);
 
         double timePerKernelMs = cublasKernelOptions->runStats.getAverageRunTimeMilliseconds();
         string timePerKernelMsString = std::to_string(timePerKernelMs);
-        double TFLOPS = (2.0 * cublasKernelRequirement->kernelRequirement.rowsA * cublasKernelRequirement->kernelRequirement.colsA * cublasKernelRequirement->kernelRequirement.colsB) /
+        double TFLOPS = (2.0 * cublasKernelRequirement->kernelRequirement.rowsA * cublasKernelRequirement->kernelRequirement.colsA *
+                         cublasKernelRequirement->kernelRequirement.colsB) /
                         (timePerKernelMs * 1.0e9);
         string TFLOPSString = std::to_string(TFLOPS);
 
