@@ -75,9 +75,9 @@ class CublasMatrixMultiply {
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_cols,
-                  bool accumulate,
-                  TensorDescriptor::DataType ABCDataType,
-                  const Stream stream) {
+                  const bool accumulate,
+                  const TensorDescriptor::DataType ABCDataType,
+                  Stream stream) {
         multiply(A, B, C, workspace, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, accumulate, ABCDataType, stream);
     }
 
@@ -94,9 +94,9 @@ class CublasMatrixMultiply {
                   const int32_t ld_A,
                   const int32_t ld_B,
                   const int32_t ld_C,
-                  bool accumulate,
-                  TensorDescriptor::DataType ABCDataType,
-                  const Stream stream);
+                  const bool accumulate,
+                  const TensorDescriptor::DataType ABCDataType,
+                  Stream stream);
 
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
@@ -108,9 +108,9 @@ class CublasMatrixMultiply {
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_cols,
-                  bool accumulate,
-                  TensorDescriptor::DataType ABCDataType,
-                  const Stream stream) {
+                  const bool accumulate,
+                  const TensorDescriptor::DataType ABCDataType,
+                  Stream stream) {
         multiply(A, B, C, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, accumulate, ABCDataType, stream);
     }
 
@@ -126,9 +126,9 @@ class CublasMatrixMultiply {
                   const int32_t ld_A,
                   const int32_t ld_B,
                   const int32_t ld_C,
-                  bool accumulate,
-                  TensorDescriptor::DataType ABCDataType,
-                  const Stream stream);
+                  const bool accumulate,
+                  const TensorDescriptor::DataType ABCDataType,
+                  Stream stream);
 
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
@@ -146,9 +146,9 @@ class CublasMatrixMultiply {
                                             const int32_t A_rows,
                                             const int32_t A_cols,
                                             const int32_t B_cols,
-                                            bool accumulate,
-                                            TensorDescriptor::DataType ABCDataType,
-                                            const Stream stream) {
+                                            const bool accumulate,
+                                            const TensorDescriptor::DataType ABCDataType,
+                                            Stream stream) {
         multiplyUsingHeuristicKernelChoice(A, B, C, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, accumulate, ABCDataType, stream);
     }
 
@@ -164,9 +164,9 @@ class CublasMatrixMultiply {
                                             const int32_t ld_A,
                                             const int32_t ld_B,
                                             const int32_t ld_C,
-                                            bool accumulate,
-                                            TensorDescriptor::DataType ABCDataType,
-                                            const Stream stream);
+                                            const bool accumulate,
+                                            const TensorDescriptor::DataType ABCDataType,
+                                            Stream stream);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
@@ -272,6 +272,7 @@ class CublasMatrixMultiply {
 
    private:
     unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
+    unordered_map<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
 
     bool useLocks;
     mutex mtx;
@@ -324,7 +325,7 @@ class CublasMatrixMultiply {
                   const int32_t ld_A,
                   const int32_t ld_B,
                   const int32_t ld_C,
-                  bool accumulate,
-                  TensorDescriptor::DataType ABCDataType,
-                  const Stream stream);
+                  const bool accumulate,
+                  const TensorDescriptor::DataType ABCDataType,
+                  Stream stream);
 };
