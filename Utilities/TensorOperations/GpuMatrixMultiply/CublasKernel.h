@@ -358,8 +358,6 @@ class CublasKernel {
         }
         assert(workspaceSizeInBytes >= requiredWorkspaceSize);
 
-        printf("using beta %f alpha %f\n", accumulate ? BETA_ACCUMULATE : BETA_CLEAR, ALPHA_NO_SCALE);
-
         cublasStatus_t cublasStatus;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       *operationDesc,
