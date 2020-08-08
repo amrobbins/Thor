@@ -49,10 +49,6 @@
 // B_cols (N): number of output features
 //-----------------------------------------------
 
-const float ALPHA_NO_SCALE = 1.0f;
-const float BETA_ACCUMULATE = 1.0f;
-const float BETA_CLEAR = 0.0f;
-
 // This variant allows non-packed matrices and uses a workspace
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
@@ -106,8 +102,9 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const bool accumulate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
-    assert(accumulate == false);  // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it
-                                  // fixed. Until then no accumulate.
+    // It appears that Cublas currently does not handle alpha and beta right, I am seeing in some instances that alpha*AB + beta*(AB+C) is
+    // returned, which I could work with, except it appears that the behavior is not consistent.
+    assert(accumulate == false);
 
     assert(A_rows > 0);
     assert(A_cols > 0);
@@ -132,10 +129,6 @@ void CublasMatrixMultiply::multiply(Tensor A,
     assert(CDimensions[0] == (uint32_t)A_rows);
     assert(CDimensions[1] == (uint32_t)ld_C);
 
-    // Don't call multiply(...) between calls to startingMultiThreadedKernelOptimization() and finishedMultiThreadedKernelOptimization()
-    // only call chooseOptimalKernel(...) between those calls
-    assert(CublasMatrixMultiply::instance().useLocks == false);
-
     int gpuNum = stream.getGpuNum();
     ScopedGpu scopedGpu(gpuNum);
 
@@ -154,9 +147,11 @@ void CublasMatrixMultiply::multiply(Tensor A,
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
+    CublasMatrixMultiply::instance().mtx.lock();
     auto it = optimalKernels.find(cublasKernelRequirement);
     assert(it != optimalKernels.end());
     CublasKernel cublasKernel = it->second;
+    CublasMatrixMultiply::instance().mtx.unlock();
 
     // Check byte size of workspace
     if (workspace.isPresent()) {
@@ -193,8 +188,9 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const bool accumulate,
                                                               const TensorDescriptor::DataType ABCDataType,
                                                               Stream stream) {
-    assert(accumulate == false);  // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it
-                                  // fixed. Until then no accumulate.
+    // It appears that Cublas currently does not handle alpha and beta right, I am seeing in some instances that alpha*AB + beta*(AB+C) is
+    // returned, which I could work with, except it appears that the behavior is not consistent.
+    assert(accumulate == false);
 
     ScopedGpu scopedGpu(stream.getGpuNum());
 
@@ -251,35 +247,65 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     kernelRequirement.allowWorkspace = false;
     OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
-    if (knownHeuristicAlgorithms.count(cublasKernelRequirement) == 1) {
+
+    // If there is already a known kernel, use it. Otherwise a heuristic search will be performed and the kernel remembered.
+    CublasMatrixMultiply::instance().mtx.lock();
+    if (optimalKernels.count(cublasKernelRequirement) == 1) {
+        cublasLtMatmulAlgo_t algorithm = optimalKernels[cublasKernelRequirement].getAlgorithm(stream.getGpuNum());
+        CublasMatrixMultiply::instance().mtx.unlock();
+
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
-                                      &ALPHA_NO_SCALE,
+                                      &CublasKernel::ALPHA_NO_SCALE,
                                       A.getMemPtr(),
                                       ADesc,
                                       B.getMemPtr(),
                                       BDesc,
-                                      accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                      accumulate ? &CublasKernel::BETA_ACCUMULATE : &CublasKernel::BETA_CLEAR,
                                       C.getMemPtr(),
                                       CDesc,
                                       C.getMemPtr(),
                                       CDesc,
-                                      &(knownHeuristicAlgorithms[cublasKernelRequirement]),
+                                      &algorithm,
                                       nullptr,
                                       0,
                                       stream);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        return;
+    } else if (knownHeuristicAlgorithms.count(cublasKernelRequirement) == 1) {
+        cublasLtMatmulAlgo_t algorithm = knownHeuristicAlgorithms[cublasKernelRequirement];
+        CublasMatrixMultiply::instance().mtx.unlock();
+
+        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                      operationDesc,
+                                      &CublasKernel::ALPHA_NO_SCALE,
+                                      A.getMemPtr(),
+                                      ADesc,
+                                      B.getMemPtr(),
+                                      BDesc,
+                                      accumulate ? &CublasKernel::BETA_ACCUMULATE : &CublasKernel::BETA_CLEAR,
+                                      C.getMemPtr(),
+                                      CDesc,
+                                      C.getMemPtr(),
+                                      CDesc,
+                                      &algorithm,
+                                      nullptr,
+                                      0,
+                                      stream);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        return;
     }
+    CublasMatrixMultiply::instance().mtx.unlock();
 
     cublasLtMatmulPreference_t searchPreferences;
     cublasStatus = cublasLtMatmulPreferenceCreate(&searchPreferences);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatmulPreferenceInit(searchPreferences);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
-    cublasLtNumericalImplFlags_t computeType = CUBLASLT_NUMERICAL_IMPL_FLAGS_INPUT_32F;
-    cublasStatus = cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute, &computeType, sizeof(computeType));
-    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    // cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
+    // cublasLtNumericalImplFlags_t computeType = CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_TYPE_MASK |
+    // CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32F; cublasStatus = cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute,
+    // &computeType, sizeof(computeType)); assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
     int returnedAlgoCount;
     vector<cublasLtMatmulHeuristicResult_t> results(10);
@@ -300,12 +326,12 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
-                                      &ALPHA_NO_SCALE,
+                                      &CublasKernel::ALPHA_NO_SCALE,
                                       A.getMemPtr(),
                                       ADesc,
                                       B.getMemPtr(),
                                       BDesc,
-                                      accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                      accumulate ? &CublasKernel::BETA_ACCUMULATE : &CublasKernel::BETA_CLEAR,
                                       C.getMemPtr(),
                                       CDesc,
                                       C.getMemPtr(),
@@ -316,7 +342,9 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                       stream);
         if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
             kernelLaunchedSuccessfully = true;
+            CublasMatrixMultiply::instance().mtx.lock();
             knownHeuristicAlgorithms[cublasKernelRequirement] = results[i].algo;
+            CublasMatrixMultiply::instance().mtx.unlock();
         }
     }
 
@@ -337,12 +365,12 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
         for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
             cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                           operationDesc,
-                                          &ALPHA_NO_SCALE,
+                                          &CublasKernel::ALPHA_NO_SCALE,
                                           A.getMemPtr(),
                                           ADesc,
                                           B.getMemPtr(),
                                           BDesc,
-                                          accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                          accumulate ? &CublasKernel::BETA_ACCUMULATE : &CublasKernel::BETA_CLEAR,
                                           C.getMemPtr(),
                                           CDesc,
                                           C.getMemPtr(),
@@ -353,7 +381,12 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                           stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 kernelLaunchedSuccessfully = true;
+                // FIXME: may need an algo per gpu
+                // FIXME: add their top N heuristic kernels to the set of optimal candidates, will need to change CublasKernel to take
+                // algorithm in constructor
+                CublasMatrixMultiply::instance().mtx.lock();
                 knownHeuristicAlgorithms[cublasKernelRequirement] = results[i].algo;
+                CublasMatrixMultiply::instance().mtx.unlock();
             }
         }
     }
@@ -403,9 +436,11 @@ void CublasMatrixMultiply::chooseOptimalKernel(
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirement, operationType);
         kernelRequirement.allowWorkspace = true;
         CublasKernelRequirement workspaceCublasKernelRequirement(kernelRequirement, operationType);
+        CublasMatrixMultiply::instance().mtx.lock();
         if (optimalKernels[noWorkspaceCublasKernelRequirement].getAverageRunTimeMilliseconds() <
             optimalKernels[workspaceCublasKernelRequirement].getAverageRunTimeMilliseconds())
             optimalKernels[workspaceCublasKernelRequirement] = optimalKernels[noWorkspaceCublasKernelRequirement];
+        CublasMatrixMultiply::instance().mtx.unlock();
     }
 }
 
@@ -469,13 +504,11 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    if (CublasMatrixMultiply::instance().useLocks)
-        CublasMatrixMultiply::instance().mtx.lock();
+    CublasMatrixMultiply::instance().mtx.lock();
 
     // Will only evaluate kernel once per gpu type
     if (optimalKernels.count(cublasKernelRequirement) == 1) {
-        if (CublasMatrixMultiply::instance().useLocks)
-            CublasMatrixMultiply::instance().mtx.unlock();
+        CublasMatrixMultiply::instance().mtx.unlock();
         return false;  // To be safe, do not assume anything about whether the best kernel has a workspace or not.
     }
 
@@ -484,8 +517,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     // thing once the optimal kernel has been found.
     optimalKernels[cublasKernelRequirement] = CublasKernel();
 
-    if (CublasMatrixMultiply::instance().useLocks)
-        CublasMatrixMultiply::instance().mtx.unlock();
+    CublasMatrixMultiply::instance().mtx.unlock();
 
     vector<CublasKernel> kernels;
     const vector<int> splitKSequence{2, 3, 4, 5, 6, 8, 12, 16, 32};
@@ -813,8 +845,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     assert(kernelWillRunOnGpu);
 
     // Save the result to be used later for this computation
-    if (CublasMatrixMultiply::instance().useLocks)
-        CublasMatrixMultiply::instance().mtx.lock();
+    CublasMatrixMultiply::instance().mtx.lock();
 
     optimalKernels[cublasKernelRequirement] = bestKernel;
 
@@ -825,8 +856,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         optimalKernels[noWorkspaceCublasKernelRequirement] = bestKernel;
     }
 
-    if (CublasMatrixMultiply::instance().useLocks)
-        CublasMatrixMultiply::instance().mtx.unlock();
+    CublasMatrixMultiply::instance().mtx.unlock();
 
     Event optimizationEndEvent;
     if (printResults) {
@@ -970,25 +1000,12 @@ unsigned int CublasMatrixMultiply::getWorkspaceSizeInBytes(int gpuNum,
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
+    CublasMatrixMultiply::instance().mtx.lock();
     assert(optimalKernels.count(cublasKernelRequirement) == 1);
-
     unsigned int workspaceSize = optimalKernels[cublasKernelRequirement].getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+    CublasMatrixMultiply::instance().mtx.unlock();
 
     return workspaceSize;
-}
-
-void CublasMatrixMultiply::startingMultiThreadedKernelOptimization() {
-    CublasMatrixMultiply::instance().mtx.lock();
-    assert(CublasMatrixMultiply::instance().useLocks == false);
-    CublasMatrixMultiply::instance().useLocks = true;
-    CublasMatrixMultiply::instance().mtx.unlock();
-}
-
-void CublasMatrixMultiply::finishedMultiThreadedKernelOptimization() {
-    CublasMatrixMultiply::instance().mtx.lock();
-    assert(CublasMatrixMultiply::instance().useLocks == true);
-    CublasMatrixMultiply::instance().useLocks = false;
-    CublasMatrixMultiply::instance().mtx.unlock();
 }
 
 double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
@@ -1000,10 +1017,6 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
                                                   int ldC,
                                                   bool workspaceAllowed,
                                                   TensorDescriptor::DataType ABCDataType) {
-    // Don't call getOptimalKernelTime(...) between calls to startingMultiThreadedKernelOptimization() and
-    // finishedMultiThreadedKernelOptimization() only call chooseOptimalKernel(...) between those calls
-    assert(CublasMatrixMultiply::instance().useLocks == false);
-
     KernelRequirement kernelRequirement;
     kernelRequirement.gpuType = gpuType;
     kernelRequirement.rowsA = rowsA;
@@ -1020,6 +1033,7 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
 
     string ABCDataTypeString = ABCDataType == TensorDescriptor::DataType::FP32 ? "FP32" : "FP16";
 
+    CublasMatrixMultiply::instance().mtx.lock();
     auto it = optimalKernels.find(cublasKernelRequirement);
     if (it == optimalKernels.end()) {
         string message =
@@ -1027,9 +1041,13 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
             "gpuType " +
             gpuType + " rowsA " + std::to_string(rowsA) + " colsA " + std::to_string(colsA) + " colsB " + std::to_string(colsB) +
             "dataType " + ABCDataTypeString;
+        CublasMatrixMultiply::instance().mtx.unlock();
         throw(CublasMatrixMultiply::Youreusingitwrong(message));
     }
-    return it->second.getAverageRunTimeMilliseconds();
+    double averageRunTimeMilliseconds = it->second.getAverageRunTimeMilliseconds();
+    CublasMatrixMultiply::instance().mtx.unlock();
+
+    return averageRunTimeMilliseconds;
 }
 
 double CublasMatrixMultiply::getOptimalKernelTime(

@@ -49,12 +49,13 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMa
                 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest && \
                 build/test/DeepLearning/Implementation/Tensor/tensorTest && \
                 build/test/Utilities/ComputeTopology/machineEvaluatorTest && \
-                build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
-                build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
                 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
                 build/test/Utilities/WorkQueue/WorkQueueTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
+
+                #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
+                #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
             build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
@@ -67,26 +68,17 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Implementation/Tensor/tensorTest \
             build/test/Utilities/WorkQueue/WorkQueueUnorderedTest \
             build/test/Utilities/WorkQueue/WorkQueueTest \
-            build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
             build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
-            build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
             build/test/Utilities/Common/OptionalTest \
 
+            #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
+            #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
+
 ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o \
                    build/Utilities/TensorOperations/Arithmetic/Average.o \
                    build/Utilities/TensorOperations/Arithmetic/Tanh.o \
                    build/Utilities/TensorOperations/Arithmetic/Relu.o \
@@ -102,7 +94,6 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Misc/Pad.o \
                    build/Utilities/TensorOperations/Misc/Extract.o \
                    build/Utilities/TensorOperations/Misc/Concatenate.o \
-                   build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
@@ -113,6 +104,19 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/Layer.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
+
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o \
+                   #build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o \
+
 
 ML_DEV = libMLDev.a MLDev.h
 
@@ -174,45 +178,45 @@ build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o: Utiliti
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/Reductions.cu
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/Reductions.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/Reductions.cu
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/Reductions.cu
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.cu build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.cu
+#build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.cu build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.cu
 
 build/Utilities/TensorOperations/Arithmetic/Average.o: Utilities/TensorOperations/Arithmetic/Average.h Utilities/TensorOperations/Arithmetic/Average.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
@@ -278,9 +282,9 @@ build/Utilities/TensorOperations/TypeConversions/TypeConverter.o: Utilities/Tens
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
 	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/TypeConversions/TypeConverter.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/TypeConversions/TypeConverter.o
 
-build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.cpp
-	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o
+#build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.cpp
+#	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o
 
 build/Utilities/ComputeTopology/MachineEvaluator.o: Utilities/ComputeTopology/MachineEvaluator.h Utilities/ComputeTopology/MachineEvaluator.cpp
 	mkdir -p build/Utilities/ComputeTopology
@@ -345,9 +349,9 @@ build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest:
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixTranspose
 	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp $(MLDEV)
-	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+#build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp $(MLDEV)
+#	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
@@ -361,9 +365,9 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: b
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
-	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+#build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
+#	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
+#	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/ComputeTopology/machineEvaluatorTest: build/test/googletest/libgtest.a test/Utilities/ComputeTopology/machineEvaluatorTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/ComputeTopology
