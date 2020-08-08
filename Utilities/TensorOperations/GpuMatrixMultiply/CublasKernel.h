@@ -120,6 +120,10 @@ struct CublasKernelOptions {
 
 class CublasKernel {
    public:
+    static const float ALPHA_NO_SCALE;
+    static const float BETA_ACCUMULATE;
+    static const float BETA_CLEAR;
+
     CublasKernel() { uninitialized = true; }
 
     CublasKernel(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, string gpuType) {
@@ -441,6 +445,8 @@ class CublasKernel {
         return *cublasKernelOptions;
     }
 
+    cublasLtMatmulAlgo_t getAlgorithm(int gpuNum) { return (*algorithmPerGpu)[gpuNum]; }
+
    private:
     CublasKernelRequirement *cublasKernelRequirement;
     CublasKernelOptions *cublasKernelOptions;
@@ -459,9 +465,6 @@ class CublasKernel {
 
     bool uninitialized;
 
-    static const float ALPHA_NO_SCALE;
-    static const float BETA_ACCUMULATE;
-    static const float BETA_CLEAR;
     static map<cublasLtMatmulTile_t, string> tileEnumToString;
 
     void allocateCublasResources() {

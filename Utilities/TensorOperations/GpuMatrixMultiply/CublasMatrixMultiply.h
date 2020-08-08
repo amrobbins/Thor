@@ -259,22 +259,10 @@ class CublasMatrixMultiply {
                                 bool workspaceAllowed,
                                 TensorDescriptor::DataType ABCDataType);
 
-    // You must call startingMultiThreadedOptimization() if you are optimizing kernels using multiple threads (so that you can use multiple
-    // GPUs). Call it before you begin.
-    // After you call startingMultiThreadedKernelOptimization(), the only method of this class that you can call
-    // is chooseOptimalKernel(), until you call finishedMultiThreadedKernelOptimization().
-    //
-    // Remember: never run more than one optimzation at a time on any gpu. So use 1 thread per GPU for this.
-    void startingMultiThreadedKernelOptimization();
-
-    // Call finishingMultiThreadedOptimization() once you are done with the multi-threaded kernel optimization.
-    void finishedMultiThreadedKernelOptimization();
-
    private:
     unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
     unordered_map<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
 
-    bool useLocks;
     mutex mtx;
 
     class Youreusingitwrong : public exception {
