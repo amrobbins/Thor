@@ -4,6 +4,7 @@
 #include "Event.h"
 #include "ScopedGpu.h"
 #include "Utilities/Common/Optional.h"
+#include "Utilities/Common/ReferenceCounted.h"
 
 #include <cudnn.h>
 #include "cuda.h"
@@ -22,12 +23,11 @@ using std::mutex;
  *
  * Also carries the gpuNum that the stream exists on.
  */
-class Stream {
+class Stream : protected ReferenceCounted {
    public:
-    Stream() {
-        uninitialized = true;
-        referenceCount = nullptr;
-    }
+    Stream()
+        // For ReferenceCounted
+        : ReferenceCounted() {}
 
     explicit Stream(int gpuNum) { construct(gpuNum); }
 
@@ -36,12 +36,23 @@ class Stream {
         construct(gpuNum);
     }
 
-    void construct(int gpuNum) {
-#ifdef DEBUG_REF_COUNTS
-        streamsCreated.fetch_add(1);
-#endif
+    Stream(const Stream &other) {
+        // implemented using operator=
+        *this = other;
+    }
 
-        uninitialized = false;
+    Stream &operator=(const Stream &other) {
+        // For ReferenceCounted
+        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
+        copyFrom(other);
+
+        return *this;
+    }
+
+    void construct(int gpuNum) {
+        // For ReferenceCounted
+        ReferenceCounted::initialize();
 
         cudnnHandle = new Optional<cudnnHandle_t>;
         mtx = new mutex;
@@ -52,56 +63,22 @@ class Stream {
 
         cudaStatus = cudaStreamCreateWithFlags(&cudaStream, cudaStreamNonBlocking);
         assert(cudaStatus == cudaSuccess);
-
-        referenceCount = new atomic<int>(1);
-    }
-
-    Stream(const Stream &stream) {
-        uninitialized = true;
-        referenceCount = nullptr;
-
-        *this = stream;  // implemented using operator=
-    }
-
-    Stream &operator=(const Stream &other) {
-        // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
-        if (!other.uninitialized) {
-            // other stream is initialized
-            other.referenceCount->fetch_add(1);
-            if (!uninitialized) {
-                // this stream was previously initialized
-                removeReference();
-            }
-            uninitialized = false;
-            referenceCount = other.referenceCount;
-
-            gpuNum = other.gpuNum;
-            cudaStream = other.cudaStream;
-            cudnnHandle = other.cudnnHandle;
-            mtx = other.mtx;
-
-            return *this;
-        } else {
-            // other stream is not initialized
-            if (!uninitialized) {
-                // this stream was previously initialized
-                removeReference();
-            }
-            uninitialized = true;
-            referenceCount = nullptr;
-            return *this;
-        }
     }
 
     operator cudaStream_t() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return cudaStream;
     }
 
-    virtual ~Stream() { removeReference(); }
+    virtual ~Stream() {
+        // For ReferenceCounted
+        bool shouldDestroy = removeReference();
+        if (shouldDestroy)
+            destroy();
+    }
 
     Event putEvent(bool enableTiming = false) {
-        assert(!uninitialized);
+        assert(!uninitialized());
 
         ScopedGpu scopedGpu(gpuNum);
 
@@ -113,7 +90,7 @@ class Stream {
     }
 
     void waitEvent(Event event) {
-        assert(!uninitialized);
+        assert(!uninitialized());
 
         ScopedGpu scopedGpu(gpuNum);
 
@@ -122,7 +99,7 @@ class Stream {
     }
 
     void synchronize() {
-        assert(!uninitialized);
+        assert(!uninitialized());
 
         cudaError_t cudaStatus = cudaStreamSynchronize(cudaStream);
         if (cudaStatus != cudaSuccess) {
@@ -133,18 +110,14 @@ class Stream {
     }
 
     cudaStream_t getStream() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return cudaStream;
     }
 
     cudnnHandle_t getCudnnHandle() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         mtx->lock();
         if (cudnnHandle->isEmpty()) {
-#ifdef DEBUG_REF_COUNTS
-            cudnnHandlesCreated.fetch_add(1);
-#endif
-
             ScopedGpu scopedGpu(gpuNum);
             cudnnStatus_t cudnnStatus;
             cudnnHandle_t handle;
@@ -163,77 +136,45 @@ class Stream {
     }
 
     int getGpuNum() const {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return gpuNum;
     }
 
-    bool isInitialized() { return !uninitialized; }
+    bool isInitialized() { return !uninitialized(); }
+
+    virtual string getObjectName() { return "Stream"; }
+
+   private:
+    void copyFrom(const Stream &other) {
+        gpuNum = other.gpuNum;
+        cudaStream = other.cudaStream;
+        cudnnHandle = other.cudnnHandle;
+        mtx = other.mtx;
+    }
+
+    void destroy() {
+        ScopedGpu scopedGpu(gpuNum);
+
+        if (cudnnHandle->isPresent()) {
+            cudnnStatus_t cudnnStatus;
+            cudnnStatus = cudnnDestroy(*cudnnHandle);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        }
+
+        cudaError_t cudaStatus;
+        cudaStatus = cudaStreamDestroy(cudaStream);
+        assert(cudaStatus == cudaSuccess);
+
+        delete cudnnHandle;
+        cudnnHandle = nullptr;
+        delete mtx;
+        mtx = nullptr;
+    }
 
    private:
     int gpuNum;
     cudaStream_t cudaStream;
     Optional<cudnnHandle_t> *cudnnHandle;
 
-    bool uninitialized;
-    atomic<int> *referenceCount;
-
     mutex *mtx;
-
-    void removeReference() {
-        if (uninitialized) {
-            assert(referenceCount == nullptr);
-            return;
-        }
-
-        int refCountBeforeDecrement = referenceCount->fetch_sub(1);
-
-        if (refCountBeforeDecrement == 1) {
-            delete referenceCount;
-            referenceCount = nullptr;
-
-#ifdef DEBUG_REF_COUNTS
-            streamsDestroyed.fetch_add(1);
-#endif
-
-            ScopedGpu scopedGpu(gpuNum);
-
-            if (cudnnHandle->isPresent()) {
-#ifdef DEBUG_REF_COUNTS
-                cudnnHandlesDestroyed.fetch_add(1);
-#endif
-
-                cudnnStatus_t cudnnStatus;
-                cudnnStatus = cudnnDestroy(*cudnnHandle);
-                assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            }
-
-            cudaError_t cudaStatus;
-            cudaStatus = cudaStreamDestroy(cudaStream);
-            assert(cudaStatus == cudaSuccess);
-
-            delete cudnnHandle;
-            cudnnHandle = nullptr;
-            delete mtx;
-            mtx = nullptr;
-        }
-    }
-
-#ifdef DEBUG_REF_COUNTS
-    static atomic<int> streamsCreated;
-    static atomic<int> streamsDestroyed;
-    static atomic<int> cudnnHandlesCreated;
-    static atomic<int> cudnnHandlesDestroyed;
-
-    class RefCountChecker {
-       public:
-        virtual ~RefCountChecker() {
-            printf("streams created %d streams destroyed %d\n", streamsCreated.fetch_add(0), streamsDestroyed.fetch_add(0));
-            printf("cudnnHandles created %d cudnnHandles destroyed %d\n",
-                   cudnnHandlesCreated.fetch_add(0),
-                   cudnnHandlesDestroyed.fetch_add(0));
-            fflush(stdout);
-        }
-    };
-    static RefCountChecker refCountChecker;
-#endif
 };

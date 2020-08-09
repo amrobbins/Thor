@@ -97,7 +97,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
-                   build/Utilities/Common/Stream.o \
+                   build/Utilities/Common/ReferenceCounted.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
                    build/Utilities/ComputeTopology/MachineEvaluator.o \
                    build/DeepLearning/Implementation/Tensor/Tensor.o \
@@ -315,9 +315,9 @@ build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/Ten
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
 	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o
 
-build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
+build/Utilities/Common/ReferenceCounted.o: Utilities/Common/ReferenceCounted.h Utilities/Common/ReferenceCounted.cpp
 	mkdir -p build/Utilities/Common
-	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
+	$(Gpp) -c -O3 -std=c++11 Utilities/Common/ReferenceCounted.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/ReferenceCounted.o
 
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
