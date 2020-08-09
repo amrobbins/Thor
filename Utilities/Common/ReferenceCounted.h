@@ -58,7 +58,7 @@ class ReferenceCounted {
     }
 
     void initialize() {
-        referenceCount = new atomic<long>(1);
+        referenceCount = new atomic<int>(1);
         initialized = true;
 
 #ifdef DEBUG_REF_COUNTS
@@ -98,7 +98,7 @@ class ReferenceCounted {
 
    private:
     bool initialized;
-    atomic<long> *referenceCount;
+    atomic<int> *referenceCount;
 
 #ifdef DEBUG_REF_COUNTS
     static atomic<int> objectsCreated;
@@ -107,8 +107,9 @@ class ReferenceCounted {
     class RefCountChecker {
        public:
         virtual ~RefCountChecker() {
-            // FIXME: make some way to print the name of the object
-            printf("objects created %d objects destroyed %d\n", objectsCreated.fetch_add(0), objectsDestroyed.fetch_add(0));
+            printf("reference counted objects created %d reference counted objects destroyed %d\n",
+                   objectsCreated.fetch_add(0),
+                   objectsDestroyed.fetch_add(0));
             fflush(stdout);
         }
     };

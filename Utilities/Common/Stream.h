@@ -50,21 +50,6 @@ class Stream : private ReferenceCounted {
         return *this;
     }
 
-    void construct(int gpuNum) {
-        // For ReferenceCounted
-        ReferenceCounted::initialize();
-
-        cudnnHandle = new Optional<cudnnHandle_t>;
-        mtx = new mutex;
-
-        ScopedGpu scopedGpu(gpuNum);
-        cudaError_t cudaStatus;
-        this->gpuNum = gpuNum;
-
-        cudaStatus = cudaStreamCreateWithFlags(&cudaStream, cudaStreamNonBlocking);
-        assert(cudaStatus == cudaSuccess);
-    }
-
     operator cudaStream_t() {
         assert(!uninitialized());
         return cudaStream;
@@ -72,7 +57,7 @@ class Stream : private ReferenceCounted {
 
     virtual ~Stream() {
         // For ReferenceCounted
-        bool shouldDestroy = removeReference();
+        bool shouldDestroy = ReferenceCounted::removeReference();
         if (shouldDestroy)
             destroy();
     }
@@ -145,6 +130,21 @@ class Stream : private ReferenceCounted {
     virtual string getObjectName() { return "Stream"; }
 
    private:
+    void construct(int gpuNum) {
+        // For ReferenceCounted
+        ReferenceCounted::initialize();
+
+        cudnnHandle = new Optional<cudnnHandle_t>;
+        mtx = new mutex;
+
+        ScopedGpu scopedGpu(gpuNum);
+        cudaError_t cudaStatus;
+        this->gpuNum = gpuNum;
+
+        cudaStatus = cudaStreamCreateWithFlags(&cudaStream, cudaStreamNonBlocking);
+        assert(cudaStatus == cudaSuccess);
+    }
+
     void copyFrom(const Stream &other) {
         gpuNum = other.gpuNum;
         cudaStream = other.cudaStream;
