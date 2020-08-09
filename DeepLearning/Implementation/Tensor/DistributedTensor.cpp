@@ -1,4 +1,4 @@
-#include "DistributedTensor.h"
+#include "DeepLearning/Implementation/Tensor/DistributedTensor.h"
 
 #include "MLDev.h"
 
@@ -7,16 +7,32 @@
 
 atomic<unsigned long> DistributedTensor::nextTensorId(1);
 
-DistributedTensor::DistributedTensor() {
-    uninitialized = true;
-
+DistributedTensor::DistributedTensor() : ReferenceCounted() {
     tensorMutex = nullptr;
     instances = nullptr;
-    referenceCount = nullptr;
 }
 
-DistributedTensor::DistributedTensor(TensorDescriptor descriptor) {
-    uninitialized = false;
+DistributedTensor::DistributedTensor(TensorDescriptor descriptor) { construct(descriptor); }
+
+DistributedTensor::DistributedTensor(const DistributedTensor &tensor) {
+    // implemented using operator=
+    *this = tensor;
+}
+
+DistributedTensor &DistributedTensor::operator=(const DistributedTensor &other) {
+    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+    copyObject(other);
+    return *this;
+}
+
+DistributedTensor::~DistributedTensor() {
+    bool shouldDestroy = ReferenceCounted::removeReference();
+    if (shouldDestroy)
+        destroy();
+}
+
+void DistributedTensor::construct(TensorDescriptor descriptor) {
+    ReferenceCounted::initialize();
 
     assert(descriptor.getNumDimensions() > 0);
 
@@ -26,83 +42,38 @@ DistributedTensor::DistributedTensor(TensorDescriptor descriptor) {
     this->descriptor = descriptor;
 
     distributedTensorId = nextTensorId.fetch_add(1);
-
-    referenceCount = new atomic<int>(1);
 }
 
-DistributedTensor::DistributedTensor(const DistributedTensor &tensor) {
-    uninitialized = true;
-    referenceCount = nullptr;
-
-    // implemented using operator=
-    *this = tensor;
+void DistributedTensor::copyObject(const DistributedTensor &other) {
+    descriptor = other.descriptor;
+    instances = other.instances;
+    tensorMutex = other.tensorMutex;
+    distributedTensorId = other.distributedTensorId;
 }
 
-DistributedTensor &DistributedTensor::operator=(const DistributedTensor &other) {
-    // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
-    if (!other.uninitialized) {
-        // other stream is initialized
-        other.referenceCount->fetch_add(1);
-        if (!uninitialized) {
-            // this stream was previously initialized
-            removeReference();
-        }
-        uninitialized = false;
-        referenceCount = other.referenceCount;
-
-        descriptor = other.descriptor;
-        instances = other.instances;
-        tensorMutex = other.tensorMutex;
-        distributedTensorId = other.distributedTensorId;
-        referenceCount = other.referenceCount;
-
-        return *this;
-    } else {
-        // other stream is not initialized
-        if (!uninitialized) {
-            // this stream was previously initialized
-            removeReference();
-        }
-        uninitialized = true;
-        referenceCount = nullptr;
-        return *this;
-    }
-}
-
-DistributedTensor::~DistributedTensor() { removeReference(); }
-
-void DistributedTensor::removeReference() {
-    if (uninitialized) {
-        assert(referenceCount == nullptr);
-        return;
-    }
-
-    int refCountBeforeDecrement = referenceCount->fetch_sub(1);
-    if (refCountBeforeDecrement == 1) {
-        delete tensorMutex;
-        delete instances;
-        delete referenceCount;
-    }
+void DistributedTensor::destroy() {
+    delete tensorMutex;
+    delete instances;
 }
 
 bool DistributedTensor::operator==(const DistributedTensor &other) const {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return getDistributedTensorId() == other.getDistributedTensorId();
 }
 bool DistributedTensor::operator!=(const DistributedTensor &other) const {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return getDistributedTensorId() != other.getDistributedTensorId();
 }
 
 Tensor DistributedTensor::getAnyInstance() {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(!instances->empty());
     return (instances->begin())->second;
 }
 
 void DistributedTensor::copyFromAsync(DistributedTensor source, Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     // deviceNum -> list of tensor instances on that device
     int deviceNum;
@@ -260,7 +231,7 @@ void DistributedTensor::copyFromAsync(DistributedTensor source, Stream stream) {
 // In the case that the source tensor instance belongs to this tensor, all other tensor instances are updated to match
 // the source instance, and the source instance is not touched.
 void DistributedTensor::copyFromAsync(Tensor source, Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     // deviceNum -> list of tensor instances on that device
     map<int, Tensor> populatedInstancePerDevice;
@@ -316,7 +287,7 @@ void DistributedTensor::peformOnGpuConversions(map<int, Tensor> &populatedInstan
                                                Stream stream,
                                                map<int, Tensor> &convertedInstancePerDevice,
                                                map<int, Event> &populatedEventPerDevice) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     // To implement this type conversion with copy, I will convert one unpopulated tensor instance on every gpu that has
     // a populated instance, then I will broadcast these converted instances to every dest instance that is still
@@ -347,7 +318,7 @@ void DistributedTensor::crossDeviceCopy(int copyToGpuNum,
                                         map<int, Tensor> &populatedInstancePerDevice,
                                         map<int, vector<Tensor>> &unpopulatedInstancesPerDevice,
                                         map<int, Event> &populatedEventPerDevice) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     // printf("copyTo %d copyFrom %d\n", copyToGpuNum, copyFromGpuNum);
     Event finishedEvent = unpopulatedInstancesPerDevice[copyToGpuNum].back().copyFromAsync(populatedInstancePerDevice[copyFromGpuNum],
@@ -364,7 +335,7 @@ void DistributedTensor::localDeviceCopy(int gpuNum,
                                         map<int, Tensor> &populatedInstancePerDevice,
                                         map<int, vector<Tensor>> &unpopulatedInstancesPerDevice,
                                         map<int, Event> &populatedEventPerDevice) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     if (unpopulatedInstancesPerDevice.count(gpuNum) == 0)
         return;
@@ -381,7 +352,7 @@ void DistributedTensor::localDeviceCopy(int gpuNum,
 map<int, Event> DistributedTensor::copyFromAsyncImpl(map<int, Tensor> &populatedInstancePerDevice,
                                                      map<int, Tensor> &unpopulatedInstancePerDevice,
                                                      map<int, Event> &populatedEventPerDevice) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     map<int, vector<Tensor>> unpopulatedInstancesPerDevice;
     for (auto it = unpopulatedInstancePerDevice.begin(); it != unpopulatedInstancePerDevice.end(); ++it) {
@@ -395,7 +366,7 @@ map<int, Event> DistributedTensor::copyFromAsyncImpl(map<int, Tensor> &populated
 void DistributedTensor::copyFromAsyncImpl(map<int, Tensor> &populatedInstancePerDevice,
                                           map<int, vector<Tensor>> &unpopulatedInstancesPerDevice,
                                           Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     map<int, Event> populatedEventPerDevice;
 
@@ -418,7 +389,7 @@ void DistributedTensor::copyFromAsyncImpl(map<int, Tensor> &populatedInstancePer
 map<int, Event> DistributedTensor::copyFromAsyncImpl(map<int, Tensor> &populatedInstancePerDevice,
                                                      map<int, vector<Tensor>> &unpopulatedInstancesPerDevice,
                                                      map<int, Event> &populatedEventPerDevice) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(!populatedInstancePerDevice.empty());
     assert(!unpopulatedInstancesPerDevice.empty());
@@ -541,7 +512,7 @@ map<int, Event> DistributedTensor::copyFromAsyncImpl(map<int, Tensor> &populated
 }
 
 Tensor DistributedTensor::addInstance(TensorPlacement instancePlacement) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     unique_lock<recursive_mutex> lck(*tensorMutex);
 
@@ -552,7 +523,7 @@ Tensor DistributedTensor::addInstance(TensorPlacement instancePlacement) {
 }
 
 void DistributedTensor::removeInstance(unsigned long instanceId) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     unique_lock<recursive_mutex> lck(*tensorMutex);
 
@@ -561,7 +532,7 @@ void DistributedTensor::removeInstance(unsigned long instanceId) {
 }
 
 void DistributedTensor::removeInstance(TensorPlacement instancePlacement) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     unique_lock<recursive_mutex> lck(*tensorMutex);
 
@@ -571,13 +542,13 @@ void DistributedTensor::removeInstance(TensorPlacement instancePlacement) {
 }
 
 bool DistributedTensor::hasInstance(unsigned long instanceId) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     return instances->count(instanceId) == 1;
 }
 
 bool DistributedTensor::hasInstance(TensorPlacement tensorPlacement) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     for (auto it = instances->begin(); it != instances->end(); ++it) {
         if (it->second.getPlacement() == tensorPlacement)
@@ -587,14 +558,14 @@ bool DistributedTensor::hasInstance(TensorPlacement tensorPlacement) {
 }
 
 Tensor DistributedTensor::getInstance(unsigned long instanceId) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(instances->count(instanceId) == 1);
     return (*instances)[instanceId];
 }
 
 Tensor DistributedTensor::getInstance(TensorPlacement tensorPlacement) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     for (auto it = instances->begin(); it != instances->end(); ++it) {
         if (it->second.getPlacement() == tensorPlacement)
@@ -604,7 +575,7 @@ Tensor DistributedTensor::getInstance(TensorPlacement tensorPlacement) {
 }
 
 Tensor DistributedTensor::getNearestInstance(Tensor other) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(getNumInstances() > 0);
     if (getNumInstances() == 1)
@@ -660,7 +631,7 @@ Tensor DistributedTensor::getNearestInstance(Tensor other) {
 }
 
 Tensor DistributedTensor::getNearestInstance(TensorPlacement tensorPlacement) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(getNumInstances() > 0);
 
@@ -701,6 +672,6 @@ Tensor DistributedTensor::getNearestInstance(TensorPlacement tensorPlacement) {
 }
 
 unordered_map<unsigned long, Tensor> DistributedTensor::getInstances() {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return *instances;
 }
