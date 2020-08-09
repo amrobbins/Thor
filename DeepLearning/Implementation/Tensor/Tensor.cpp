@@ -1,4 +1,4 @@
-#include "Tensor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include "MLDev.h"
 
@@ -35,6 +35,44 @@ bool Tensor::operator!=(const Tensor &other) const {
     return instanceId != other.instanceId;
 }
 
+void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
+    ReferenceCounted::initialize();
+
+    cudaError_t cudaStatus;
+
+    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(placement.getDeviceNum() >= 0);
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
+        assert(placement.getDeviceNum() == 0);
+    else
+        assert(placement.getDeviceNum() < (int)MachineEvaluator::instance().getNumGpus());
+    this->placement = placement;
+
+    this->descriptor = descriptor;
+    descriptorOverridden = false;
+
+    instanceId = nextInstanceId.fetch_add(1);
+
+    unsigned long numElements = descriptor.getTotalNumElements();
+    assert(numElements > 0);
+
+    unsigned long memBytes;
+    memBytes = descriptor.getArraySizeInBytes();
+
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
+        assert(cudaStatus == cudaSuccess);
+    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        ScopedGpu scopedGpu(placement.getDeviceNum());
+
+        cudaStatus = cudaMalloc(&mem, memBytes);
+        assert(cudaStatus == cudaSuccess);
+    } else {
+        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    }
+}
+
 void Tensor::copyObject(const Tensor &other) {
     placement = other.placement;
     mem = other.mem;
@@ -43,6 +81,24 @@ void Tensor::copyObject(const Tensor &other) {
     descriptor = other.descriptor;
     descriptorOverridden = other.descriptorOverridden;
     overriddenDescriptor = other.overriddenDescriptor;
+}
+
+void Tensor::destroy() {
+    cudaError_t cudaStatus;
+
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        cudaStatus = cudaFreeHost(mem);
+        assert(cudaStatus == cudaSuccess);
+    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        ScopedGpu scopedGpu(placement.getDeviceNum());
+
+        cudaStatus = cudaFree(mem);
+        assert(cudaStatus == cudaSuccess);
+        mem = NULL;
+    } else {
+        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
+               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    }
 }
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
@@ -92,62 +148,6 @@ TensorDescriptor Tensor::getDescriptor() {
     if (descriptorOverridden)
         return overriddenDescriptor;
     return descriptor;
-}
-
-void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
-    ReferenceCounted::initialize();
-
-    cudaError_t cudaStatus;
-
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(placement.getDeviceNum() >= 0);
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
-        assert(placement.getDeviceNum() == 0);
-    else
-        assert(placement.getDeviceNum() < (int)MachineEvaluator::instance().getNumGpus());
-    this->placement = placement;
-
-    this->descriptor = descriptor;
-    descriptorOverridden = false;
-
-    instanceId = nextInstanceId.fetch_add(1);
-
-    unsigned long numElements = descriptor.getTotalNumElements();
-    assert(numElements > 0);
-
-    unsigned long memBytes;
-    memBytes = descriptor.getArraySizeInBytes();
-
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
-        assert(cudaStatus == cudaSuccess);
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(placement.getDeviceNum());
-
-        cudaStatus = cudaMalloc(&mem, memBytes);
-        assert(cudaStatus == cudaSuccess);
-    } else {
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    }
-}
-
-void Tensor::destroy() {
-    cudaError_t cudaStatus;
-
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        cudaStatus = cudaFreeHost(mem);
-        assert(cudaStatus == cudaSuccess);
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(placement.getDeviceNum());
-
-        cudaStatus = cudaFree(mem);
-        assert(cudaStatus == cudaSuccess);
-        mem = NULL;
-    } else {
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    }
 }
 
 void Tensor::overrideDescriptor(TensorDescriptor descriptor) {

@@ -1,9 +1,9 @@
 #pragma once
 
-#include "Tensor.h"
-#include "TensorDescriptor.h"
-#include "TensorPlacement.h"
-
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -60,7 +60,7 @@ class Tensor;
 //      if multiple threads will be adding/removing instances and moving data, the threads must coordinate by
 //      explicitly calling lock() on the DistributedTensor before performing the operations and then explicitly unlock()
 //      the DistributedTensor afterward.
-class DistributedTensor {
+class DistributedTensor : private ReferenceCounted {
    public:
     DistributedTensor();
     DistributedTensor(TensorDescriptor descriptor);
@@ -70,11 +70,11 @@ class DistributedTensor {
     virtual ~DistributedTensor();
 
     TensorDescriptor getDescriptor() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return descriptor;
     }
     unsigned long getDistributedTensorId() const {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return distributedTensorId;
     }
 
@@ -110,7 +110,7 @@ class DistributedTensor {
     void removeInstance(TensorPlacement placement);
 
     unsigned long getNumInstances() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return instances->size();
     }
     Tensor getAnyInstance();
@@ -118,17 +118,14 @@ class DistributedTensor {
     bool operator==(const DistributedTensor &other) const;
     bool operator!=(const DistributedTensor &other) const;
 
-    int getReferenceCount() {
-        assert(!uninitialized);
-        return *referenceCount;
-    }
+    using ReferenceCounted::getReferenceCount;
 
     void lock() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         tensorMutex->lock();
     }
     void unlock() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         tensorMutex->unlock();
     }
 
@@ -139,8 +136,6 @@ class DistributedTensor {
     recursive_mutex *tensorMutex;
 
     unsigned long distributedTensorId;
-
-    atomic<int> *referenceCount;
 
     static atomic<unsigned long> nextTensorId;
 
@@ -174,11 +169,11 @@ class DistributedTensor {
                          map<int, Event> &populatedEventPerDevice);
 
     void removeAllInstances(TensorPlacement placement) {
-        assert(!uninitialized);
+        assert(!uninitialized());
         instances->clear();
     }
 
-    bool uninitialized;
-
-    void removeReference();
+    void construct(TensorDescriptor descriptor);
+    void copyObject(const DistributedTensor &other);
+    void destroy();
 };

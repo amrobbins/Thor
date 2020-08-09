@@ -1,8 +1,7 @@
 #pragma once
 
-#include "TensorDescriptor.h"
-#include "TensorPlacement.h"
-
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
