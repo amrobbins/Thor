@@ -5,6 +5,8 @@
 
 class Convolution2d : public TrainableWeightsBiasesLayer {
    public:
+    virtual ~Convolution2d() {}
+
     Convolution2d(const int filterWidth,
                   const int filterHeight,
                   const int filterHorizontalStride,

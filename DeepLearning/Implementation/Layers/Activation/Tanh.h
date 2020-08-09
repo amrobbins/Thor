@@ -5,6 +5,8 @@
 
 class Tanh : public Layer {
    public:
+    virtual ~Tanh() {}
+
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
         return featureInput.get().clone();

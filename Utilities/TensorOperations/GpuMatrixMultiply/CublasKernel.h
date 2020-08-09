@@ -124,7 +124,10 @@ class CublasKernel {
     static const float BETA_ACCUMULATE;
     static const float BETA_CLEAR;
 
-    CublasKernel() { uninitialized = true; }
+    CublasKernel() {
+        uninitialized = true;
+        referenceCount = nullptr;
+    }
 
     CublasKernel(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, string gpuType) {
         referenceCount = new atomic<int>(1);
@@ -140,70 +143,48 @@ class CublasKernel {
     }
 
     CublasKernel(const CublasKernel &other) {
+        uninitialized = true;
+        referenceCount = nullptr;
+
         // implemented using operator=
         *this = other;
     }
 
     CublasKernel &operator=(const CublasKernel &other) {
-        if (other.uninitialized) {
+        // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
+        if (!other.uninitialized) {
+            // other stream is initialized
+            other.referenceCount->fetch_add(1);
+            if (!uninitialized) {
+                // this stream was previously initialized
+                removeReference();
+            }
+            uninitialized = false;
+            referenceCount = other.referenceCount;
+
+            cublasKernelRequirement = other.cublasKernelRequirement;
+            cublasKernelOptions = other.cublasKernelOptions;
+            operationDesc = other.operationDesc;
+            ADesc = other.ADesc;
+            BDesc = other.BDesc;
+            CDesc = other.CDesc;
+            DDesc = other.DDesc;
+            algorithmPerGpu = other.algorithmPerGpu;
+
+            return *this;
+        } else {
+            // other stream is not initialized
+            if (!uninitialized) {
+                // this stream was previously initialized
+                removeReference();
+            }
             uninitialized = true;
+            referenceCount = nullptr;
             return *this;
         }
-        uninitialized = false;
-
-        cublasKernelRequirement = other.cublasKernelRequirement;
-        cublasKernelOptions = other.cublasKernelOptions;
-
-        operationDesc = other.operationDesc;
-        ADesc = other.ADesc;
-        BDesc = other.BDesc;
-        CDesc = other.CDesc;
-        DDesc = other.DDesc;
-        algorithmPerGpu = other.algorithmPerGpu;
-
-        referenceCount = other.referenceCount;
-        referenceCount->fetch_add(1);
-
-        return *this;
     }
 
-    virtual ~CublasKernel() {
-        if (uninitialized)
-            return;
-
-        int refCountBeforeDecrement = referenceCount->fetch_sub(1);
-        if (refCountBeforeDecrement == 1) {
-            delete referenceCount;
-            referenceCount = nullptr;
-
-            delete cublasKernelRequirement;
-            delete cublasKernelOptions;
-
-            cublasStatus_t cublasStatus;
-
-            cublasStatus = cublasLtMatmulDescDestroy(*operationDesc);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            delete operationDesc;
-
-            cublasStatus = cublasLtMatrixLayoutDestroy(*ADesc);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            delete ADesc;
-
-            cublasStatus = cublasLtMatrixLayoutDestroy(*BDesc);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            delete BDesc;
-
-            cublasStatus = cublasLtMatrixLayoutDestroy(*CDesc);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            delete CDesc;
-
-            cublasStatus = cublasLtMatrixLayoutDestroy(*DDesc);
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            delete DDesc;
-
-            delete algorithmPerGpu;
-        }
-    }
+    virtual ~CublasKernel() { removeReference(); }
 
     inline bool operator==(const CublasKernel &other) const {
         return cublasKernelRequirement == other.cublasKernelRequirement && cublasKernelOptions == other.cublasKernelOptions;
@@ -574,6 +555,46 @@ class CublasKernel {
                                                  CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
                                                  &cublasKernelOptions->reductionFlag,
                                                  sizeof(cublasKernelOptions->reductionFlag));
+        }
+    }
+
+    void removeReference() {
+        if (uninitialized) {
+            assert(referenceCount == nullptr);
+            return;
+        }
+
+        int refCountBeforeDecrement = referenceCount->fetch_sub(1);
+        if (refCountBeforeDecrement == 1) {
+            delete referenceCount;
+            referenceCount = nullptr;
+
+            delete cublasKernelRequirement;
+            delete cublasKernelOptions;
+
+            cublasStatus_t cublasStatus;
+
+            cublasStatus = cublasLtMatmulDescDestroy(*operationDesc);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            delete operationDesc;
+
+            cublasStatus = cublasLtMatrixLayoutDestroy(*ADesc);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            delete ADesc;
+
+            cublasStatus = cublasLtMatrixLayoutDestroy(*BDesc);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            delete BDesc;
+
+            cublasStatus = cublasLtMatrixLayoutDestroy(*CDesc);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            delete CDesc;
+
+            cublasStatus = cublasLtMatrixLayoutDestroy(*DDesc);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            delete DDesc;
+
+            delete algorithmPerGpu;
         }
     }
 };

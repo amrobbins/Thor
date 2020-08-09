@@ -4,6 +4,8 @@
 
 class Reshape : public Layer {
    public:
+    virtual ~Reshape() {}
+
     Reshape(vector<unsigned long> newDimensions) : newDimensions(newDimensions) {}
 
     virtual Optional<Tensor> createFeatureOutputTensor() {

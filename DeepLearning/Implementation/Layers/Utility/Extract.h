@@ -10,6 +10,8 @@
  */
 class Extract : public Layer {
    public:
+    virtual ~Extract() {}
+
     // The dimensionSpans map key is the dimension number (starting from dimension 0 - the most significant dimension)
     // i.e. if there is a c++ array data[x][y][z] then dimensionSpans[0] represents dimensionSpans[x].
     // The span for a dimension is represented as pair(indexOfFirstElementInSpan, indexOfLastElementInSpan)

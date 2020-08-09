@@ -30,31 +30,52 @@ DistributedTensor::DistributedTensor(TensorDescriptor descriptor) {
     referenceCount = new atomic<int>(1);
 }
 
-DistributedTensor::DistributedTensor(const DistributedTensor &tensor) { *this = tensor; }
+DistributedTensor::DistributedTensor(const DistributedTensor &tensor) {
+    uninitialized = true;
+    referenceCount = nullptr;
 
-DistributedTensor &DistributedTensor::operator=(const DistributedTensor &tensor) {
-    uninitialized = tensor.uninitialized;
-    if (uninitialized) {
-        tensorMutex = nullptr;
-        instances = nullptr;
+    // implemented using operator=
+    *this = tensor;
+}
+
+DistributedTensor &DistributedTensor::operator=(const DistributedTensor &other) {
+    // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
+    if (!other.uninitialized) {
+        // other stream is initialized
+        other.referenceCount->fetch_add(1);
+        if (!uninitialized) {
+            // this stream was previously initialized
+            removeReference();
+        }
+        uninitialized = false;
+        referenceCount = other.referenceCount;
+
+        descriptor = other.descriptor;
+        instances = other.instances;
+        tensorMutex = other.tensorMutex;
+        distributedTensorId = other.distributedTensorId;
+        referenceCount = other.referenceCount;
+
+        return *this;
+    } else {
+        // other stream is not initialized
+        if (!uninitialized) {
+            // this stream was previously initialized
+            removeReference();
+        }
+        uninitialized = true;
         referenceCount = nullptr;
         return *this;
     }
-
-    descriptor = tensor.descriptor;
-    instances = tensor.instances;
-    tensorMutex = tensor.tensorMutex;
-    distributedTensorId = tensor.distributedTensorId;
-    referenceCount = tensor.referenceCount;
-
-    referenceCount->fetch_add(1);
-
-    return *this;
 }
 
-DistributedTensor::~DistributedTensor() {
-    if (uninitialized)
+DistributedTensor::~DistributedTensor() { removeReference(); }
+
+void DistributedTensor::removeReference() {
+    if (uninitialized) {
+        assert(referenceCount == nullptr);
         return;
+    }
 
     int refCountBeforeDecrement = referenceCount->fetch_sub(1);
     if (refCountBeforeDecrement == 1) {

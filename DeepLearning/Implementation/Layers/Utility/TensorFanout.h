@@ -6,6 +6,8 @@
 // New streams are created for outputs 1+
 class TensorFanout : public MultiConnectionLayer {
    public:
+    virtual ~TensorFanout() {}
+
     virtual void connectToNextLayer(Layer *nextLayer) {
         // There is no actual movement of data on the inputs,
         // instead streams are created to fork the execution.

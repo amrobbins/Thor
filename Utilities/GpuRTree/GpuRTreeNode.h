@@ -81,7 +81,7 @@ struct GpuContext {
     float *leafPointsL1_d_mem = NULL;
 
     GpuContext() {}
-    ~GpuContext() { tearDown(); }
+    virtual ~GpuContext() { tearDown(); }
 
     GpuContext(const GpuContext &) = delete;
     GpuContext &operator=(const GpuContext &) = delete;

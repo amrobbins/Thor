@@ -13,6 +13,8 @@
 
 class CategoricalCrossEntropyLoss : public Loss {
    public:
+    virtual ~CategoricalCrossEntropyLoss(){};
+
     CategoricalCrossEntropyLoss(float lossScalingFactor = 1.0f) : Loss(lossScalingFactor) {}
 
     virtual void compile() {

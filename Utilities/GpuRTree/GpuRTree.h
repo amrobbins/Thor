@@ -27,7 +27,7 @@
 class GpuRtree {
    public:
     GpuRtree(Point points[], long numPoints, bool buildMultiThread, int numDimensions);
-    ~GpuRtree();
+    virtual ~GpuRtree();
 
     GpuRtree() = delete;
     GpuRtree(const GpuRtree &) = delete;

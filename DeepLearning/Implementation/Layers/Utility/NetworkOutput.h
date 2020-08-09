@@ -4,6 +4,8 @@
 
 class NetworkOutput : public Layer {
    public:
+    virtual ~NetworkOutput() {}
+
     NetworkOutput(Optional<TensorPlacement> outputPlacement) : outputPlacement(outputPlacement) {}
 
     virtual void connectToNextLayer(Layer *nextLayer) { assert(false); }

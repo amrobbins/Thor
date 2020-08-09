@@ -5,6 +5,8 @@
 
 class Relu : public Layer {
    public:
+    virtual ~Relu() {}
+
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
         return featureInput.get().clone();

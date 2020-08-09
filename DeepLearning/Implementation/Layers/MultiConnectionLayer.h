@@ -9,6 +9,8 @@
  */
 class MultiConnectionLayer : public Layer {
    public:
+    virtual ~MultiConnectionLayer() {}
+
     virtual void parentCompile() {
         Layer::parentCompile();
 

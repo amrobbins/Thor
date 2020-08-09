@@ -162,8 +162,10 @@ TEST(Convolution2d, Convolution2dWorks) {
                 printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));
         }
 
-        if (inferenceOnly)
+        if (inferenceOnly) {
+            LayerTestHelper::tearDownNetwork(layers);
             continue;
+        }
 
         // Backward pass
         Tensor errorInputGpu = convolution2dLayer->getErrorInputs().front();

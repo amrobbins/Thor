@@ -6,6 +6,8 @@
 // Data type will be converted if necessary, memory will be copied across devices if necessary.
 class NetworkInput : public Layer {
    public:
+    virtual ~NetworkInput() {}
+
     NetworkInput(Optional<TensorPlacement> networkPlacement,
                  Optional<TensorDescriptor::DataType> contentDataType,
                  Optional<vector<unsigned long>> contentDimensions,

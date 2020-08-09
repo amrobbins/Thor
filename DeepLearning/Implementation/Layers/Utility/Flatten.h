@@ -4,6 +4,8 @@
 
 class Flatten : public Layer {
    public:
+    virtual ~Flatten() {}
+
     Flatten(unsigned int toNumDimensions) { this->toNumDimensions = toNumDimensions; }
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
