@@ -6,6 +6,16 @@
 
 using std::atomic;
 
+/**
+ * Note: if you want to create a class that derives from a class that derives ReferenceCounted,
+ *       you will have to be able to figure out which is the most derived destructor and only
+ *       it will call removeReference(). Then the intermediate classes will have to be able to
+ *       ask if they should destroy without decrementing the reference count. This support will
+ *       need to be added if this pattern is desired.
+ *
+ *       Since that seems a bit messy, it is not really recommended to do that, unless you really have to.
+ */
+
 #define DEBUG_REF_COUNTS
 
 class ReferenceCounted {

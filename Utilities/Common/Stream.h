@@ -23,7 +23,7 @@ using std::mutex;
  *
  * Also carries the gpuNum that the stream exists on.
  */
-class Stream : protected ReferenceCounted {
+class Stream : private ReferenceCounted {
    public:
     Stream()
         // For ReferenceCounted
