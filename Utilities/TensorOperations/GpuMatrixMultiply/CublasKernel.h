@@ -137,7 +137,6 @@ class CublasKernel : private ReferenceCounted {
     }
 
     CublasKernel &operator=(const CublasKernel &other) {
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
         copyFrom(other);
         return *this;
     }
@@ -528,6 +527,8 @@ class CublasKernel : private ReferenceCounted {
     }
 
     void copyFrom(const CublasKernel &other) {
+        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
         cublasKernelRequirement = other.cublasKernelRequirement;
         cublasKernelOptions = other.cublasKernelOptions;
         operationDesc = other.operationDesc;

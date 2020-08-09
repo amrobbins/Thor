@@ -14,7 +14,6 @@ Tensor::Tensor(const Tensor &tensorInstance) {
 }
 
 Tensor &Tensor::operator=(const Tensor &other) {
-    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
     copyObject(other);
     return *this;
 }
@@ -74,6 +73,8 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
 }
 
 void Tensor::copyObject(const Tensor &other) {
+    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
     placement = other.placement;
     mem = other.mem;
     instanceId = other.instanceId;

@@ -57,10 +57,10 @@ class ReferenceCounted {
         }
     }
 
-    int getReferenceCount() { return referenceCount->fetch_add(0); }
+    long getReferenceCount() { return referenceCount->fetch_add(0); }
 
     void initialize() {
-        referenceCount = new atomic<int>(1);
+        referenceCount = new atomic<long>(1);
         initialized = true;
 
 #ifdef DEBUG_REF_COUNTS
@@ -100,7 +100,7 @@ class ReferenceCounted {
 
    private:
     bool initialized;
-    atomic<int> *referenceCount;
+    atomic<long> *referenceCount;
 
 #ifdef DEBUG_REF_COUNTS
     static atomic<long> objectsCreated;
@@ -113,6 +113,7 @@ class ReferenceCounted {
                    objectsCreated.fetch_add(0),
                    objectsDestroyed.fetch_add(0));
             fflush(stdout);
+            assert(objectsCreated.fetch_add(0) == objectsDestroyed.fetch_add(0));
         }
     };
     static RefCountChecker refCountChecker;
