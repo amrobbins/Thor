@@ -101,13 +101,13 @@ class ReferenceCounted {
     atomic<int> *referenceCount;
 
 #ifdef DEBUG_REF_COUNTS
-    static atomic<int> objectsCreated;
-    static atomic<int> objectsDestroyed;
+    static atomic<long> objectsCreated;
+    static atomic<long> objectsDestroyed;
 
     class RefCountChecker {
        public:
         virtual ~RefCountChecker() {
-            printf("reference counted objects created %d reference counted objects destroyed %d\n",
+            printf("reference counted objects created %ld reference counted objects destroyed %ld\n",
                    objectsCreated.fetch_add(0),
                    objectsDestroyed.fetch_add(0));
             fflush(stdout);
