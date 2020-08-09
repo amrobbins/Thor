@@ -1,6 +1,7 @@
 #pragma once
 
-#include "ScopedGpu.h"
+#include "Utilities/Common/ReferenceCounted.h"
+#include "Utilities/Common/ScopedGpu.h"
 
 #include <assert.h>
 
@@ -16,81 +17,45 @@ using std::atomic;
  *
  * Also carries the gpuNum that the event exists on.
  */
-class Event {
+class Event : private ReferenceCounted {
    public:
-    Event() {
-        uninitialized = true;
-        referenceCount = nullptr;
-    }
+    Event() : ReferenceCounted() {}
 
-    explicit Event(int gpuNum, bool enableTiming) {
-        uninitialized = false;
-
-        ScopedGpu scopedGpu(gpuNum);
-
-        cudaError_t cudaStatus;
-        this->gpuNum = gpuNum;
-
-        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, enableTiming ? 0 : cudaEventDisableTiming);
-        assert(cudaStatus == cudaSuccess);
-
-        referenceCount = new atomic<int>(1);
-    }
+    explicit Event(int gpuNum, bool enableTiming) { construct(gpuNum, enableTiming); }
 
     Event(const Event &event) {
-        uninitialized = true;
-        referenceCount = nullptr;
-
         *this = event;  // implemented using operator=
     }
 
     Event &operator=(const Event &other) {
-        // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
-        if (!other.uninitialized) {
-            // other stream is initialized
-            other.referenceCount->fetch_add(1);
-            if (!uninitialized) {
-                // this stream was previously initialized
-                removeReference();
-            }
-            uninitialized = false;
-            referenceCount = other.referenceCount;
-
-            gpuNum = other.gpuNum;
-            cudaEvent = other.cudaEvent;
-
-            return *this;
-        } else {
-            // other stream is not initialized
-            if (!uninitialized) {
-                // this stream was previously initialized
-                removeReference();
-            }
-            uninitialized = true;
-            referenceCount = nullptr;
-            return *this;
-        }
+        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+        copyFrom(other);
+        return *this;
     }
 
-    virtual ~Event() { removeReference(); }
+    virtual ~Event() {
+        bool shouldDestroy = ReferenceCounted::removeReference();
+        if (shouldDestroy)
+            destroy();
+    }
 
     operator cudaEvent_t() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return cudaEvent;
     }
 
     cudaEvent_t getEvent() {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return cudaEvent;
     }
 
     int getGpuNum() const {
-        assert(!uninitialized);
+        assert(!uninitialized());
         return gpuNum;
     }
 
     void synchronize() {
-        assert(!uninitialized);
+        assert(!uninitialized());
 
         cudaError_t cudaStatus;
         cudaStatus = cudaEventSynchronize(*this);
@@ -98,7 +63,7 @@ class Event {
     }
 
     float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
-        assert(!uninitialized);
+        assert(!uninitialized());
 
         float milliseconds;
 
@@ -111,26 +76,29 @@ class Event {
 
    private:
     int gpuNum;
-    bool uninitialized = false;
     cudaEvent_t cudaEvent;
 
-    atomic<int> *referenceCount;
+    void construct(int gpuNum, bool enableTiming) {
+        ReferenceCounted::initialize();
 
-    void removeReference() {
-        if (uninitialized) {
-            assert(referenceCount == nullptr);
-            return;
-        }
+        ScopedGpu scopedGpu(gpuNum);
 
-        int refCountBeforeDecrement = referenceCount->fetch_sub(1);
-        if (refCountBeforeDecrement == 1) {
-            delete referenceCount;
-            referenceCount = nullptr;
+        cudaError_t cudaStatus;
+        this->gpuNum = gpuNum;
 
-            ScopedGpu scopedGpu(gpuNum);
-            cudaError_t cudaStatus;
-            cudaStatus = cudaEventDestroy(cudaEvent);
-            assert(cudaStatus == cudaSuccess);
-        }
+        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, enableTiming ? 0 : cudaEventDisableTiming);
+        assert(cudaStatus == cudaSuccess);
+    }
+
+    void copyFrom(const Event &other) {
+        gpuNum = other.gpuNum;
+        cudaEvent = other.cudaEvent;
+    }
+
+    void destroy() {
+        ScopedGpu scopedGpu(gpuNum);
+        cudaError_t cudaStatus;
+        cudaStatus = cudaEventDestroy(cudaEvent);
+        assert(cudaStatus == cudaSuccess);
     }
 };

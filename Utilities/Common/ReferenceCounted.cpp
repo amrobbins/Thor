@@ -1,7 +1,7 @@
 #include "Utilities/Common/ReferenceCounted.h"
 
 #ifdef DEBUG_REF_COUNTS
-atomic<int> ReferenceCounted::objectsCreated(0);
-atomic<int> ReferenceCounted::objectsDestroyed(0);
+atomic<long> ReferenceCounted::objectsCreated(0L);
+atomic<long> ReferenceCounted::objectsDestroyed(0L);
 ReferenceCounted::RefCountChecker ReferenceCounted::refCountChecker;
 #endif
