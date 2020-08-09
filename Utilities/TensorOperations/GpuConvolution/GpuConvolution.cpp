@@ -41,12 +41,64 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     assert(returnedAlgoCount > 0);
 
-    GpuConvolution::instance().forwardMutex.lock();
+    // Returned algos don't always run, choose the first one that runs.
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
 
-    assert(perfResults[0].status == CUDNN_STATUS_SUCCESS);
-    optimalForwardKernels[convolutionKernelRequirement] = perfResults[0];
+    vector<unsigned long> inputDimensions;
+    inputDimensions.push_back(convolutionKernelRequirement.getBatchSize());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputRows());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputColumns());
+    TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+    Tensor dataInput(gpuPlacement, inputDescriptor);
 
-    GpuConvolution::instance().forwardMutex.unlock();
+    vector<unsigned long> outputDimensions;
+    outputDimensions.push_back(convolutionKernelRequirement.getBatchSize());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputRows());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputColumns());
+    TensorDescriptor outputDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+    Tensor dataOutput(gpuPlacement, outputDescriptor);
+
+    vector<unsigned long> weightsDimensions;
+    weightsDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
+    weightsDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
+    weightsDimensions.push_back(convolutionKernelRequirement.getFilterHeight());
+    weightsDimensions.push_back(convolutionKernelRequirement.getFilterWidth());
+    TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+    Tensor weights(gpuPlacement, weightsDescriptor);
+
+    for (int i = 0; i < returnedAlgoCount; ++i) {
+        if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
+            continue;
+        uint64_t workspaceSizeInBytes = perfResults[i].memory;
+        Optional<Tensor> workspace;
+        if (workspaceSizeInBytes > 0)
+            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+
+        cudnnStatus_t cudnnStatus;
+        cudnnStatus = cudnnConvolutionForward(stream.getCudnnHandle(),
+                                              &ALPHA_NO_SCALE,
+                                              convolutionKernelRequirement.getDataInputTensorDescriptor(),
+                                              dataInput.getMemPtr(),
+                                              convolutionKernelRequirement.getWeightsFilterDescriptor(),
+                                              weights.getMemPtr(),
+                                              convolutionKernelRequirement.getConvolutionDescriptor(),
+                                              perfResults[i].algo,
+                                              workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                              perfResults[i].memory,
+                                              &BETA_ACCUMULATE,
+                                              convolutionKernelRequirement.getDataOutputTensorDescriptor(),
+                                              dataOutput.getMemPtr());
+        if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
+            GpuConvolution::instance().forwardMutex.lock();
+            optimalForwardKernels[convolutionKernelRequirement] = perfResults[i];
+            GpuConvolution::instance().forwardMutex.unlock();
+            return;
+        }
+    }
+
+    assert(false);
 }
 
 // Finds the optimal backwardData and backwardFilter kernel for the convolution operation given the parameters
@@ -89,11 +141,64 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     assert(returnedAlgoCount > 0);
 
-    GpuConvolution::instance().backwardDataMutex.lock();
+    // Returned algos don't always run, choose the first one that runs.
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
 
-    optimalBackwardDataKernels[convolutionKernelRequirement] = perfResults[0];
+    vector<unsigned long> inputDimensions;
+    inputDimensions.push_back(convolutionKernelRequirement.getBatchSize());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputRows());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputColumns());
+    TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+    Tensor errorOutput(gpuPlacement, inputDescriptor);
 
-    GpuConvolution::instance().backwardDataMutex.unlock();
+    vector<unsigned long> outputDimensions;
+    outputDimensions.push_back(convolutionKernelRequirement.getBatchSize());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputRows());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputColumns());
+    TensorDescriptor outputDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+    Tensor errorInput(gpuPlacement, outputDescriptor);
+
+    vector<unsigned long> weightsDimensions;
+    weightsDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
+    weightsDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
+    weightsDimensions.push_back(convolutionKernelRequirement.getFilterHeight());
+    weightsDimensions.push_back(convolutionKernelRequirement.getFilterWidth());
+    TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+    Tensor weights(gpuPlacement, weightsDescriptor);
+
+    for (int i = 0; i < returnedAlgoCount; ++i) {
+        if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
+            continue;
+        uint64_t workspaceSizeInBytes = perfResults[i].memory;
+        Optional<Tensor> workspace;
+        if (workspaceSizeInBytes > 0)
+            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+
+        cudnnStatus_t cudnnStatus;
+        cudnnStatus = cudnnConvolutionBackwardData(stream.getCudnnHandle(),
+                                                   &ALPHA_NO_SCALE,
+                                                   convolutionKernelRequirement.getWeightsFilterDescriptor(),
+                                                   weights.getMemPtr(),
+                                                   convolutionKernelRequirement.getErrorInputTensorDescriptor(),
+                                                   errorInput.getMemPtr(),
+                                                   convolutionKernelRequirement.getConvolutionDescriptor(),
+                                                   perfResults[i].algo,
+                                                   workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                                   perfResults[i].memory,
+                                                   &BETA_ACCUMULATE,
+                                                   convolutionKernelRequirement.getErrorOutputTensorDescriptor(),
+                                                   errorOutput.getMemPtr());
+        if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
+            GpuConvolution::instance().backwardDataMutex.lock();
+            optimalBackwardDataKernels[convolutionKernelRequirement] = perfResults[i];
+            GpuConvolution::instance().backwardDataMutex.unlock();
+            return;
+        }
+    }
+
+    assert(false);
 }
 
 void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirement convolutionKernelRequirement, Stream stream) {
@@ -130,11 +235,64 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     assert(returnedAlgoCount > 0);
 
-    GpuConvolution::instance().backwardFilterMutex.lock();
+    // Returned algos don't always run, choose the first one that runs.
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum());
 
-    optimalBackwardFilterKernels[convolutionKernelRequirement] = perfResults[0];
+    vector<unsigned long> inputDimensions;
+    inputDimensions.push_back(convolutionKernelRequirement.getBatchSize());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputRows());
+    inputDimensions.push_back(convolutionKernelRequirement.getNumInputColumns());
+    TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+    Tensor dataInput(gpuPlacement, inputDescriptor);
 
-    GpuConvolution::instance().backwardFilterMutex.unlock();
+    vector<unsigned long> outputDimensions;
+    outputDimensions.push_back(convolutionKernelRequirement.getBatchSize());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputRows());
+    outputDimensions.push_back(convolutionKernelRequirement.getNumOutputColumns());
+    TensorDescriptor outputDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
+    Tensor errorInput(gpuPlacement, outputDescriptor);
+
+    vector<unsigned long> weightsDimensions;
+    weightsDimensions.push_back(convolutionKernelRequirement.getNumOutputChannels());
+    weightsDimensions.push_back(convolutionKernelRequirement.getNumInputChannels());
+    weightsDimensions.push_back(convolutionKernelRequirement.getFilterHeight());
+    weightsDimensions.push_back(convolutionKernelRequirement.getFilterWidth());
+    TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+    Tensor weightsGradient(gpuPlacement, weightsDescriptor);
+
+    for (int i = 0; i < returnedAlgoCount; ++i) {
+        if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
+            continue;
+        uint64_t workspaceSizeInBytes = perfResults[i].memory;
+        Optional<Tensor> workspace;
+        if (workspaceSizeInBytes > 0)
+            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+
+        cudnnStatus_t cudnnStatus;
+        cudnnStatus = cudnnConvolutionBackwardFilter(stream.getCudnnHandle(),
+                                                     &ALPHA_NO_SCALE,
+                                                     convolutionKernelRequirement.getDataInputTensorDescriptor(),
+                                                     dataInput.getMemPtr(),
+                                                     convolutionKernelRequirement.getErrorInputTensorDescriptor(),
+                                                     errorInput.getMemPtr(),
+                                                     convolutionKernelRequirement.getConvolutionDescriptor(),
+                                                     perfResults[i].algo,
+                                                     workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
+                                                     perfResults[i].memory,
+                                                     &BETA_ACCUMULATE,
+                                                     convolutionKernelRequirement.getWeightsGradientFilterDescriptor(),
+                                                     weightsGradient.getMemPtr());
+        if (cudnnStatus == CUDNN_STATUS_SUCCESS) {
+            GpuConvolution::instance().backwardFilterMutex.lock();
+            optimalBackwardFilterKernels[convolutionKernelRequirement] = perfResults[i];
+            GpuConvolution::instance().backwardFilterMutex.unlock();
+            return;
+        }
+    }
+
+    assert(false);
 }
 
 uint64_t GpuConvolution::getForwardWorkspaceSizeInBytes(ConvolutionKernelRequirement convolutionKernelRequirement) {
@@ -204,94 +362,9 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
                                           &BETA_CLEAR,
                                           convolutionKernelRequirement.getDataOutputTensorDescriptor(),
                                           dataOutput.getMemPtr());
-    if (cudnnStatus == 3) {
-        // This looks like an issue with cudnn. Better to choose a suboptimal working algorithm than to crash...
-        int maxAlgoCount;
-        cudnnStatus = cudnnGetConvolutionForwardAlgorithmMaxCount(stream.getCudnnHandle(), &maxAlgoCount);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-
-        cudnnConvolutionFwdAlgoPerf_t *perfResults = new cudnnConvolutionFwdAlgoPerf_t[maxAlgoCount];
-
-        int returnedAlgoCount;
-        cudnnStatus = cudnnGetConvolutionForwardAlgorithm_v7(stream.getCudnnHandle(),
-                                                             convolutionKernelRequirement.getDataInputTensorDescriptor(),
-                                                             convolutionKernelRequirement.getWeightsFilterDescriptor(),
-                                                             convolutionKernelRequirement.getConvolutionDescriptor(),
-                                                             convolutionKernelRequirement.getDataOutputTensorDescriptor(),
-                                                             maxAlgoCount,
-                                                             &returnedAlgoCount,
-                                                             perfResults);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-
-        // Choose the best algo with no workspace
-        int i;
-        for (i = 0; i < maxAlgoCount; ++i) {
-            if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
-                continue;
-            if (perfResults[i].memory != 0)
-                continue;
-            break;
-        }
-        if (i < maxAlgoCount) {
-            GpuConvolution::instance().forwardMutex.lock();
-            optimalKernel = perfResults[i];
-            optimalForwardKernels[convolutionKernelRequirement] = optimalKernel;
-            GpuConvolution::instance().forwardMutex.unlock();
-        } else {
-            GpuConvolution::instance().forwardMutex.lock();
-            optimalKernel.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
-            optimalKernel.memory = 0;
-            optimalForwardKernels[convolutionKernelRequirement] = optimalKernel;
-            GpuConvolution::instance().forwardMutex.unlock();
-        }
-
-        // printf("!!!!!! Switched to algo %d\n", algo);
-        cudnnStatus = cudnnConvolutionForward(stream.getCudnnHandle(),
-                                              &ALPHA_NO_SCALE,
-                                              convolutionKernelRequirement.getDataInputTensorDescriptor(),
-                                              dataInput.getMemPtr(),
-                                              convolutionKernelRequirement.getWeightsFilterDescriptor(),
-                                              weights.getMemPtr(),
-                                              convolutionKernelRequirement.getConvolutionDescriptor(),
-                                              optimalKernel.algo,
-                                              nullptr,
-                                              optimalKernel.memory,
-                                              &BETA_CLEAR,
-                                              convolutionKernelRequirement.getDataOutputTensorDescriptor(),
-                                              dataOutput.getMemPtr());
-    }
-
-    if (cudnnStatus == 3) {
-        // printf("!!!!!! Still failed, fall back used\n");
-        // If it still doesn't work then go with algo CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM which is stable and does not use a workspace.
-
-        GpuConvolution::instance().forwardMutex.lock();
-        optimalKernel.algo = CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM;
-        optimalKernel.memory = 0;
-        optimalForwardKernels[convolutionKernelRequirement] = optimalKernel;
-        GpuConvolution::instance().forwardMutex.unlock();
-
-        cudnnStatus = cudnnConvolutionForward(stream.getCudnnHandle(),
-                                              &ALPHA_NO_SCALE,
-                                              convolutionKernelRequirement.getDataInputTensorDescriptor(),
-                                              dataInput.getMemPtr(),
-                                              convolutionKernelRequirement.getWeightsFilterDescriptor(),
-                                              weights.getMemPtr(),
-                                              convolutionKernelRequirement.getConvolutionDescriptor(),
-                                              optimalKernel.algo,
-                                              nullptr,
-                                              optimalKernel.memory,
-                                              &BETA_CLEAR,
-                                              convolutionKernelRequirement.getDataOutputTensorDescriptor(),
-                                              dataOutput.getMemPtr());
-    }
 
     if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
         printf("cudnnStatus %d\n", cudnnStatus);
-        // printf("algo %d, memory %ld, inPtr %p, wPtr %p wsPtr %p, outPtr %p\n", optimalKernel.algo,
-        // optimalKernel.memory,
-        //    dataInput.getMemPtr(), weights.getMemPtr(), workspace.isPresent() ? workspace.get().getMemPtr() : nullptr,
-        //    dataOutput.getMemPtr());
         fflush(stdout);
     }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -344,6 +417,10 @@ void GpuConvolution::convolutionBackwardData(ConvolutionKernelRequirement convol
                                                &BETA_CLEAR,
                                                convolutionKernelRequirement.getErrorOutputTensorDescriptor(),
                                                errorOutput.getMemPtr());
+    if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
+        printf("cudnnStatus %d\n", cudnnStatus);
+        fflush(stdout);
+    }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
@@ -383,6 +460,10 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
                                                  accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
                                                  convolutionKernelRequirement.getWeightsGradientFilterDescriptor(),
                                                  weightsGradient.getMemPtr());
+    if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
+        printf("cudnnStatus %d\n", cudnnStatus);
+        fflush(stdout);
+    }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
