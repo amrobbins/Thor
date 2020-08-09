@@ -679,6 +679,8 @@ TEST(Concatenate, Concatenates) {
             // (float)partsMem[sourceFlatIndex]);
             ASSERT_EQ((float)wholeMem[destFlatIndex], (float)partsMem[sourceFlatIndex]);
         }
+
+        LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
@@ -814,6 +816,8 @@ TEST(Split, Splits) {
             //       (float)partsMem[destFlatIndex]);
             ASSERT_EQ((float)wholeMem[sourceFlatIndex], (float)partsMem[destFlatIndex]);
         }
+
+        LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
