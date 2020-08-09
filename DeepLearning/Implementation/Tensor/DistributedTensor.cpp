@@ -20,7 +20,6 @@ DistributedTensor::DistributedTensor(const DistributedTensor &tensor) {
 }
 
 DistributedTensor &DistributedTensor::operator=(const DistributedTensor &other) {
-    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
     copyObject(other);
     return *this;
 }
@@ -45,6 +44,8 @@ void DistributedTensor::construct(TensorDescriptor descriptor) {
 }
 
 void DistributedTensor::copyObject(const DistributedTensor &other) {
+    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
     descriptor = other.descriptor;
     instances = other.instances;
     tensorMutex = other.tensorMutex;

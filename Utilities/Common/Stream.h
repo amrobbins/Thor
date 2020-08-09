@@ -25,26 +25,21 @@ using std::mutex;
  */
 class Stream : private ReferenceCounted {
    public:
-    Stream()
-        // For ReferenceCounted
-        : ReferenceCounted() {}
+    Stream() : ReferenceCounted() {}
 
     explicit Stream(int gpuNum) { construct(gpuNum); }
-
-    explicit Stream(TensorPlacement placement) {
-        int gpuNum = placement.getMemDevice() == TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
-        construct(gpuNum);
-    }
 
     Stream(const Stream &other) {
         // implemented using operator=
         *this = other;
     }
 
-    Stream &operator=(const Stream &other) {
-        // For ReferenceCounted
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+    explicit Stream(TensorPlacement placement) {
+        int gpuNum = placement.getMemDevice() == TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
+        construct(gpuNum);
+    }
 
+    Stream &operator=(const Stream &other) {
         copyFrom(other);
 
         return *this;
@@ -56,7 +51,6 @@ class Stream : private ReferenceCounted {
     }
 
     virtual ~Stream() {
-        // For ReferenceCounted
         bool shouldDestroy = ReferenceCounted::removeReference();
         if (shouldDestroy)
             destroy();
@@ -131,7 +125,6 @@ class Stream : private ReferenceCounted {
 
    private:
     void construct(int gpuNum) {
-        // For ReferenceCounted
         ReferenceCounted::initialize();
 
         cudnnHandle = new Optional<cudnnHandle_t>;
@@ -146,6 +139,8 @@ class Stream : private ReferenceCounted {
     }
 
     void copyFrom(const Stream &other) {
+        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
         gpuNum = other.gpuNum;
         cudaStream = other.cudaStream;
         cudnnHandle = other.cudnnHandle;

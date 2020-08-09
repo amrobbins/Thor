@@ -29,7 +29,6 @@ class Event : private ReferenceCounted {
     }
 
     Event &operator=(const Event &other) {
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
         copyFrom(other);
         return *this;
     }
@@ -92,6 +91,8 @@ class Event : private ReferenceCounted {
     }
 
     void copyFrom(const Event &other) {
+        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
         gpuNum = other.gpuNum;
         cudaEvent = other.cudaEvent;
     }

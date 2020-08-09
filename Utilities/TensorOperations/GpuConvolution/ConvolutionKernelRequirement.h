@@ -58,7 +58,6 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     }
 
     ConvolutionKernelRequirement &operator=(const ConvolutionKernelRequirement &other) {
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
         copyFrom(other);
         return *this;
     }
@@ -356,6 +355,8 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     }
 
     void copyFrom(const ConvolutionKernelRequirement &other) {
+        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+
         gpuType = other.gpuType;
         filterWidth = other.filterWidth;
         filterHeight = other.filterHeight;
