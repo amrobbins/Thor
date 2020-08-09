@@ -24,7 +24,8 @@ class Event : private ReferenceCounted {
     explicit Event(int gpuNum, bool enableTiming) { construct(gpuNum, enableTiming); }
 
     Event(const Event &event) {
-        *this = event;  // implemented using operator=
+        // implemented using operator=
+        *this = event;
     }
 
     Event &operator=(const Event &other) {

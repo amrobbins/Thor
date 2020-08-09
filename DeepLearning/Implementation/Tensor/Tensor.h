@@ -3,6 +3,7 @@
 #include "TensorDescriptor.h"
 #include "TensorPlacement.h"
 
+#include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -45,7 +46,7 @@ class DistributedTensor;
  *       copying across devices where the destination data type is smaller than the source data type.
  */
 
-class Tensor {
+class Tensor : private ReferenceCounted {
    public:
     Tensor();
     Tensor(TensorPlacement placement, TensorDescriptor descriptor);
@@ -53,12 +54,12 @@ class Tensor {
     Tensor &operator=(const Tensor &tensorInstance);
     virtual ~Tensor();
 
-    bool isInitialized() { return !uninitialized; }
+    bool isInitialized() { return !uninitialized(); }
 
-    Tensor clone() { return uninitialized ? Tensor() : Tensor(placement, descriptor); }
-    Tensor clone(TensorPlacement newPlacement) { return uninitialized ? Tensor() : Tensor(newPlacement, descriptor); }
+    Tensor clone() { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
+    Tensor clone(TensorPlacement newPlacement) { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
     Tensor clone(TensorDescriptor::DataType newDataType) {
-        return uninitialized ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
+        return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
 
     TensorPlacement getPlacement() { return placement; }
@@ -85,10 +86,10 @@ class Tensor {
     void concatenateFrom(vector<Tensor> sources);
     void splitInto(vector<Tensor> destinations);
 
-    int getReferenceCount() { return *referenceCount; }
-
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
+
+    using ReferenceCounted::getReferenceCount;
 
    private:
     void copyFromAsync(Tensor source, Stream stream, bool mustPreserveSourceValue);
@@ -96,12 +97,8 @@ class Tensor {
     Event copyFromAsync(Tensor source, Event startEvent, bool mustPreserveSourceValue);
     Event copyFromAsync(DistributedTensor source, Event startEvent, bool mustPreserveSourceValue);
 
-    bool uninitialized;
-
     TensorPlacement placement;
     void *mem;
-
-    atomic<int> *referenceCount;
 
     unsigned long instanceId;
 
@@ -119,7 +116,9 @@ class Tensor {
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();
 
-    void removeReference();
+    void construct(TensorPlacement placement, TensorDescriptor descriptor);
+    void copyObject(const Tensor &other);
+    void destroy();
 
     friend class DistributedTensor;
 };
