@@ -18,7 +18,7 @@ The goals of this project are:
 
 Dependencies
   1. cuda 11  - can install with apt-get install cuda
-  2. cudnn 7.5 - uses /usr/include/cudnn.h
+  2. cudnn 8.02 - uses /usr/include/cudnn.h
   3. clang-format  - can install with apt-get install clang-format
   4. boost 1.72
 
