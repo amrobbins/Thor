@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
+// FIXME: inference only support
+
 class Convolution2d : public TrainableWeightsBiasesLayer {
    public:
     virtual ~Convolution2d() {}
@@ -33,8 +35,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
           batchSize(batchSize),
           numInputColumns(numInputColumns),
           numInputRows(numInputRows) {
-        string gpuType = MachineEvaluator::instance().getGpuType(0);
-        ConvolutionKernelRequirement tempConvolutionKernelRequirement = ConvolutionKernelRequirement(gpuType,
+        string anyGpuType = MachineEvaluator::instance().getGpuType(0);
+        ConvolutionKernelRequirement tempConvolutionKernelRequirement = ConvolutionKernelRequirement(anyGpuType,
                                                                                                      filterWidth,
                                                                                                      filterHeight,
                                                                                                      filterHorizontalStride,
@@ -94,14 +96,15 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         weightsDimensions.push_back(filterWidth);
         TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
         weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        weightsGradient = weights.clone();
+        if(!inferenceOnly)
+            weightsGradient = weights.clone();
         if (hasBias) {
             biases = Tensor(featureInputs.front().get().getPlacement(),
                             TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
             biasesGradient = biases.get().clone();
         }
 
-        // Allocate 1 workspace of each type, since it is possible that all three types of kernels may have be running at the same time.
+        // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         uint64_t workspaceForwardSizeInBytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(convolutionKernelRequirement);
         if (workspaceForwardSizeInBytes > 0) {

@@ -1,4 +1,4 @@
-#include "CublasMatrixMultiply.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 //-----------------------------------------------
 //
