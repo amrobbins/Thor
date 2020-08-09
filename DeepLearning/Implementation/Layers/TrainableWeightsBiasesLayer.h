@@ -12,6 +12,8 @@
  */
 class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    public:
+    virtual ~TrainableWeightsBiasesLayer() {}
+
     TrainableWeightsBiasesLayer(bool inferenceOnly, bool hasBias, Optional<float> learningRate)
         : inferenceOnly(inferenceOnly), hasBias(hasBias), weightUpdateCallback(nullptr) {
         if (!inferenceOnly)

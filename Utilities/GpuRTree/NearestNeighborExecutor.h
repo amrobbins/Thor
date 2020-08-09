@@ -47,7 +47,7 @@ class NearestNeighborGpuQueryHandle {
     NearestNeighborGpuQueryHandle &operator=(const NearestNeighborGpuQueryHandle &) = delete;
 
     NearestNeighborGpuQueryHandle(int gpuNum, int numDimensions, int maxNumPointsPerQuery);
-    ~NearestNeighborGpuQueryHandle();
+    virtual ~NearestNeighborGpuQueryHandle();
 
    private:
     int gpuNum;

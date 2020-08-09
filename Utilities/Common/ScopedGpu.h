@@ -13,7 +13,7 @@ class ScopedGpu {
     ScopedGpu(const ScopedGpu&) = delete;
     ScopedGpu& operator=(const ScopedGpu&) = delete;
 
-    ~ScopedGpu() {
+    virtual ~ScopedGpu() {
         if (gpuNum != previousGpuNum)
             swapActiveDevice(previousGpuNum);
     }

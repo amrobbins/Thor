@@ -18,7 +18,10 @@ using std::atomic;
  */
 class Event {
    public:
-    Event() { uninitialized = true; }
+    Event() {
+        uninitialized = true;
+        referenceCount = nullptr;
+    }
 
     explicit Event(int gpuNum, bool enableTiming) {
         uninitialized = false;
@@ -35,38 +38,41 @@ class Event {
     }
 
     Event(const Event &event) {
+        uninitialized = true;
+        referenceCount = nullptr;
+
         *this = event;  // implemented using operator=
     }
 
-    Event &operator=(const Event &event) {
-        uninitialized = event.uninitialized;
-        if (uninitialized)
+    Event &operator=(const Event &other) {
+        // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
+        if (!other.uninitialized) {
+            // other stream is initialized
+            other.referenceCount->fetch_add(1);
+            if (!uninitialized) {
+                // this stream was previously initialized
+                removeReference();
+            }
+            uninitialized = false;
+            referenceCount = other.referenceCount;
+
+            gpuNum = other.gpuNum;
+            cudaEvent = other.cudaEvent;
+
             return *this;
-
-        referenceCount = event.referenceCount;
-        referenceCount->fetch_add(1);
-
-        gpuNum = event.gpuNum;
-        cudaEvent = event.cudaEvent;
-
-        return *this;
-    }
-
-    ~Event() {
-        if (uninitialized)
-            return;
-
-        int refCountBeforeDecrement = referenceCount->fetch_sub(1);
-        if (refCountBeforeDecrement == 1) {
-            delete referenceCount;
+        } else {
+            // other stream is not initialized
+            if (!uninitialized) {
+                // this stream was previously initialized
+                removeReference();
+            }
+            uninitialized = true;
             referenceCount = nullptr;
-
-            ScopedGpu scopedGpu(gpuNum);
-            cudaError_t cudaStatus;
-            cudaStatus = cudaEventDestroy(cudaEvent);
-            assert(cudaStatus == cudaSuccess);
+            return *this;
         }
     }
+
+    virtual ~Event() { removeReference(); }
 
     operator cudaEvent_t() {
         assert(!uninitialized);
@@ -109,4 +115,22 @@ class Event {
     cudaEvent_t cudaEvent;
 
     atomic<int> *referenceCount;
+
+    void removeReference() {
+        if (uninitialized) {
+            assert(referenceCount == nullptr);
+            return;
+        }
+
+        int refCountBeforeDecrement = referenceCount->fetch_sub(1);
+        if (refCountBeforeDecrement == 1) {
+            delete referenceCount;
+            referenceCount = nullptr;
+
+            ScopedGpu scopedGpu(gpuNum);
+            cudaError_t cudaStatus;
+            cudaStatus = cudaEventDestroy(cudaEvent);
+            assert(cudaStatus == cudaSuccess);
+        }
+    }
 };

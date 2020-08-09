@@ -36,7 +36,7 @@ class WorkQueueUnordered {
    public:
     WorkQueueUnordered();
     WorkQueueUnordered(bool hasOutput);
-    ~WorkQueueUnordered();
+    virtual ~WorkQueueUnordered();
     WorkQueueUnordered(const WorkQueueUnordered &) = delete;
     WorkQueueUnordered &operator=(const WorkQueueUnordered &) = delete;
 

@@ -179,4 +179,6 @@ class DistributedTensor {
     }
 
     bool uninitialized;
+
+    void removeReference();
 };

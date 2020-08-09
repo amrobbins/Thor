@@ -39,6 +39,8 @@
  */
 class Split : public MultiConnectionLayer {
    public:
+    virtual ~Split() {}
+
     Split(unsigned int axis, vector<unsigned long> axisElements) {
         this->axis = axis;
         this->axisElements = axisElements;

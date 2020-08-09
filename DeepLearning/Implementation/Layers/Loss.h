@@ -60,6 +60,8 @@ class Loss : public Layer {
         }
     }
 
+    virtual ~Loss() {}
+
     virtual void initialize() {
         activationsReceived = false;
         labelsReceived = false;

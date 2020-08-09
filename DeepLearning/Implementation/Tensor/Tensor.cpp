@@ -26,32 +26,54 @@ Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) {
     allocate();
 }
 
-Tensor &Tensor::operator=(const Tensor &tensorInstance) {
-    uninitialized = tensorInstance.uninitialized;
-    if (uninitialized)
+Tensor &Tensor::operator=(const Tensor &other) {
+    // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
+    if (!other.uninitialized) {
+        // other stream is initialized
+        other.referenceCount->fetch_add(1);
+        if (!uninitialized) {
+            // this stream was previously initialized
+            removeReference();
+        }
+        uninitialized = false;
+        referenceCount = other.referenceCount;
+
+        placement = other.placement;
+        mem = other.mem;
+        referenceCount = other.referenceCount;
+        instanceId = other.instanceId;
+
+        descriptor = other.descriptor;
+        descriptorOverridden = other.descriptorOverridden;
+        overriddenDescriptor = other.overriddenDescriptor;
+
         return *this;
-
-    placement = tensorInstance.placement;
-    mem = tensorInstance.mem;
-    referenceCount = tensorInstance.referenceCount;
-    instanceId = tensorInstance.instanceId;
-
-    descriptor = tensorInstance.descriptor;
-    descriptorOverridden = tensorInstance.descriptorOverridden;
-    overriddenDescriptor = tensorInstance.overriddenDescriptor;
-
-    referenceCount->fetch_add(1);
-
-    return *this;
+    } else {
+        // other stream is not initialized
+        if (!uninitialized) {
+            // this stream was previously initialized
+            removeReference();
+        }
+        uninitialized = true;
+        referenceCount = nullptr;
+        return *this;
+    }
 }
 
 Tensor::Tensor(const Tensor &tensorInstance) {
+    uninitialized = true;
+    referenceCount = nullptr;
+
     *this = tensorInstance;  // implemented using operator=
 }
 
-Tensor::~Tensor() {
-    if (uninitialized)
+Tensor::~Tensor() { removeReference(); }
+
+void Tensor::removeReference() {
+    if (uninitialized) {
+        assert(referenceCount == nullptr);
         return;
+    }
 
     assert(referenceCount != nullptr);
     int refCountBeforeDecrement = referenceCount->fetch_sub(1);

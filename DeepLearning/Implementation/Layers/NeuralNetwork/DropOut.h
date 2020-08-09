@@ -15,6 +15,8 @@
 
 class DropOut : public Layer {
    public:
+    virtual ~DropOut() {}
+
     void setTrainingMode(bool training) {
         assert(running == false);
         this->training = training;

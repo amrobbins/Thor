@@ -36,6 +36,8 @@
  */
 class Concatenate : public MultiConnectionLayer {
    public:
+    virtual ~Concatenate() {}
+
     Concatenate(unsigned int axis) {
         this->axis = (int)axis;
         splitTensorFeatureInputMemoriesArray_d = nullptr;

@@ -4,6 +4,8 @@
 
 class DeviceCrossing : public Layer {
    public:
+    virtual ~DeviceCrossing() {}
+
     DeviceCrossing() { uninitialized = true; }
 
     DeviceCrossing(TensorPlacement inputPlacement, TensorPlacement outputPlacement) {

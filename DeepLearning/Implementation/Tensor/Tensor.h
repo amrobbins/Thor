@@ -119,5 +119,7 @@ class Tensor {
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();
 
+    void removeReference();
+
     friend class DistributedTensor;
 };

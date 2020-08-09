@@ -4,6 +4,8 @@
 
 class TypeConversion : public Layer {
    public:
+    virtual ~TypeConversion() {}
+
     TypeConversion() { uninitialized = true; }
 
     TypeConversion(TensorDescriptor::DataType newDataType) {

@@ -8,6 +8,8 @@
 template <typename INDEX_TYPE>
 class Map : public Layer {
    public:
+    virtual ~Map() {}
+
     Map() { uninitialized = true; }
 
     // There is one entry per element in the destination tensor, the entry contains the index of the element in the

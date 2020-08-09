@@ -10,6 +10,8 @@
  */
 class Pad : public Layer {
    public:
+    virtual ~Pad() {}
+
     // The paddingAmount map key is the dimension number (starting from dimension 0 - the most significant dimension)
     // i.e. if there is a c++ array data[x][y][z] then paddingAmount[0] represents paddingAmount[x].
     // The corresponding value is a pair where the first integer represents the number of elements of padding at the

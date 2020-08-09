@@ -4,5 +4,7 @@
 
 class FullyConnected : public Layer {
    public:
+    virtual ~FullyConnected() {}
+
     FullyConnected() {}
 };
