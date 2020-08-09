@@ -4,193 +4,113 @@
 
 atomic<unsigned long> Tensor::nextInstanceId(1);
 
-Tensor::Tensor() {
-    uninitialized = true;
-    mem = nullptr;
-    referenceCount = nullptr;
-}
+Tensor::Tensor() : ReferenceCounted() {}
 
-Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) {
-    uninitialized = false;
+Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) { construct(placement, descriptor); }
 
-    referenceCount = new atomic<int>(1);
-
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(placement.getDeviceNum() >= 0);
-    this->placement = placement;
-
-    this->descriptor = descriptor;
-    descriptorOverridden = false;
-
-    instanceId = nextInstanceId.fetch_add(1);
-    allocate();
+Tensor::Tensor(const Tensor &tensorInstance) {
+    // implemented using operator=
+    *this = tensorInstance;
 }
 
 Tensor &Tensor::operator=(const Tensor &other) {
-    // Do not reorder the increment/decrement of refCount here or object may be destroyed prematurely
-    if (!other.uninitialized) {
-        // other stream is initialized
-        other.referenceCount->fetch_add(1);
-        if (!uninitialized) {
-            // this stream was previously initialized
-            removeReference();
-        }
-        uninitialized = false;
-        referenceCount = other.referenceCount;
-
-        placement = other.placement;
-        mem = other.mem;
-        referenceCount = other.referenceCount;
-        instanceId = other.instanceId;
-
-        descriptor = other.descriptor;
-        descriptorOverridden = other.descriptorOverridden;
-        overriddenDescriptor = other.overriddenDescriptor;
-
-        return *this;
-    } else {
-        // other stream is not initialized
-        if (!uninitialized) {
-            // this stream was previously initialized
-            removeReference();
-        }
-        uninitialized = true;
-        referenceCount = nullptr;
-        return *this;
-    }
+    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+    copyObject(other);
+    return *this;
 }
 
-Tensor::Tensor(const Tensor &tensorInstance) {
-    uninitialized = true;
-    referenceCount = nullptr;
-
-    *this = tensorInstance;  // implemented using operator=
-}
-
-Tensor::~Tensor() { removeReference(); }
-
-void Tensor::removeReference() {
-    if (uninitialized) {
-        assert(referenceCount == nullptr);
-        return;
-    }
-
-    assert(referenceCount != nullptr);
-    int refCountBeforeDecrement = referenceCount->fetch_sub(1);
-    if (refCountBeforeDecrement == 1) {
-        delete referenceCount;
-        referenceCount = nullptr;
-
-        deallocate();
-    }
+Tensor::~Tensor() {
+    bool shouldDestroy = ReferenceCounted::removeReference();
+    if (shouldDestroy)
+        destroy();
 }
 
 bool Tensor::operator==(const Tensor &other) const {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return instanceId == other.instanceId;
 }
 
 bool Tensor::operator!=(const Tensor &other) const {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return instanceId != other.instanceId;
+}
+
+void Tensor::copyObject(const Tensor &other) {
+    placement = other.placement;
+    mem = other.mem;
+    instanceId = other.instanceId;
+
+    descriptor = other.descriptor;
+    descriptorOverridden = other.descriptorOverridden;
+    overriddenDescriptor = other.overriddenDescriptor;
 }
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
 void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
 
-/*
-// move constructor
-Tensor::Tensor(Tensor&& other) noexcept {
-    uninitialized = other.uninitialized;
-    if(uninitialized) {
-        instanceId = 0;
-        mem = NULL;
-        return;
-    }
-
-    parentTensor = other.parentTensor;
-    placement = other.placement;
-    mem = other.mem;
-    referenceCount = other.referenceCount;
-    instanceId = other.instanceId;
-
-    other.uninitialized = true;
-    other.mem = NULL;
-}
-
-// move assignment
-Tensor& Tensor::operator=(Tensor&& other) noexcept {
-    uninitialized = other.uninitialized;
-    if(uninitialized) {
-        instanceId = 0;
-        mem = NULL;
-        return *this;
-    }
-
-    parentTensor = other.parentTensor;
-    placement = other.placement;
-    mem = other.mem;
-    referenceCount = other.referenceCount;
-    instanceId = other.instanceId;
-
-    other.uninitialized = true;
-    other.mem = NULL;
-
-    return *this;
-}
-*/
-
 void Tensor::copyFromAsync(Tensor source, Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     copyFromAsync(source, stream, true);
 }
 void Tensor::copyFromAsync(DistributedTensor source, Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     copyFromAsync(source, stream, true);
 }
 
 void Tensor::moveFromAsync(Tensor source, Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     copyFromAsync(source, stream, false);
 }
 void Tensor::moveFromAsync(DistributedTensor source, Stream stream) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     copyFromAsync(source, stream, false);
 }
 
 // The following function variants return an event that indicates that the copying is finished when
 // cudaStreamWaitEvent() is called on this event.
 Event Tensor::copyFromAsync(Tensor source, Event startEvent) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return copyFromAsync(source, startEvent, true);
 }
 Event Tensor::copyFromAsync(DistributedTensor source, Event startEvent) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return copyFromAsync(source, startEvent, true);
 }
 
 Event Tensor::moveFromAsync(Tensor source, Event startEvent) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return copyFromAsync(source, startEvent, false);
 }
 Event Tensor::moveFromAsync(DistributedTensor source, Event startEvent) {
-    assert(!uninitialized);
+    assert(!uninitialized());
     return copyFromAsync(source, startEvent, false);
 }
 
 TensorDescriptor Tensor::getDescriptor() {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     if (descriptorOverridden)
         return overriddenDescriptor;
     return descriptor;
 }
 
-void Tensor::allocate() {
-    assert(!uninitialized);
+void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
+    ReferenceCounted::initialize();
 
     cudaError_t cudaStatus;
-    TensorDescriptor descriptor = getDescriptor();
+
+    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(placement.getDeviceNum() >= 0);
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
+        assert(placement.getDeviceNum() == 0);
+    else
+        assert(placement.getDeviceNum() < (int)MachineEvaluator::instance().getNumGpus());
+    this->placement = placement;
+
+    this->descriptor = descriptor;
+    descriptorOverridden = false;
+
+    instanceId = nextInstanceId.fetch_add(1);
 
     unsigned long numElements = descriptor.getTotalNumElements();
     assert(numElements > 0);
@@ -212,9 +132,7 @@ void Tensor::allocate() {
     }
 }
 
-void Tensor::deallocate() {
-    assert(!uninitialized);
-
+void Tensor::destroy() {
     cudaError_t cudaStatus;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
@@ -233,19 +151,19 @@ void Tensor::deallocate() {
 }
 
 void Tensor::overrideDescriptor(TensorDescriptor descriptor) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     descriptorOverridden = true;
     overriddenDescriptor = descriptor;
 }
 
 void Tensor::clearDescriptorOverride() {
-    assert(!uninitialized);
+    assert(!uninitialized());
     descriptorOverridden = false;
 }
 
 void *Tensor::getElement(vector<unsigned long> dimensionIndex) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
     return getDescriptor().getChunkAddress(dimensionIndex, mem);
@@ -254,7 +172,7 @@ void *Tensor::getElement(vector<unsigned long> dimensionIndex) {
 // The stream will wait for the copy to finish,
 // but if you have another stream that you want to wait also, you can use the returned Event to do that.
 void Tensor::copyFromAsync(Tensor source, Stream stream, bool mustPreserveSourceValue) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     Event finishedEvent;
 
@@ -264,7 +182,7 @@ void Tensor::copyFromAsync(Tensor source, Stream stream, bool mustPreserveSource
 
 // Note: startEvent is on the source device, finished event is on the dest device, copyStream is on the dest device
 Event Tensor::copyFromAsync(Tensor source, Event startEvent, bool mustPreserveSourceValue) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     cudaError_t cudaStatus;
     Stream copyStream;
@@ -441,7 +359,7 @@ Event Tensor::copyFromAsync(Tensor source, Event startEvent, bool mustPreserveSo
 }
 
 void Tensor::copyFromAsync(DistributedTensor source, Stream stream, bool mustPreserveSourceValue) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     Event finishedEvent;
 
@@ -450,7 +368,7 @@ void Tensor::copyFromAsync(DistributedTensor source, Stream stream, bool mustPre
 }
 
 Event Tensor::copyFromAsync(DistributedTensor source, Event startEvent, bool mustPreserveSourceValue) {
-    assert(!uninitialized);
+    assert(!uninitialized());
 
     assert(source.getNumInstances() > 0);
 

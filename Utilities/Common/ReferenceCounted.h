@@ -57,6 +57,8 @@ class ReferenceCounted {
         }
     }
 
+    int getReferenceCount() { return referenceCount->fetch_add(0); }
+
     void initialize() {
         referenceCount = new atomic<int>(1);
         initialized = true;
