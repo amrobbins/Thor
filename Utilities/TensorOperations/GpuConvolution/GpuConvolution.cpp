@@ -323,7 +323,10 @@ uint64_t GpuConvolution::getBackwardFilterWorkspaceSizeInBytes(ConvolutionKernel
 }
 
 uint64_t GpuConvolution::getBackwardBiasWorkspaceSizeInBytes(ConvolutionKernelRequirement convolutionKernelRequirement) {
-    return convolutionKernelRequirement.getBatchSize() * convolutionKernelRequirement.getNumOutputChannels() * sizeof(float);
+    if(useCudnnBackwardBias)
+        return 0;
+    else
+        return convolutionKernelRequirement.getBatchSize() * convolutionKernelRequirement.getNumOutputChannels() * sizeof(float);
 }
 
 void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolutionKernelRequirement,
@@ -375,7 +378,18 @@ void GpuConvolution::convolutionForward(ConvolutionKernelRequirement convolution
         assert(biasDimensions.size() == 1);
         assert(biasDimensions[0] == dataOutput.getDescriptor().getDimensions()[1]);
 
-        addConvolutionBias(dataOutput, biases, stream);
+        if(useCudnnForwardBias) {
+            cudnnStatus = cudnnAddTensor(stream.getCudnnHandle(),
+                                         &ALPHA_NO_SCALE,
+                                         convolutionKernelRequirement.getBiasesTensorDescriptor(),
+                                         biases.get().getMemPtr(),
+                                         &BETA_ACCUMULATE,
+                                         convolutionKernelRequirement.getDataOutputTensorDescriptor(),
+                                         dataOutput.getMemPtr());
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        } else {
+            addConvolutionBias(dataOutput, biases, stream);
+        }
     }
 }
 
@@ -467,6 +481,20 @@ void GpuConvolution::convolutionBackwardFilter(ConvolutionKernelRequirement conv
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
-void GpuConvolution::convolutionBackwardBias(Tensor errorInput, Tensor biasesGradient, Tensor workspace, Stream stream) {
-    computeConvolutionBiasesGradient(errorInput, biasesGradient, workspace, stream);
+void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement, Tensor errorInput, Tensor biasesGradient, Optional<Tensor> workspace, Stream stream, bool accumulateGradient) {
+//FIXME: use cudnnConvolutionBackwardBias
+
+    if(useCudnnBackwardBias) {
+        cudnnStatus_t cudnnStatus;
+        cudnnStatus = cudnnConvolutionBackwardBias(stream.getCudnnHandle(),
+                                                   &ALPHA_NO_SCALE,
+                                                   convolutionKernelRequirement.getErrorInputTensorDescriptor(),
+                                                   errorInput.getMemPtr(),
+                                                   accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                                   convolutionKernelRequirement.getBiasesTensorDescriptor(),
+                                                   biasesGradient.getMemPtr());
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    } else {
+        computeConvolutionBiasesGradient(errorInput, biasesGradient, workspace, stream);
+    }
 }

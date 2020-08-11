@@ -10,11 +10,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual ~FullyConnected() {}
 
     FullyConnected(const uint32_t numInputFeatures,
-                  const uint32_t numOutputFeatures,
-                  const int batchSize,
-                  const bool inferenceOnly,
-                  const bool hasBias,
-                  Optional<float> learningRate)
+                   const uint32_t numOutputFeatures,
+                   const int batchSize,
+                   const bool inferenceOnly,
+                   const bool hasBias,
+                   Optional<float> learningRate)
         : TrainableWeightsBiasesLayer(inferenceOnly, hasBias, learningRate),
           numInputFeatures(numInputFeatures),
           numOutputFeatures(numOutputFeatures),
@@ -37,7 +37,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
         ScopedGpu scopedGpu(gpuNum);
 
-        CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum, batchSize, numInputFeatures, numOutputFeatures, TensorDescriptor::DataType::FP16);
+        CublasMatrixMultiply::instance().chooseOptimalKernel(
+            gpuNum, batchSize, numInputFeatures, numOutputFeatures, TensorDescriptor::DataType::FP16);
 
         // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
         // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter rows, S
@@ -47,17 +48,19 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         weightsDimensions.push_back(numOutputFeatures);
         TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
         weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        if(!inferenceOnly)
+        if (!inferenceOnly)
             weightsGradient = weights.clone();
         if (hasBias) {
-            biases = Tensor(featureInputs.front().get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
+            biases =
+                Tensor(featureInputs.front().get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
             biasesGradient = biases.get().clone();
         }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         bool kernelWillRunOnGpu;
-        uint64_t workspaceForwardSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(0, batchSize, numInputFeatures, numOutputFeatures, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
+        uint64_t workspaceForwardSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
+            0, batchSize, numInputFeatures, numOutputFeatures, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
         assert(kernelWillRunOnGpu);
         if (workspaceForwardSizeInBytes > 0) {
             vector<unsigned long> workspaceDimensions;
@@ -65,27 +68,27 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
             workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
         }
-/*
-        if (!isBackPropStub()) {
-            uint64_t workspaceBackwardDataSizeInBytes =
-                GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
-            GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
-            if (workspaceBackwardDataSizeInBytes > 0) {
-                vector<unsigned long> workspaceDimensions;
-                workspaceDimensions.push_back(workspaceBackwardDataSizeInBytes);
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
-                workspaceBackwardData = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
-            }
-        }
-        uint64_t workspaceBackwardFilterSizeInBytes =
-            GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
-        if (workspaceBackwardFilterSizeInBytes > 0) {
-            vector<unsigned long> workspaceDimensions;
-            workspaceDimensions.push_back(workspaceBackwardFilterSizeInBytes);
-            TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
-            workspaceBackwardFilter = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
-        }
-*/
+        /*
+                if (!isBackPropStub()) {
+                    uint64_t workspaceBackwardDataSizeInBytes =
+                        GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
+                    GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
+                    if (workspaceBackwardDataSizeInBytes > 0) {
+                        vector<unsigned long> workspaceDimensions;
+                        workspaceDimensions.push_back(workspaceBackwardDataSizeInBytes);
+                        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
+                        workspaceBackwardData = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
+                    }
+                }
+                uint64_t workspaceBackwardFilterSizeInBytes =
+                    GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
+                if (workspaceBackwardFilterSizeInBytes > 0) {
+                    vector<unsigned long> workspaceDimensions;
+                    workspaceDimensions.push_back(workspaceBackwardFilterSizeInBytes);
+                    TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
+                    workspaceBackwardFilter = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
+                }
+        */
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {
@@ -93,10 +96,20 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(outputTensor.isPresent());
         assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-        CublasMatrixMultiply::instance().multiply(
-            inputTensor, weights, outputTensor, workspaceForward, batchSize, numInputFeatures, numOutputFeatures, false, TensorDescriptor::DataType::FP16, stream);
+        CublasMatrixMultiply::instance().multiply(inputTensor,
+                                                  weights,
+                                                  outputTensor,
+                                                  workspaceForward,
+                                                  batchSize,
+                                                  numInputFeatures,
+                                                  numOutputFeatures,
+                                                  false,
+                                                  TensorDescriptor::DataType::FP16,
+                                                  stream);
 
-        if(hasBias)
+
+// FIXME: use cudnnAddTensor
+        if (hasBias)
             addFullyConnectedLayerBias(outputTensor, biases, stream);
     }
 
@@ -107,26 +120,26 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                           Optional<Stream> dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
-/*
-        assert(convolutionKernelRequirement.isPresent());
-        assert(errorIn.isPresent());
-        assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        /*
+                assert(convolutionKernelRequirement.isPresent());
+                assert(errorIn.isPresent());
+                assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-        if (errorOut.isPresent()) {
-            assert(dataStream.isPresent());
-            GpuConvolution::instance().convolutionBackwardData(
-                convolutionKernelRequirement, errorIn, weights, errorOut, workspaceBackwardData, dataStream);
-        }
+                if (errorOut.isPresent()) {
+                    assert(dataStream.isPresent());
+                    GpuConvolution::instance().convolutionBackwardData(
+                        convolutionKernelRequirement, errorIn, weights, errorOut, workspaceBackwardData, dataStream);
+                }
 
-        GpuConvolution::instance().convolutionBackwardFilter(
-            convolutionKernelRequirement, dataIn, errorIn, weightsGradient, workspaceBackwardFilter, gradientStream, accumulateGradient);
+                GpuConvolution::instance().convolutionBackwardFilter(
+                    convolutionKernelRequirement, dataIn, errorIn, weightsGradient, workspaceBackwardFilter, gradientStream,
+           accumulateGradient);
 
-        if (hasBias) {
-            GpuConvolution::instance().convolutionBackwardBias(errorIn, biasesGradient, workspaceBackwardBias, gradientStream);
-        }
-*/
+                if (hasBias) {
+                    GpuConvolution::instance().convolutionBackwardBias(errorIn, biasesGradient, workspaceBackwardBias, gradientStream);
+                }
+        */
     }
-
 
     void addFullyConnectedLayerBias(Tensor outputTensor, Tensor biases, Stream stream) {
         // FIXME: implement

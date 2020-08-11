@@ -185,6 +185,30 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
         return **ppOutputTensorDescriptor;
     }
 
+    cudnnTensorDescriptor_t getBiasesTensorDescriptor() {
+        assert(!uninitialized());
+
+        if (*ppBiasesDescriptor != nullptr)
+            return **ppBiasesDescriptor;
+        *ppBiasesDescriptor = new cudnnTensorDescriptor_t;
+
+        cudnnStatus_t cudnnStatus;
+
+        cudnnStatus = cudnnCreateTensorDescriptor(*ppBiasesDescriptor);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        cudnnStatus = cudnnSetTensor4dDescriptor(**ppBiasesDescriptor,
+                                                 CUDNN_TENSOR_NCHW,
+                                                 CUDNN_DATA_HALF,
+                                                 1,
+                                                 numOutputChannels,
+                                                 1,
+                                                 1);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+
+        return **ppBiasesDescriptor;
+    }
+
+
     cudnnTensorDescriptor_t getErrorInputTensorDescriptor() {
         assert(!uninitialized());
         return getDataOutputTensorDescriptor();
@@ -298,6 +322,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     cudnnFilterDescriptor_t **ppFilterDescriptor;
     cudnnTensorDescriptor_t **ppInputTensorDescriptor;
     cudnnTensorDescriptor_t **ppOutputTensorDescriptor;
+    cudnnTensorDescriptor_t **ppBiasesDescriptor;
 
     void construct(const string gpuType,
                    const int filterWidth,
@@ -346,6 +371,8 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
         *ppInputTensorDescriptor = nullptr;
         ppOutputTensorDescriptor = new cudnnTensorDescriptor_t *;
         *ppOutputTensorDescriptor = nullptr;
+        ppBiasesDescriptor = new cudnnTensorDescriptor_t *;
+        *ppBiasesDescriptor = nullptr;
 
         // Eagerly call all the get...Descriptor() functions to avoid needing to lock when populating the structures
         getConvolutionDescriptor();
@@ -375,6 +402,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
         ppFilterDescriptor = other.ppFilterDescriptor;
         ppInputTensorDescriptor = other.ppInputTensorDescriptor;
         ppOutputTensorDescriptor = other.ppOutputTensorDescriptor;
+        ppBiasesDescriptor = other.ppBiasesDescriptor;
     }
 
     void destroy() {
@@ -411,6 +439,14 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
         }
         delete ppOutputTensorDescriptor;
         ppOutputTensorDescriptor = nullptr;
+
+        if (*ppBiasesDescriptor != nullptr) {
+            cudnnStatus = cudnnDestroyTensorDescriptor(**ppBiasesDescriptor);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            delete *ppBiasesDescriptor;
+        }
+        delete ppBiasesDescriptor;
+        ppBiasesDescriptor = nullptr;
     }
 
     friend class std::hash<ConvolutionKernelRequirement>;

@@ -96,7 +96,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         weightsDimensions.push_back(filterWidth);
         TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
         weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        if(!inferenceOnly)
+        if (!inferenceOnly)
             weightsGradient = weights.clone();
         if (hasBias) {
             biases = Tensor(featureInputs.front().get().getPlacement(),
@@ -161,6 +161,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
         assert(convolutionKernelRequirement.isPresent());
+        assert(dataIn.isPresent());
         assert(errorIn.isPresent());
         assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
@@ -174,7 +175,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             convolutionKernelRequirement, dataIn, errorIn, weightsGradient, workspaceBackwardFilter, gradientStream, accumulateGradient);
 
         if (hasBias) {
-            GpuConvolution::instance().convolutionBackwardBias(errorIn, biasesGradient, workspaceBackwardBias, gradientStream);
+            GpuConvolution::instance().convolutionBackwardBias(convolutionKernelRequirement, errorIn, biasesGradient, workspaceBackwardBias, gradientStream, accumulateGradient);
         }
     }
 

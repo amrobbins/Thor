@@ -46,7 +46,6 @@ class NetworkInput : public Layer {
         assert(this->nextLayer.isEmpty());
 
         this->nextLayer = nextLayer;
-        this->stream = stream;
 
         featureOutput = createFeatureOutputTensor();
 

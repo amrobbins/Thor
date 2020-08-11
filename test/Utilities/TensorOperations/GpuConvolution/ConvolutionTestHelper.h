@@ -320,7 +320,7 @@ class ConvolutionTestHelper {
         copyStream.synchronize();
     }
 
-    static void cpuConvolutionBackwardBias(Tensor errorInput, Tensor biasesGradient) {
+    static void cpuConvolutionBackwardBias(Tensor errorInput, Tensor biasesGradient, bool accumulate) {
         vector<unsigned long> errorInputDimensions = errorInput.getDescriptor().getDimensions();
         unsigned int n = errorInputDimensions[0];
         unsigned int c = errorInputDimensions[1];
@@ -334,7 +334,13 @@ class ConvolutionTestHelper {
         Tensor biasesGradientFloat(TensorPlacement::MemDevices::CPU,
                                    TensorDescriptor(TensorDescriptor::DataType::FP32, biasesGradient.getDescriptor().getDimensions()));
         float *biasesGradientFloatMem = (float *)biasesGradientFloat.getMemPtr();
-        memset(biasesGradientFloatMem, 0, sizeof(float) * biasesGradientFloat.getDescriptor().getTotalNumElements());
+        if(accumulate) {
+            Stream stream(0);
+            biasesGradientFloat.copyFromAsync(biasesGradient, stream);
+            stream.synchronize();
+        } else {
+            memset(biasesGradientFloatMem, 0, sizeof(float) * biasesGradientFloat.getDescriptor().getTotalNumElements());
+        }
 
         if (omp_get_num_procs() > 1)
             omp_set_num_threads(omp_get_num_procs() - 1);
