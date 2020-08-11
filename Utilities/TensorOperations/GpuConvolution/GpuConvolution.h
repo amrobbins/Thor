@@ -82,7 +82,7 @@ class GpuConvolution {
                                    Optional<Tensor> workspace,
                                    Stream stream,
                                    bool accumulateGradient);
-    void convolutionBackwardBias(Tensor errorInput, Tensor biasesGradient, Tensor workspace, Stream stream);
+    void convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement, Tensor errorInput, Tensor biasesGradient, Optional<Tensor> workspace, Stream stream, bool accumulateGradient);
 
    private:
     mutex forwardMutex;
@@ -94,6 +94,9 @@ class GpuConvolution {
     unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdFilterAlgoPerf_t> optimalBackwardFilterKernels;
 
     static constexpr int MAX_ALGOS = 5000;
+
+    static constexpr bool useCudnnForwardBias = true;
+    static constexpr bool useCudnnBackwardBias = true;
 
     GpuConvolution();
 

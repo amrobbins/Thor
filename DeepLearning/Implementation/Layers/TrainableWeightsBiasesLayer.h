@@ -132,6 +132,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual Tensor getWeights() { return weights; }
     virtual Optional<Tensor> getBiases() { return biases; }
+    virtual Optional<Tensor> getWeightsGradient() { return weightsGradient; }
+    virtual Optional<Tensor> getBiasesGradient() { return biasesGradient; }
 
    protected:
     const bool inferenceOnly;

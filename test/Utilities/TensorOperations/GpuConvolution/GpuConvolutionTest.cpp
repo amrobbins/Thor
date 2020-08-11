@@ -12,37 +12,71 @@ using std::vector;
 TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
     Stream stream(0);
 
-    for (int t = 0; t < 20; ++t) {
-        int batchSize = (rand() % 40) + 1;
-        int outputChannels = (rand() % 40) + 1;
-        int height = (rand() % 40) + 1;
-        int width = (rand() % 40) + 1;
+    for (int t = 0; t < 15; ++t) {
+        int numInputColumns = (rand() % 75) + 1;
+        int numInputRows = (rand() % 75) + 1;
+        int filterWidth = (rand() % numInputColumns) + 1;
+        int filterHeight = (rand() % numInputRows) + 1;
+
+        int filterHorizontalStride = (rand() % numInputColumns) + 1;
+        int filterVerticalStride = (rand() % numInputRows) + 1;
+        int leftAndRightPadWidth = (rand() % 20) + 1;
+        int topAndBottomPadHeight = (rand() % 20) + 1;
+        int numFeatureInputChannels = (rand() % 33) + 1;
+        int numFeatureOutputChannels = (rand() % 33) + 1;
+        int batchSize = (rand() % 33) + 1;
+
+        bool accumulate = rand() % 2;
+
+        ConvolutionKernelRequirement convolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
+                                                                  filterWidth,
+                                                                  filterHeight,
+                                                                  filterHorizontalStride,
+                                                                  filterVerticalStride,
+                                                                  leftAndRightPadWidth,
+                                                                  topAndBottomPadHeight,
+                                                                  numFeatureInputChannels,
+                                                                  numFeatureOutputChannels,
+                                                                  batchSize,
+                                                                  numInputColumns,
+                                                                  numInputRows);
+
+        int numOutputRows = convolutionKernelRequirement.getNumOutputRows();
+        int numOutputColumns = convolutionKernelRequirement.getNumOutputColumns();
 
         // Allocate tensors
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        Tensor errorInputCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, outputChannels, height, width));
-        Tensor errorInputGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, outputChannels, height, width));
+        Tensor errorInputCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns));
+        Tensor errorInputGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns));
 
-        Tensor biasesGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, outputChannels));
-        Tensor biasesGradientGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, outputChannels));
-        Tensor biasesGradientGpu_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, outputChannels));
+        Tensor biasesGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, numFeatureOutputChannels));
+        Tensor biasesGradientGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, numFeatureOutputChannels));
+        Tensor biasesGradientGpu_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, numFeatureOutputChannels));
 
-        Tensor workspaceGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, batchSize * outputChannels));
+        Tensor workspaceGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, batchSize * numFeatureOutputChannels));
 
         // Fill input tensors
         unsigned int errorInputNumElements = errorInputCpu.getDescriptor().getTotalNumElements();
         half *errorInputMem = (half *)errorInputCpu.getMemPtr();
         for (unsigned int i = 0; i < errorInputNumElements; ++i) {
-            errorInputMem[i] = 1.0f;  //((rand() % 200) / 10.0f) - 10.0f;
+            errorInputMem[i] = ((rand() % 200) / 10.0f) - 10.0f;
         }
         errorInputGpu.copyFromAsync(errorInputCpu, stream);
 
-        // Perform gradient computation on GPU and CPU
-        GpuConvolution::instance().convolutionBackwardBias(errorInputGpu, biasesGradientGpu, workspaceGpu, stream);
+        if (accumulate) {
+            half* biasesGradientCpuMem = (half *)biasesGradientCpu.getMemPtr();
+            for(int i = 0; i < numFeatureOutputChannels; ++i) {
+                biasesGradientCpuMem[i] = (half)(((rand() % 200) / 10.0f) - 10.0f);
+            }
+            biasesGradientGpu.copyFromAsync(biasesGradientCpu, stream);
+        }
 
-        ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu);
+        // Perform gradient computation on GPU and CPU
+        GpuConvolution::instance().convolutionBackwardBias(convolutionKernelRequirement, errorInputGpu, biasesGradientGpu, workspaceGpu, stream, accumulate);
+
+        ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
 
         cudaError_t cudaStatus;
         cudaStatus = cudaDeviceSynchronize();
@@ -51,7 +85,7 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
         stream.synchronize();
 
         // Verify CPU and GPU results match
-        for (int i = 0; i < outputChannels; ++i) {
+        for (int i = 0; i < numFeatureOutputChannels; ++i) {
             float cpuVal = *(half *)biasesGradientCpu.getElement({(uint64_t)i});
             float gpuVal = *(half *)biasesGradientGpu_h.getElement({(uint64_t)i});
             EXPECT_EQ(cpuVal, gpuVal);
@@ -60,6 +94,8 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
 }
 
 TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
+    srand(time(nullptr));
+
     Stream stream(0);
 
     for (int t = 0; t < 15; ++t) {

@@ -99,7 +99,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         }
 
         Tensor featureOutputCpu(cpuPlacement, outputDescriptor);
-        Tensor featureOutputGpu_h(cpuPlacement, outputDescriptor);
+        Tensor featureOutputGpu_h;
 
         layers.push_back(
             new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions(), stream));
@@ -174,6 +174,9 @@ TEST(Convolution2d, Convolution2dWorks) {
         Tensor errorInputCpu = Tensor(cpuPlacement, errorInputGpu.getDescriptor());
         Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
 
+        // I would need a second connection or a second input to get the layer to accumulate, there is a fixme below to create this test.
+        bool accumulate = false;
+
         half *errorInputMem = (half *)errorInputCpu.getMemPtr();
         for (int i = 0; i < numOutputElements; ++i) {
             errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
@@ -208,11 +211,21 @@ TEST(Convolution2d, Convolution2dWorks) {
         Tensor weightsGpu = convolution2dLayer->getWeights();
         Tensor weightsGpu_h = weightsGpu.clone(cpuPlacement);
         Tensor weightsGradientCpu = weightsGpu_h.clone();
+        Tensor weightsGradientGpu = convolution2dLayer->getWeightsGradient();
         weightsGpu_h.copyFromAsync(weightsGpu, stream);
+
+        if(accumulate) {
+            half *weightsGradientCpuMem = (half*)weightsGradientCpu.getMemPtr();
+            for (int i = 0; i < numWeights; ++i) {
+                weightsGradientCpuMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+            }
+            weightsGradientGpu.copyFromAsync(weightsGradientCpu, stream);
+        }
+
         stream.synchronize();
 
         ConvolutionTestHelper::cpuConvolutionBackwardFilter(
-            featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, false);
+            featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, accumulate);
 
         for (int o = 0; o < numOutputChannels; ++o) {
             for (int i = 0; i < numInputChannels; ++i) {
@@ -236,10 +249,20 @@ TEST(Convolution2d, Convolution2dWorks) {
             Tensor biasesGpu = convolution2dLayer->getBiases();
             Tensor biasesGpu_h = biasesGpu.clone(cpuPlacement);
             Tensor biasesGradientCpu = biasesGpu_h.clone();
+            Tensor biasesGradientGpu = convolution2dLayer->getBiasesGradient();
             biasesGpu_h.copyFromAsync(biasesGpu, stream);
+
+            if(accumulate) {
+                half *biasesGradientCpuMem = (half*)biasesGradientCpu.getMemPtr();
+                for (int i = 0; i < numOutputChannels; ++i) {
+                    biasesGradientCpuMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+                }
+                biasesGradientGpu.copyFromAsync(biasesGradientCpu, stream);
+            }
+
             stream.synchronize();
 
-            ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu);
+            ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
 
             for (int i = 0; i < numOutputChannels; ++i) {
                 float cpuGradient = *(half *)biasesGradientCpu.getElement({(uint64_t)i});
