@@ -175,7 +175,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             convolutionKernelRequirement, dataIn, errorIn, weightsGradient, workspaceBackwardFilter, gradientStream, accumulateGradient);
 
         if (hasBias) {
-            GpuConvolution::instance().convolutionBackwardBias(convolutionKernelRequirement, errorIn, biasesGradient, workspaceBackwardBias, gradientStream, accumulateGradient);
+            GpuConvolution::instance().convolutionBackwardBias(
+                convolutionKernelRequirement, errorIn, biasesGradient, workspaceBackwardBias, gradientStream, accumulateGradient);
         }
     }
 

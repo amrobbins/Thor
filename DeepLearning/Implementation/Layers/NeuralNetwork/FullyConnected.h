@@ -107,8 +107,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                   TensorDescriptor::DataType::FP16,
                                                   stream);
 
-
-// FIXME: use cudnnAddTensor
+        // FIXME: use cudnnAddTensor
         if (hasBias)
             addFullyConnectedLayerBias(outputTensor, biases, stream);
     }

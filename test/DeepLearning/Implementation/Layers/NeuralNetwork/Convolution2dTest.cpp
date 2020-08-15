@@ -17,6 +17,22 @@
 using std::set;
 using std::vector;
 
+void backwardPass(Convolution2d *convolution2dLayer,
+                  int numOutputElements,
+                  int numWeights,
+                  int numInputChannels,
+                  int numOutputChannels,
+                  int batchSize,
+                  Tensor featureInputCpu,
+                  Tensor weightsCpu,
+                  Optional<Tensor> biasesCpu,
+                  Stream stream,
+                  ConvolutionKernelRequirement convolutionKernelRequirement,
+                  int filterHeight,
+                  int filterWidth,
+                  Optional<float> learningRate,
+                  bool accumulate);
+
 TEST(Convolution2d, Convolution2dWorks) {
     srand(time(NULL));
 
@@ -89,10 +105,12 @@ TEST(Convolution2d, Convolution2dWorks) {
         }
 
         Optional<Tensor> biasesCpu;
+        TensorDescriptor biasesDescriptor;
+        half *biasesMem = nullptr;
         if (hasBias) {
-            TensorDescriptor biasesDescriptor(TensorDescriptor::DataType::FP16, numOutputChannels);
+            biasesDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputChannels);
             biasesCpu = Tensor(cpuPlacement, biasesDescriptor);
-            half *biasesMem = (half *)biasesCpu.get().getMemPtr();
+            biasesMem = (half *)biasesCpu.get().getMemPtr();
             for (int i = 0; i < numOutputChannels; ++i) {
                 biasesMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
             }
@@ -167,116 +185,186 @@ TEST(Convolution2d, Convolution2dWorks) {
             continue;
         }
 
-        // Backward pass
-        Tensor errorInputGpu = convolution2dLayer->getErrorInputs().front();
-        Tensor errorOutputGpu = convolution2dLayer->getErrorOutputs().front();
-        Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
-        Tensor errorInputCpu = Tensor(cpuPlacement, errorInputGpu.getDescriptor());
-        Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+        // Backward pass # 1 no accumulate
+        backwardPass(convolution2dLayer,
+                     numOutputElements,
+                     numWeights,
+                     numInputChannels,
+                     numOutputChannels,
+                     batchSize,
+                     featureInputCpu,
+                     weightsCpu,
+                     biasesCpu,
+                     stream,
+                     convolutionKernelRequirement,
+                     filterHeight,
+                     filterWidth,
+                     learningRate,
+                     false);
 
-        // I would need a second connection or a second input to get the layer to accumulate, there is a fixme below to create this test.
-        bool accumulate = false;
+        backwardPass(convolution2dLayer,
+                     numOutputElements,
+                     numWeights,
+                     numInputChannels,
+                     numOutputChannels,
+                     batchSize,
+                     featureInputCpu,
+                     weightsCpu,
+                     biasesCpu,
+                     stream,
+                     convolutionKernelRequirement,
+                     filterHeight,
+                     filterWidth,
+                     learningRate,
+                     true);
 
-        half *errorInputMem = (half *)errorInputCpu.getMemPtr();
-        for (int i = 0; i < numOutputElements; ++i) {
-            errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        for (int i = 0; i < numWeights; ++i) {
+            weightsMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
-
-        errorInputGpu.copyFromAsync(errorInputCpu, stream);
-        convolution2dLayer->backward(errorInputGpu);
-        errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
-        stream.synchronize();
-        convolution2dLayer->getGradientUpdateStream().get().synchronize();
-
-        // Backward Data
-        ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputCpu, weightsCpu, errorOutputCpu, convolutionKernelRequirement);
-
-        // Verify CPU and GPU results match
-        for (unsigned int n = 0; n < errorOutputDescriptor.getDimensions()[0]; ++n) {
-            for (unsigned int c = 0; c < errorOutputDescriptor.getDimensions()[1]; ++c) {
-                for (unsigned int h = 0; h < errorOutputDescriptor.getDimensions()[2]; ++h) {
-                    for (unsigned int w = 0; w < errorOutputDescriptor.getDimensions()[3]; ++w) {
-                        float cpuVal = *(half *)errorOutputCpu.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
-                        float gpuVal = *(half *)errorOutputGpu_h.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
-                        float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
-                        EXPECT_LT(abs(cpuVal - gpuVal), thresh);
-                        if (abs(cpuVal - gpuVal) >= thresh)
-                            printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, n, c, h, w);
-                    }
-                }
-            }
-        }
-
-        // Backward Filter
-        Tensor weightsGpu = convolution2dLayer->getWeights();
-        Tensor weightsGpu_h = weightsGpu.clone(cpuPlacement);
-        Tensor weightsGradientCpu = weightsGpu_h.clone();
-        Tensor weightsGradientGpu = convolution2dLayer->getWeightsGradient();
-        weightsGpu_h.copyFromAsync(weightsGpu, stream);
-
-        if(accumulate) {
-            half *weightsGradientCpuMem = (half*)weightsGradientCpu.getMemPtr();
-            for (int i = 0; i < numWeights; ++i) {
-                weightsGradientCpuMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-            }
-            weightsGradientGpu.copyFromAsync(weightsGradientCpu, stream);
-        }
-
-        stream.synchronize();
-
-        ConvolutionTestHelper::cpuConvolutionBackwardFilter(
-            featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, accumulate);
-
-        for (int o = 0; o < numOutputChannels; ++o) {
-            for (int i = 0; i < numInputChannels; ++i) {
-                for (int h = 0; h < filterHeight; ++h) {
-                    for (int w = 0; w < filterWidth; ++w) {
-                        float cpuGradient = *(half *)weightsGradientCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
-                        float cpuWeight = *(half *)weightsCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
-                        float cpuVal = cpuWeight - cpuGradient * learningRate.get();
-                        float gpuVal = *(half *)weightsGpu_h.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
-                        float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
-                        EXPECT_LT(abs(cpuVal - gpuVal), thresh);
-                        if (abs(cpuVal - gpuVal) >= thresh)
-                            printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, o, i, h, w);
-                    }
-                }
-            }
-        }
-
-        // Backward Bias
         if (hasBias) {
-            Tensor biasesGpu = convolution2dLayer->getBiases();
-            Tensor biasesGpu_h = biasesGpu.clone(cpuPlacement);
-            Tensor biasesGradientCpu = biasesGpu_h.clone();
-            Tensor biasesGradientGpu = convolution2dLayer->getBiasesGradient();
-            biasesGpu_h.copyFromAsync(biasesGpu, stream);
-
-            if(accumulate) {
-                half *biasesGradientCpuMem = (half*)biasesGradientCpu.getMemPtr();
-                for (int i = 0; i < numOutputChannels; ++i) {
-                    biasesGradientCpuMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-                }
-                biasesGradientGpu.copyFromAsync(biasesGradientCpu, stream);
-            }
-
-            stream.synchronize();
-
-            ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
-
             for (int i = 0; i < numOutputChannels; ++i) {
-                float cpuGradient = *(half *)biasesGradientCpu.getElement({(uint64_t)i});
-                float cpuBias = *(half *)biasesCpu.get().getElement({(uint64_t)i});
-                float cpuVal = cpuBias - cpuGradient * learningRate.get();
-                float gpuVal = *(half *)biasesGpu_h.getElement({(uint64_t)i});
-                float thresh = batchSize * 0.001 + abs(cpuVal * 0.005);
-                EXPECT_LT(abs(cpuVal - gpuVal), thresh);
-                if (abs(cpuVal - gpuVal) >= thresh)
-                    printf("%f %f   at [%d] batchSize %d thresh %f\n", cpuVal, gpuVal, i, batchSize, thresh);
+                biasesMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
             }
         }
+        Event weightsUpdateEvent = convolution2dLayer->updateWeightsAndBiases(weightsCpu, biasesCpu, stream.putEvent());
+        stream.waitEvent(weightsUpdateEvent);
+
+        backwardPass(convolution2dLayer,
+                     numOutputElements,
+                     numWeights,
+                     numInputChannels,
+                     numOutputChannels,
+                     batchSize,
+                     featureInputCpu,
+                     weightsCpu,
+                     biasesCpu,
+                     stream,
+                     convolutionKernelRequirement,
+                     filterHeight,
+                     filterWidth,
+                     learningRate,
+                     false);
 
         LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
+void backwardPass(Convolution2d *convolution2dLayer,
+                  int numOutputElements,
+                  int numWeights,
+                  int numInputChannels,
+                  int numOutputChannels,
+                  int batchSize,
+                  Tensor featureInputCpu,
+                  Tensor weightsCpu,
+                  Optional<Tensor> biasesCpu,
+                  Stream stream,
+                  ConvolutionKernelRequirement convolutionKernelRequirement,
+                  int filterHeight,
+                  int filterWidth,
+                  Optional<float> learningRate,
+                  bool accumulate) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+
+    Tensor errorInputGpu = convolution2dLayer->getErrorInputs().front();
+    Tensor errorOutputGpu = convolution2dLayer->getErrorOutputs().front();
+    Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+    Tensor errorInputCpu = Tensor(cpuPlacement, errorInputGpu.getDescriptor());
+    Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+
+    half *errorInputMem = (half *)errorInputCpu.getMemPtr();
+    for (int i = 0; i < numOutputElements; ++i) {
+        errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+    }
+
+    Tensor weightsGradientCpu = weightsCpu.clone();
+    Tensor weightsGradientGpu = convolution2dLayer->getWeightsGradient();
+
+    if (accumulate) {
+        weightsGradientCpu.copyFromAsync(weightsGradientGpu, stream);
+    }
+
+    // printf("cpu before %f\n", (float)*(half*)weightsGradientCpu.getElement({0, 0, 0, 0}));
+
+    Optional<Tensor> biasesGradientCpu = biasesCpu.isPresent() ? Optional<Tensor>(biasesCpu.get().clone()) : Optional<Tensor>::empty();
+    Optional<Tensor> biasesGradientGpu = convolution2dLayer->getBiasesGradient();
+
+    if (biasesCpu.isPresent() && accumulate) {
+        biasesGradientCpu.get().copyFromAsync(biasesGradientGpu, stream);
+    }
+
+    // Launch backward pass
+    errorInputGpu.copyFromAsync(errorInputCpu, stream);
+    convolution2dLayer->backward(errorInputGpu);
+    errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+    stream.synchronize();
+    convolution2dLayer->getGradientUpdateStream().get().synchronize();
+
+    // Backward Data
+    ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputCpu, weightsCpu, errorOutputCpu, convolutionKernelRequirement);
+
+    // Verify CPU and GPU results match
+    vector<unsigned long> errorOutputDimensions = errorOutputGpu.getDescriptor().getDimensions();
+    for (unsigned int n = 0; n < errorOutputDimensions[0]; ++n) {
+        for (unsigned int c = 0; c < errorOutputDimensions[1]; ++c) {
+            for (unsigned int h = 0; h < errorOutputDimensions[2]; ++h) {
+                for (unsigned int w = 0; w < errorOutputDimensions[3]; ++w) {
+                    float cpuVal = *(half *)errorOutputCpu.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                    float gpuVal = *(half *)errorOutputGpu_h.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                    float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
+                    EXPECT_LT(abs(cpuVal - gpuVal), thresh);
+                    if (abs(cpuVal - gpuVal) >= thresh)
+                        printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, n, c, h, w);
+                }
+            }
+        }
+    }
+
+    // Backward Filter
+    ConvolutionTestHelper::cpuConvolutionBackwardFilter(
+        featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, accumulate);
+    Tensor weightsGradientGpu_h = Tensor(cpuPlacement, weightsGradientGpu.getDescriptor());
+    weightsGradientGpu_h.copyFromAsync(weightsGradientGpu, stream);
+    stream.synchronize();
+
+    // printf("cpu after %f gpu after %f\n", (float)*(half*)weightsGradientCpu.getElement({0, 0, 0, 0}),
+    // (float)*(half*)weightsGradientGpu_h.getElement({0, 0, 0, 0}));
+
+    for (int o = 0; o < numOutputChannels; ++o) {
+        for (int i = 0; i < numInputChannels; ++i) {
+            for (int h = 0; h < filterHeight; ++h) {
+                for (int w = 0; w < filterWidth; ++w) {
+                    float cpuGradient = *(half *)weightsGradientCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                    // float cpuWeight = *(half *)weightsCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                    float cpuVal = cpuGradient;
+                    float gpuVal = *(half *)weightsGradientGpu_h.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                    float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
+                    ASSERT_LT(abs(cpuVal - gpuVal), thresh);
+                    if (abs(cpuVal - gpuVal) >= thresh)
+                        printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, o, i, h, w);
+                }
+            }
+        }
+    }
+
+    // Backward Bias
+    if (biasesCpu.isPresent()) {
+        ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
+
+        Tensor biasesGradientGpu_h = Tensor(cpuPlacement, biasesGradientGpu.get().getDescriptor());
+        biasesGradientGpu_h.copyFromAsync(biasesGradientGpu, stream);
+        stream.synchronize();
+
+        for (int i = 0; i < numOutputChannels; ++i) {
+            float cpuGradient = *(half *)biasesGradientCpu.get().getElement({(uint64_t)i});
+            // float cpuBias = *(half *)biasesCpu.get().getElement({(uint64_t)i});
+            float cpuVal = cpuGradient;
+            float gpuVal = *(half *)biasesGradientGpu_h.getElement({(uint64_t)i});
+            float thresh = batchSize * 0.001 + abs(cpuVal * 0.005);
+            EXPECT_LT(abs(cpuVal - gpuVal), thresh);
+            if (abs(cpuVal - gpuVal) >= thresh)
+                printf("%f %f   at [%d] batchSize %d thresh %f\n", cpuVal, gpuVal, i, batchSize, thresh);
+        }
     }
 }
 

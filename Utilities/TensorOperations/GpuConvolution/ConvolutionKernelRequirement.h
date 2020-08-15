@@ -196,18 +196,11 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
 
         cudnnStatus = cudnnCreateTensorDescriptor(*ppBiasesDescriptor);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        cudnnStatus = cudnnSetTensor4dDescriptor(**ppBiasesDescriptor,
-                                                 CUDNN_TENSOR_NCHW,
-                                                 CUDNN_DATA_HALF,
-                                                 1,
-                                                 numOutputChannels,
-                                                 1,
-                                                 1);
+        cudnnStatus = cudnnSetTensor4dDescriptor(**ppBiasesDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputChannels, 1, 1);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         return **ppBiasesDescriptor;
     }
-
 
     cudnnTensorDescriptor_t getErrorInputTensorDescriptor() {
         assert(!uninitialized());

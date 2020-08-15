@@ -48,8 +48,12 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        Tensor errorInputCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns));
-        Tensor errorInputGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns));
+        Tensor errorInputCpu(
+            cpuPlacement,
+            TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns));
+        Tensor errorInputGpu(
+            gpuPlacement,
+            TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numFeatureOutputChannels, numOutputRows, numOutputColumns));
 
         Tensor biasesGradientCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, numFeatureOutputChannels));
         Tensor biasesGradientGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, numFeatureOutputChannels));
@@ -66,15 +70,16 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
         errorInputGpu.copyFromAsync(errorInputCpu, stream);
 
         if (accumulate) {
-            half* biasesGradientCpuMem = (half *)biasesGradientCpu.getMemPtr();
-            for(int i = 0; i < numFeatureOutputChannels; ++i) {
+            half *biasesGradientCpuMem = (half *)biasesGradientCpu.getMemPtr();
+            for (int i = 0; i < numFeatureOutputChannels; ++i) {
                 biasesGradientCpuMem[i] = (half)(((rand() % 200) / 10.0f) - 10.0f);
             }
             biasesGradientGpu.copyFromAsync(biasesGradientCpu, stream);
         }
 
         // Perform gradient computation on GPU and CPU
-        GpuConvolution::instance().convolutionBackwardBias(convolutionKernelRequirement, errorInputGpu, biasesGradientGpu, workspaceGpu, stream, accumulate);
+        GpuConvolution::instance().convolutionBackwardBias(
+            convolutionKernelRequirement, errorInputGpu, biasesGradientGpu, workspaceGpu, stream, accumulate);
 
         ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
 

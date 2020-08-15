@@ -19,6 +19,32 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         if (!inferenceOnly)
             assert(learningRate.isPresent());
         this->learningRate = learningRate;
+        clearGradientAccumulator = true;
+    }
+
+    Event updateWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
+        clearGradientAccumulator = true;
+        Event weightsUpdatedEvent = weights.copyFromAsync(newWeights, dataReadyEvent);
+        Optional<Event> biasesUpdatedEvent;
+        if (hasBias) {
+            assert(newBiases.isPresent());
+            biasesUpdatedEvent = biases.get().copyFromAsync(newBiases, dataReadyEvent);
+        }
+        for (unsigned int i = 0; i < streams.size(); ++i) {
+            streams[i].waitEvent(weightsUpdatedEvent);
+            if (biasesUpdatedEvent.isPresent())
+                streams[i].waitEvent(biasesUpdatedEvent);
+        }
+
+        // This layer instance is done with the updated weights memory when the following event triggers
+        return weightsUpdatedEvent;
+    }
+
+    Event updateWeightsAndBiasesWithScaledGradient() {
+        assert(gradientUpdateStream.isPresent());
+        applyGradients(gradientUpdateStream, weights, weightsGradient, biases, biasesGradient);
+        Event gradientAppliedEvent = gradientUpdateStream.get().putEvent();
+        return gradientAppliedEvent;
     }
 
     virtual Optional<Stream> getGradientUpdateStream() { return gradientUpdateStream; }
@@ -42,22 +68,17 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             assert(connectionNumber != errorInputs.size());
         }
 
+        backProp(featureInputs[connectionNumber],
+                 errorInputs[connectionNumber],
+                 errorOutputs[connectionNumber],
+                 // Since they all update a single gradients tensor, gradient updates must run sequentially to one another.
+                 gradientUpdateStream,
+                 streams[connectionNumber],
+                 connectionNumber,
+                 !clearGradientAccumulator);
+        clearGradientAccumulator = false;
+
         if (errorInputs.size() > 1) {
-            unique_lock<mutex> lck(mtx);
-
-            bool firstBackProp = (stillWaitingForErrorInputTensors == allErrorInputTensorIds) &&
-                                 (stillWaitingForNumEmptyErrorInputConnections == numEmptyErrorInputConnections);
-            bool accumulateGradient = !firstBackProp;
-
-            backProp(featureInputs[connectionNumber],
-                     errorInputs[connectionNumber],
-                     errorOutputs[connectionNumber],
-                     // Since they all update a single gradients tensor, gradient updates must run sequentially to one another.
-                     gradientUpdateStream,
-                     streams[connectionNumber],
-                     connectionNumber,
-                     accumulateGradient);
-
             if (errorInput.isPresent()) {
                 assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
@@ -66,13 +87,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 numEmptyErrorInputConnections -= 1;
             }
             if (stillWaitingForErrorInputTensors.empty() && stillWaitingForNumEmptyErrorInputConnections == 0) {
-                processedAllErrorInputs(gradientUpdateStream);
                 stillWaitingForErrorInputTensors = allErrorInputTensorIds;
                 stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
             }
-        } else {
-            backProp(featureInputs[0], errorInputs[0], errorOutputs[0], gradientUpdateStream, streams[0], 0, false);
-            processedAllErrorInputs(gradientUpdateStream);
         }
 
         if (previousLayers[connectionNumber].isEmpty())
@@ -89,14 +106,6 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             assert(!featureInputs.empty());
             gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice());
         }
-    }
-
-    virtual void processedAllErrorInputs(Stream stream) {
-        applyGradients(stream, weights, weightsGradient, biases, biasesGradient);
-        Event gradientAppliedEvent = stream.putEvent();
-
-        if (weightUpdateCallback != nullptr)
-            weightUpdateCallback(gradientAppliedEvent, weights, weightsGradient, biases, biasesGradient);
     }
 
     // Default implementation simply updates weights by learningRate*gradient, does not apply momentum or anything else.
@@ -157,6 +166,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                           Optional<Stream> dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) = 0;
+
+    bool clearGradientAccumulator;
 
    private:
     virtual void backProp(
