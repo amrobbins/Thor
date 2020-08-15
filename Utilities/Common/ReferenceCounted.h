@@ -18,8 +18,6 @@ using std::recursive_mutex;
  *       Since that seems a bit messy, it is not really recommended to do that, unless you really have to.
  */
 
-
-
 /**
  * Note: This is the thread related guarantee that ReferenceCounted gives:
  *
@@ -83,20 +81,15 @@ using std::recursive_mutex;
 
 class ReferenceCounted {
    public:
-    ReferenceCounted()
-     : id(nextId.fetch_add(1)) {
-        referenceCount = nullptr;
-    }
+    ReferenceCounted() : id(nextId.fetch_add(1)) { referenceCount = nullptr; }
 
-    ReferenceCounted(const ReferenceCounted &other)
-     : id(nextId.fetch_add(1)) {
+    ReferenceCounted(const ReferenceCounted &other) : id(nextId.fetch_add(1)) {
         referenceCount = nullptr;
 
         *this = other;  // implemented using operator=
     }
 
     ReferenceCounted &operator=(const ReferenceCounted &other) {
-
         atomic<long> *otherReferenceCount = other.referenceCount;
 
         // If they already refer to the same instance, or they are both uninitialized, then do nothing.
@@ -109,7 +102,7 @@ class ReferenceCounted {
             if (referenceCount != nullptr) {
                 // this stream was previously initialized
                 bool shouldDestroy = removeReference();
-                if(shouldDestroy)
+                if (shouldDestroy)
                     this->destroy();
             }
             referenceCount = otherReferenceCount;
@@ -120,7 +113,7 @@ class ReferenceCounted {
             if (referenceCount != nullptr) {
                 // this stream was previously initialized
                 bool shouldDestroy = removeReference();
-                if(shouldDestroy)
+                if (shouldDestroy)
                     this->destroy();
             }
             referenceCount = nullptr;
@@ -130,7 +123,7 @@ class ReferenceCounted {
 
     // Lock 2 ReferenceCounted's without possibility of deadlock
     void lockSelfAndOther(ReferenceCounted &other) {
-        if(id < other.id) {
+        if (id < other.id) {
             mtx.lock();
             other.mtx.lock();
         } else {
@@ -140,7 +133,7 @@ class ReferenceCounted {
     }
 
     void unlockSelfAndOther(ReferenceCounted &other) {
-        if(id < other.id) {
+        if (id < other.id) {
             other.mtx.unlock();
             mtx.unlock();
         } else {
@@ -194,7 +187,7 @@ class ReferenceCounted {
     }
 
    private:
-    atomic<atomic<long>*> referenceCount;
+    atomic<atomic<long> *> referenceCount;
 
     recursive_mutex mtx;
 

@@ -334,7 +334,7 @@ class ConvolutionTestHelper {
         Tensor biasesGradientFloat(TensorPlacement::MemDevices::CPU,
                                    TensorDescriptor(TensorDescriptor::DataType::FP32, biasesGradient.getDescriptor().getDimensions()));
         float *biasesGradientFloatMem = (float *)biasesGradientFloat.getMemPtr();
-        if(accumulate) {
+        if (accumulate) {
             Stream stream(0);
             biasesGradientFloat.copyFromAsync(biasesGradient, stream);
             stream.synchronize();

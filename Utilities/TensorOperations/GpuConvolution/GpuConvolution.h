@@ -82,7 +82,12 @@ class GpuConvolution {
                                    Optional<Tensor> workspace,
                                    Stream stream,
                                    bool accumulateGradient);
-    void convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement, Tensor errorInput, Tensor biasesGradient, Optional<Tensor> workspace, Stream stream, bool accumulateGradient);
+    void convolutionBackwardBias(ConvolutionKernelRequirement convolutionKernelRequirement,
+                                 Tensor errorInput,
+                                 Tensor biasesGradient,
+                                 Optional<Tensor> workspace,
+                                 Stream stream,
+                                 bool accumulateGradient);
 
    private:
     mutex forwardMutex;
