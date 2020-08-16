@@ -4,7 +4,6 @@
 
 class BatchNormalization : public Layer {
    public:
-
     virtual ~BatchNormalization() {}
 
     void setTrainingMode(bool training) {
@@ -12,8 +11,7 @@ class BatchNormalization : public Layer {
         this->training = training;
     }
 
-    BatchNormalization(bool training)
-        : training(training) {}
+    BatchNormalization(bool training) : training(training) {}
 
     virtual void compile() {
         cudnnStatus_t cudnnStatus;
@@ -36,35 +34,35 @@ class BatchNormalization : public Layer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         cudnnStatus = cudnnGetBatchNormalizationForwardTrainingExWorkspaceSize(stream.getCudnnHandle(),
-                                                                               cudnnBatchNormMode_t                    mode,
-                                                                               cudnnBatchNormOps_t                     bnOps,
-                                                                               const cudnnTensorDescriptor_t           xDesc,
-                                                                               const cudnnTensorDescriptor_t           zDesc,
-                                                                               const cudnnTensorDescriptor_t           yDesc, 
-                                                                               const cudnnTensorDescriptor_t           bnScaleBiasMeanVarDesc,
-                                                                               const cudnnActivationDescriptor_t       activationDesc, 
-                                                                               size_t                                  *sizeInBytes);
+                                                                               cudnnBatchNormMode_t mode,
+                                                                               cudnnBatchNormOps_t bnOps,
+                                                                               const cudnnTensorDescriptor_t xDesc,
+                                                                               const cudnnTensorDescriptor_t zDesc,
+                                                                               const cudnnTensorDescriptor_t yDesc,
+                                                                               const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
+                                                                               const cudnnActivationDescriptor_t activationDesc,
+                                                                               size_t *sizeInBytes);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         cudnnStatus = cudnnGetBatchNormalizationTrainingExReserveSpaceSize(stream.getCudnnHandle(),
-                                                                           cudnnBatchNormMode_t                mode,
-                                                                           cudnnBatchNormOps_t                 bnOps,
-                                                                           const cudnnActivationDescriptor_t   activationDesc, 
-                                                                           const cudnnTensorDescriptor_t       xDesc, 
-                                                                           size_t                              *sizeInBytes);
+                                                                           cudnnBatchNormMode_t mode,
+                                                                           cudnnBatchNormOps_t bnOps,
+                                                                           const cudnnActivationDescriptor_t activationDesc,
+                                                                           const cudnnTensorDescriptor_t xDesc,
+                                                                           size_t *sizeInBytes);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         cudnnStatus = cudnnGetBatchNormalizationBackwardExWorkspaceSize(stream.getCudnnHandle(),
-                                                                        cudnnBatchNormMode_t                mode,
-                                                                        cudnnBatchNormOps_t                 bnOps,
-                                                                        const cudnnTensorDescriptor_t       xDesc,
-                                                                        const cudnnTensorDescriptor_t       yDesc, 
-                                                                        const cudnnTensorDescriptor_t       dyDesc,
-                                                                        const cudnnTensorDescriptor_t       dzDesc, 
-                                                                        const cudnnTensorDescriptor_t       dxDesc,
-                                                                        const cudnnTensorDescriptor_t       dBnScaleBiasDesc,
-                                                                        const cudnnActivationDescriptor_t   activationDesc, 
-                                                                        size_t                              *sizeInBytes);
+                                                                        cudnnBatchNormMode_t mode,
+                                                                        cudnnBatchNormOps_t bnOps,
+                                                                        const cudnnTensorDescriptor_t xDesc,
+                                                                        const cudnnTensorDescriptor_t yDesc,
+                                                                        const cudnnTensorDescriptor_t dyDesc,
+                                                                        const cudnnTensorDescriptor_t dzDesc,
+                                                                        const cudnnTensorDescriptor_t dxDesc,
+                                                                        const cudnnTensorDescriptor_t dBnScaleBiasDesc,
+                                                                        const cudnnActivationDescriptor_t activationDesc,
+                                                                        size_t *sizeInBytes);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
@@ -96,48 +94,47 @@ class BatchNormalization : public Layer {
 
         cudnnStatus_t cudnnStatus;
 
-        if(training) {
-            cudnnStatus = cudnnBatchNormalizationForwardTrainingEx(stream.getCudnnHandle(),
-                                                                    cudnnBatchNormMode_t                mode,
-                                                                    cudnnBatchNormOps_t                 bnOps,
-                                                                    const void                          *alpha,
-                                                                    const void                          *beta,
-                                                                    const cudnnTensorDescriptor_t       xDesc,
-                                                                    const void                          *xData,
-                                                                    const cudnnTensorDescriptor_t       zDesc, 
-                                                                    const void                          *zData, 
-                                                                    const cudnnTensorDescriptor_t       yDesc,
-                                                                    void                                *yData,
-                                                                    const cudnnTensorDescriptor_t       bnScaleBiasMeanVarDesc,
-                                                                    const void                          *bnScaleData,
-                                                                    const void                          *bnBiasData, 
-                                                                    double                              exponentialAverageFactor,
-                                                                    void                                *resultRunningMeanData,
-                                                                    void                                *resultRunningVarianceData,
-                                                                    double                              epsilon,
-                                                                    void                                *saveMean,
-                                                                    void                                *saveInvVariance,
-                                                                    const cudnnActivationDescriptor_t   activationDesc, 
-                                                                    void                                *workspace,
-                                                                    size_t                              workSpaceSizeInBytes
-                                                                    void                                *reserveSpace
-                                                                    size_t                              reserveSpaceSizeInBytes);
+        if (training) {
+            cudnnStatus =
+                cudnnBatchNormalizationForwardTrainingEx(stream.getCudnnHandle(),
+                                                         cudnnBatchNormMode_t mode,
+                                                         cudnnBatchNormOps_t bnOps,
+                                                         const void *alpha,
+                                                         const void *beta,
+                                                         const cudnnTensorDescriptor_t xDesc,
+                                                         const void *xData,
+                                                         const cudnnTensorDescriptor_t zDesc,
+                                                         const void *zData,
+                                                         const cudnnTensorDescriptor_t yDesc,
+                                                         void *yData,
+                                                         const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
+                                                         const void *bnScaleData,
+                                                         const void *bnBiasData,
+                                                         double exponentialAverageFactor,
+                                                         void *resultRunningMeanData,
+                                                         void *resultRunningVarianceData,
+                                                         double epsilon,
+                                                         void *saveMean,
+                                                         void *saveInvVariance,
+                                                         const cudnnActivationDescriptor_t activationDesc,
+                                                         void *workspace,
+                                                         size_t workSpaceSizeInBytes void *reserveSpace size_t reserveSpaceSizeInBytes);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
             cudnnStatus = cudnnBatchNormalizationForwardInference(stream.getCudnnHandle(),
-                                                                  cudnnBatchNormMode_t             mode,
-                                                                  const void                      *alpha,
-                                                                  const void                      *beta,
-                                                                  const cudnnTensorDescriptor_t    xDesc,
-                                                                  const void                      *x,
-                                                                  const cudnnTensorDescriptor_t    yDesc,
-                                                                  void                            *y,
-                                                                  const cudnnTensorDescriptor_t    bnScaleBiasMeanVarDesc,
-                                                                  const void                      *bnScale,
-                                                                  const void                      *bnBias,
-                                                                  const void                      *estimatedMean,
-                                                                  const void                      *estimatedVariance,
-                                                                  double                           epsilon);
+                                                                  cudnnBatchNormMode_t mode,
+                                                                  const void *alpha,
+                                                                  const void *beta,
+                                                                  const cudnnTensorDescriptor_t xDesc,
+                                                                  const void *x,
+                                                                  const cudnnTensorDescriptor_t yDesc,
+                                                                  void *y,
+                                                                  const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
+                                                                  const void *bnScale,
+                                                                  const void *bnBias,
+                                                                  const void *estimatedMean,
+                                                                  const void *estimatedVariance,
+                                                                  double epsilon);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         }
     }
@@ -149,35 +146,33 @@ class BatchNormalization : public Layer {
 
         cudnnStatus_t cudnnStatus;
         cudnnStatus = cudnnBatchNormalizationBackwardEx(stream.getCudnnHandle(),
-                                                        cudnnBatchNormMode_t                mode,
-                                                        cudnnBatchNormOps_t                 bnOps,
-                                                        const void                          *alphaDataDiff,
-                                                        const void                          *betaDataDiff,
-                                                        const void                          *alphaParamDiff,
-                                                        const void                          *betaParamDiff,
-                                                        const cudnnTensorDescriptor_t       xDesc,
-                                                        const void                          *xData,
-                                                        const cudnnTensorDescriptor_t       yDesc,
-                                                        const void                          *yData,
-                                                        const cudnnTensorDescriptor_t       dyDesc,
-                                                        const void                          *dyData,
-                                                        const cudnnTensorDescriptor_t       dzDesc,
-                                                        void                                *dzData,
-                                                        const cudnnTensorDescriptor_t       dxDesc,
-                                                        void                                *dxData,
-                                                        const cudnnTensorDescriptor_t       dBnScaleBiasDesc,
-                                                        const void                          *bnScaleData,
-                                                        const void                          *bnBiasData,
-                                                        void                                *dBnScaleData,
-                                                        void                                *dBnBiasData,
-                                                        double                              epsilon,
-                                                        const void                          *savedMean,
-                                                        const void                          *savedInvVariance,
-                                                        const cudnnActivationDescriptor_t   activationDesc,
-                                                        void                                *workspace,
-                                                        size_t                              workSpaceSizeInBytes
-                                                        void                                *reserveSpace
-                                                        size_t                              reserveSpaceSizeInBytes);
+                                                        cudnnBatchNormMode_t mode,
+                                                        cudnnBatchNormOps_t bnOps,
+                                                        const void *alphaDataDiff,
+                                                        const void *betaDataDiff,
+                                                        const void *alphaParamDiff,
+                                                        const void *betaParamDiff,
+                                                        const cudnnTensorDescriptor_t xDesc,
+                                                        const void *xData,
+                                                        const cudnnTensorDescriptor_t yDesc,
+                                                        const void *yData,
+                                                        const cudnnTensorDescriptor_t dyDesc,
+                                                        const void *dyData,
+                                                        const cudnnTensorDescriptor_t dzDesc,
+                                                        void *dzData,
+                                                        const cudnnTensorDescriptor_t dxDesc,
+                                                        void *dxData,
+                                                        const cudnnTensorDescriptor_t dBnScaleBiasDesc,
+                                                        const void *bnScaleData,
+                                                        const void *bnBiasData,
+                                                        void *dBnScaleData,
+                                                        void *dBnBiasData,
+                                                        double epsilon,
+                                                        const void *savedMean,
+                                                        const void *savedInvVariance,
+                                                        const cudnnActivationDescriptor_t activationDesc,
+                                                        void *workspace,
+                                                        size_t workSpaceSizeInBytes void *reserveSpace size_t reserveSpaceSizeInBytes);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
