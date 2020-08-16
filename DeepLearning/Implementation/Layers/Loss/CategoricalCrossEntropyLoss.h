@@ -59,6 +59,8 @@ class CategoricalCrossEntropyLoss : public Loss {
             return;
         ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
 
+        // FIXME: what cudnn functions can I use here? cudnnReduceTensor(), cudnnScaleTensor(), cudnnOpTensor() ... ?
+
         // Softmax
         if (inputTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             launchExponentiation((half*)inputTensor.get().getMemPtr(),
