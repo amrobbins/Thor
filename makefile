@@ -96,6 +96,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Misc/Concatenate.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
+                   build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
                    build/Utilities/Common/ReferenceCounted.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
@@ -310,6 +311,10 @@ build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o: Utilities/Tens
 build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o: Utilities/TensorOperations/GpuConvolution/GpuConvolution.h Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
 	mkdir -p build/Utilities/TensorOperations/GpuConvolution
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
+
+build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o: DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o
 
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply

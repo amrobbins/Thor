@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 // FIXME: inference only support

@@ -19,13 +19,17 @@ class OperationType {
                   cudaDataType_t ADataType,
                   cudaDataType_t BDataType,
                   cudaDataType_t CDataType,
-                  cudaDataType_t DDataType)
+                  cudaDataType_t DDataType,
+                  bool transposeA,
+                  bool transposeB)
         : computeDataType(computeDataType),
           scaleDataType(scaleDataType),
           ADataType(ADataType),
           BDataType(BDataType),
           CDataType(CDataType),
-          DDataType(DDataType) {
+          DDataType(DDataType),
+          transposeA(transposeA),
+          transposeB(transposeB) {
         // Below is exactly the bounds of current support
         assert(computeDataType == CUBLAS_COMPUTE_32F);
         assert(scaleDataType == CUDA_R_32F);
@@ -44,19 +48,24 @@ class OperationType {
     cudaDataType_t getBDataType() const { return BDataType; }
     cudaDataType_t getCDataType() const { return CDataType; }
     cudaDataType_t getDDataType() const { return DDataType; }
+    bool getTransposeA() const { return transposeA; }
+    bool getTransposeB() const { return transposeB; }
 
     inline bool operator==(const OperationType &other) const {
         return computeDataType == other.computeDataType && scaleDataType == other.scaleDataType && ADataType == other.ADataType &&
-               BDataType == other.BDataType && CDataType == other.CDataType && DDataType == other.DDataType;
+               BDataType == other.BDataType && CDataType == other.CDataType && DDataType == other.DDataType &&
+               transposeA == other.transposeA && transposeB == other.transposeB;
     }
 
    private:
-    cublasComputeType_t computeDataType;
-    cudaDataType_t scaleDataType;
-    cudaDataType_t ADataType;
-    cudaDataType_t BDataType;
-    cudaDataType_t CDataType;
-    cudaDataType_t DDataType;
+    const cublasComputeType_t computeDataType;
+    const cudaDataType_t scaleDataType;
+    const cudaDataType_t ADataType;
+    const cudaDataType_t BDataType;
+    const cudaDataType_t CDataType;
+    const cudaDataType_t DDataType;
+    const bool transposeA;
+    const bool transposeB;
 };
 
 struct CublasKernelRequirement {

@@ -75,10 +75,13 @@ class CublasMatrixMultiply {
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_cols,
+                  bool transposeA,
+                  bool transposeB,
                   const bool accumulate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream) {
-        multiply(A, B, C, workspace, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, accumulate, ABCDataType, stream);
+        multiply(
+            A, B, C, workspace, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, transposeA, transposeB, accumulate, ABCDataType, stream);
     }
 
     // This variant allows non-packed matrices
@@ -94,6 +97,8 @@ class CublasMatrixMultiply {
                   const int32_t ld_A,
                   const int32_t ld_B,
                   const int32_t ld_C,
+                  bool transposeA,
+                  bool transposeB,
                   const bool accumulate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
@@ -108,10 +113,12 @@ class CublasMatrixMultiply {
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_cols,
+                  bool transposeA,
+                  bool transposeB,
                   const bool accumulate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream) {
-        multiply(A, B, C, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, accumulate, ABCDataType, stream);
+        multiply(A, B, C, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, transposeA, transposeB, accumulate, ABCDataType, stream);
     }
 
     // This variant allows non-packed matrices
@@ -126,6 +133,8 @@ class CublasMatrixMultiply {
                   const int32_t ld_A,
                   const int32_t ld_B,
                   const int32_t ld_C,
+                  bool transposeA,
+                  bool transposeB,
                   const bool accumulate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
@@ -146,10 +155,13 @@ class CublasMatrixMultiply {
                                             const int32_t A_rows,
                                             const int32_t A_cols,
                                             const int32_t B_cols,
+                                            bool transposeA,
+                                            bool transposeB,
                                             const bool accumulate,
                                             const TensorDescriptor::DataType ABCDataType,
                                             Stream stream) {
-        multiplyUsingHeuristicKernelChoice(A, B, C, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, accumulate, ABCDataType, stream);
+        multiplyUsingHeuristicKernelChoice(
+            A, B, C, A_rows, A_cols, B_cols, A_cols, B_cols, B_cols, transposeA, transposeB, accumulate, ABCDataType, stream);
     }
 
     // This variant allows non-packed matrices
@@ -164,15 +176,23 @@ class CublasMatrixMultiply {
                                             const int32_t ld_A,
                                             const int32_t ld_B,
                                             const int32_t ld_C,
+                                            bool transposeA,
+                                            bool transposeB,
                                             const bool accumulate,
                                             const TensorDescriptor::DataType ABCDataType,
                                             Stream stream);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
-    inline void chooseOptimalKernel(
-        string gpuType, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType, bool printResults = false) {
-        chooseOptimalKernel(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType, printResults);
+    inline void chooseOptimalKernel(string gpuType,
+                                    int rowsA,
+                                    int colsA,
+                                    int colsB,
+                                    bool transposeA,
+                                    bool transposeB,
+                                    TensorDescriptor::DataType ABCDataType,
+                                    bool printResults = false) {
+        chooseOptimalKernel(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB, transposeA, transposeB, ABCDataType, printResults);
     }
 
     inline void chooseOptimalKernel(string gpuType,
@@ -182,6 +202,8 @@ class CublasMatrixMultiply {
                                     int ldA,
                                     int ldB,
                                     int ldC,
+                                    bool transposeA,
+                                    bool transposeB,
                                     TensorDescriptor::DataType ABCDataType,
                                     bool printResults = false) {
         // Find a gpu of the proper type or fail
@@ -194,7 +216,7 @@ class CublasMatrixMultiply {
         }
         assert(gpuNum >= 0);
 
-        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType, printResults);
+        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, transposeA, transposeB, ABCDataType, printResults);
     }
 
     // Find the optimal kernel for the matrix multiply operation for type of the gpuNum GPU, by measuring it specifically on that gpu.
@@ -205,9 +227,15 @@ class CublasMatrixMultiply {
     // multiple readers are fine lock free so locks are only used during multi-threaded optimization.
     //
     // Note: never run more than one optimization at a time on any gpu.
-    inline void chooseOptimalKernel(
-        int gpuNum, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType, bool printResults = false) {
-        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType, printResults);
+    inline void chooseOptimalKernel(int gpuNum,
+                                    int rowsA,
+                                    int colsA,
+                                    int colsB,
+                                    bool transposeA,
+                                    bool transposeB,
+                                    TensorDescriptor::DataType ABCDataType,
+                                    bool printResults = false) {
+        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, transposeA, transposeB, ABCDataType, printResults);
     }
 
     void chooseOptimalKernel(int gpuNum,
@@ -217,12 +245,21 @@ class CublasMatrixMultiply {
                              int ldA,
                              int ldB,
                              int ldC,
+                             bool transposeA,
+                             bool transposeB,
                              TensorDescriptor::DataType ABCDataType,
                              bool printResults = false);
 
-    inline unsigned int getWorkspaceSizeInBytes(
-        int gpuNum, int rowsA, int colsA, int colsB, TensorDescriptor::DataType ABCDataType, bool &kernelWillRunOnGpu) {
-        return getWorkspaceSizeInBytes(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, ABCDataType, kernelWillRunOnGpu);
+    inline unsigned int getWorkspaceSizeInBytes(int gpuNum,
+                                                int rowsA,
+                                                int colsA,
+                                                int colsB,
+                                                bool transposeA,
+                                                bool transposeB,
+                                                TensorDescriptor::DataType ABCDataType,
+                                                bool &kernelWillRunOnGpu) {
+        return getWorkspaceSizeInBytes(
+            gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB, transposeA, transposeB, ABCDataType, kernelWillRunOnGpu);
     }
 
     unsigned int getWorkspaceSizeInBytes(int gpuNum,
@@ -232,6 +269,8 @@ class CublasMatrixMultiply {
                                          int ldA,
                                          int ldB,
                                          int ldC,
+                                         bool transposeA,
+                                         bool transposeB,
                                          TensorDescriptor::DataType ABCDataType,
                                          bool &kernelWillRunOnGpu);
 
@@ -247,8 +286,11 @@ class CublasMatrixMultiply {
                                 int ldA,
                                 int ldB,
                                 int ldC,
-                                bool workspaceAllowed,
-                                TensorDescriptor::DataType ABCDataType);
+                                bool transposeA,
+                                bool transposeB,
+                                TensorDescriptor::DataType ABCDataType,
+                                bool workspaceAllowed);
+
     double getOptimalKernelTime(int gpuNum,
                                 int rowsA,
                                 int colsA,
@@ -256,8 +298,10 @@ class CublasMatrixMultiply {
                                 int ldA,
                                 int ldB,
                                 int ldC,
-                                bool workspaceAllowed,
-                                TensorDescriptor::DataType ABCDataType);
+                                bool transposeA,
+                                bool transposeB,
+                                TensorDescriptor::DataType ABCDataType,
+                                bool workspaceAllowed);
 
    private:
     unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
@@ -286,6 +330,8 @@ class CublasMatrixMultiply {
                              int ldA,
                              int ldB,
                              int ldC,
+                             bool transposeA,
+                             bool transposeB,
                              TensorDescriptor::DataType ABCDataType,
                              bool allowWorkspaces,
                              bool printResults);
@@ -313,6 +359,8 @@ class CublasMatrixMultiply {
                   const int32_t ld_A,
                   const int32_t ld_B,
                   const int32_t ld_C,
+                  bool transposeA,
+                  bool transposeB,
                   const bool accumulate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);

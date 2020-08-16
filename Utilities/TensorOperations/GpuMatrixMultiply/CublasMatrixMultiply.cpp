@@ -62,10 +62,26 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const int32_t ld_A,
                                     const int32_t ld_B,
                                     const int32_t ld_C,
+                                    bool transposeA,
+                                    bool transposeB,
                                     const bool accumulate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
-    multiply(A, B, C, Optional<Tensor>(workspace), A_rows, A_cols, B_cols, ld_A, ld_B, ld_C, accumulate, ABCDataType, stream);
+    multiply(A,
+             B,
+             C,
+             Optional<Tensor>(workspace),
+             A_rows,
+             A_cols,
+             B_cols,
+             ld_A,
+             ld_B,
+             ld_C,
+             transposeA,
+             transposeB,
+             accumulate,
+             ABCDataType,
+             stream);
 }
 
 // This variant allows non-packed matrices, does not use a workspace
@@ -80,10 +96,26 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const int32_t ld_A,
                                     const int32_t ld_B,
                                     const int32_t ld_C,
+                                    bool transposeA,
+                                    bool transposeB,
                                     const bool accumulate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
-    multiply(A, B, C, Optional<Tensor>::empty(), A_rows, A_cols, B_cols, ld_A, ld_B, ld_C, accumulate, ABCDataType, stream);
+    multiply(A,
+             B,
+             C,
+             Optional<Tensor>::empty(),
+             A_rows,
+             A_cols,
+             B_cols,
+             ld_A,
+             ld_B,
+             ld_C,
+             transposeA,
+             transposeB,
+             accumulate,
+             ABCDataType,
+             stream);
 }
 
 // This variant allows non-packed matrices
@@ -99,6 +131,8 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const int32_t ld_A,
                                     const int32_t ld_B,
                                     const int32_t ld_C,
+                                    bool transposeA,
+                                    bool transposeB,
                                     const bool accumulate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
@@ -143,7 +177,8 @@ void CublasMatrixMultiply::multiply(Tensor A,
     kernelRequirement.allowWorkspace = workspace.isPresent();
 
     cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType(
+        CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, transposeA, transposeB);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -185,6 +220,8 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const int32_t ld_A,
                                                               const int32_t ld_B,
                                                               const int32_t ld_C,
+                                                              bool transposeA,
+                                                              bool transposeB,
                                                               const bool accumulate,
                                                               const TensorDescriptor::DataType ABCDataType,
                                                               Stream stream) {
@@ -245,7 +282,8 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     kernelRequirement.ldB = ld_B;
     kernelRequirement.ldC = ld_C;
     kernelRequirement.allowWorkspace = false;
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType(
+        CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, transposeA, transposeB);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     // If there is already a known kernel, use it. Otherwise a heuristic search will be performed and the kernel remembered.
@@ -409,13 +447,23 @@ long minl(long a, long b) { return a < b ? a : b; }
 
 long maxl(long a, long b) { return a > b ? a : b; }
 
-void CublasMatrixMultiply::chooseOptimalKernel(
-    int gpuNum, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, TensorDescriptor::DataType ABCDataType, bool printResults) {
-    bool bestKernelHasWorkspace = chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType, true, printResults);
+void CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
+                                               int rowsA,
+                                               int colsA,
+                                               int colsB,
+                                               int ldA,
+                                               int ldB,
+                                               int ldC,
+                                               bool transposeA,
+                                               bool transposeB,
+                                               TensorDescriptor::DataType ABCDataType,
+                                               bool printResults) {
+    bool bestKernelHasWorkspace =
+        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, transposeA, transposeB, ABCDataType, true, printResults);
 
     // If the best kernel did not have a workspace, then it will be used for the no workspace version of the computation also
     if (bestKernelHasWorkspace) {
-        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, ABCDataType, false, printResults);
+        chooseOptimalKernel(gpuNum, rowsA, colsA, colsB, ldA, ldB, ldC, transposeA, transposeB, ABCDataType, false, printResults);
 
         // The heuristic that is being used to choose kernels tries to get a kernel as close as possible to 1 wave,
         // for smaller operations this can be achieved by adding a workspace, but this doesn't create a faster kernel.
@@ -432,7 +480,8 @@ void CublasMatrixMultiply::chooseOptimalKernel(
         kernelRequirement.ldC = ldC;
         kernelRequirement.allowWorkspace = false;
         cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-        OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+        OperationType operationType(
+            CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, transposeA, transposeB);
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirement, operationType);
         kernelRequirement.allowWorkspace = true;
         CublasKernelRequirement workspaceCublasKernelRequirement(kernelRequirement, operationType);
@@ -451,6 +500,8 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
                                                int ldA,
                                                int ldB,
                                                int ldC,
+                                               bool transposeA,
+                                               bool transposeB,
                                                TensorDescriptor::DataType ABCDataType,
                                                bool allowWorkspaces,
                                                bool printResults) {
@@ -500,7 +551,8 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     kernelRequirement.allowWorkspace = allowWorkspaces;
 
     cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType(
+        CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, transposeA, transposeB);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -983,6 +1035,8 @@ unsigned int CublasMatrixMultiply::getWorkspaceSizeInBytes(int gpuNum,
                                                            int ldA,
                                                            int ldB,
                                                            int ldC,
+                                                           bool transposeA,
+                                                           bool transposeB,
                                                            TensorDescriptor::DataType ABCDataType,
                                                            bool &kernelWillRunOnGpu) {
     KernelRequirement kernelRequirement;
@@ -996,7 +1050,8 @@ unsigned int CublasMatrixMultiply::getWorkspaceSizeInBytes(int gpuNum,
     kernelRequirement.allowWorkspace = true;
 
     cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType(
+        CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, transposeA, transposeB);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -1015,8 +1070,10 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
                                                   int ldA,
                                                   int ldB,
                                                   int ldC,
-                                                  bool workspaceAllowed,
-                                                  TensorDescriptor::DataType ABCDataType) {
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  TensorDescriptor::DataType ABCDataType,
+                                                  bool workspaceAllowed) {
     KernelRequirement kernelRequirement;
     kernelRequirement.gpuType = gpuType;
     kernelRequirement.rowsA = rowsA;
@@ -1028,7 +1085,8 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
     kernelRequirement.allowWorkspace = workspaceAllowed;
 
     cudaDataType_t ABCDataTypeCuda = mapToCublasDataType(ABCDataType);
-    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda);
+    OperationType operationType(
+        CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, ABCDataTypeCuda, transposeA, transposeB);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
     string ABCDataTypeString = ABCDataType == TensorDescriptor::DataType::FP32 ? "FP32" : "FP16";
@@ -1050,8 +1108,26 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
     return averageRunTimeMilliseconds;
 }
 
-double CublasMatrixMultiply::getOptimalKernelTime(
-    int gpuNum, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, bool workspaceAllowed, TensorDescriptor::DataType ABCDataType) {
-    return getOptimalKernelTime(
-        MachineEvaluator::instance().getGpuType(gpuNum), rowsA, colsA, colsB, ldA, ldB, ldC, workspaceAllowed, ABCDataType);
+double CublasMatrixMultiply::getOptimalKernelTime(int gpuNum,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int colsB,
+                                                  int ldA,
+                                                  int ldB,
+                                                  int ldC,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  TensorDescriptor::DataType ABCDataType,
+                                                  bool workspaceAllowed) {
+    return getOptimalKernelTime(MachineEvaluator::instance().getGpuType(gpuNum),
+                                rowsA,
+                                colsA,
+                                colsB,
+                                ldA,
+                                ldB,
+                                ldC,
+                                transposeA,
+                                transposeB,
+                                ABCDataType,
+                                workspaceAllowed);
 }
