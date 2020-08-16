@@ -107,6 +107,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
+                   build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
@@ -332,6 +333,10 @@ build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utili
 build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o: DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.h DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o
+
+build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o
 
 
 
