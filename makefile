@@ -106,6 +106,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/Layer.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
+                   build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
@@ -327,6 +328,11 @@ build/Utilities/Common/ReferenceCounted.o: Utilities/Common/ReferenceCounted.h U
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
 	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
+
+build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o: DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.h DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o
+
 
 
 

@@ -35,7 +35,6 @@ class DropOut : public Layer {
         // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),
         // so this dropout layer can only be used for 1 input/output pair.
         assert(featureInput.isPresent());
-        assert(featureInput.isPresent());
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
