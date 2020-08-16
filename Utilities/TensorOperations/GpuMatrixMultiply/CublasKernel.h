@@ -419,6 +419,16 @@ class CublasKernel : private ReferenceCounted {
         const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
         cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        if (cublasKernelRequirement->operationType.getTransposeA()) {
+            cublasOperation_t transpose = CUBLAS_OP_T;
+            cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
+        if (cublasKernelRequirement->operationType.getTransposeB()) {
+            cublasOperation_t transpose = CUBLAS_OP_T;
+            cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
 
         cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
         int64_t ld;

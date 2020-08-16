@@ -175,10 +175,12 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
                               accumulate);
 
         if (useLdVersion)
+            // FIXME:
             CublasMatrixMultiply::instance().chooseOptimalKernel(
-                0, rowsA, colsA, colsB, ldA, ldB, ldC, TensorDescriptor::DataType::FP32, false);
+                0, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, TensorDescriptor::DataType::FP32, false);
         else
-            CublasMatrixMultiply::instance().chooseOptimalKernel(0, rowsA, colsA, colsB, TensorDescriptor::DataType::FP32, false);
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                0, rowsA, colsA, colsB, false, false, TensorDescriptor::DataType::FP32, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -187,7 +189,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
             int workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
-                0, rowsA, colsA, colsB, ldA, ldB, ldC, TensorDescriptor::DataType::FP32, kernelWillRunOnGpu);
+                0, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, TensorDescriptor::DataType::FP32, kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -200,21 +202,35 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         B_d.copyFromAsync(B, stream);
         C_d.copyFromAsync(C, stream);
 
+        // FIXME:
         if (useWorkspace) {
             if (useLdVersion) {
-                CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, ldA, ldB, ldC, accumulate, TensorDescriptor::DataType::FP32, stream);
+                CublasMatrixMultiply::instance().multiply(A_d,
+                                                          B_d,
+                                                          C_d,
+                                                          workspace_d,
+                                                          rowsA,
+                                                          colsA,
+                                                          colsB,
+                                                          ldA,
+                                                          ldB,
+                                                          ldC,
+                                                          false,
+                                                          false,
+                                                          accumulate,
+                                                          TensorDescriptor::DataType::FP32,
+                                                          stream);
             } else {
                 CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, accumulate, TensorDescriptor::DataType::FP32, stream);
+                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
             }
         } else {
             if (useLdVersion) {
                 CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, accumulate, TensorDescriptor::DataType::FP32, stream);
+                    A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
             } else {
                 CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, rowsA, colsA, colsB, accumulate, TensorDescriptor::DataType::FP32, stream);
+                    A_d, B_d, C_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
             }
         }
 
@@ -332,9 +348,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalKernel(
-                0, rowsA, colsA, colsB, ldA, ldB, ldC, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, TensorDescriptor::DataType::FP16, false);
         else
-            CublasMatrixMultiply::instance().chooseOptimalKernel(0, rowsA, colsA, colsB, TensorDescriptor::DataType::FP16, false);
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                0, rowsA, colsA, colsB, false, false, TensorDescriptor::DataType::FP16, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -343,7 +360,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
             int workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
-                0, rowsA, colsA, colsB, ldA, ldB, ldC, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
+                0, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -358,19 +375,32 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
 
         if (useWorkspace) {
             if (useLdVersion) {
-                CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, ldA, ldB, ldC, accumulate, TensorDescriptor::DataType::FP16, stream);
+                CublasMatrixMultiply::instance().multiply(A_d,
+                                                          B_d,
+                                                          C_d,
+                                                          workspace_d,
+                                                          rowsA,
+                                                          colsA,
+                                                          colsB,
+                                                          ldA,
+                                                          ldB,
+                                                          ldC,
+                                                          false,
+                                                          false,
+                                                          accumulate,
+                                                          TensorDescriptor::DataType::FP16,
+                                                          stream);
             } else {
                 CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, accumulate, TensorDescriptor::DataType::FP16, stream);
+                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
             }
         } else {
             if (useLdVersion) {
                 CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, accumulate, TensorDescriptor::DataType::FP16, stream);
+                    A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
             } else {
                 CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, rowsA, colsA, colsB, accumulate, TensorDescriptor::DataType::FP16, stream);
+                    A_d, B_d, C_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
             }
         }
 
@@ -492,10 +522,10 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
 
         if (useLdVersion) {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, accumulate, TensorDescriptor::DataType::FP32, stream);
+                A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
         } else {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, accumulate, TensorDescriptor::DataType::FP32, stream);
+                A_d, B_d, C_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
@@ -616,10 +646,10 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
 
         if (useLdVersion) {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, accumulate, TensorDescriptor::DataType::FP16, stream);
+                A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
         } else {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, accumulate, TensorDescriptor::DataType::FP16, stream);
+                A_d, B_d, C_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
