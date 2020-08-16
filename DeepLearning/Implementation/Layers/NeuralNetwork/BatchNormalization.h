@@ -1,78 +1,153 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 
-class BatchNormalization : public Layer {
+/**
+ * Parameter epsilon is used in the batch normalization formula and must be >= 0.00001.
+ * Parameter exponentialRunningAverageFactor is used to determine how long to remember past results and how much weight to give the newest
+ * result, via equation: runningMean = runningMean*(1-exponentialRunningAverageFactor) + newMean*exponentialRunningAverageFactor
+ *
+ * This layer will synchronize all streams with stream[0] when multiple connections are present, for compatibility with cuDNN.
+ */
+
+class BatchNormalization : public TrainableWeightsBiasesLayer {
    public:
     virtual ~BatchNormalization() {}
 
-    void setTrainingMode(bool training) {
-        assert(running == false);
-        this->training = training;
+    // 2D Batch Normalization - e.g. after fully connected
+    BatchNormalization(unsigned int batchSize,
+                       unsigned int numFeatures,
+                       bool training,
+                       const bool inferenceOnly,
+                       Optional<float> learningRate,
+                       double exponentialRunningAverageFactor = 0.05,
+                       double epsilon = 0.0001)
+        : TrainableWeightsBiasesLayer(inferenceOnly, true, learningRate),
+          batchSize(batchSize),
+          numChannels(numFeatures),
+          height(1),
+          width(1),
+          exponentialRunningAverageFactor(exponentialRunningAverageFactor),
+          epsilon(epsilon) {
+        setTrainingMode(training);
     }
 
-    BatchNormalization(bool training) : training(training) {}
+    // 4D Batch Normalization - e.g. after convolution 2d
+    BatchNormalization(unsigned int batchSize,
+                       unsigned int numChannels,
+                       unsigned int height,
+                       unsigned int width,
+                       bool training,
+                       const bool inferenceOnly,
+                       Optional<float> learningRate,
+                       double exponentialRunningAverageFactor = 0.05,
+                       double epsilon = 0.0001)
+        : TrainableWeightsBiasesLayer(inferenceOnly, true, learningRate),
+          batchSize(batchSize),
+          numChannels(numChannels),
+          height(height),
+          width(width),
+          exponentialRunningAverageFactor(exponentialRunningAverageFactor),
+          epsilon(epsilon) {
+        setTrainingMode(training);
+    }
+
+    void setTrainingMode(bool training) {
+        assert(running == false);
+        assert(inferenceOnly == false);
+        this->training = training;
+    }
+    bool getTrainingMode() { return training; }
+
+    double getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
+    void setExponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
+        this->exponentialRunningAverageFactor = exponentialRunningAverageFactor;
+    }
+
+    double getEpsilon() { return epsilon; }
+    void setEpsilon(double epsilon) { this->epsilon = epsilon; }
 
     virtual void compile() {
         cudnnStatus_t cudnnStatus;
 
-        assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
+        assert(!featureInputs.empty());
+        assert(!featureOutputs.empty());
+        assert(featureInputs.size() == featureOutputs.size());
 
         featureInputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.get());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        cudnnStatus = cudnnSetTensor4dDescriptor(
-            featureInputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, fix batchSize, numFeatures, inputHeight, inputWidth);
+        cudnnStatus =
+            cudnnSetTensor4dDescriptor(featureInputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numChannels, height, width);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureOutputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.get());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        cudnnStatus = cudnnSetTensor4dDescriptor(
-            featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, fix batchSize, numFeatures, outputHeight, outputWidth);
+        cudnnStatus =
+            cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numChannels, height, width);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnGetBatchNormalizationForwardTrainingExWorkspaceSize(stream.getCudnnHandle(),
-                                                                               cudnnBatchNormMode_t mode,
-                                                                               cudnnBatchNormOps_t bnOps,
-                                                                               const cudnnTensorDescriptor_t xDesc,
-                                                                               const cudnnTensorDescriptor_t zDesc,
-                                                                               const cudnnTensorDescriptor_t yDesc,
-                                                                               const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
-                                                                               const cudnnActivationDescriptor_t activationDesc,
-                                                                               size_t *sizeInBytes);
+        derivedBnDescriptor = cudnnTensorDescriptor_t();
+        cudnnStatus = cudnnCreateTensorDescriptor(&derivedBnDescriptor.get());
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        cudnnStatus = cudnnDeriveBNTensorDescriptor(derivedBnDescriptor,
+                                                    featureInputDescriptor,
+                                                    height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnGetBatchNormalizationTrainingExReserveSpaceSize(stream.getCudnnHandle(),
-                                                                           cudnnBatchNormMode_t mode,
-                                                                           cudnnBatchNormOps_t bnOps,
-                                                                           const cudnnActivationDescriptor_t activationDesc,
-                                                                           const cudnnTensorDescriptor_t xDesc,
-                                                                           size_t *sizeInBytes);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        vector<unsigned long> derivedBnTensorDimensions = {batchSize, numChannels, height, width};
 
-        cudnnStatus = cudnnGetBatchNormalizationBackwardExWorkspaceSize(stream.getCudnnHandle(),
-                                                                        cudnnBatchNormMode_t mode,
-                                                                        cudnnBatchNormOps_t bnOps,
-                                                                        const cudnnTensorDescriptor_t xDesc,
-                                                                        const cudnnTensorDescriptor_t yDesc,
-                                                                        const cudnnTensorDescriptor_t dyDesc,
-                                                                        const cudnnTensorDescriptor_t dzDesc,
-                                                                        const cudnnTensorDescriptor_t dxDesc,
-                                                                        const cudnnTensorDescriptor_t dBnScaleBiasDesc,
-                                                                        const cudnnActivationDescriptor_t activationDesc,
-                                                                        size_t *sizeInBytes);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        weights =
+            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        biases =
+            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        weightsGradient =
+            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        biasesGradient =
+            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        resultRunningMean =
+            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        resultRunningVariance =
+            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+
+        for (unsigned int i = 0; i < featureInputs.size(); ++i) {
+            resultSaveMean[i] = Tensor(featureInputs[0].get().getPlacement(),
+                                       TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            resultSaveInvVariance[i] = Tensor(featureInputs[0].get().getPlacement(),
+                                              TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        }
+
+        Tensor oneInit_h =
+            Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        Tensor zeroInit_h =
+            Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        unsigned long numElements = oneInit_h.getDescriptor().getTotalNumElements();
+        float *oneInitMem = (float *)oneInit_h.getMemPtr();
+        float *zeroInitMem = (float *)zeroInit_h.getMemPtr();
+        for (unsigned long i = 0; i < numElements; ++i) {
+            oneInitMem[i] = 1.0f;
+            zeroInitMem[i] = 0.0f;
+        }
+        weights.copyFromAsync(oneInit_h, streams[0]);
+        biases.get().copyFromAsync(zeroInit_h, streams[0]);
+        resultRunningMean.copyFromAsync(biases.get(), streams[0]);
+        resultRunningVariance.copyFromAsync(biases.get(), streams[0]);
+
+        if (streams.size() > 1) {
+            Event initializedEvent = streams[0].putEvent();
+            for (unsigned int i = 0; i < streams.size(); ++i)
+                streams[i].waitEvent(initializedEvent);
+        }
     }
 
     void cleanup() {
         cudnnStatus_t cudnnStatus;
 
-        if (poolingDescriptor.isPresent()) {
-            cudnnStatus = cudnnDestroyPoolingDescriptor(poolingDescriptor.get());
+        if (derivedBnDescriptor.isPresent()) {
+            cudnnStatus = cudnnDestroyTensorDescriptor(derivedBnDescriptor.get());
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            poolingDescriptor.clear();
+            derivedBnDescriptor.clear();
         }
 
         if (featureInputDescriptor.isPresent()) {
@@ -88,7 +163,7 @@ class BatchNormalization : public Layer {
         }
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
+    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
 
@@ -96,92 +171,108 @@ class BatchNormalization : public Layer {
 
         if (training) {
             cudnnStatus =
-                cudnnBatchNormalizationForwardTrainingEx(stream.getCudnnHandle(),
-                                                         cudnnBatchNormMode_t mode,
-                                                         cudnnBatchNormOps_t bnOps,
-                                                         const void *alpha,
-                                                         const void *beta,
-                                                         const cudnnTensorDescriptor_t xDesc,
-                                                         const void *xData,
-                                                         const cudnnTensorDescriptor_t zDesc,
-                                                         const void *zData,
-                                                         const cudnnTensorDescriptor_t yDesc,
-                                                         void *yData,
-                                                         const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
-                                                         const void *bnScaleData,
-                                                         const void *bnBiasData,
-                                                         double exponentialAverageFactor,
-                                                         void *resultRunningMeanData,
-                                                         void *resultRunningVarianceData,
-                                                         double epsilon,
-                                                         void *saveMean,
-                                                         void *saveInvVariance,
-                                                         const cudnnActivationDescriptor_t activationDesc,
-                                                         void *workspace,
-                                                         size_t workSpaceSizeInBytes void *reserveSpace size_t reserveSpaceSizeInBytes);
+                cudnnBatchNormalizationForwardTraining(streams[0].getCudnnHandle(),
+                                                       height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
+                                                       &ALPHA_NO_SCALE,
+                                                       &BETA_CLEAR,
+                                                       featureInputDescriptor,
+                                                       inputTensor.get().getMemPtr(),
+                                                       featureOutputDescriptor,
+                                                       outputTensor.get().getMemPtr(),
+                                                       derivedBnDescriptor,
+                                                       weights.getMemPtr(),
+                                                       biases.get().getMemPtr(),
+                                                       exponentialRunningAverageFactor,
+                                                       resultRunningMean.getMemPtr(),
+                                                       resultRunningVariance.getMemPtr(),
+                                                       epsilon,
+                                                       resultSaveMean[connectionNumber].getMemPtr(),
+                                                       resultSaveInvVariance[connectionNumber].getMemPtr());
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
-            cudnnStatus = cudnnBatchNormalizationForwardInference(stream.getCudnnHandle(),
-                                                                  cudnnBatchNormMode_t mode,
-                                                                  const void *alpha,
-                                                                  const void *beta,
-                                                                  const cudnnTensorDescriptor_t xDesc,
-                                                                  const void *x,
-                                                                  const cudnnTensorDescriptor_t yDesc,
-                                                                  void *y,
-                                                                  const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
-                                                                  const void *bnScale,
-                                                                  const void *bnBias,
-                                                                  const void *estimatedMean,
-                                                                  const void *estimatedVariance,
-                                                                  double epsilon);
+            cudnnStatus =
+                cudnnBatchNormalizationForwardInference(streams[0].getCudnnHandle(),
+                                                        height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
+                                                        &ALPHA_NO_SCALE,
+                                                        &BETA_CLEAR,
+                                                        featureInputDescriptor,
+                                                        inputTensor.get().getMemPtr(),
+                                                        featureOutputDescriptor,
+                                                        outputTensor.get().getMemPtr(),
+                                                        derivedBnDescriptor,
+                                                        weights.getMemPtr(),
+                                                        biases.get().getMemPtr(),
+                                                        resultRunningMean.getMemPtr(),
+                                                        resultRunningVariance.getMemPtr(),
+                                                        epsilon);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         }
+
+        // Since running average is a single memory, multiple connections to this layer must serialize with each other.
+        if (connectionNumber != 0)
+            streams[connectionNumber].waitEvent(streams[0].putEvent());
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
+    virtual void backProp(Optional<Tensor> dataIn,
+                          Optional<Tensor> errorIn,
+                          Optional<Tensor> errorOut,
+                          Stream gradientStream,
+                          Optional<Stream> dataStream,
+                          unsigned int connectionNumber,
+                          bool accumulateGradient) {
         if (errorOut.isEmpty())
             return;
         assert(errorIn.isPresent());
 
         cudnnStatus_t cudnnStatus;
-        cudnnStatus = cudnnBatchNormalizationBackwardEx(stream.getCudnnHandle(),
-                                                        cudnnBatchNormMode_t mode,
-                                                        cudnnBatchNormOps_t bnOps,
-                                                        const void *alphaDataDiff,
-                                                        const void *betaDataDiff,
-                                                        const void *alphaParamDiff,
-                                                        const void *betaParamDiff,
-                                                        const cudnnTensorDescriptor_t xDesc,
-                                                        const void *xData,
-                                                        const cudnnTensorDescriptor_t yDesc,
-                                                        const void *yData,
-                                                        const cudnnTensorDescriptor_t dyDesc,
-                                                        const void *dyData,
-                                                        const cudnnTensorDescriptor_t dzDesc,
-                                                        void *dzData,
-                                                        const cudnnTensorDescriptor_t dxDesc,
-                                                        void *dxData,
-                                                        const cudnnTensorDescriptor_t dBnScaleBiasDesc,
-                                                        const void *bnScaleData,
-                                                        const void *bnBiasData,
-                                                        void *dBnScaleData,
-                                                        void *dBnBiasData,
-                                                        double epsilon,
-                                                        const void *savedMean,
-                                                        const void *savedInvVariance,
-                                                        const cudnnActivationDescriptor_t activationDesc,
-                                                        void *workspace,
-                                                        size_t workSpaceSizeInBytes void *reserveSpace size_t reserveSpaceSizeInBytes);
+        cudnnStatus = cudnnBatchNormalizationBackward(streams[0].getCudnnHandle(),
+                                                      height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
+                                                      &ALPHA_NO_SCALE,
+                                                      &BETA_CLEAR,
+                                                      &ALPHA_NO_SCALE,
+                                                      accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                                      featureInputDescriptor,
+                                                      dataIn.get().getMemPtr(),
+                                                      featureOutputDescriptor,
+                                                      errorIn.get().getMemPtr(),
+                                                      featureInputDescriptor,
+                                                      errorOut.get().getMemPtr(),
+                                                      derivedBnDescriptor,
+                                                      weights.getMemPtr(),
+                                                      weightsGradient.get().getMemPtr(),
+                                                      biasesGradient.get().getMemPtr(),
+                                                      epsilon,
+                                                      resultSaveMean[connectionNumber].getMemPtr(),
+                                                      resultSaveInvVariance[connectionNumber].getMemPtr());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+
+        // Since weights are a single memory, multiple connections to this layer must serialize with each other.
+        // This is the normal case for gradients, so that accumulation may be used, however it differs in that the separate
+        // gradientUpdateStream is not used. This is because cuDNN is not separating back propagation of errors and updating gradients.
+        if (connectionNumber != 0)
+            streams[connectionNumber].waitEvent(streams[0].putEvent());
     }
 
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;
+    static const float BETA_ACCUMULATE;
+
+    const unsigned int batchSize;
+    const unsigned int numChannels;
+    const unsigned int height;
+    const unsigned int width;
 
     bool training;
+    double exponentialRunningAverageFactor;
+    double epsilon;
 
-    Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
     Optional<cudnnTensorDescriptor_t> featureInputDescriptor;
+    Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
+    Optional<cudnnTensorDescriptor_t> derivedBnDescriptor;
+
+    Tensor resultRunningMean;
+    Tensor resultRunningVariance;
+    vector<Tensor> resultSaveMean;
+    vector<Tensor> resultSaveInvVariance;
 };

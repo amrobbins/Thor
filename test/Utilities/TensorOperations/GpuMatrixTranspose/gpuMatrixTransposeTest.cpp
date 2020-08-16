@@ -177,12 +177,14 @@ void testMatrixTransposeFp16(int rows, int cols, bool print = false, bool verify
 }
 
 TEST(MatrixTransposeFp32, OutputIsCorrect) {
+    srand(time(nullptr));
+
     if (omp_get_num_procs() > 1)
         omp_set_num_threads(omp_get_num_procs() - 1);
 
 #pragma omp parallel for schedule(dynamic, 10)
-    for (int rows = 1; rows < 150; rows++) {
-        for (int cols = 1; cols < 150; cols++) {
+    for (int rows = 1; rows < 150; rows += (rand() % 5) + 1) {
+        for (int cols = 1; cols < 150; cols += (rand() % 5) + 1) {
             testMatrixTransposeFp32(rows, cols);
         }
     }
@@ -191,12 +193,14 @@ TEST(MatrixTransposeFp32, OutputIsCorrect) {
 }
 
 TEST(MatrixTransposeFp16, OutputIsCorrect) {
+    srand(time(nullptr));
+
     if (omp_get_num_procs() > 1)
         omp_set_num_threads(omp_get_num_procs() - 1);
 
 #pragma omp parallel for schedule(dynamic, 10)
-    for (int rows = 1; rows < 150; rows++) {
-        for (int cols = 1; cols < 150; cols++) {
+    for (int rows = 1; rows < 150; rows += (rand() % 5) + 1) {
+        for (int cols = 1; cols < 150; cols += (rand() % 5) + 1) {
             testMatrixTransposeFp16(rows, cols);
         }
     }
