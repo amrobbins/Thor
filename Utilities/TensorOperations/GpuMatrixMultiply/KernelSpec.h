@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -8,29 +9,6 @@
 #include <utility>
 
 using std::string;
-
-struct KernelRequirement {
-    string gpuType;
-    int rowsA;
-    int colsA;
-    int colsB;
-    int ldA;
-    int ldB;
-    int ldC;
-
-    bool allowWorkspace;
-
-    bool operator==(const KernelRequirement &other) const {
-        return gpuType == other.gpuType && rowsA == other.rowsA && colsA == other.colsA && colsB == other.colsB && ldA == other.ldA &&
-               ldB == other.ldB && ldC == other.ldC && allowWorkspace == other.allowWorkspace;
-    }
-
-    bool operator<(const KernelRequirement &other) const {
-        long total = rowsA + colsA + colsB + ldA + ldB + ldC + (int)allowWorkspace;
-        long otherTotal = other.rowsA + other.colsA + other.colsB + other.ldA + other.ldB + other.ldC + (int)other.allowWorkspace;
-        return total < otherTotal;
-    }
-};
 
 /**
  * Every kernel must specify at the minimum:
@@ -277,22 +255,3 @@ struct KernelWithSpec {
         assert(false);
     }
 };
-
-namespace std {
-template <>
-struct hash<KernelRequirement> {
-    std::size_t operator()(const KernelRequirement &k) const {
-        size_t hashValue;
-        hashValue = (hash<int>()(k.allowWorkspace)) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.rowsA))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.colsA))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.colsB))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.ldA))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.ldB))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.ldC))) << 1;
-        hashValue = hashValue ^ hash<string>()(k.gpuType);
-
-        return hashValue;
-    }
-};
-}  // namespace std

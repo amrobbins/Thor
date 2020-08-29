@@ -27,16 +27,18 @@ class Stream : private ReferenceCounted {
    public:
     Stream() : ReferenceCounted() {}
 
-    explicit Stream(int gpuNum) { construct(gpuNum); }
+    enum class Priority { HIGH = 3, REGULAR = 4, LOW = 5 };
+
+    explicit Stream(int gpuNum, Priority priority = Priority::REGULAR) { construct(gpuNum, priority); }
 
     Stream(const Stream &other) {
         // implemented using operator=
         *this = other;
     }
 
-    explicit Stream(TensorPlacement placement) {
+    explicit Stream(TensorPlacement placement, Priority priority = Priority::REGULAR) {
         int gpuNum = placement.getMemDevice() == TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
-        construct(gpuNum);
+        construct(gpuNum, priority);
     }
 
     Stream &operator=(const Stream &other) {
@@ -124,7 +126,7 @@ class Stream : private ReferenceCounted {
     virtual string getObjectName() { return "Stream"; }
 
    private:
-    void construct(int gpuNum) {
+    void construct(int gpuNum, Priority priority) {
         ReferenceCounted::initialize();
 
         cudnnHandle = new Optional<cudnnHandle_t>;
@@ -134,7 +136,20 @@ class Stream : private ReferenceCounted {
         cudaError_t cudaStatus;
         this->gpuNum = gpuNum;
 
-        cudaStatus = cudaStreamCreateWithFlags(&cudaStream, cudaStreamNonBlocking);
+        // greatestPriority is given the highest priority in terms of execution, and its numerical value is the minimum of the allowed
+        // range.
+        int leastPriority, greatestPriority;
+        cudaStatus = cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority);
+        assert(cudaStatus == cudaSuccess);
+        int priorityValue;
+        if (priority == Priority::HIGH)
+            priorityValue = greatestPriority;
+        else if (priority == Priority::REGULAR)
+            priorityValue = greatestPriority + 1;
+        else
+            priorityValue = greatestPriority + 2;
+
+        cudaStatus = cudaStreamCreateWithPriority(&cudaStream, cudaStreamNonBlocking, priorityValue);
         assert(cudaStatus == cudaSuccess);
     }
 
