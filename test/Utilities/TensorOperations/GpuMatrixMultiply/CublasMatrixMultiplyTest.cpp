@@ -55,6 +55,8 @@ void matrixMultiplyCpu(float *A,
                        bool transposeA,
                        bool transposeB,
                        bool accumulate) {
+    omp_set_num_threads(10);
+
     float *A_t = nullptr;
     if (transposeA) {
         A_t = A;
@@ -77,6 +79,7 @@ void matrixMultiplyCpu(float *A,
 
     verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, lda, ldb, ldc, false, false);
 
+#pragma omp parallel for schedule(static, 3)
     for (int ra = 0; ra < rowsA; ra++) {
         for (int cb = 0; cb < colsB; cb++) {
             float accum = 0.0;
@@ -109,6 +112,8 @@ void matrixMultiplyCpuHalf(half *A,
                            bool transposeA,
                            bool transposeB,
                            bool accumulate) {
+    omp_set_num_threads(10);
+
     half *A_t = nullptr;
     if (transposeA) {
         A_t = A;
@@ -131,6 +136,7 @@ void matrixMultiplyCpuHalf(half *A,
 
     assert(colsA == rowsB);
 
+#pragma omp parallel for schedule(static, 3)
     for (int ra = 0; ra < rowsA; ra++) {
         for (int cb = 0; cb < colsB; cb++) {
             float accum = 0.0;
@@ -146,7 +152,7 @@ void matrixMultiplyCpuHalf(half *A,
 
     if (transposeA)
         delete A;
-    if (transposeA)
+    if (transposeB)
         delete B;
 }
 
@@ -433,21 +439,34 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
     }
 }
 
-/*
 TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
     srand(time(nullptr));
 
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
+        bool transposeA = rand() % 2;
+        bool transposeB = rand() % 2;
+
         int rowsA = 128 + (rand() % 1500);
         int colsA = 128 + (rand() % 1500);
+        int rowsB = 128 + (rand() % 1500);
         int colsB = 128 + (rand() % 1500);
+
+        // Now make the operation legal
+        if (!transposeA && !transposeB)
+            rowsB = colsA;
+        if (!transposeA && transposeB)
+            colsB = colsA;
+        if (transposeA && !transposeB)
+            rowsB = rowsA;
+        if (transposeA && transposeB)
+            colsB = rowsA;
 
         int ldA = colsA;
         int ldB = colsB;
-        int ldC = colsB;
+        int ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -456,15 +475,15 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
             ldC += rand() % 10;
         }
 
-        bool transposeA = false; //rand() % 2;
-        bool transposeB = false; //rand() % 2;
+        int rowsC = transposeA == false ? rowsA : colsA;
+        int colsC = transposeB == false ? colsB : rowsB;
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, colsA, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, rowsA, ldC);
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, rowsB, ldB);
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, rowsC, ldC);
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -481,14 +500,14 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
             }
         }
         half *BMem = (half *)B.getMemPtr();
-        for (int row = 0; row < colsA; ++row) {
+        for (int row = 0; row < rowsB; ++row) {
             for (int col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         half *CMem = (half *)C.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (int row = 0; row < rowsC; ++row) {
+            for (int col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -500,19 +519,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         // printf("\n\nC before:\n");
         // printMatrix(CMem, colsA, colsB, ldC);
 
-
         // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it fixed. Until then no
         // accumulate.
         // bool accumulate = rand() % 2 ? true : false;
         bool accumulate = false;
 
-        // FIXME
+        verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
+
         std::thread cpuWorker(matrixMultiplyCpuHalf,
                               (half *)A.getMemPtr(),
                               (half *)B.getMemPtr(),
                               (half *)C.getMemPtr(),
                               rowsA,
                               colsA,
+                              rowsB,
                               colsB,
                               ldA,
                               ldB,
@@ -523,10 +543,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalKernel(
-                0, rowsA, colsA, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
         else
             CublasMatrixMultiply::instance().chooseOptimalKernel(
-                0, rowsA, colsA, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
 
         bool useWorkspace = rand() % 2;
 
@@ -535,7 +555,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
             int workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
-                0, rowsA, colsA, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -556,6 +576,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
                                                           workspace_d,
                                                           rowsA,
                                                           colsA,
+                                                          rowsB,
                                                           colsB,
                                                           ldA,
                                                           ldB,
@@ -566,16 +587,50 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
                                                           TensorDescriptor::DataType::FP16,
                                                           stream);
             } else {
-                CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, workspace_d, rowsA, colsA, colsB, transposeA, transposeB, accumulate, TensorDescriptor::DataType::FP16,
-stream);
+                CublasMatrixMultiply::instance().multiply(A_d,
+                                                          B_d,
+                                                          C_d,
+                                                          workspace_d,
+                                                          rowsA,
+                                                          colsA,
+                                                          rowsB,
+                                                          colsB,
+                                                          transposeA,
+                                                          transposeB,
+                                                          accumulate,
+                                                          TensorDescriptor::DataType::FP16,
+                                                          stream);
             }
         } else {
             if (useLdVersion) {
-                CublasMatrixMultiply::instance().multiply(
-                    A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, transposeA, transposeB, accumulate, TensorDescriptor::DataType::FP16,
-stream); } else { CublasMatrixMultiply::instance().multiply( A_d, B_d, C_d, rowsA, colsA, colsB, transposeA, transposeB, accumulate,
-TensorDescriptor::DataType::FP16, stream);
+                CublasMatrixMultiply::instance().multiply(A_d,
+                                                          B_d,
+                                                          C_d,
+                                                          rowsA,
+                                                          colsA,
+                                                          rowsB,
+                                                          colsB,
+                                                          ldA,
+                                                          ldB,
+                                                          ldC,
+                                                          transposeA,
+                                                          transposeB,
+                                                          accumulate,
+                                                          TensorDescriptor::DataType::FP16,
+                                                          stream);
+            } else {
+                CublasMatrixMultiply::instance().multiply(A_d,
+                                                          B_d,
+                                                          C_d,
+                                                          rowsA,
+                                                          colsA,
+                                                          rowsB,
+                                                          colsB,
+                                                          transposeA,
+                                                          transposeB,
+                                                          accumulate,
+                                                          TensorDescriptor::DataType::FP16,
+                                                          stream);
             }
         }
 
@@ -583,7 +638,7 @@ TensorDescriptor::DataType::FP16, stream);
         cpuWorker.join();
         stream.synchronize();
 
-        float maxDiff = colsA * 0.005;
+        float maxDiff = transposeA == false ? colsA * 0.005 : rowsA * 0.005;
 
         half *CMemGpu = (half *)C_gpu_h.getMemPtr();
 
@@ -592,13 +647,19 @@ TensorDescriptor::DataType::FP16, stream);
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsA; ++i) {
-            for (int j = 0; j < colsB; ++j) {
-                float diff = abs((float)(CMem[i * ldC + j]) - (float)(CMemGpu[i * ldC + j]));
+        for (int i = 0; i < rowsC; ++i) {
+            for (int j = 0; j < colsC; ++j) {
+                float diff = abs((float)CMem[i * ldC + j] - (float)CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d bcols %d\n", rowsA, colsA, colsB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, float(CMem[i * ldC + j]), float(CMemGpu[i * ldC + j]));
+                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                           rowsA,
+                           colsA,
+                           rowsB,
+                           colsB,
+                           transposeA,
+                           transposeB);
+                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, (float)CMem[i * ldC + j], (float)CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
@@ -613,14 +674,28 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
+        bool transposeA = rand() % 2;
+        bool transposeB = rand() % 2;
+
         int rowsA = 128 + (rand() % 1500);
         int colsA = 128 + (rand() % 1500);
+        int rowsB = 128 + (rand() % 1500);
         int colsB = 128 + (rand() % 1500);
+
+        // Now make the operation legal
+        if (!transposeA && !transposeB)
+            rowsB = colsA;
+        if (!transposeA && transposeB)
+            colsB = colsA;
+        if (transposeA && !transposeB)
+            rowsB = rowsA;
+        if (transposeA && transposeB)
+            colsB = rowsA;
 
         int ldA = colsA;
         int ldB = colsB;
-        int ldC = colsB;
+        int ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -629,12 +704,15 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
             ldC += rand() % 10;
         }
 
+        int rowsC = transposeA == false ? rowsA : colsA;
+        int colsC = transposeB == false ? colsB : rowsB;
+
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, colsA, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, rowsA, ldC);
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, rowsB, ldB);
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, rowsC, ldC);
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -651,14 +729,14 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
             }
         }
         float *BMem = (float *)B.getMemPtr();
-        for (int row = 0; row < colsA; ++row) {
+        for (int row = 0; row < rowsB; ++row) {
             for (int col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         float *CMem = (float *)C.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (int row = 0; row < rowsC; ++row) {
+            for (int col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -675,18 +753,21 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
         // bool accumulate = rand() % 2 ? true : false;
         bool accumulate = false;
 
+        verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
+
         std::thread cpuWorker(matrixMultiplyCpu,
                               (float *)A.getMemPtr(),
                               (float *)B.getMemPtr(),
                               (float *)C.getMemPtr(),
                               rowsA,
                               colsA,
+                              rowsB,
                               colsB,
                               ldA,
                               ldB,
                               ldC,
-                              false,
-                              false,
+                              transposeA,
+                              transposeB,
                               accumulate);
 
         A_d.copyFromAsync(A, stream);
@@ -694,18 +775,31 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
         C_d.copyFromAsync(C, stream);
 
         if (useLdVersion) {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
+            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
+                                                                                B_d,
+                                                                                C_d,
+                                                                                rowsA,
+                                                                                colsA,
+                                                                                rowsB,
+                                                                                colsB,
+                                                                                ldA,
+                                                                                ldB,
+                                                                                ldC,
+                                                                                transposeA,
+                                                                                transposeB,
+                                                                                accumulate,
+                                                                                TensorDescriptor::DataType::FP32,
+                                                                                stream);
         } else {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP32, stream);
+                A_d, B_d, C_d, rowsA, colsA, rowsB, colsB, transposeA, transposeB, accumulate, TensorDescriptor::DataType::FP32, stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
         cpuWorker.join();
         stream.synchronize();
 
-        float maxDiff = colsA * 0.0001;
+        float maxDiff = transposeA == false ? colsA * 0.0001 : rowsA * 0.0001;
 
         float *CMemGpu = (float *)C_gpu_h.getMemPtr();
 
@@ -714,13 +808,19 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsA; ++i) {
-            for (int j = 0; j < colsB; ++j) {
-                float diff = abs((float)(CMem[i * ldC + j]) - (float)(CMemGpu[i * ldC + j]));
+        for (int i = 0; i < rowsC; ++i) {
+            for (int j = 0; j < colsC; ++j) {
+                float diff = abs(CMem[i * ldC + j] - CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d bcols %d\n", rowsA, colsA, colsB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, float(CMem[i * ldC + j]), float(CMemGpu[i * ldC + j]));
+                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                           rowsA,
+                           colsA,
+                           rowsB,
+                           colsB,
+                           transposeA,
+                           transposeB);
+                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, CMem[i * ldC + j], CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
@@ -735,14 +835,28 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
+        bool transposeA = rand() % 2;
+        bool transposeB = rand() % 2;
+
         int rowsA = 128 + (rand() % 1500);
         int colsA = 128 + (rand() % 1500);
+        int rowsB = 128 + (rand() % 1500);
         int colsB = 128 + (rand() % 1500);
+
+        // Now make the operation legal
+        if (!transposeA && !transposeB)
+            rowsB = colsA;
+        if (!transposeA && transposeB)
+            colsB = colsA;
+        if (transposeA && !transposeB)
+            rowsB = rowsA;
+        if (transposeA && transposeB)
+            colsB = rowsA;
 
         int ldA = colsA;
         int ldB = colsB;
-        int ldC = colsB;
+        int ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -751,12 +865,15 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
             ldC += rand() % 10;
         }
 
+        int rowsC = transposeA == false ? rowsA : colsA;
+        int colsC = transposeB == false ? colsB : rowsB;
+
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, colsA, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, rowsA, ldC);
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, rowsB, ldB);
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, rowsC, ldC);
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -773,14 +890,14 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
             }
         }
         half *BMem = (half *)B.getMemPtr();
-        for (int row = 0; row < colsA; ++row) {
+        for (int row = 0; row < rowsB; ++row) {
             for (int col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         half *CMem = (half *)C.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (int row = 0; row < rowsC; ++row) {
+            for (int col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -797,37 +914,60 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         // bool accumulate = rand() % 2 ? true : false;
         bool accumulate = false;
 
+        verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
+
         std::thread cpuWorker(matrixMultiplyCpuHalf,
                               (half *)A.getMemPtr(),
                               (half *)B.getMemPtr(),
                               (half *)C.getMemPtr(),
                               rowsA,
                               colsA,
+                              rowsB,
                               colsB,
                               ldA,
                               ldB,
                               ldC,
-                              false,
-                              false,
+                              transposeA,
+                              transposeB,
                               accumulate);
+
+        if (useLdVersion)
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+        else
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
 
         A_d.copyFromAsync(A, stream);
         B_d.copyFromAsync(B, stream);
         C_d.copyFromAsync(C, stream);
 
         if (useLdVersion) {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, ldA, ldB, ldC, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
+            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
+                                                                                B_d,
+                                                                                C_d,
+                                                                                rowsA,
+                                                                                colsA,
+                                                                                rowsB,
+                                                                                colsB,
+                                                                                ldA,
+                                                                                ldB,
+                                                                                ldC,
+                                                                                transposeA,
+                                                                                transposeB,
+                                                                                accumulate,
+                                                                                TensorDescriptor::DataType::FP16,
+                                                                                stream);
         } else {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, colsB, false, false, accumulate, TensorDescriptor::DataType::FP16, stream);
+                A_d, B_d, C_d, rowsA, colsA, rowsB, colsB, transposeA, transposeB, accumulate, TensorDescriptor::DataType::FP16, stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
         cpuWorker.join();
         stream.synchronize();
 
-        float maxDiff = colsA * 0.005;
+        float maxDiff = transposeA == false ? colsA * 0.005 : rowsA * 0.005;
 
         half *CMemGpu = (half *)C_gpu_h.getMemPtr();
 
@@ -836,13 +976,19 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsA; ++i) {
-            for (int j = 0; j < colsB; ++j) {
-                float diff = abs((float)(CMem[i * ldC + j]) - (float)(CMemGpu[i * ldC + j]));
+        for (int i = 0; i < rowsC; ++i) {
+            for (int j = 0; j < colsC; ++j) {
+                float diff = abs((float)CMem[i * ldC + j] - (float)CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d bcols %d\n", rowsA, colsA, colsB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, float(CMem[i * ldC + j]), float(CMemGpu[i * ldC + j]));
+                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                           rowsA,
+                           colsA,
+                           rowsB,
+                           colsB,
+                           transposeA,
+                           transposeB);
+                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, (float)CMem[i * ldC + j], (float)CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
@@ -850,8 +996,6 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         }
     }
 }
-
-*/
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

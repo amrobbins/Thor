@@ -258,6 +258,16 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
     cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    if (transposeA) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+    if (transposeB) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
 
     int64_t ld;
     cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
