@@ -246,42 +246,45 @@ class CublasKernel : private ReferenceCounted {
                        Stream stream) {
         assert(!uninitialized());
 
+        uint64_t rowsC = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
+                                                                                        : cublasKernelRequirement->kernelRequirement.colsA;
+
         // Check that everything matches up
         vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
         assert(ADimensions.size() == 2);
         assert(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
         assert(ADimensions[1] == ldA);
         if (A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.getADataType() == CUDA_R_32F);
+            assert(cublasKernelRequirement->operationType.ADataType == CUDA_R_32F);
         else
-            assert(cublasKernelRequirement->operationType.getADataType() == CUDA_R_16F);
+            assert(cublasKernelRequirement->operationType.ADataType == CUDA_R_16F);
 
         vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
         assert(BDimensions.size() == 2);
-        assert(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.colsA);
+        assert(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsB);
         assert(BDimensions[1] == ldB);
         if (B.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.getBDataType() == CUDA_R_32F);
+            assert(cublasKernelRequirement->operationType.BDataType == CUDA_R_32F);
         else
-            assert(cublasKernelRequirement->operationType.getBDataType() == CUDA_R_16F);
+            assert(cublasKernelRequirement->operationType.BDataType == CUDA_R_16F);
 
         vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
         assert(CDimensions.size() == 2);
-        assert(CDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
+        assert(CDimensions[0] == rowsC);
         assert(CDimensions[1] == ldC);
         if (C.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.getCDataType() == CUDA_R_32F);
+            assert(cublasKernelRequirement->operationType.CDataType == CUDA_R_32F);
         else
-            assert(cublasKernelRequirement->operationType.getCDataType() == CUDA_R_16F);
+            assert(cublasKernelRequirement->operationType.CDataType == CUDA_R_16F);
 
         vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
         assert(DDimensions.size() == 2);
-        assert(DDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
+        assert(DDimensions[0] == rowsC);
         assert(DDimensions[1] == ldD);
         if (D.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            assert(cublasKernelRequirement->operationType.getDDataType() == CUDA_R_32F);
+            assert(cublasKernelRequirement->operationType.DDataType == CUDA_R_32F);
         else
-            assert(cublasKernelRequirement->operationType.getDDataType() == CUDA_R_16F);
+            assert(cublasKernelRequirement->operationType.DDataType == CUDA_R_16F);
 
         assert(C.getMemPtr() != A.getMemPtr());
         assert(C.getMemPtr() != B.getMemPtr());
@@ -343,9 +346,14 @@ class CublasKernel : private ReferenceCounted {
 
         double timePerKernelMs = cublasKernelOptions->runStats.getAverageRunTimeMilliseconds();
         string timePerKernelMsString = std::to_string(timePerKernelMs);
-        double TFLOPS = (2.0 * cublasKernelRequirement->kernelRequirement.rowsA * cublasKernelRequirement->kernelRequirement.colsA *
-                         cublasKernelRequirement->kernelRequirement.colsB) /
-                        (timePerKernelMs * 1.0e9);
+
+        int finalRowsA = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
+                                                                                        : cublasKernelRequirement->kernelRequirement.colsA;
+        int finalColsA = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.colsA
+                                                                                        : cublasKernelRequirement->kernelRequirement.rowsA;
+        int finalColsB = cublasKernelRequirement->kernelRequirement.transposeB == false ? cublasKernelRequirement->kernelRequirement.colsB
+                                                                                        : cublasKernelRequirement->kernelRequirement.rowsB;
+        double TFLOPS = (2.0 * finalRowsA * finalColsA * finalColsB) / (timePerKernelMs * 1.0e9);
         string TFLOPSString = std::to_string(TFLOPS);
 
         description += " kernelTime: " + timePerKernelMsString + "ms";
@@ -411,20 +419,19 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus_t cublasStatus;
 
         operationDesc = new cublasLtMatmulDesc_t;
-        cublasStatus = cublasLtMatmulDescCreate(operationDesc,
-                                                cublasKernelRequirement->operationType.getComputeDataType(),
-                                                cublasKernelRequirement->operationType.getScaleDataType());
+        cublasStatus = cublasLtMatmulDescCreate(
+            operationDesc, cublasKernelRequirement->operationType.computeDataType, cublasKernelRequirement->operationType.scaleDataType);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
         const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
         cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        if (cublasKernelRequirement->operationType.getTransposeA()) {
+        if (cublasKernelRequirement->kernelRequirement.transposeA) {
             cublasOperation_t transpose = CUBLAS_OP_T;
             cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
-        if (cublasKernelRequirement->operationType.getTransposeB()) {
+        if (cublasKernelRequirement->kernelRequirement.transposeB) {
             cublasOperation_t transpose = CUBLAS_OP_T;
             cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -435,7 +442,7 @@ class CublasKernel : private ReferenceCounted {
 
         ADesc = new cublasLtMatrixLayout_t;
         cublasStatus = cublasLtMatrixLayoutCreate(ADesc,
-                                                  cublasKernelRequirement->operationType.getADataType(),
+                                                  cublasKernelRequirement->operationType.ADataType,
                                                   cublasKernelRequirement->kernelRequirement.rowsA,
                                                   cublasKernelRequirement->kernelRequirement.colsA,
                                                   cublasKernelRequirement->kernelRequirement.ldA);
@@ -448,8 +455,8 @@ class CublasKernel : private ReferenceCounted {
 
         BDesc = new cublasLtMatrixLayout_t;
         cublasStatus = cublasLtMatrixLayoutCreate(BDesc,
-                                                  cublasKernelRequirement->operationType.getBDataType(),
-                                                  cublasKernelRequirement->kernelRequirement.colsA,
+                                                  cublasKernelRequirement->operationType.BDataType,
+                                                  cublasKernelRequirement->kernelRequirement.rowsB,
                                                   cublasKernelRequirement->kernelRequirement.colsB,
                                                   cublasKernelRequirement->kernelRequirement.ldB);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -459,12 +466,14 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
+        int rowsC = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
+                                                                                   : cublasKernelRequirement->kernelRequirement.colsA;
+        int colsC = cublasKernelRequirement->kernelRequirement.transposeB == false ? cublasKernelRequirement->kernelRequirement.colsB
+                                                                                   : cublasKernelRequirement->kernelRequirement.rowsB;
+
         CDesc = new cublasLtMatrixLayout_t;
-        cublasStatus = cublasLtMatrixLayoutCreate(CDesc,
-                                                  cublasKernelRequirement->operationType.getCDataType(),
-                                                  cublasKernelRequirement->kernelRequirement.rowsA,
-                                                  cublasKernelRequirement->kernelRequirement.colsB,
-                                                  cublasKernelRequirement->kernelRequirement.ldC);
+        cublasStatus = cublasLtMatrixLayoutCreate(
+            CDesc, cublasKernelRequirement->operationType.CDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldC);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -473,11 +482,8 @@ class CublasKernel : private ReferenceCounted {
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
         DDesc = new cublasLtMatrixLayout_t;
-        cublasStatus = cublasLtMatrixLayoutCreate(DDesc,
-                                                  cublasKernelRequirement->operationType.getDDataType(),
-                                                  cublasKernelRequirement->kernelRequirement.rowsA,
-                                                  cublasKernelRequirement->kernelRequirement.colsB,
-                                                  cublasKernelRequirement->kernelRequirement.ldC);
+        cublasStatus = cublasLtMatrixLayoutCreate(
+            DDesc, cublasKernelRequirement->operationType.DDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldC);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -492,12 +498,12 @@ class CublasKernel : private ReferenceCounted {
                 continue;
 
             cublasStatus = cublasLtMatmulAlgoInit(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                                  cublasKernelRequirement->operationType.getComputeDataType(),
-                                                  cublasKernelRequirement->operationType.getScaleDataType(),
-                                                  cublasKernelRequirement->operationType.getADataType(),
-                                                  cublasKernelRequirement->operationType.getBDataType(),
-                                                  cublasKernelRequirement->operationType.getCDataType(),
-                                                  cublasKernelRequirement->operationType.getDDataType(),
+                                                  cublasKernelRequirement->operationType.computeDataType,
+                                                  cublasKernelRequirement->operationType.scaleDataType,
+                                                  cublasKernelRequirement->operationType.ADataType,
+                                                  cublasKernelRequirement->operationType.BDataType,
+                                                  cublasKernelRequirement->operationType.CDataType,
+                                                  cublasKernelRequirement->operationType.DDataType,
                                                   cublasKernelOptions->algorithmId,
                                                   &((*algorithmPerGpu)[gpuNum]));
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);

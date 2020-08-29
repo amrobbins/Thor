@@ -1,7 +1,5 @@
 #pragma once
 
-#include "Utilities/TensorOperations/GpuMatrixMultiply/KernelSpec.h"
-
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -12,24 +10,116 @@
 
 using std::atomic;
 
-class OperationType {
-   public:
+struct KernelRequirement {
+    KernelRequirement(const string gpuType,
+                      const int rowsA,
+                      const int colsA,
+                      const int rowsB,
+                      const int colsB,
+                      const bool transposeA,
+                      const bool transposeB,
+                      const int ldA,
+                      const int ldB,
+                      const int ldC,
+                      const bool allowWorkspace)
+        : gpuType(gpuType),
+          rowsA(rowsA),
+          colsA(colsA),
+          rowsB(rowsB),
+          colsB(colsB),
+          transposeA(transposeA),
+          transposeB(transposeB),
+          ldA(ldA),
+          ldB(ldB),
+          ldC(ldC),
+          allowWorkspace(allowWorkspace) {
+        assert(rowsA > 0);
+        assert(colsA > 0);
+        assert(rowsB > 0);
+        assert(colsB > 0);
+        assert(ldA >= colsA);
+        assert(ldB >= colsB);
+
+        int finalColsA = transposeA == false ? colsA : rowsA;
+        int finalColsB = transposeB == false ? colsB : rowsB;
+        int finalRowsB = transposeB == false ? rowsB : colsB;
+
+        /*
+        printf("rowsA %d colsA %d rowsB %d colsB %d transposeA %d transposeB %d ldA %d ldB %d ldC %d\n",
+               rowsA,
+               colsA,
+               rowsB,
+               colsB,
+               transposeA,
+               transposeB,
+               ldA,
+               ldB,
+               ldC);
+        */
+
+        assert(ldC >= finalColsB);
+        assert(finalColsA == finalRowsB);
+    }
+
+    const string gpuType;
+    const int rowsA;
+    const int colsA;
+    const int rowsB;
+    const int colsB;
+    const bool transposeA;
+    const bool transposeB;
+    const int ldA;
+    const int ldB;
+    const int ldC;
+    const bool allowWorkspace;
+
+    bool operator==(const KernelRequirement &other) const {
+        return gpuType == other.gpuType && rowsA == other.rowsA && colsA == other.colsA && rowsB == other.rowsB && colsB == other.colsB &&
+               transposeA == other.transposeA && transposeB == other.transposeB && ldA == other.ldA && ldB == other.ldB &&
+               ldC == other.ldC && allowWorkspace == other.allowWorkspace;
+    }
+
+    bool operator<(const KernelRequirement &other) const {
+        long total = rowsA + colsA + rowsB + colsB + ldA + ldB + ldC + (int)allowWorkspace + (int)transposeA + (int)transposeB;
+        long otherTotal = other.rowsA + other.colsA + other.rowsB + other.colsB + other.ldA + other.ldB + other.ldC +
+                          (int)other.allowWorkspace + (int)other.transposeA + (int)other.transposeB;
+        return total < otherTotal;
+    }
+};
+
+namespace std {
+template <>
+struct hash<KernelRequirement> {
+    std::size_t operator()(const KernelRequirement &k) const {
+        size_t hashValue;
+        hashValue = (hash<int>()(k.allowWorkspace)) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.rowsA))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.colsA))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.rowsB))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.colsB))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.ldA))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.ldB))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.ldC))) << 1;
+        hashValue = hashValue ^ hash<string>()(k.gpuType);
+
+        return hashValue;
+    }
+};
+}  // namespace std
+
+struct OperationType {
     OperationType(cublasComputeType_t computeDataType,
                   cudaDataType_t scaleDataType,
                   cudaDataType_t ADataType,
                   cudaDataType_t BDataType,
                   cudaDataType_t CDataType,
-                  cudaDataType_t DDataType,
-                  bool transposeA,
-                  bool transposeB)
+                  cudaDataType_t DDataType)
         : computeDataType(computeDataType),
           scaleDataType(scaleDataType),
           ADataType(ADataType),
           BDataType(BDataType),
           CDataType(CDataType),
-          DDataType(DDataType),
-          transposeA(transposeA),
-          transposeB(transposeB) {
+          DDataType(DDataType) {
         // Below is exactly the bounds of current support
         assert(computeDataType == CUBLAS_COMPUTE_32F);
         assert(scaleDataType == CUDA_R_32F);
@@ -42,30 +132,17 @@ class OperationType {
         assert(ADataType == DDataType);
     }
 
-    cublasComputeType_t getComputeDataType() const { return computeDataType; }
-    cudaDataType_t getScaleDataType() const { return scaleDataType; }
-    cudaDataType_t getADataType() const { return ADataType; }
-    cudaDataType_t getBDataType() const { return BDataType; }
-    cudaDataType_t getCDataType() const { return CDataType; }
-    cudaDataType_t getDDataType() const { return DDataType; }
-    bool getTransposeA() const { return transposeA; }
-    bool getTransposeB() const { return transposeB; }
-
-    inline bool operator==(const OperationType &other) const {
-        return computeDataType == other.computeDataType && scaleDataType == other.scaleDataType && ADataType == other.ADataType &&
-               BDataType == other.BDataType && CDataType == other.CDataType && DDataType == other.DDataType &&
-               transposeA == other.transposeA && transposeB == other.transposeB;
-    }
-
-   private:
     const cublasComputeType_t computeDataType;
     const cudaDataType_t scaleDataType;
     const cudaDataType_t ADataType;
     const cudaDataType_t BDataType;
     const cudaDataType_t CDataType;
     const cudaDataType_t DDataType;
-    const bool transposeA;
-    const bool transposeB;
+
+    inline bool operator==(const OperationType &other) const {
+        return computeDataType == other.computeDataType && scaleDataType == other.scaleDataType && ADataType == other.ADataType &&
+               BDataType == other.BDataType && CDataType == other.CDataType && DDataType == other.DDataType;
+    }
 };
 
 struct CublasKernelRequirement {
@@ -89,12 +166,12 @@ template <>
 struct hash<OperationType> {
     std::size_t operator()(const OperationType &o) const {
         size_t hashValue = 0;
-        hashValue |= o.getComputeDataType() == CUBLAS_COMPUTE_32F ? 7 : 13;
-        hashValue |= o.getScaleDataType() == CUDA_R_32F ? 50 : 70;
-        hashValue |= o.getADataType() == CUDA_R_32F ? 500 : 900;
-        hashValue |= o.getBDataType() == CUDA_R_32F ? 2000 : 3400;
-        hashValue |= o.getCDataType() == CUDA_R_32F ? 10000 : 30000;
-        hashValue |= o.getDDataType() == CUDA_R_32F ? 40000 : 55000;
+        hashValue |= o.computeDataType == CUBLAS_COMPUTE_32F ? 7 : 13;
+        hashValue |= o.scaleDataType == CUDA_R_32F ? 50 : 70;
+        hashValue |= o.ADataType == CUDA_R_32F ? 500 : 900;
+        hashValue |= o.BDataType == CUDA_R_32F ? 2000 : 3400;
+        hashValue |= o.CDataType == CUDA_R_32F ? 10000 : 30000;
+        hashValue |= o.DDataType == CUDA_R_32F ? 40000 : 55000;
         return hashValue;
     }
 };
