@@ -161,19 +161,34 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(outputTensor.isPresent());
         assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-        CublasMatrixMultiply::instance().multiply(inputTensor,
-                                                  weights,
-                                                  outputTensor,
-                                                  workspaceForward,
-                                                  batchSize,
-                                                  numInputFeatures,
-                                                  numInputFeatures,
-                                                  numOutputFeatures,
-                                                  false,
-                                                  false,
-                                                  false,
-                                                  TensorDescriptor::DataType::FP16,
-                                                  stream);
+        if (workspaceForward.isPresent()) {
+            CublasMatrixMultiply::instance().multiply(inputTensor,
+                                                      weights,
+                                                      outputTensor,
+                                                      workspaceForward,
+                                                      batchSize,
+                                                      numInputFeatures,
+                                                      numInputFeatures,
+                                                      numOutputFeatures,
+                                                      false,
+                                                      false,
+                                                      false,
+                                                      TensorDescriptor::DataType::FP16,
+                                                      stream);
+        } else {
+            CublasMatrixMultiply::instance().multiply(inputTensor,
+                                                      weights,
+                                                      outputTensor,
+                                                      batchSize,
+                                                      numInputFeatures,
+                                                      numInputFeatures,
+                                                      numOutputFeatures,
+                                                      false,
+                                                      false,
+                                                      false,
+                                                      TensorDescriptor::DataType::FP16,
+                                                      stream);
+        }
 
         if (hasBias) {
             cudnnStatus_t cudnnStatus;
@@ -204,34 +219,64 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         if (errorOut.isPresent()) {
             assert(dataStream.isPresent());
 
-            CublasMatrixMultiply::instance().multiply(errorIn,
-                                                      weights,
-                                                      errorOut,
-                                                      workspaceBackwardData,
-                                                      batchSize,
-                                                      numOutputFeatures,
-                                                      numInputFeatures,
-                                                      numOutputFeatures,
-                                                      false,
-                                                      true,
-                                                      false,
-                                                      TensorDescriptor::DataType::FP16,
-                                                      dataStream);
+            if (workspaceBackwardData.isPresent()) {
+                CublasMatrixMultiply::instance().multiply(errorIn,
+                                                          weights,
+                                                          errorOut,
+                                                          workspaceBackwardData,
+                                                          batchSize,
+                                                          numOutputFeatures,
+                                                          numInputFeatures,
+                                                          numOutputFeatures,
+                                                          false,
+                                                          true,
+                                                          false,
+                                                          TensorDescriptor::DataType::FP16,
+                                                          dataStream);
+            } else {
+                CublasMatrixMultiply::instance().multiply(errorIn,
+                                                          weights,
+                                                          errorOut,
+                                                          batchSize,
+                                                          numOutputFeatures,
+                                                          numInputFeatures,
+                                                          numOutputFeatures,
+                                                          false,
+                                                          true,
+                                                          false,
+                                                          TensorDescriptor::DataType::FP16,
+                                                          dataStream);
+            }
         }
 
-        CublasMatrixMultiply::instance().multiply(dataIn,
-                                                  errorIn,
-                                                  weightsGradient,
-                                                  workspaceBackwardWeights,
-                                                  batchSize,
-                                                  numInputFeatures,
-                                                  batchSize,
-                                                  numOutputFeatures,
-                                                  true,
-                                                  false,
-                                                  accumulateGradient,
-                                                  TensorDescriptor::DataType::FP16,
-                                                  gradientUpdateStream);
+        if (workspaceBackwardWeights.isPresent()) {
+            CublasMatrixMultiply::instance().multiply(dataIn,
+                                                      errorIn,
+                                                      weightsGradient,
+                                                      workspaceBackwardWeights,
+                                                      batchSize,
+                                                      numInputFeatures,
+                                                      batchSize,
+                                                      numOutputFeatures,
+                                                      true,
+                                                      false,
+                                                      accumulateGradient,
+                                                      TensorDescriptor::DataType::FP16,
+                                                      gradientUpdateStream);
+        } else {
+            CublasMatrixMultiply::instance().multiply(dataIn,
+                                                      errorIn,
+                                                      weightsGradient,
+                                                      batchSize,
+                                                      numInputFeatures,
+                                                      batchSize,
+                                                      numOutputFeatures,
+                                                      true,
+                                                      false,
+                                                      accumulateGradient,
+                                                      TensorDescriptor::DataType::FP16,
+                                                      gradientUpdateStream);
+        }
 
         if (hasBias) {
             cudnnStatus =
