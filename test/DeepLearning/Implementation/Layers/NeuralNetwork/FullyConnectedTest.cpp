@@ -15,6 +15,11 @@
 
 using std::vector;
 
+// FIXME: make a test with accumulate once cublasLt bug is fixed.
+// FIXME: make a test for multiple connections
+
+void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases);
+
 TEST(FullyConnected, FullyConnectedWorks) {
     srand(time(NULL));
 
@@ -27,8 +32,8 @@ TEST(FullyConnected, FullyConnectedWorks) {
         uint64_t numInputFeatures = (rand() % 300) + 1;
         uint64_t numOutputFeatures = (rand() % 300) + 1;
         uint64_t batchSize = (rand() % 300) + 1;
-        bool inferenceOnly = true;  // FIXME
-        bool hasBiases = false;     // FIXME
+        bool inferenceOnly = (rand() % 4) == 0;
+        bool hasBiases = false;  // FIXME
         Optional<float> learningRate;
         if (!inferenceOnly)
             learningRate = (1 + (rand() % 20000)) / 10000.0f;
@@ -68,6 +73,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         layers.push_back(new NetworkOutput(cpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
+
         featureOutGpu_h = layers.back()->getFeatureOutput();
 
         fullyConnectedLayer->getWeights().copyFromAsync(weights, stream);
@@ -97,10 +103,10 @@ TEST(FullyConnected, FullyConnectedWorks) {
         half *cpuFeatureOut = (half *)featureOut.getMemPtr();
         half *gpuFeatureOut = (half *)featureOutGpu_h.getMemPtr();
         int numOutputElements = batchSize * numOutputFeatures;
+        float maxDiff = numInputFeatures * 0.01;
         for (int i = 0; i < numOutputElements; ++i) {
-            float thresh = std::max(abs((float)cpuFeatureOut[i]) / 500, 0.01f);
-            EXPECT_LT(abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])), thresh);
-            if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= thresh)
+            EXPECT_LT(abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])), maxDiff);
+            if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= maxDiff)
                 printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));
         }
 
@@ -108,10 +114,109 @@ TEST(FullyConnected, FullyConnectedWorks) {
             LayerTestHelper::tearDownNetwork(layers);
             continue;
         }
+
+        backwardPass(fullyConnectedLayer, hasBiases);
+
+        LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
-// FIXME: make a test for multiple connections
+void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases) {
+    assert(hasBiases == false);  // FIXME
+
+    Stream stream = fullyConnectedLayer->getStreams()[0];
+
+    Tensor featureInput = fullyConnectedLayer->getFeatureInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
+    Tensor errorInput = fullyConnectedLayer->getErrorInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
+    Tensor errorOutput = fullyConnectedLayer->getErrorOutputs().front().get().clone(TensorPlacement::MemDevices::CPU);
+    Tensor weights = fullyConnectedLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
+    Tensor weightsGradient = fullyConnectedLayer->getWeightsGradient().get().clone(TensorPlacement::MemDevices::CPU);
+    Tensor biases;
+    Tensor biasesGradient;
+    if (hasBiases) {
+        biases = fullyConnectedLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
+        biasesGradient = fullyConnectedLayer->getBiasesGradient().get().clone(TensorPlacement::MemDevices::CPU);
+    }
+
+    int batchSize = featureInput.getDescriptor().getDimensions()[0];
+    int numInputFeatures = featureInput.getDescriptor().getDimensions()[1];
+    int numOutputFeatures = errorInput.getDescriptor().getDimensions()[1];
+
+    // featureIn, weights and biases are populated still by the forward pass
+    // just need to populate errorIn
+    featureInput.copyFromAsync(fullyConnectedLayer->getFeatureInputs().front(), stream);
+    weights.copyFromAsync(fullyConnectedLayer->getWeights(), stream);
+    if (hasBiases) {
+        biases.copyFromAsync(fullyConnectedLayer->getBiases(), stream);
+        biasesGradient.copyFromAsync(fullyConnectedLayer->getBiasesGradient(), stream);
+    }
+    stream.synchronize();
+
+    const int errorInputSize = batchSize * numOutputFeatures;
+    half *errorInputMem = (half *)errorInput.getMemPtr();
+    for (int i = 0; i < errorInputSize; ++i) {
+        errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+    }
+    fullyConnectedLayer->getErrorInputs().front().get().copyFromAsync(errorInput, stream);
+
+    fullyConnectedLayer->backward(fullyConnectedLayer->getErrorInputs().front());
+
+    matrixMultiplyCpuHalf((half *)errorInput.getMemPtr(),
+                          (half *)weights.getMemPtr(),
+                          (half *)errorOutput.getMemPtr(),
+                          batchSize,
+                          numOutputFeatures,
+                          numInputFeatures,
+                          numOutputFeatures,
+                          numOutputFeatures,
+                          numOutputFeatures,
+                          numInputFeatures,
+                          false,
+                          true,
+                          false);
+
+    matrixMultiplyCpuHalf((half *)featureInput.getMemPtr(),
+                          (half *)errorInput.getMemPtr(),
+                          (half *)weightsGradient.getMemPtr(),
+                          batchSize,
+                          numInputFeatures,
+                          batchSize,
+                          numOutputFeatures,
+                          numInputFeatures,
+                          numOutputFeatures,
+                          numOutputFeatures,
+                          true,
+                          false,
+                          false);
+
+    Tensor errorOutputGpu_h = fullyConnectedLayer->getErrorOutputs().front().get().clone(TensorPlacement::MemDevices::CPU);
+    Tensor weightsGradientGpu_h = fullyConnectedLayer->getWeightsGradient().get().clone(TensorPlacement::MemDevices::CPU);
+
+    errorOutputGpu_h.copyFromAsync(fullyConnectedLayer->getErrorOutputs().front(), stream);
+    weightsGradientGpu_h.copyFromAsync(fullyConnectedLayer->getWeightsGradient(), stream);
+
+    stream.synchronize();
+
+    half *cpuErrorOutput = (half *)errorOutput.getMemPtr();
+    half *gpuErrorOutput = (half *)errorOutputGpu_h.getMemPtr();
+    int numOutputElements = batchSize * numInputFeatures;
+    float maxDiff = numOutputFeatures * 0.01;
+    for (int i = 0; i < numOutputElements; ++i) {
+        EXPECT_LT(abs((float)(cpuErrorOutput[i]) - (float)(gpuErrorOutput[i])), maxDiff);
+        if (abs((float)(cpuErrorOutput[i]) - (float)(gpuErrorOutput[i])) >= maxDiff)
+            printf("%f %f\n", (float)(cpuErrorOutput[i]), (float)(gpuErrorOutput[i]));
+    }
+
+    half *cpuWeightsGradient = (half *)weightsGradient.getMemPtr();
+    half *gpuWeightsGradient = (half *)weightsGradientGpu_h.getMemPtr();
+    int numWeights = numInputFeatures * numOutputFeatures;
+    maxDiff = batchSize * 0.01;
+    for (int i = 0; i < numWeights; ++i) {
+        EXPECT_LT(abs((float)(cpuWeightsGradient[i]) - (float)(gpuWeightsGradient[i])), maxDiff);
+        if (abs((float)(cpuWeightsGradient[i]) - (float)(gpuWeightsGradient[i])) >= maxDiff)
+            printf("%f %f\n", (float)(cpuWeightsGradient[i]), (float)(gpuWeightsGradient[i]));
+    }
+}
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

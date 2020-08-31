@@ -79,8 +79,10 @@ struct RunStats {
     }
 
     inline bool operator<(RunStats &rhs) {
-        assert(!errorFlag);
-        assert(!rhs.errorFlag);
+        if (errorFlag)
+            return false;
+        else if (rhs.errorFlag)
+            return true;
         return getAverageRunTimeMilliseconds() < rhs.getAverageRunTimeMilliseconds();
     }
 
@@ -344,20 +346,25 @@ class CublasKernel : private ReferenceCounted {
         int workspaceSize = getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
         description += " workspace: " + std::to_string(workspaceSize);
 
-        double timePerKernelMs = cublasKernelOptions->runStats.getAverageRunTimeMilliseconds();
-        string timePerKernelMsString = std::to_string(timePerKernelMs);
+        if (cublasKernelOptions->runStats.runCount > 0) {
+            double timePerKernelMs = cublasKernelOptions->runStats.getAverageRunTimeMilliseconds();
+            string timePerKernelMsString = std::to_string(timePerKernelMs);
 
-        int finalRowsA = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.rowsA
-                                                                                        : cublasKernelRequirement->kernelRequirement.colsA;
-        int finalColsA = cublasKernelRequirement->kernelRequirement.transposeA == false ? cublasKernelRequirement->kernelRequirement.colsA
-                                                                                        : cublasKernelRequirement->kernelRequirement.rowsA;
-        int finalColsB = cublasKernelRequirement->kernelRequirement.transposeB == false ? cublasKernelRequirement->kernelRequirement.colsB
-                                                                                        : cublasKernelRequirement->kernelRequirement.rowsB;
-        double TFLOPS = (2.0 * finalRowsA * finalColsA * finalColsB) / (timePerKernelMs * 1.0e9);
-        string TFLOPSString = std::to_string(TFLOPS);
+            int finalRowsA = cublasKernelRequirement->kernelRequirement.transposeA == false
+                                 ? cublasKernelRequirement->kernelRequirement.rowsA
+                                 : cublasKernelRequirement->kernelRequirement.colsA;
+            int finalColsA = cublasKernelRequirement->kernelRequirement.transposeA == false
+                                 ? cublasKernelRequirement->kernelRequirement.colsA
+                                 : cublasKernelRequirement->kernelRequirement.rowsA;
+            int finalColsB = cublasKernelRequirement->kernelRequirement.transposeB == false
+                                 ? cublasKernelRequirement->kernelRequirement.colsB
+                                 : cublasKernelRequirement->kernelRequirement.rowsB;
+            double TFLOPS = (2.0 * finalRowsA * finalColsA * finalColsB) / (timePerKernelMs * 1.0e9);
+            string TFLOPSString = std::to_string(TFLOPS);
 
-        description += " kernelTime: " + timePerKernelMsString + "ms";
-        description += " TFLOPS: " + TFLOPSString + "\n";
+            description += " kernelTime: " + timePerKernelMsString + "ms";
+            description += " TFLOPS: " + TFLOPSString + "\n";
+        }
 
         return description;
     }
