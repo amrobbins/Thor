@@ -17,6 +17,8 @@
 using std::set;
 using std::vector;
 
+// FIXME: make a test for multiple connections
+
 void backwardPass(Convolution2d *convolution2dLayer,
                   int numOutputElements,
                   int numWeights,
@@ -173,8 +175,8 @@ TEST(Convolution2d, Convolution2dWorks) {
 
         half *cpuFeatureOut = (half *)featureOutputCpu.getMemPtr();
         half *gpuFeatureOut = (half *)featureOutputGpu_h.getMemPtr();
+        const float thresh = std::max(batchSize * (filterWidth * 0.02 + filterHeight * 0.02), 1.0);
         for (int i = 0; i < numOutputElements; ++i) {
-            float thresh = std::max(abs((float)cpuFeatureOut[i]) / 500, 0.01f);
             EXPECT_LT(abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])), thresh);
             if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= thresh)
                 printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));
@@ -282,6 +284,8 @@ void backwardPass(Convolution2d *convolution2dLayer,
 
     if (accumulate) {
         weightsGradientCpu.copyFromAsync(weightsGradientGpu, stream);
+    } else {
+        memset(weightsGradientCpu.getMemPtr(), 0, weightsGradientCpu.getDescriptor().getArraySizeInBytes());
     }
 
     // printf("cpu before %f\n", (float)*(half*)weightsGradientCpu.getElement({0, 0, 0, 0}));
@@ -303,6 +307,8 @@ void backwardPass(Convolution2d *convolution2dLayer,
     // Backward Data
     ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputCpu, weightsCpu, errorOutputCpu, convolutionKernelRequirement);
 
+    const float thresh = std::max(batchSize * (filterWidth * 0.02 + filterHeight * 0.02), 1.0);
+
     // Verify CPU and GPU results match
     vector<unsigned long> errorOutputDimensions = errorOutputGpu.getDescriptor().getDimensions();
     for (unsigned int n = 0; n < errorOutputDimensions[0]; ++n) {
@@ -311,7 +317,6 @@ void backwardPass(Convolution2d *convolution2dLayer,
                 for (unsigned int w = 0; w < errorOutputDimensions[3]; ++w) {
                     float cpuVal = *(half *)errorOutputCpu.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
                     float gpuVal = *(half *)errorOutputGpu_h.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
-                    float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
                     EXPECT_LT(abs(cpuVal - gpuVal), thresh);
                     if (abs(cpuVal - gpuVal) >= thresh)
                         printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, n, c, h, w);
@@ -338,10 +343,34 @@ void backwardPass(Convolution2d *convolution2dLayer,
                     // float cpuWeight = *(half *)weightsCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
                     float cpuVal = cpuGradient;
                     float gpuVal = *(half *)weightsGradientGpu_h.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
-                    float thresh = batchSize * 0.1 + abs(cpuVal * 0.05);
-                    ASSERT_LT(abs(cpuVal - gpuVal), thresh);
-                    if (abs(cpuVal - gpuVal) >= thresh)
+                    if (abs(cpuVal - gpuVal) >= thresh) {
                         printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, o, i, h, w);
+                        int inputImageHeight = featureInputCpu.getDescriptor().getDimensions()[2];
+                        int inputImageWidth = featureInputCpu.getDescriptor().getDimensions()[3];
+                        Tensor featureOutput = convolution2dLayer->getFeatureOutputs()[0];
+                        int outputImageHeight = featureOutput.getDescriptor().getDimensions()[2];
+                        int outputImageWidth = featureOutput.getDescriptor().getDimensions()[3];
+                        printf(
+                            "accumulate %d inputImageHeight %d inputImageWidth %d outputImageHeight %d outputImageWidth %d filterHeight %d "
+                            "filterWidth %d verticalStride %d horizontalStride %d verticalPadding %d horizontalPadding %d numWeights %d "
+                            "numInputChannels %d numOutputChannels %d batchSize %d\n\n",
+                            accumulate,
+                            inputImageHeight,
+                            inputImageWidth,
+                            outputImageHeight,
+                            outputImageWidth,
+                            filterHeight,
+                            filterWidth,
+                            convolutionKernelRequirement.getFilterVerticalStride(),
+                            convolutionKernelRequirement.getFilterHorizontalStride(),
+                            convolutionKernelRequirement.getTopAndBottomPadHeight(),
+                            convolutionKernelRequirement.getLeftAndRightPadWidth(),
+                            numWeights,
+                            numInputChannels,
+                            numOutputChannels,
+                            batchSize);
+                    }
+                    ASSERT_LT(abs(cpuVal - gpuVal), thresh);
                 }
             }
         }
@@ -367,8 +396,6 @@ void backwardPass(Convolution2d *convolution2dLayer,
         }
     }
 }
-
-// FIXME: make a test for multiple connections
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

@@ -554,7 +554,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     constexpr int initialRun = 5;
     constexpr int finalRun = 20;
 
-    constexpr long FIVE_HUNDRED_MEGS = 536870912;
+    constexpr long ONE_HUNDRED_MEGS = 134217728;
     const int ELEMENT_SIZE = (ABCDataType == TensorDescriptor::DataType::FP32 ? sizeof(float) : sizeof(half));
 
     string gpuType = MachineEvaluator::instance().getGpuType(gpuNum);
@@ -658,6 +658,10 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
                             if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
                                 maxWorkspaceSizeInBytes = workspaceSizeInBytes;
 
+                            // I have seen some kernel report 0 waves and causes sporadic runtime failures, so avoid that.
+                            if (!(cublasKernel.getWavesCount(gpuNum) > 0.0f))
+                                continue;
+
                             kernels.push_back(cublasKernel);
                         }
                     }
@@ -691,9 +695,13 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
 
     cublasStatus_t cublasStatus;
 
+    // Ensure there are no unreported runtime errors
+    stream.synchronize();
+    cublasGetError();
+
     // Allocate a lot of memory, to ensure subsequent calls are not benefitting from cache hits
     long memPerInstance = (rowsA * ldA + rowsB * ldB + rowsC * ldC) * ELEMENT_SIZE;
-    long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(FIVE_HUNDRED_MEGS, 10 * memPerInstance));
+    long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * memPerInstance));
     long numInstances = minl(totalMatrixMemory / memPerInstance, 5000);
     assert(numInstances > 0);
 
@@ -702,7 +710,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         maxWorkspaceSizeInBytes = 1;
         numWorkspaceInstances = 1;
     } else {
-        long totalWorkspaceMem = minl(totalGpuMem * 0.4, maxl(FIVE_HUNDRED_MEGS, 10 * maxWorkspaceSizeInBytes));
+        long totalWorkspaceMem = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * maxWorkspaceSizeInBytes));
         numWorkspaceInstances = minl(totalWorkspaceMem / maxWorkspaceSizeInBytes, 5000);
         assert(numWorkspaceInstances > 0);
     }
@@ -741,16 +749,30 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
                                                         prunedKernels.size() < initialContestantCount);
              ++i) {
             cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, stream);
-            if (cublasStatus == CUBLAS_STATUS_SUCCESS)
-                prunedKernels.push_back(kernels[i]);
+            if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+                // Wait for execution to finish to catch any runtime errors that are reported asynchronously
+                stream.synchronize();
+                cublasStatus = cublasGetError();
+                if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+                    prunedKernels.push_back(kernels[i]);
+                }
+            }
         }
         kernels = prunedKernels;
     } else {
+        prunedKernels.reserve(kernels.size());
+
         // Prune just the non-working kernels
         for (unsigned int i = 0; i < kernels.size(); ++i) {
             cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, stream);
-            if (cublasStatus == CUBLAS_STATUS_SUCCESS)
-                prunedKernels.push_back(kernels[i]);
+            if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+                // Wait for execution to finish to catch any runtime errors that are reported asynchronously
+                stream.synchronize();
+                cublasStatus = cublasGetError();
+                if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+                    prunedKernels.push_back(kernels[i]);
+                }
+            }
         }
         kernels = prunedKernels;
     }
@@ -845,24 +867,6 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         }
     }
 
-    // Discard any kernels that were not successful for any reason
-    // Since all bad kernels have already been pruned away, there should be no errors upon kernel invocation,
-    // but this logic is kept for fault tolerance if there are flaky kernels.
-    vector<CublasKernel> errorFreeKernels;
-    errorFreeKernels.reserve(kernels.size());
-    for (unsigned int i = 0; i < kernels.size(); ++i) {
-        if (!kernels[i].getErrorFlag()) {
-            errorFreeKernels.push_back(kernels[i]);
-        } else if (printResults) {
-            printf("discarded kernel to due error: %s\n", kernels[i].toString(gpuNum).c_str());
-        }
-    }
-    if (printResults)
-        printf("\n");
-
-    assert(!errorFreeKernels.empty());
-    kernels = errorFreeKernels;
-
     if (printResults) {
         printf("Initial kernel measurments:\n\n");
         std::sort(kernels.begin(), kernels.end(), CublasKernel::executionTimeComparison);
@@ -886,11 +890,18 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     for (unsigned int i = 0; i < kernels.size(); ++i)
         kernels[i].stashRunStats();
 
+    cublasStatus = CUBLAS_STATUS_SUCCESS;
     for (int run = 0; run < finalRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
-            cublasStatus = kernels[kernelIndex].runWithoutChecks(
-                A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, stream);
+            if (!kernels[kernelIndex].getErrorFlag())
+                cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                                     B[tensorInstance],
+                                                                     C[tensorInstance],
+                                                                     C[tensorInstance],
+                                                                     workspace[workspaceInstance],
+                                                                     false,
+                                                                     stream);
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
@@ -898,6 +909,22 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
             if (workspaceInstance >= numWorkspaceInstances)
                 workspaceInstance = 0;
             stopEvents[kernelIndex].push_back(stream.putEvent(true));
+
+            if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
+                int checkIndex = kernelIndex == 0 ? kernels.size() - 1 : kernelIndex - 1;
+                kernels[checkIndex].setErrorFlag();
+                printf("cublasStatus %d on kernelIndex %d run %d tensorInstance %d of %ld workspaceInstance %d of %ld workspaceSize %ld\n",
+                       cublasStatus,
+                       kernelIndex,
+                       run,
+                       tensorInstance,
+                       numInstances,
+                       workspaceInstance,
+                       numWorkspaceInstances,
+                       maxWorkspaceSizeInBytes);
+                printf("%s\n", kernels[checkIndex].toString(gpuNum).c_str());
+            }
+
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
     }
@@ -918,6 +945,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     }
 
     CublasKernel bestKernel = *std::min_element(kernels.begin(), kernels.end(), CublasKernel::executionTimeComparison);
+    assert(!bestKernel.getErrorFlag());
     bestKernel.unstashRunStats();
     bool kernelWillRunOnGpu;
     bool bestKernelHasWorkspace = bestKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu) > 0;

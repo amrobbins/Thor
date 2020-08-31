@@ -390,7 +390,7 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: b
 
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
-	$(Gpp) $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) -g $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
 #	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply

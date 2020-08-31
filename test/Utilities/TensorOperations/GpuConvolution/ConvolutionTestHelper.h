@@ -7,7 +7,7 @@ class ConvolutionTestHelper {
     static int computeOutputDimensionSize(int inputDimensionSize, int perSidePadding, int filterSize, int filterStride) {
         int paddedSize = inputDimensionSize + 2 * perSidePadding;
         assert(filterSize <= paddedSize);
-        int outputSize = 1 + (paddedSize - filterSize) / filterStride;
+        int outputSize = 1 + ((paddedSize - filterSize) / filterStride);
         assert(outputSize > 0);
         return outputSize;
     }
