@@ -89,6 +89,8 @@ class GpuConvolution {
                                  Stream stream,
                                  bool accumulateGradient);
 
+    void printBackwardFilterKernelInfo(ConvolutionKernelRequirement convolutionKernelRequirement);
+
    private:
     mutex forwardMutex;
     mutex backwardDataMutex;

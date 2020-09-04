@@ -36,8 +36,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
-                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \

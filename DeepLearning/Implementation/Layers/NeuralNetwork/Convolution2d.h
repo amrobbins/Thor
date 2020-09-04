@@ -182,6 +182,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     void cleanup() {}
 
+    void printBackwardFilterKernelInfo() { GpuConvolution::instance().printBackwardFilterKernelInfo(convolutionKernelRequirement); }
+
    private:
     const int filterWidth;
     const int filterHeight;

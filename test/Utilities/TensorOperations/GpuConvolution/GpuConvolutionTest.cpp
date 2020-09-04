@@ -12,7 +12,7 @@ using std::vector;
 TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
     Stream stream(0);
 
-    for (int t = 0; t < 15; ++t) {
+    for (int t = 0; t < 5; ++t) {
         int numInputColumns = (rand() % 75) + 1;
         int numInputRows = (rand() % 75) + 1;
         int filterWidth = (rand() % numInputColumns) + 1;
@@ -103,7 +103,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
 
     Stream stream(0);
 
-    for (int t = 0; t < 15; ++t) {
+    for (int t = 0; t < 5; ++t) {
         int numInputColumns = (rand() % 75) + 1;
         int numInputRows = (rand() % 75) + 1;
         int filterWidth = (rand() % numInputColumns) + 1;
@@ -220,7 +220,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
 void backwardFilterTest(bool accumulate) {
     Stream stream(0);
 
-    for (int t = 0; t < 10; ++t) {
+    for (int t = 0; t < 5; ++t) {
         int numInputColumns = (rand() % 75) + 1;
         int numInputRows = (rand() % 75) + 1;
         int filterWidth = (rand() % numInputColumns) + 1;
@@ -352,7 +352,7 @@ TEST(GpuConvolution, ConvolutionBackwardFilterProducesCorrectResult_WithAccumula
 TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
     Stream stream(0);
 
-    for (int t = 0; t < 10; ++t) {
+    for (int t = 0; t < 5; ++t) {
         int numInputColumns = (rand() % 75) + 1;
         int numInputRows = (rand() % 75) + 1;
         int filterWidth = (rand() % numInputColumns) + 1;
