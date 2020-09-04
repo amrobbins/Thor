@@ -289,6 +289,12 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
     for (int i = 0; i < returnedAlgoCount; ++i) {
         if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
             continue;
+
+        // FIXME: I'm seeing that the nondeterministic algorithms often give very wrong results, not sure why, problem with atomics?
+        // FIXME: For now I am not using them, I should check later to see if they start to work better.
+        if (perfResults[i].determinism == 0)
+            continue;
+
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
         Optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
@@ -530,4 +536,16 @@ void GpuConvolution::convolutionBackwardBias(ConvolutionKernelRequirement convol
     } else {
         computeConvolutionBiasesGradient(errorInput, biasesGradient, workspace, stream);
     }
+}
+
+void GpuConvolution::printBackwardFilterKernelInfo(ConvolutionKernelRequirement convolutionKernelRequirement) {
+    assert(optimalBackwardFilterKernels.count(convolutionKernelRequirement) == 1);
+    cudnnConvolutionBwdFilterAlgoPerf_t algo = optimalBackwardFilterKernels[convolutionKernelRequirement];
+    printf("algo %d status %d time %f workspaceSize %ld determinism %d mathType %d\n",
+           algo.algo,
+           algo.status,
+           algo.time,
+           algo.memory,
+           algo.determinism,
+           algo.mathType);
 }

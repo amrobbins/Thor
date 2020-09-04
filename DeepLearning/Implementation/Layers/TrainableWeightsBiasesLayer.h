@@ -37,7 +37,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         }
 
         // This layer instance is done with the updated weights memory when the following event triggers
-        return weightsUpdatedEvent;
+        return streams[0].putEvent();
     }
 
     Event updateWeightsAndBiasesWithScaledGradient() {
