@@ -16,7 +16,9 @@ class Pooling : public Layer {
             int batchSize,
             int numFeatures,
             int inputHeight,
-            int inputWidth)
+            int inputWidth,
+            int verticalPadding,
+            int horizontalPadding)
         : poolingType(poolingType),
           windowHeight(windowHeight),
           windowWidth(windowWidth),
@@ -25,7 +27,9 @@ class Pooling : public Layer {
           batchSize(batchSize),
           numFeatures(numFeatures),
           inputHeight(inputHeight),
-          inputWidth(inputWidth) {
+          inputWidth(inputWidth),
+          verticalPadding(verticalPadding),
+          horizontalPadding(horizontalPadding) {
         assert(poolingType == Type::MAX || poolingType == Type::AVERAGE);
         assert(windowHeight > 0);
         assert(windowWidth > 0);
@@ -37,6 +41,9 @@ class Pooling : public Layer {
         assert(inputWidth > 0);
         assert(inputHeight >= windowHeight);
         assert(inputWidth >= windowWidth);
+
+        outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
+        outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
     }
 
     virtual void compile() {
@@ -53,8 +60,6 @@ class Pooling : public Layer {
         assert(inputDimensions[2] == (uint32_t)inputHeight);
         assert(inputDimensions[3] == (uint32_t)inputWidth);
         vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
-        int outputWidth = 1 + (inputWidth - windowWidth) / horizontalStride;
-        int outputHeight = 1 + (inputHeight - windowHeight) / verticalStride;
         assert(outputDimensions.size() == 4);
         assert(outputDimensions[0] == (uint32_t)batchSize);
         assert(outputDimensions[1] == (uint32_t)numFeatures);
@@ -63,6 +68,7 @@ class Pooling : public Layer {
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
+        poolingDescriptor = cudnnPoolingDescriptor_t();
         cudnnStatus = cudnnCreatePoolingDescriptor(&poolingDescriptor.get());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus =
@@ -71,8 +77,8 @@ class Pooling : public Layer {
                                         CUDNN_NOT_PROPAGATE_NAN,
                                         windowHeight,
                                         windowWidth,
-                                        0,
-                                        0,
+                                        verticalPadding,
+                                        horizontalPadding,
                                         verticalStride,
                                         horizontalStride);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -90,6 +96,17 @@ class Pooling : public Layer {
         cudnnStatus = cudnnSetTensor4dDescriptor(
             featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numFeatures, outputHeight, outputWidth);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    }
+
+    virtual Optional<Tensor> createFeatureOutputTensor() {
+        assert(featureInput.isPresent());
+        vector<unsigned long> featureOutputDimensions;
+        featureOutputDimensions.push_back(batchSize);
+        featureOutputDimensions.push_back(numFeatures);
+        featureOutputDimensions.push_back(outputHeight);
+        featureOutputDimensions.push_back(outputWidth);
+        TensorDescriptor featureOutputDescriptor(featureInput.get().getDescriptor().getDataType(), featureOutputDimensions);
+        return Tensor(featureInput.get().getPlacement(), featureOutputDescriptor);
     }
 
     void cleanup() {
@@ -151,6 +168,17 @@ class Pooling : public Layer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
+    static uint32_t computeOutputDimensionSize(uint32_t inputDimensionSize,
+                                               uint32_t perSidePadding,
+                                               uint32_t windowSize,
+                                               uint32_t windowStride) {
+        uint32_t paddedSize = inputDimensionSize + 2 * perSidePadding;
+        assert(windowSize <= paddedSize);
+        uint32_t outputSize = 1 + ((paddedSize - windowSize) / windowStride);
+        assert(outputSize > 0);
+        return outputSize;
+    }
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;
@@ -164,6 +192,10 @@ class Pooling : public Layer {
     int numFeatures;
     int inputHeight;
     int inputWidth;
+    int verticalPadding;
+    int horizontalPadding;
+    int outputHeight;
+    int outputWidth;
 
     Optional<cudnnPoolingDescriptor_t> poolingDescriptor;
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;

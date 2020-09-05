@@ -160,6 +160,9 @@ class Layer {
     // postConnectToNextLayer() is called after each call to connectToNextLayer(...)
     virtual void postConnectToNextLayer() {}
 
+    // FIXME: If there is a layer that does not breaks the backprop path, I should not allocate back prop tensors downstream from the
+    // breakage.
+
     virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
                                                     Optional<Tensor> featureInput,
                                                     Stream stream,
@@ -174,7 +177,7 @@ class Layer {
         this->previousLayer = previousLayer;
         this->stream = stream;
         this->featureInput = featureInput;
-        if (backPropagateError)
+        if (backPropagateError && !inferenceOnly)
             errorOutput = featureInput.get().clone();
         else
             errorOutput = Optional<Tensor>::empty();

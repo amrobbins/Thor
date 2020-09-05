@@ -36,8 +36,9 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
-                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
@@ -72,6 +73,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest \
+            build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
             build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
@@ -391,6 +393,10 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: b
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -g $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp $(MLDEV)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
+	$(Gpp) -g $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
 #	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
