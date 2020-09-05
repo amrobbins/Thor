@@ -67,6 +67,7 @@ class Layer {
     Layer() {
         compiled = false;
         running = false;
+        inferenceOnly = false;
     }
 
     // Use pointers for layers
@@ -209,8 +210,12 @@ class Layer {
         launchSum(result_d, sources_d, numSources, numElements, stream);
     }
 
-    void sumScale(half result_d[], half source0_d[], half source1_d[], float scale, int numElements, Stream stream) {
-        launchSumScale(result_d, source0_d, source1_d, scale, numElements, stream);
+    void sumScale(half result_d[], half nonScaledSource_d[], half scaledSource_d[], float scale, int numElements, Stream stream) {
+        launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
+    }
+
+    void sumScale(half result_d[], half nonScaledSource_d[], float scaledSource_d[], float scale, int numElements, Stream stream) {
+        launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
    protected:

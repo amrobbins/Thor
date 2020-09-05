@@ -145,6 +145,7 @@ class MultiConnectionLayer : public Layer {
                                                     Stream stream,
                                                     bool backPropagateError) {
         assert(!compiled);
+
         Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
         if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
             assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
@@ -155,7 +156,9 @@ class MultiConnectionLayer : public Layer {
 
         previousLayers.push_back(previousLayer);
         featureInputs.emplace_back(featureInput);
-        if (backPropagateError)
+        // backPropagateError allows the previous layer to specify that it does not support back propagation,
+        // inferenceOnly means that even though back propagation is supported, we are not using it since we are not training.
+        if (backPropagateError && !inferenceOnly)
             errorOutputs.emplace_back(featureInput.get().clone());
         else
             errorOutputs.emplace_back(Optional<Tensor>::empty());

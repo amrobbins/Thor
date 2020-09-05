@@ -25,9 +25,7 @@ class Optional {
     }
 
     T &get() const {
-        if (isEmpty()) {
-            throw CalledGetOnEmptyOptionalException();
-        }
+        assert(!isEmpty());
         return *pValue;
     }
 

@@ -99,10 +99,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         previousLayers[connectionNumber].get()->backward(errorOutputs[connectionNumber]);
     }
 
-    virtual void parentInitialize() {
-        MultiConnectionLayer::parentInitialize();
+    virtual void parentCompile() {
+        MultiConnectionLayer::parentCompile();
 
-        if (weightsGradient.isPresent()) {
+        if (!inferenceOnly) {
             assert(!featureInputs.empty());
             gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice());
         }
@@ -111,21 +111,47 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     // Default implementation simply updates weights by learningRate*gradient, does not apply momentum or anything else.
     virtual void applyGradients(
         Stream stream, Tensor weights, Tensor weightsGradient, Optional<Tensor> biases, Optional<Tensor> biasesGradient) {
-        sumScale((half*)weights.getMemPtr(),
-                 (half*)weights.getMemPtr(),
-                 (half*)weightsGradient.getMemPtr(),
-                 -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
-                 weights.getDescriptor().getTotalNumElements(),
-                 stream);
+        if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
+            weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            sumScale((half*)weights.getMemPtr(),
+                     (half*)weights.getMemPtr(),
+                     (half*)weightsGradient.getMemPtr(),
+                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
+                     weights.getDescriptor().getTotalNumElements(),
+                     stream);
+        } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
+                   weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            sumScale((half*)weights.getMemPtr(),
+                     (half*)weights.getMemPtr(),
+                     (float*)weightsGradient.getMemPtr(),
+                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
+                     weights.getDescriptor().getTotalNumElements(),
+                     stream);
+        } else {
+            assert(false);
+        }
         if (hasBias) {
             assert(biases.isPresent());
             assert(biasesGradient.isPresent());
-            sumScale((half*)biases.get().getMemPtr(),
-                     (half*)biases.get().getMemPtr(),
-                     (half*)biasesGradient.get().getMemPtr(),
-                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
-                     biases.get().getDescriptor().getTotalNumElements(),
-                     stream);
+            if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
+                biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                sumScale((half*)biases.get().getMemPtr(),
+                         (half*)biases.get().getMemPtr(),
+                         (half*)biasesGradient.get().getMemPtr(),
+                         -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
+                         biases.get().getDescriptor().getTotalNumElements(),
+                         stream);
+            } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
+                       biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+                sumScale((half*)biases.get().getMemPtr(),
+                         (half*)biases.get().getMemPtr(),
+                         (float*)biasesGradient.get().getMemPtr(),
+                         -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
+                         biases.get().getDescriptor().getTotalNumElements(),
+                         stream);
+            } else {
+                assert(false);
+            }
         }
     }
 

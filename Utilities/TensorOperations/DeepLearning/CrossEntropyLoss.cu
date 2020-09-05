@@ -84,7 +84,7 @@ void launchCrossEntropyLoss(LABEL_TYPE *labels_d,
     dim3 gridSize((numElements + 1023) / 1024);
     crossEntropyLossPartOne<LABEL_TYPE, PROBABILITY_TYPE>
         <<<gridSize, blockSize, 0, stream.getStream()>>>(labels_d, probabilities_d, workspace_d, numElements);
-    launchSumManyToOne(workspace_d, loss_d, elementsPerBatch, batchSize, false, stream);
+    launchSumManyToOne(workspace_d, loss_d, elementsPerBatch, batchSize, false, false, stream);
 }
 
 template void launchCrossEntropyLoss<half, half>(

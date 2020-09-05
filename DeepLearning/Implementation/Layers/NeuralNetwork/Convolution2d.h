@@ -101,7 +101,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         if (hasBias) {
             biases = Tensor(featureInputs.front().get().getPlacement(),
                             TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
-            biasesGradient = biases.get().clone();
+            if (!inferenceOnly)
+                biasesGradient = biases.get().clone();
         }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.

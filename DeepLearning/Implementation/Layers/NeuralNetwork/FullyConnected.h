@@ -53,7 +53,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         if (hasBias) {
             biases =
                 Tensor(featureInputs.front().get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
-            biasesGradient = biases.get().clone();
+            if (!inferenceOnly)
+                biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
         }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
@@ -76,7 +77,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
         }
 
-        if (!isBackPropStub()) {
+        if (!isBackPropStub() && !inferenceOnly) {
             CublasMatrixMultiply::instance().chooseOptimalKernel(
                 gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, TensorDescriptor::DataType::FP16);
 
@@ -97,24 +98,27 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardDataSizeInBytes}));
         }
 
-        CublasMatrixMultiply::instance().chooseOptimalKernel(
-            gpuNum, batchSize, numInputFeatures, batchSize, numOutputFeatures, true, false, TensorDescriptor::DataType::FP16);
+        if (!inferenceOnly) {
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                gpuNum, batchSize, numInputFeatures, batchSize, numOutputFeatures, true, false, TensorDescriptor::DataType::FP16);
 
-        uint64_t workspaceBackwardWeightsSizeInBytes =
-            CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(gpuNum,
-                                                                     batchSize,
-                                                                     numInputFeatures,
-                                                                     batchSize,
-                                                                     numOutputFeatures,
-                                                                     true,
-                                                                     false,
-                                                                     TensorDescriptor::DataType::FP16,
-                                                                     kernelWillRunOnGpu);
-        assert(kernelWillRunOnGpu);
+            uint64_t workspaceBackwardWeightsSizeInBytes =
+                CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(gpuNum,
+                                                                         batchSize,
+                                                                         numInputFeatures,
+                                                                         batchSize,
+                                                                         numOutputFeatures,
+                                                                         true,
+                                                                         false,
+                                                                         TensorDescriptor::DataType::FP16,
+                                                                         kernelWillRunOnGpu);
+            assert(kernelWillRunOnGpu);
 
-        if (workspaceBackwardWeightsSizeInBytes > 0)
-            workspaceBackwardWeights = Tensor(featureInputs.front().get().getPlacement(),
-                                              TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardWeightsSizeInBytes}));
+            if (workspaceBackwardWeightsSizeInBytes > 0)
+                workspaceBackwardWeights =
+                    Tensor(featureInputs.front().get().getPlacement(),
+                           TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardWeightsSizeInBytes}));
+        }
 
         if (hasBias) {
             cudnnStatus_t cudnnStatus;
@@ -132,27 +136,29 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                 cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numOutputFeatures, 1, 1);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-            reduceTensorDescriptor = cudnnReduceTensorDescriptor_t();
-            cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceTensorDescriptor.get());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            cudnnStatus = cudnnSetReduceTensorDescriptor(reduceTensorDescriptor,
-                                                         CUDNN_REDUCE_TENSOR_ADD,
-                                                         CUDNN_DATA_HALF,
-                                                         CUDNN_NOT_PROPAGATE_NAN,
-                                                         CUDNN_REDUCE_TENSOR_NO_INDICES,
-                                                         CUDNN_32BIT_INDICES);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            if (!inferenceOnly) {
+                reduceDescriptor = cudnnReduceTensorDescriptor_t();
+                cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceDescriptor.get());
+                assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+                cudnnStatus = cudnnSetReduceTensorDescriptor(reduceDescriptor,
+                                                             CUDNN_REDUCE_TENSOR_ADD,
+                                                             CUDNN_DATA_FLOAT,
+                                                             CUDNN_NOT_PROPAGATE_NAN,
+                                                             CUDNN_REDUCE_TENSOR_NO_INDICES,
+                                                             CUDNN_32BIT_INDICES);
+                assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-            size_t reduceWorkspaceSizeInBytes;
-            cudnnStatus = cudnnGetReductionWorkspaceSize(streams[0].getCudnnHandle(),
-                                                         reduceTensorDescriptor,
-                                                         featureOutputDescriptor,
-                                                         biasesDescriptor,
-                                                         &reduceWorkspaceSizeInBytes);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            if (reduceWorkspaceSizeInBytes > 0)
-                workspaceBackwardBias = Tensor(featureInputs.front().get().getPlacement(),
-                                               TensorDescriptor(TensorDescriptor::DataType::UINT8, {reduceWorkspaceSizeInBytes}));
+                size_t reduceWorkspaceSizeInBytes;
+                cudnnStatus = cudnnGetReductionWorkspaceSize(gradientUpdateStream.get().getCudnnHandle(),
+                                                             reduceDescriptor,
+                                                             featureOutputDescriptor,
+                                                             biasesDescriptor,
+                                                             &reduceWorkspaceSizeInBytes);
+                assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+                if (reduceWorkspaceSizeInBytes > 0)
+                    workspaceBackwardBias = Tensor(featureInputs.front().get().getPlacement(),
+                                                   TensorDescriptor(TensorDescriptor::DataType::UINT8, {reduceWorkspaceSizeInBytes}));
+            }
         }
     }
 
@@ -191,6 +197,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
 
         if (hasBias) {
+            assert(biases.isPresent());
+            assert(biasesDescriptor.isPresent());
+            assert(featureOutputDescriptor.isPresent());
+
             cudnnStatus_t cudnnStatus;
 
             cudnnStatus = cudnnAddTensor(stream.getCudnnHandle(),
@@ -211,8 +221,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                           Optional<Stream> dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
-        cudnnStatus_t cudnnStatus;
-
         assert(errorIn.isPresent());
         assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
@@ -262,7 +270,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                       false,
                                                       accumulateGradient,
                                                       TensorDescriptor::DataType::FP16,
-                                                      gradientUpdateStream);
+                                                      gradientStream);
         } else {
             CublasMatrixMultiply::instance().multiply(dataIn,
                                                       errorIn,
@@ -275,34 +283,41 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                       false,
                                                       accumulateGradient,
                                                       TensorDescriptor::DataType::FP16,
-                                                      gradientUpdateStream);
+                                                      gradientStream);
         }
 
         if (hasBias) {
-            cudnnStatus =
-                cudnnReduceTensor(gradientUpdateStream.get().getCudnnHandle(),
-                                  reduceTensorDescriptor,
-                                  nullptr,
-                                  0,
-                                  workspaceBackwardBias.isPresent() ? workspaceBackwardBias.get().getMemPtr() : nullptr,
-                                  workspaceBackwardBias.isPresent() ? workspaceBackwardBias.get().getDescriptor().getArraySizeInBytes() : 0,
-                                  &ALPHA_NO_SCALE,
-                                  featureOutputDescriptor,
-                                  errorIn.get().getMemPtr(),
-                                  accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
-                                  biasesDescriptor,
-                                  biasesGradient.get().getMemPtr());
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            /*
+                        cudnnStatus_t cudnnStatus =
+                        cudnnReduceTensor(gradientStream.getCudnnHandle(),
+                                          reduceDescriptor,
+                                          nullptr,
+                                          0,
+                                          workspaceBackwardBias.isPresent() ? workspaceBackwardBias.get().getMemPtr() : nullptr,
+                                          workspaceBackwardBias.isPresent() ?
+               workspaceBackwardBias.get().getDescriptor().getArraySizeInBytes() : 0, &ALPHA_NO_SCALE, featureOutputDescriptor,
+                                          errorIn.get().getMemPtr(),
+                                          accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                          biasesDescriptor,
+                                          biasesGradient.get().getMemPtr());
+                        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            */
+            launchSumBatch((half*)errorIn.get().getMemPtr(),
+                           (half*)biasesGradient.get().getMemPtr(),
+                           numOutputFeatures,
+                           batchSize,
+                           accumulateGradient,
+                           gradientStream);
         }
     }
 
     void cleanup() {
         cudnnStatus_t cudnnStatus;
 
-        if (reduceTensorDescriptor.isPresent()) {
-            cudnnStatus = cudnnDestroyReduceTensorDescriptor(reduceTensorDescriptor.get());
+        if (reduceDescriptor.isPresent()) {
+            cudnnStatus = cudnnDestroyReduceTensorDescriptor(reduceDescriptor.get());
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            reduceTensorDescriptor.clear();
+            reduceDescriptor.clear();
         }
 
         if (biasesDescriptor.isPresent()) {
@@ -334,5 +349,5 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     Optional<cudnnTensorDescriptor_t> biasesDescriptor;
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
-    Optional<cudnnReduceTensorDescriptor_t> reduceTensorDescriptor;
+    Optional<cudnnReduceTensorDescriptor_t> reduceDescriptor;
 };
