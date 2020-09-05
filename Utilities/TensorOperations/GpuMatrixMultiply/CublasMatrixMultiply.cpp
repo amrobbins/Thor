@@ -371,7 +371,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     // &computeType, sizeof(computeType)); assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
     int returnedAlgoCount;
-    vector<cublasLtMatmulHeuristicResult_t> results(10);
+    vector<cublasLtMatmulHeuristicResult_t> results(30);
     cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                                   operationDesc,
                                                   ADesc,
@@ -379,7 +379,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                   CDesc,
                                                   CDesc,
                                                   searchPreferences,
-                                                  10,
+                                                  30,
                                                   results.data(),
                                                   &returnedAlgoCount);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
@@ -387,6 +387,9 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     // Algorithms aren't guaranteed to run, so find the first one that does and then return.
     bool kernelLaunchedSuccessfully = false;
     for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
+        // have seen kernels that say wavesCount == 0 that sporadically fail.
+        if (!(results[i].wavesCount > 0.0f))
+            continue;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
                                       &CublasKernel::ALPHA_NO_SCALE,

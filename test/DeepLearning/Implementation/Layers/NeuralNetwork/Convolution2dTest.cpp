@@ -50,8 +50,8 @@ TEST(Convolution2d, Convolution2dWorks) {
         const int filterVerticalStride = numInputRows == 1 ? 1 : 1 + (rand() % (numInputRows - 1));
         const int filterWidth = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));
         const int filterHeight = numInputRows == 1 ? 1 : 1 + (rand() % (numInputRows - 1));
-        const int leftAndRightPadWidth = rand() % 10;
-        const int topAndBottomPadHeight = rand() % 10;
+        const int leftAndRightPadWidth = filterWidth < 10 ? rand() % filterWidth : rand() % 10;
+        const int topAndBottomPadHeight = filterHeight < 10 ? rand() % filterHeight : rand() % 10;
         const int numInputChannels = 1 + (rand() % 10);
         const int numOutputChannels = 1 + (rand() % 10);
         const int batchSize = 1 + (rand() % 10);
