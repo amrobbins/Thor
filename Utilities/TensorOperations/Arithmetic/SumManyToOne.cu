@@ -20,11 +20,15 @@ __device__ __forceinline__ float smtn_warpReduceBottom8(float val) {
 }
 
 template <typename SOURCE_TYPE, typename DEST_TYPE>
-__global__ void sumManyToOne(SOURCE_TYPE *source, DEST_TYPE *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert) {
+__global__ void sumManyToOne(
+    SOURCE_TYPE *source, DEST_TYPE *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, bool accumulate) {
     __shared__ float sharedBuffer[8];
 
     // Create 256 partial sums
     float sum = 0.0f;
+    if (threadIdx.x == 0 && accumulate)
+        sum = (float)dest[blockIdx.x];
+
     uint32_t offset = blockIdx.x * numElementsPerBatch;
     for (uint32_t element = threadIdx.x; element < numElementsPerBatch; element += 256) {
         sum += (float)source[offset + element];
@@ -45,18 +49,61 @@ __global__ void sumManyToOne(SOURCE_TYPE *source, DEST_TYPE *dest, uint32_t numE
 }
 
 template <typename SOURCE_TYPE, typename DEST_TYPE>
-void launchSumManyToOne(
-    SOURCE_TYPE *source_d, DEST_TYPE *dest_d, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, Stream stream) {
+void launchSumManyToOne(SOURCE_TYPE *source_d,
+                        DEST_TYPE *dest_d,
+                        uint32_t numElementsPerBatch,
+                        uint32_t batchSize,
+                        bool invert,
+                        bool accumulate,
+                        Stream stream) {
+    assert(numElementsPerBatch > 0);
+    assert(batchSize > 0);
+
     dim3 blockSize(256);
     dim3 gridSize(batchSize);
-    assert(numElementsPerBatch > 0);
     sumManyToOne<SOURCE_TYPE, DEST_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElementsPerBatch, batchSize, invert);
+        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElementsPerBatch, batchSize, invert, accumulate);
 }
 
+template void launchSumManyToOne<half, half>(
+    half *source_d, half *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, bool accumulate, Stream stream);
 template void launchSumManyToOne<half, float>(
-    half *source_d, float *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, Stream stream);
+    half *source_d, float *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, bool accumulate, Stream stream);
 template void launchSumManyToOne<float, float>(
-    float *source_d, float *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, Stream stream);
+    float *source_d, float *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, bool accumulate, Stream stream);
 template void launchSumManyToOne<float, half>(
-    float *source_d, half *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, Stream stream);
+    float *source_d, half *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool invert, bool accumulate, Stream stream);
+
+template <typename SOURCE_TYPE, typename DEST_TYPE>
+__global__ void sumBatch(SOURCE_TYPE *source, DEST_TYPE *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate) {
+    const uint32_t elementOffset = blockIdx.x * 256 + threadIdx.x;
+    if (elementOffset >= numElementsPerBatch)
+        return;
+
+    float buff = 0.0f;
+    for (uint32_t i = 0; i < batchSize; ++i) {
+        buff += (float)source[i * numElementsPerBatch + elementOffset];
+    }
+    dest[elementOffset] = (DEST_TYPE)buff;
+}
+
+template <typename SOURCE_TYPE, typename DEST_TYPE>
+void launchSumBatch(
+    SOURCE_TYPE *source_d, DEST_TYPE *dest_d, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate, Stream stream) {
+    assert(numElementsPerBatch > 0);
+    assert(batchSize > 0);
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElementsPerBatch + 255) / 256);
+    sumBatch<SOURCE_TYPE, DEST_TYPE>
+        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElementsPerBatch, batchSize, accumulate);
+}
+
+template void launchSumBatch<half, half>(
+    half *source_d, half *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate, Stream stream);
+template void launchSumBatch<half, float>(
+    half *source_d, float *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate, Stream stream);
+template void launchSumBatch<float, float>(
+    float *source_d, float *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate, Stream stream);
+template void launchSumBatch<float, half>(
+    float *source_d, half *dest, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate, Stream stream);

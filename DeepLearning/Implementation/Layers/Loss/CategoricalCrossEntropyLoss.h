@@ -78,6 +78,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                            elementsPerBatch,
                            batchSize,
                            true,
+                           false,
                            stream);
         launchMultiplyByScalar((float*)softmaxWorkspace.getMemPtr(),
                                (float*)inverseSumOfInputExponentials.getMemPtr(),

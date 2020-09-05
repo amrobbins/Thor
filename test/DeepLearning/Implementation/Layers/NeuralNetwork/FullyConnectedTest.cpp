@@ -18,7 +18,7 @@ using std::vector;
 // FIXME: make a test with accumulate once cublasLt bug is fixed.
 // FIXME: make a test for multiple connections
 
-void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases);
+void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accumulate);
 
 TEST(FullyConnected, FullyConnectedWorks) {
     srand(time(NULL));
@@ -33,7 +33,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         uint64_t numOutputFeatures = (rand() % 300) + 1;
         uint64_t batchSize = (rand() % 300) + 1;
         bool inferenceOnly = (rand() % 4) == 0;
-        bool hasBiases = false;  // FIXME
+        bool hasBiases = (rand() % 4) != 0;
         Optional<float> learningRate;
         if (!inferenceOnly)
             learningRate = (1 + (rand() % 20000)) / 10000.0f;
@@ -42,7 +42,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         Tensor weights = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numInputFeatures, numOutputFeatures}));
         Tensor featureOut = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numOutputFeatures}));
         Tensor featureOutGpu_h;
-        Tensor biases;
+        Tensor biases = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputFeatures}));
 
         const int featureInSize = batchSize * numInputFeatures;
         half *featureInMem = (half *)featureIn.getMemPtr();
@@ -56,8 +56,11 @@ TEST(FullyConnected, FullyConnectedWorks) {
             weightsMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
+        half *biasesMem = (half *)biases.getMemPtr();
         if (hasBiases) {
-            // FIXME: create and fill biases
+            for (unsigned int i = 0; i < numOutputFeatures; ++i) {
+                biasesMem[i] = ((rand() % 100) / 2.0f) - 5.0f;
+            }
         }
 
         vector<Layer *> layers;
@@ -67,6 +70,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         layers.push_back(new NoOpLayer());
         FullyConnected *fullyConnectedLayer =
             new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, inferenceOnly, hasBiases, learningRate);
+        fullyConnectedLayer->setInferenceOnly(inferenceOnly);
 
         layers.push_back(fullyConnectedLayer);
         layers.push_back(new NoOpLayer());
@@ -74,11 +78,25 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
+        // Backward tensors must not be created, since they would be unused and would waist memory.
+        if (inferenceOnly) {
+            ASSERT_TRUE(fullyConnectedLayer->getErrorOutputs()[0].isEmpty());
+            ASSERT_TRUE(fullyConnectedLayer->getWeightsGradient().isEmpty());
+            ASSERT_TRUE(fullyConnectedLayer->getBiasesGradient().isEmpty());
+            ASSERT_TRUE(fullyConnectedLayer->getGradientUpdateStream().isEmpty());
+        }
+
+        if (!hasBiases) {
+            ASSERT_TRUE(fullyConnectedLayer->getBiases().isEmpty());
+            ASSERT_TRUE(fullyConnectedLayer->getBiasesGradient().isEmpty());
+        }
+
         featureOutGpu_h = layers.back()->getFeatureOutput();
 
-        fullyConnectedLayer->getWeights().copyFromAsync(weights, stream);
-        if (hasBiases)
-            fullyConnectedLayer->getBiases().get().copyFromAsync(biases, stream);
+        Event weightsUpdatedEvent = fullyConnectedLayer->updateWeightsAndBiases(weights, biases, stream.putEvent());
+        stream.waitEvent(weightsUpdatedEvent);
+        if (!inferenceOnly)
+            fullyConnectedLayer->getGradientUpdateStream().get().waitEvent(weightsUpdatedEvent);
 
         // Network is runnable here
         layers[0]->forward(featureIn);
@@ -98,6 +116,16 @@ TEST(FullyConnected, FullyConnectedWorks) {
                               false,
                               false);
 
+        if (hasBiases) {
+            half *featureOutMem = (half *)featureOut.getMemPtr();
+            for (unsigned int batch = 0; batch < batchSize; ++batch) {
+                for (unsigned int outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
+                    featureOutMem[batch * numOutputFeatures + outputFeature] =
+                        featureOutMem[batch * numOutputFeatures + outputFeature] + biasesMem[outputFeature];
+                }
+            }
+        }
+
         stream.synchronize();
 
         half *cpuFeatureOut = (half *)featureOut.getMemPtr();
@@ -106,8 +134,14 @@ TEST(FullyConnected, FullyConnectedWorks) {
         float maxDiff = numInputFeatures * 0.01;
         for (int i = 0; i < numOutputElements; ++i) {
             EXPECT_LT(abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])), maxDiff);
-            if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= maxDiff)
-                printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));
+            if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= maxDiff) {
+                int batch = i / numOutputFeatures;
+                int outputFeature = i - (batch * numOutputFeatures);
+                printf("%f %f   bias %f\n",
+                       (float)(cpuFeatureOut[i]),
+                       (float)(gpuFeatureOut[i]),
+                       hasBiases ? (float)biasesMem[outputFeature] : 0.0f);
+            }
         }
 
         if (inferenceOnly) {
@@ -115,27 +149,33 @@ TEST(FullyConnected, FullyConnectedWorks) {
             continue;
         }
 
-        backwardPass(fullyConnectedLayer, hasBiases);
+        bool accumulate = false;  // FIXME
+
+        backwardPass(fullyConnectedLayer, hasBiases, accumulate);
 
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
-void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases) {
-    assert(hasBiases == false);  // FIXME
+void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accumulate) {
+    assert(accumulate == false);  // FIXME
 
-    Stream stream = fullyConnectedLayer->getStreams()[0];
+    Stream dataStream = fullyConnectedLayer->getStreams()[0];
+    Stream gradientUpdateStream = fullyConnectedLayer->getGradientUpdateStream().get();
+
+    Tensor errorInput = fullyConnectedLayer->getErrorInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
 
     Tensor featureInput = fullyConnectedLayer->getFeatureInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
-    Tensor errorInput = fullyConnectedLayer->getErrorInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
     Tensor errorOutput = fullyConnectedLayer->getErrorOutputs().front().get().clone(TensorPlacement::MemDevices::CPU);
     Tensor weights = fullyConnectedLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
     Tensor weightsGradient = fullyConnectedLayer->getWeightsGradient().get().clone(TensorPlacement::MemDevices::CPU);
     Tensor biases;
     Tensor biasesGradient;
+    Tensor biasesGradientFloat;
     if (hasBiases) {
         biases = fullyConnectedLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
         biasesGradient = fullyConnectedLayer->getBiasesGradient().get().clone(TensorPlacement::MemDevices::CPU);
+        biasesGradientFloat = biasesGradient.clone(TensorDescriptor::DataType::FP32);
     }
 
     int batchSize = featureInput.getDescriptor().getDimensions()[0];
@@ -144,20 +184,21 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases) {
 
     // featureIn, weights and biases are populated still by the forward pass
     // just need to populate errorIn
-    featureInput.copyFromAsync(fullyConnectedLayer->getFeatureInputs().front(), stream);
-    weights.copyFromAsync(fullyConnectedLayer->getWeights(), stream);
+    featureInput.copyFromAsync(fullyConnectedLayer->getFeatureInputs().front(), dataStream);
+    weights.copyFromAsync(fullyConnectedLayer->getWeights(), dataStream);
     if (hasBiases) {
-        biases.copyFromAsync(fullyConnectedLayer->getBiases(), stream);
-        biasesGradient.copyFromAsync(fullyConnectedLayer->getBiasesGradient(), stream);
+        biases.copyFromAsync(fullyConnectedLayer->getBiases(), dataStream);
+        biasesGradient.copyFromAsync(fullyConnectedLayer->getBiasesGradient(), dataStream);
+        biasesGradientFloat.copyFromAsync(biasesGradient, dataStream);
     }
-    stream.synchronize();
+    dataStream.synchronize();
 
     const int errorInputSize = batchSize * numOutputFeatures;
     half *errorInputMem = (half *)errorInput.getMemPtr();
     for (int i = 0; i < errorInputSize; ++i) {
         errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
-    fullyConnectedLayer->getErrorInputs().front().get().copyFromAsync(errorInput, stream);
+    fullyConnectedLayer->getErrorInputs().front().get().copyFromAsync(errorInput, dataStream);
 
     fullyConnectedLayer->backward(fullyConnectedLayer->getErrorInputs().front());
 
@@ -189,13 +230,34 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases) {
                           false,
                           false);
 
+    if (hasBiases) {
+        // Reduce errorIn_batchSizexnumOutputFeatures to biasesGradient_numOutputFeatures by summing the elements of each batch item.
+        float *biasesGradientMem = (float *)biasesGradientFloat.getMemPtr();
+        half *errorInMem = (half *)errorInput.getMemPtr();
+        for (int batch = 0; batch < batchSize; ++batch) {
+            for (int outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
+                if (batch == 0 && !accumulate)
+                    biasesGradientMem[outputFeature] = 0.0f;
+                biasesGradientMem[outputFeature] =
+                    biasesGradientMem[outputFeature] + (float)errorInMem[batch * numOutputFeatures + outputFeature];
+            }
+        }
+        biasesGradient.copyFromAsync(biasesGradientFloat, gradientUpdateStream);
+    }
+
     Tensor errorOutputGpu_h = fullyConnectedLayer->getErrorOutputs().front().get().clone(TensorPlacement::MemDevices::CPU);
     Tensor weightsGradientGpu_h = fullyConnectedLayer->getWeightsGradient().get().clone(TensorPlacement::MemDevices::CPU);
+    Tensor biasesGradientGpu_h;
+    if (hasBiases)
+        biasesGradientGpu_h = fullyConnectedLayer->getBiasesGradient().get().clone(TensorPlacement::MemDevices::CPU);
 
-    errorOutputGpu_h.copyFromAsync(fullyConnectedLayer->getErrorOutputs().front(), stream);
-    weightsGradientGpu_h.copyFromAsync(fullyConnectedLayer->getWeightsGradient(), stream);
+    errorOutputGpu_h.copyFromAsync(fullyConnectedLayer->getErrorOutputs().front(), dataStream);
+    weightsGradientGpu_h.copyFromAsync(fullyConnectedLayer->getWeightsGradient(), gradientUpdateStream);
+    if (hasBiases)
+        biasesGradientGpu_h.copyFromAsync(fullyConnectedLayer->getBiasesGradient(), gradientUpdateStream);
 
-    stream.synchronize();
+    dataStream.synchronize();
+    gradientUpdateStream.synchronize();
 
     half *cpuErrorOutput = (half *)errorOutput.getMemPtr();
     half *gpuErrorOutput = (half *)errorOutputGpu_h.getMemPtr();
@@ -215,6 +277,19 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases) {
         EXPECT_LT(abs((float)(cpuWeightsGradient[i]) - (float)(gpuWeightsGradient[i])), maxDiff);
         if (abs((float)(cpuWeightsGradient[i]) - (float)(gpuWeightsGradient[i])) >= maxDiff)
             printf("%f %f\n", (float)(cpuWeightsGradient[i]), (float)(gpuWeightsGradient[i]));
+    }
+
+    if (hasBiases) {
+        half *cpuBiasesGradient = (half *)biasesGradient.getMemPtr();
+        half *gpuBiasesGradient = (half *)biasesGradientGpu_h.getMemPtr();
+
+        for (int i = 0; i < numOutputFeatures; ++i) {
+            EXPECT_LT(abs((float)(cpuBiasesGradient[i]) - (float)(gpuBiasesGradient[i])), maxDiff);
+            if (abs((float)(cpuBiasesGradient[i]) - (float)(gpuBiasesGradient[i])) < maxDiff) {
+            } else {
+                printf("%d of %d   %f %f\n", i + 1, numOutputFeatures, (float)(cpuBiasesGradient[i]), (float)(gpuBiasesGradient[i]));
+            }
+        }
     }
 }
 

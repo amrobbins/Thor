@@ -300,12 +300,20 @@ TEST(SumManyToOne, ComputesCorrectAnswer) {
         int batchSize = (rand() % 8) + 1;
         int numElementsPerBatch = (rand() % 512) + 1;
         bool invert = rand() % 2 ? true : false;
+        bool accumulate = rand() % 2 ? true : false;
         for (int i = 0; i < numElementsPerBatch * batchSize; ++i) {
             summand[i] = ((rand() % 100) / 20.0f) - 2.5f;
         }
 
+        for (int b = 0; b < batchSize; ++b)
+            dest_cpu[b] = ((rand() % 100) / 20.0f) - 2.5f;
+        cudaStatus = cudaMemcpyAsync(dest_d, dest_cpu, batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        stream.synchronize();
+
         for (int b = 0; b < batchSize; ++b) {
-            dest_cpu[b] = 0.0f;
+            if (!accumulate)
+                dest_cpu[b] = 0.0f;
             for (int i = 0; i < numElementsPerBatch; ++i)
                 dest_cpu[b] += (float)summand[b * numElementsPerBatch + i];
             if (invert && abs(dest_cpu[b]) < 0.1f) {
@@ -320,7 +328,7 @@ TEST(SumManyToOne, ComputesCorrectAnswer) {
             cudaMemcpyAsync(summand_d, summand, numElementsPerBatch * batchSize * sizeof(half), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchSumManyToOne(summand_d, dest_d, numElementsPerBatch, batchSize, invert, stream);
+        launchSumManyToOne(summand_d, dest_d, numElementsPerBatch, batchSize, invert, accumulate, stream);
 
         cudaStatus = cudaMemcpyAsync(dest, dest_d, batchSize * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);

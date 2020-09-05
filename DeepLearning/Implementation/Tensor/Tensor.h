@@ -60,6 +60,9 @@ class Tensor : private ReferenceCounted {
     Tensor clone(TensorDescriptor::DataType newDataType) {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
+    Tensor clone(TensorPlacement newPlacement, TensorDescriptor::DataType newDataType) {
+        return uninitialized() ? Tensor() : Tensor(newPlacement, TensorDescriptor(newDataType, descriptor.getDimensions()));
+    }
 
     TensorPlacement getPlacement() { return placement; }
     void *getMemPtr() { return mem; }

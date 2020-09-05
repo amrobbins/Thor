@@ -48,15 +48,6 @@ TEST(Optional, Works) {
     assert(maybeString.get() == "a string");
     string otherString(maybeString);
     assert(otherString == "a string");
-
-    maybeString.clear();
-    try {
-        maybeString.get();
-    } catch (CalledGetOnEmptyOptionalException ex) {
-        return;
-    }
-    // When the expected exception is thrown, control will not reach this line.
-    assert(false);
 }
 
 int main(int argc, char **argv) {

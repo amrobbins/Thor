@@ -138,11 +138,27 @@ TEST(Convolution2d, Convolution2dWorks) {
                                                               inferenceOnly,
                                                               hasBias,
                                                               learningRate);
+        convolution2dLayer->setInferenceOnly(inferenceOnly);
+
         layers.push_back(convolution2dLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
+
+        // Backward tensors must not be created, since they would be unused and would waist memory.
+        if (inferenceOnly) {
+            ASSERT_TRUE(convolution2dLayer->getErrorOutputs()[0].isEmpty());
+            ASSERT_TRUE(convolution2dLayer->getWeightsGradient().isEmpty());
+            ASSERT_TRUE(convolution2dLayer->getBiasesGradient().isEmpty());
+            ASSERT_TRUE(convolution2dLayer->getGradientUpdateStream().isEmpty());
+        }
+
+        if (!hasBias) {
+            ASSERT_TRUE(convolution2dLayer->getBiases().isEmpty());
+            ASSERT_TRUE(convolution2dLayer->getBiasesGradient().isEmpty());
+        }
+
         featureOutputGpu_h = layers.back()->getFeatureOutput();
 
         // convolution2dLayer->setCallBackWhenGradientsReady(weightUpdateCallback);
@@ -403,8 +419,8 @@ void backwardPass(Convolution2d *convolution2dLayer,
         }
     }
 
-    convolution2dLayer->getStreams()[0].waitEvent(convolution2dLayer->getGradientUpdateStream().get().putEvent());
-    convolution2dLayer->getGradientUpdateStream().get().waitEvent(convolution2dLayer->getStreams()[0].putEvent());
+    // convolution2dLayer->getStreams()[0].waitEvent(convolution2dLayer->getGradientUpdateStream().get().putEvent());
+    // convolution2dLayer->getGradientUpdateStream().get().waitEvent(convolution2dLayer->getStreams()[0].putEvent());
 }
 
 int main(int argc, char **argv) {
