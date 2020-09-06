@@ -3,6 +3,9 @@
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
+#include <thread>
+#include "omp.h"
+
 // FIXME: inference only support
 
 class FullyConnected : public TrainableWeightsBiasesLayer {
@@ -302,8 +305,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                           biasesGradient.get().getMemPtr());
                         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
             */
-            launchSumBatch((half*)errorIn.get().getMemPtr(),
-                           (half*)biasesGradient.get().getMemPtr(),
+            launchSumBatch((half *)errorIn.get().getMemPtr(),
+                           (half *)biasesGradient.get().getMemPtr(),
                            numOutputFeatures,
                            batchSize,
                            accumulateGradient,
@@ -332,6 +335,78 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             featureOutputDescriptor.clear();
         }
     }
+
+    class InitializationScheme {
+       public:
+        virtual ~InitializationScheme() {}
+
+        virtual void initialize(FullyConnected *fullyConnected) const = 0;
+    };
+
+    class UniformRandomInitialization : public InitializationScheme {
+       public:
+        UniformRandomInitialization(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
+            assert(isfinite(maxValue));
+            assert(isfinite(minValue));
+            assert(maxValue >= minValue);
+        }
+
+        virtual void initialize(FullyConnected *fullyConnected) const {
+            Tensor buffer = fullyConnected->weights.clone(TensorPlacement::MemDevices::CPU);
+
+            std::uniform_real_distribution<float> distribution(minValue, maxValue);
+            std::hash<int> threadNumHash;
+
+            uint64_t totalNumWeights = fullyConnected->weights.getDescriptor().getTotalNumElements();
+            half *bufferMem = (half *)buffer.getMemPtr();
+            int numProcessors = omp_get_num_procs();
+            if (numProcessors > 1)
+                numProcessors -= 1;
+            assert(numProcessors >= 1);
+            omp_set_num_threads(numProcessors);
+            uint64_t weightsPerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
+            std::default_random_engine generator;
+#pragma omp parallel private(generator)
+            {
+                int threadNum = omp_get_thread_num();
+                generator.seed(time(NULL) * threadNumHash(omp_get_thread_num()));
+                uint64_t threadEnd = (threadNum + 1) * weightsPerThread;
+                if (totalNumWeights < threadEnd)
+                    threadEnd = totalNumWeights;
+                for (uint64_t i = threadNum * weightsPerThread; i < threadEnd; ++i) {
+                    bufferMem[i] = (half)distribution(generator);
+                }
+            }
+
+            fullyConnected->weights.copyFromAsync(buffer, fullyConnected->streams[0]);
+
+            if (fullyConnected->streams.size() > 1) {
+                Event weightsUpdatedEvent = fullyConnected->streams[0].putEvent();
+                for (unsigned int i = 1; i < fullyConnected->streams.size(); ++i) {
+                    fullyConnected->streams[i].waitEvent(weightsUpdatedEvent);
+                }
+            }
+        }
+
+       private:
+        float maxValue;
+        float minValue;
+    };
+
+    void initializeWeights(const InitializationScheme *scheme) {
+        assert(compiled);
+
+        const UniformRandomInitialization *uniformRandomScheme = dynamic_cast<const UniformRandomInitialization *>(scheme);
+
+        if (uniformRandomScheme) {
+            uniformRandomScheme->initialize(this);
+            return;
+        }
+
+        assert(false);
+    }
+
+    void initializeBiases() {}
 
    private:
     static const float ALPHA_NO_SCALE;

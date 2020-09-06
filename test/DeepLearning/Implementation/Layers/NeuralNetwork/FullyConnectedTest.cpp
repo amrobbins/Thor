@@ -78,6 +78,18 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
+        FullyConnected::UniformRandomInitialization initializer(0.1, -0.1);
+        fullyConnectedLayer->initializeWeights(&initializer);
+
+        Tensor weightsInitial = fullyConnectedLayer->getWeights().clone(cpuPlacement);
+        weightsInitial.copyFromAsync(fullyConnectedLayer->getWeights(), stream);
+        stream.synchronize();
+        int totalNumWeights = fullyConnectedLayer->getWeights().getDescriptor().getTotalNumElements();
+        half *weightsInitialMem = (half *)weightsInitial.getMemPtr();
+        for (int i = 0; i < totalNumWeights; ++i) {
+            ASSERT_LT(abs((float)weightsInitialMem[i]), 0.1);
+        }
+
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
             ASSERT_TRUE(fullyConnectedLayer->getErrorOutputs()[0].isEmpty());
