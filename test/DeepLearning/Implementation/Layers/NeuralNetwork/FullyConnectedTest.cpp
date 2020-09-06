@@ -34,9 +34,6 @@ TEST(FullyConnected, FullyConnectedWorks) {
         uint64_t batchSize = (rand() % 300) + 1;
         bool inferenceOnly = (rand() % 4) == 0;
         bool hasBiases = (rand() % 4) != 0;
-        Optional<float> learningRate;
-        if (!inferenceOnly)
-            learningRate = (1 + (rand() % 20000)) / 10000.0f;
 
         Tensor featureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
         Tensor weights = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numInputFeatures, numOutputFeatures}));
@@ -68,8 +65,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         layers.push_back(
             new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
         layers.push_back(new NoOpLayer());
-        FullyConnected *fullyConnectedLayer =
-            new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, inferenceOnly, hasBiases, learningRate);
+        FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
         fullyConnectedLayer->setInferenceOnly(inferenceOnly);
 
         layers.push_back(fullyConnectedLayer);
@@ -305,11 +301,7 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
         uint64_t numInputFeatures = (rand() % 1024) + 1;
         uint64_t numOutputFeatures = (rand() % 2048) + 1;
         uint64_t batchSize = (rand() % 300) + 1;
-        bool inferenceOnly = (rand() % 4) == 0;
         bool hasBiases = (rand() % 4) != 0;
-        Optional<float> learningRate;
-        if (!inferenceOnly)
-            learningRate = (1 + (rand() % 20000)) / 10000.0f;
 
         Tensor featureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
 
@@ -317,8 +309,7 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
         layers.push_back(
             new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
         layers.push_back(new NoOpLayer());
-        FullyConnected *fullyConnectedLayer =
-            new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, inferenceOnly, hasBiases, learningRate);
+        FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
         layers.push_back(fullyConnectedLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));

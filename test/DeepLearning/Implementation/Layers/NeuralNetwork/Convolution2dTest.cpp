@@ -32,7 +32,6 @@ void backwardPass(Convolution2d *convolution2dLayer,
                   ConvolutionKernelRequirement convolutionKernelRequirement,
                   int filterHeight,
                   int filterWidth,
-                  Optional<float> learningRate,
                   bool accumulate);
 
 TEST(Convolution2d, Convolution2dWorks) {
@@ -57,9 +56,6 @@ TEST(Convolution2d, Convolution2dWorks) {
         const int batchSize = 1 + (rand() % 10);
         const bool inferenceOnly = (rand() % 4) == 0;
         const bool hasBias = (rand() % 4) != 0;
-        Optional<float> learningRate;
-        if (!inferenceOnly)
-            learningRate = (1 + (rand() % 20000)) / 10000.0f;
 
         int numOutputRows =
             ConvolutionTestHelper::computeOutputDimensionSize(numInputRows, topAndBottomPadHeight, filterHeight, filterVerticalStride);
@@ -135,9 +131,7 @@ TEST(Convolution2d, Convolution2dWorks) {
                                                               batchSize,
                                                               numInputColumns,
                                                               numInputRows,
-                                                              inferenceOnly,
-                                                              hasBias,
-                                                              learningRate);
+                                                              hasBias);
         convolution2dLayer->setInferenceOnly(inferenceOnly);
 
         layers.push_back(convolution2dLayer);
@@ -218,7 +212,6 @@ TEST(Convolution2d, Convolution2dWorks) {
                      convolutionKernelRequirement,
                      filterHeight,
                      filterWidth,
-                     learningRate,
                      false);
 
         backwardPass(convolution2dLayer,
@@ -234,7 +227,6 @@ TEST(Convolution2d, Convolution2dWorks) {
                      convolutionKernelRequirement,
                      filterHeight,
                      filterWidth,
-                     learningRate,
                      true);
 
         for (int i = 0; i < numWeights; ++i) {
@@ -262,7 +254,6 @@ TEST(Convolution2d, Convolution2dWorks) {
                      convolutionKernelRequirement,
                      filterHeight,
                      filterWidth,
-                     learningRate,
                      false);
 
         LayerTestHelper::tearDownNetwork(layers);
@@ -282,7 +273,6 @@ void backwardPass(Convolution2d *convolution2dLayer,
                   ConvolutionKernelRequirement convolutionKernelRequirement,
                   int filterHeight,
                   int filterWidth,
-                  Optional<float> learningRate,
                   bool accumulate) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 
