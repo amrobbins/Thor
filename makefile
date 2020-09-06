@@ -33,7 +33,7 @@ TEST_COMPILE_DEPENDENCIES = $(INCLUDE_DIRS_TEST) $(LIB_DIRS_TEST) $(LIBS_TEST) $
 DEBUG = -ggdb
 NVCC_DEBUG = -g
 
-Gpp = g++ -Wall -Werror
+Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
 RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
@@ -372,31 +372,31 @@ build/test/Utilities/WorkQueue/WorkQueueTest: build/test/googletest/libgtest.a t
 
 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixTranspose
-	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) -o build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp $(MLDEV)
 #	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
-#	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+#	$(Gpp) -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
-	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) -o build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest.cpp $(MLDEV)
 	mkdir -p build/test/Utilities/TensorOperations/GpuConvolution
-	$(Gpp) -fopenmp -o build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) -o build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
-	$(Gpp) $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
-	$(Gpp) -g $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp $(MLDEV)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
-	$(Gpp) -g $(DEBUG) -fopenmp -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest.cpp $(MLDEV)
 #	mkdir -p build/test/Utilities/TensorOperations/GpuMatrixMultiply
