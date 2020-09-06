@@ -12,13 +12,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     virtual ~FullyConnected() {}
 
-    FullyConnected(const uint32_t numInputFeatures,
-                   const uint32_t numOutputFeatures,
-                   const int batchSize,
-                   const bool inferenceOnly,
-                   const bool hasBias,
-                   Optional<float> learningRate)
-        : TrainableWeightsBiasesLayer(inferenceOnly, hasBias, learningRate),
+    FullyConnected(const uint32_t numInputFeatures, const uint32_t numOutputFeatures, const int batchSize, const bool hasBias)
+        : TrainableWeightsBiasesLayer(hasBias),
           numInputFeatures(numInputFeatures),
           numOutputFeatures(numOutputFeatures),
           batchSize(batchSize) {}
@@ -371,7 +366,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             int numProcessors = omp_get_num_procs();
             if (numProcessors > 1)
                 numProcessors -= 1;
-            int maxDesiredProcessors = (totalNumWeights + 29999) / 30000;
+            int maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
             if (numProcessors > maxDesiredProcessors)
                 numProcessors = maxDesiredProcessors;
             assert(numProcessors >= 1);

@@ -14,13 +14,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    public:
     virtual ~TrainableWeightsBiasesLayer() {}
 
-    TrainableWeightsBiasesLayer(bool inferenceOnly, bool hasBias, Optional<float> learningRate)
-        : inferenceOnly(inferenceOnly), hasBias(hasBias), weightUpdateCallback(nullptr) {
-        if (!inferenceOnly)
-            assert(learningRate.isPresent());
-        this->learningRate = learningRate;
-        clearGradientAccumulator = true;
-    }
+    TrainableWeightsBiasesLayer(bool hasBias) : hasBias(hasBias), weightUpdateCallback(nullptr) { clearGradientAccumulator = true; }
 
     Event updateWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
         clearGradientAccumulator = true;
@@ -111,6 +105,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     // Default implementation simply updates weights by learningRate*gradient, does not apply momentum or anything else.
     virtual void applyGradients(
         Stream stream, Tensor weights, Tensor weightsGradient, Optional<Tensor> biases, Optional<Tensor> biasesGradient) {
+        assert(learningRate.isPresent());
+
         if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
             weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             sumScale((half*)weights.getMemPtr(),
@@ -171,7 +167,6 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual Optional<Tensor> getBiasesGradient() { return biasesGradient; }
 
    protected:
-    const bool inferenceOnly;
     const bool hasBias;
     Optional<float> learningRate;
 

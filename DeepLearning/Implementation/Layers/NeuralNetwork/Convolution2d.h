@@ -20,10 +20,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                   const int batchSize,
                   const int numInputColumns,
                   const int numInputRows,
-                  const bool inferenceOnly,
-                  const bool hasBias,
-                  Optional<float> learningRate)
-        : TrainableWeightsBiasesLayer(inferenceOnly, hasBias, learningRate),
+                  const bool hasBias)
+        : TrainableWeightsBiasesLayer(hasBias),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
           filterHorizontalStride(filterHorizontalStride),
