@@ -290,7 +290,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
 
         if (hasBias) {
-            /*
+            /* This method worked for the first 1 or 2 invocations in a program, but returned junk after that:
                         cudnnStatus_t cudnnStatus =
                         cudnnReduceTensor(gradientStream.getCudnnHandle(),
                                           reduceDescriptor,
@@ -336,40 +336,51 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
     }
 
-    class InitializationScheme {
+    class Initializer {
        public:
-        virtual ~InitializationScheme() {}
+        virtual ~Initializer() {}
 
-        virtual void initialize(FullyConnected *fullyConnected) const = 0;
+        virtual void initializeWeights(FullyConnected *fullyConnected) const = 0;
+        virtual void initializeBiases(FullyConnected *fullyConnected) const = 0;
     };
 
-    class UniformRandomInitialization : public InitializationScheme {
+    class UniformRandomInitializer : public Initializer {
        public:
-        UniformRandomInitialization(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
+        UniformRandomInitializer(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
             assert(isfinite(maxValue));
             assert(isfinite(minValue));
             assert(maxValue >= minValue);
         }
 
-        virtual void initialize(FullyConnected *fullyConnected) const {
-            Tensor buffer = fullyConnected->weights.clone(TensorPlacement::MemDevices::CPU);
+        virtual void initializeWeights(FullyConnected *fullyConnected) const { initialize(fullyConnected, fullyConnected->weights); }
+
+        virtual void initializeBiases(FullyConnected *fullyConnected) const {
+            assert(fullyConnected->hasBias);
+            initialize(fullyConnected, fullyConnected->biases);
+        }
+
+       private:
+        virtual void initialize(FullyConnected *fullyConnected, Tensor weights) const {
+            Tensor buffer = weights.clone(TensorPlacement::MemDevices::CPU);
 
             std::uniform_real_distribution<float> distribution(minValue, maxValue);
             std::hash<int> threadNumHash;
 
-            uint64_t totalNumWeights = fullyConnected->weights.getDescriptor().getTotalNumElements();
+            uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
             half *bufferMem = (half *)buffer.getMemPtr();
             int numProcessors = omp_get_num_procs();
             if (numProcessors > 1)
                 numProcessors -= 1;
+            int maxDesiredProcessors = (totalNumWeights + 29999) / 30000;
+            if (numProcessors > maxDesiredProcessors)
+                numProcessors = maxDesiredProcessors;
             assert(numProcessors >= 1);
             omp_set_num_threads(numProcessors);
             uint64_t weightsPerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
-            std::default_random_engine generator;
-#pragma omp parallel private(generator)
+#pragma omp parallel
             {
                 int threadNum = omp_get_thread_num();
-                generator.seed(time(NULL) * threadNumHash(omp_get_thread_num()));
+                std::default_random_engine generator(time(NULL) * threadNumHash(threadNum));
                 uint64_t threadEnd = (threadNum + 1) * weightsPerThread;
                 if (totalNumWeights < threadEnd)
                     threadEnd = totalNumWeights;
@@ -378,7 +389,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                 }
             }
 
-            fullyConnected->weights.copyFromAsync(buffer, fullyConnected->streams[0]);
+            weights.copyFromAsync(buffer, fullyConnected->streams[0]);
 
             if (fullyConnected->streams.size() > 1) {
                 Event weightsUpdatedEvent = fullyConnected->streams[0].putEvent();
@@ -393,20 +404,32 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         float minValue;
     };
 
-    void initializeWeights(const InitializationScheme *scheme) {
+    void initializeWeights(const Initializer *initializer) {
         assert(compiled);
 
-        const UniformRandomInitialization *uniformRandomScheme = dynamic_cast<const UniformRandomInitialization *>(scheme);
+        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
 
-        if (uniformRandomScheme) {
-            uniformRandomScheme->initialize(this);
+        if (uniformRandomInitializer) {
+            uniformRandomInitializer->initializeWeights(this);
             return;
         }
 
         assert(false);
     }
 
-    void initializeBiases() {}
+    void initializeBiases(const Initializer *initializer) {
+        assert(compiled);
+        assert(hasBias);
+
+        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
+
+        if (uniformRandomInitializer) {
+            uniformRandomInitializer->initializeBiases(this);
+            return;
+        }
+
+        assert(false);
+    }
 
    private:
     static const float ALPHA_NO_SCALE;

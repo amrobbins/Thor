@@ -78,18 +78,6 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        FullyConnected::UniformRandomInitialization initializer(0.1, -0.1);
-        fullyConnectedLayer->initializeWeights(&initializer);
-
-        Tensor weightsInitial = fullyConnectedLayer->getWeights().clone(cpuPlacement);
-        weightsInitial.copyFromAsync(fullyConnectedLayer->getWeights(), stream);
-        stream.synchronize();
-        int totalNumWeights = fullyConnectedLayer->getWeights().getDescriptor().getTotalNumElements();
-        half *weightsInitialMem = (half *)weightsInitial.getMemPtr();
-        for (int i = 0; i < totalNumWeights; ++i) {
-            ASSERT_LT(abs((float)weightsInitialMem[i]), 0.1);
-        }
-
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
             ASSERT_TRUE(fullyConnectedLayer->getErrorOutputs()[0].isEmpty());
@@ -302,6 +290,72 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accu
                 printf("%d of %d   %f %f\n", i + 1, numOutputFeatures, (float)(cpuBiasesGradient[i]), (float)(gpuBiasesGradient[i]));
             }
         }
+    }
+}
+
+TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
+    srand(time(NULL));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    Stream stream(0);
+
+    for (int test = 0; test < 5; ++test) {
+        uint64_t numInputFeatures = (rand() % 1024) + 1;
+        uint64_t numOutputFeatures = (rand() % 2048) + 1;
+        uint64_t batchSize = (rand() % 300) + 1;
+        bool inferenceOnly = (rand() % 4) == 0;
+        bool hasBiases = (rand() % 4) != 0;
+        Optional<float> learningRate;
+        if (!inferenceOnly)
+            learningRate = (1 + (rand() % 20000)) / 10000.0f;
+
+        Tensor featureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
+
+        vector<Layer *> layers;
+        layers.push_back(
+            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NoOpLayer());
+        FullyConnected *fullyConnectedLayer =
+            new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, inferenceOnly, hasBiases, learningRate);
+        layers.push_back(fullyConnectedLayer);
+        layers.push_back(new NoOpLayer());
+        layers.push_back(new NetworkOutput(cpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+
+        FullyConnected::UniformRandomInitializer initializer(0.1, -0.1);
+        fullyConnectedLayer->initializeWeights(&initializer);
+        if (hasBiases) {
+            fullyConnectedLayer->initializeBiases(&initializer);
+        }
+
+        Tensor weights = fullyConnectedLayer->getWeights().clone(cpuPlacement);
+        weights.copyFromAsync(fullyConnectedLayer->getWeights(), stream);
+        Tensor biases;
+        if (hasBiases) {
+            biases = fullyConnectedLayer->getBiases().get().clone(cpuPlacement);
+            biases.copyFromAsync(fullyConnectedLayer->getBiases(), stream);
+        }
+
+        stream.synchronize();
+
+        int totalNumWeights = fullyConnectedLayer->getWeights().getDescriptor().getTotalNumElements();
+        half *weightsMem = (half *)weights.getMemPtr();
+        for (int i = 0; i < totalNumWeights; ++i) {
+            ASSERT_LT(abs((float)weightsMem[i]), 0.1);
+        }
+
+        if (hasBiases) {
+            int totalNumBiases = fullyConnectedLayer->getBiases().get().getDescriptor().getTotalNumElements();
+            half *biasesMem = (half *)biases.getMemPtr();
+            for (int i = 0; i < totalNumBiases; ++i) {
+                ASSERT_LT(abs((float)biasesMem[i]), 0.1);
+            }
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
