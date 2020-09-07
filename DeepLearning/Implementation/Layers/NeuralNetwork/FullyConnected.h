@@ -4,9 +4,6 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <thread>
-#include "omp.h"
-
-// FIXME: inference only support
 
 class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
@@ -329,101 +326,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
             featureOutputDescriptor.clear();
         }
-    }
-
-    class Initializer {
-       public:
-        virtual ~Initializer() {}
-
-        virtual void initializeWeights(FullyConnected *fullyConnected) const = 0;
-        virtual void initializeBiases(FullyConnected *fullyConnected) const = 0;
-    };
-
-    class UniformRandomInitializer : public Initializer {
-       public:
-        UniformRandomInitializer(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
-            assert(isfinite(maxValue));
-            assert(isfinite(minValue));
-            assert(maxValue >= minValue);
-        }
-
-        virtual void initializeWeights(FullyConnected *fullyConnected) const { initialize(fullyConnected, fullyConnected->weights); }
-
-        virtual void initializeBiases(FullyConnected *fullyConnected) const {
-            assert(fullyConnected->hasBias);
-            initialize(fullyConnected, fullyConnected->biases);
-        }
-
-       private:
-        virtual void initialize(FullyConnected *fullyConnected, Tensor weights) const {
-            Tensor buffer = weights.clone(TensorPlacement::MemDevices::CPU);
-
-            std::uniform_real_distribution<float> distribution(minValue, maxValue);
-            std::hash<int> threadNumHash;
-
-            uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
-            half *bufferMem = (half *)buffer.getMemPtr();
-            int numProcessors = omp_get_num_procs();
-            if (numProcessors > 1)
-                numProcessors -= 1;
-            int maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
-            if (numProcessors > maxDesiredProcessors)
-                numProcessors = maxDesiredProcessors;
-            assert(numProcessors >= 1);
-            omp_set_num_threads(numProcessors);
-            uint64_t weightsPerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
-#pragma omp parallel
-            {
-                int threadNum = omp_get_thread_num();
-                std::default_random_engine generator(time(NULL) * threadNumHash(threadNum));
-                uint64_t threadEnd = (threadNum + 1) * weightsPerThread;
-                if (totalNumWeights < threadEnd)
-                    threadEnd = totalNumWeights;
-                for (uint64_t i = threadNum * weightsPerThread; i < threadEnd; ++i) {
-                    bufferMem[i] = (half)distribution(generator);
-                }
-            }
-
-            weights.copyFromAsync(buffer, fullyConnected->streams[0]);
-
-            if (fullyConnected->streams.size() > 1) {
-                Event weightsUpdatedEvent = fullyConnected->streams[0].putEvent();
-                for (unsigned int i = 1; i < fullyConnected->streams.size(); ++i) {
-                    fullyConnected->streams[i].waitEvent(weightsUpdatedEvent);
-                }
-            }
-        }
-
-       private:
-        float maxValue;
-        float minValue;
-    };
-
-    void initializeWeights(const Initializer *initializer) {
-        assert(compiled);
-
-        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
-
-        if (uniformRandomInitializer) {
-            uniformRandomInitializer->initializeWeights(this);
-            return;
-        }
-
-        assert(false);
-    }
-
-    void initializeBiases(const Initializer *initializer) {
-        assert(compiled);
-        assert(hasBias);
-
-        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
-
-        if (uniformRandomInitializer) {
-            uniformRandomInitializer->initializeBiases(this);
-            return;
-        }
-
-        assert(false);
     }
 
    private:

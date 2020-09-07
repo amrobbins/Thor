@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 
+#include "omp.h"
+
 /**
  * A TrainableWeightsBiasesLayer has a trainable weights tensor and possibly a trainable biases tensor.
  *
@@ -109,17 +111,17 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
             weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            sumScale((half*)weights.getMemPtr(),
-                     (half*)weights.getMemPtr(),
-                     (half*)weightsGradient.getMemPtr(),
+            sumScale((half *)weights.getMemPtr(),
+                     (half *)weights.getMemPtr(),
+                     (half *)weightsGradient.getMemPtr(),
                      -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                    weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            sumScale((half*)weights.getMemPtr(),
-                     (half*)weights.getMemPtr(),
-                     (float*)weightsGradient.getMemPtr(),
+            sumScale((half *)weights.getMemPtr(),
+                     (half *)weights.getMemPtr(),
+                     (float *)weightsGradient.getMemPtr(),
                      -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
@@ -131,17 +133,17 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             assert(biasesGradient.isPresent());
             if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                 biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                sumScale((half*)biases.get().getMemPtr(),
-                         (half*)biases.get().getMemPtr(),
-                         (half*)biasesGradient.get().getMemPtr(),
+                sumScale((half *)biases.get().getMemPtr(),
+                         (half *)biases.get().getMemPtr(),
+                         (half *)biasesGradient.get().getMemPtr(),
                          -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
                          biases.get().getDescriptor().getTotalNumElements(),
                          stream);
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                        biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-                sumScale((half*)biases.get().getMemPtr(),
-                         (half*)biases.get().getMemPtr(),
-                         (float*)biasesGradient.get().getMemPtr(),
+                sumScale((half *)biases.get().getMemPtr(),
+                         (half *)biases.get().getMemPtr(),
+                         (float *)biasesGradient.get().getMemPtr(),
                          -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
                          biases.get().getDescriptor().getTotalNumElements(),
                          stream);
@@ -165,6 +167,103 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual Optional<Tensor> getBiases() { return biases; }
     virtual Optional<Tensor> getWeightsGradient() { return weightsGradient; }
     virtual Optional<Tensor> getBiasesGradient() { return biasesGradient; }
+
+    class Initializer {
+       public:
+        virtual ~Initializer() {}
+
+        virtual void initializeWeights(TrainableWeightsBiasesLayer *trainableWeightsBiasesLayer) const = 0;
+        virtual void initializeBiases(TrainableWeightsBiasesLayer *trainableWeightsBiasesLayer) const = 0;
+    };
+
+    class UniformRandomInitializer : public Initializer {
+       public:
+        UniformRandomInitializer(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
+            assert(isfinite(maxValue));
+            assert(isfinite(minValue));
+            assert(maxValue >= minValue);
+        }
+
+        virtual void initializeWeights(TrainableWeightsBiasesLayer *trainableWeightsBiasesLayer) const {
+            initialize(trainableWeightsBiasesLayer, trainableWeightsBiasesLayer->weights);
+        }
+
+        virtual void initializeBiases(TrainableWeightsBiasesLayer *trainableWeightsBiasesLayer) const {
+            assert(trainableWeightsBiasesLayer->hasBias);
+            initialize(trainableWeightsBiasesLayer, trainableWeightsBiasesLayer->biases);
+        }
+
+       private:
+        virtual void initialize(TrainableWeightsBiasesLayer *trainableWeightsBiasesLayer, Tensor weights) const {
+            Tensor buffer = weights.clone(TensorPlacement::MemDevices::CPU);
+
+            std::uniform_real_distribution<float> distribution(minValue, maxValue);
+            std::hash<int> threadNumHash;
+
+            uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
+            half *bufferMem = (half *)buffer.getMemPtr();
+            int numProcessors = omp_get_num_procs();
+            if (numProcessors > 1)
+                numProcessors -= 1;
+            int maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
+            if (numProcessors > maxDesiredProcessors)
+                numProcessors = maxDesiredProcessors;
+            assert(numProcessors >= 1);
+            omp_set_num_threads(numProcessors);
+            uint64_t weightsPerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
+#pragma omp parallel
+            {
+                int threadNum = omp_get_thread_num();
+                std::default_random_engine generator(time(NULL) * threadNumHash(threadNum));
+                uint64_t threadEnd = (threadNum + 1) * weightsPerThread;
+                if (totalNumWeights < threadEnd)
+                    threadEnd = totalNumWeights;
+                for (uint64_t i = threadNum * weightsPerThread; i < threadEnd; ++i) {
+                    bufferMem[i] = (half)distribution(generator);
+                }
+            }
+
+            weights.copyFromAsync(buffer, trainableWeightsBiasesLayer->streams[0]);
+
+            if (trainableWeightsBiasesLayer->streams.size() > 1) {
+                Event weightsUpdatedEvent = trainableWeightsBiasesLayer->streams[0].putEvent();
+                for (unsigned int i = 1; i < trainableWeightsBiasesLayer->streams.size(); ++i) {
+                    trainableWeightsBiasesLayer->streams[i].waitEvent(weightsUpdatedEvent);
+                }
+            }
+        }
+
+       private:
+        float maxValue;
+        float minValue;
+    };
+
+    void initializeWeights(const Initializer *initializer) {
+        assert(compiled);
+
+        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
+
+        if (uniformRandomInitializer) {
+            uniformRandomInitializer->initializeWeights(this);
+            return;
+        }
+
+        assert(false);
+    }
+
+    void initializeBiases(const Initializer *initializer) {
+        assert(compiled);
+        assert(hasBias);
+
+        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
+
+        if (uniformRandomInitializer) {
+            uniformRandomInitializer->initializeBiases(this);
+            return;
+        }
+
+        assert(false);
+    }
 
    protected:
     const bool hasBias;

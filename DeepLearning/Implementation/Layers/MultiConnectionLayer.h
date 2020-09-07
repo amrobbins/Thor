@@ -113,7 +113,7 @@ class MultiConnectionLayer : public Layer {
         return previouslyConnectedFeatureInput.get().clone();
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
         assert(!compiled);
 
         nextLayers.push_back(nextLayer);
@@ -122,7 +122,7 @@ class MultiConnectionLayer : public Layer {
         else
             featureOutputs.emplace_back(Optional<Tensor>::empty());
 
-        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams.back(), true));
+        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams.back(), true, connectionType));
 
         Optional<Tensor> firstErrorInput = getFirstPresentTensor(errorInputs);
         if (firstErrorInput.isPresent()) {
@@ -140,10 +140,8 @@ class MultiConnectionLayer : public Layer {
         ensureNoDeviceCrossing();
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(!compiled);
 
         Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);

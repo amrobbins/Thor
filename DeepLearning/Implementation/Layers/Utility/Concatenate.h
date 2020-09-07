@@ -233,11 +233,11 @@ class Concatenate : public MultiConnectionLayer {
         stridePerPackedTensorDimension_d = nullptr;
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
         assert(!running);
         nextLayers.push_back(nextLayer);
         featureOutputs.emplace_back(createFeatureOutputTensor());
-        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams[0], true));
+        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams[0], true, connectionType));
 
         assert(errorInputs.back().isPresent());
         assert(featureOutputs.back().isPresent());
@@ -248,10 +248,8 @@ class Concatenate : public MultiConnectionLayer {
         ensureNoDeviceCrossing();
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(!running);
         assert(featureInput.isPresent());
 

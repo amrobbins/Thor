@@ -102,6 +102,7 @@ class TensorDescriptor {
     }
 
     bool operator==(const TensorDescriptor &rhs) const { return dataType == rhs.dataType && dimensions == rhs.dimensions; }
+    bool operator!=(const TensorDescriptor &rhs) const { return !(*this == rhs); }
 
     // Gives the number of bytes to store an array of numElements of this dataType, this exists because it can give the number of bytes of
     // packed boolean, whereas bytes per element doesn't work since it is not an integer number of bytes per packed boolean.

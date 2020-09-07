@@ -8,22 +8,20 @@ class TensorFanout : public MultiConnectionLayer {
    public:
     virtual ~TensorFanout() {}
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
         // There is no actual movement of data on the inputs,
         // instead streams are created to fork the execution.
         if (featureOutputs.empty()) {
-            errorInputs.push_back(nextLayer->connectToPreviousLayer(this, featureInputs[0], streams[0], true));
+            errorInputs.push_back(nextLayer->connectToPreviousLayer(this, featureInputs[0], streams[0], true, connectionType));
         } else {
             streams.emplace_back(streams[0].getGpuNum());
-            errorInputs.push_back(nextLayer->connectToPreviousLayer(this, featureInputs[0], streams.back(), true));
+            errorInputs.push_back(nextLayer->connectToPreviousLayer(this, featureInputs[0], streams.back(), true, connectionType));
         }
         nextLayers.push_back(nextLayer);
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         // This special case layer can only be connected to on a single input feature tensor
         assert(featureInputs.empty());
         assert(featureInput.isPresent());

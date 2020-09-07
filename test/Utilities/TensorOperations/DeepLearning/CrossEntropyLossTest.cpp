@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <algorithm>
 #include "cuda.h"
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"
@@ -12,7 +13,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer) {
 
     float labels[4096];
     float probabilities[4096];
-    float loss[4096];
+    half loss[4096];
     float loss_cpu[4096];
 
     cudaError_t cudaStatus;
@@ -20,7 +21,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer) {
     float *labels_d;
     float *probabilities_d;
     float *workspace_d;
-    float *loss_d;
+    half *loss_d;
 
     Stream stream(0);
 
@@ -30,7 +31,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer) {
     assert(cudaStatus == cudaSuccess);
     cudaStatus = cudaMalloc(&workspace_d, 4096 * sizeof(float));
     assert(cudaStatus == cudaSuccess);
-    cudaStatus = cudaMalloc(&loss_d, 4096 * sizeof(float));
+    cudaStatus = cudaMalloc(&loss_d, 4096 * sizeof(half));
     assert(cudaStatus == cudaSuccess);
 
     for (int t = 0; t < 50; ++t) {
@@ -76,7 +77,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer) {
 
         launchCrossEntropyLoss(labels_d, probabilities_d, workspace_d, loss_d, numElementsPerBatch, batchSize, stream);
 
-        cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
+        cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
         for (int b = 0; b < batchSize; ++b) {
@@ -94,11 +95,12 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer) {
 
         float thresh = 0.01;
         for (int b = 0; b < batchSize; ++b) {
-            float diff = abs(loss[b] - loss_cpu[b]);
-            if (diff >= thresh || !isfinite(diff)) {
-                printf("numElementsPerBatch %d element %d %f %f\n", numElementsPerBatch, b, loss[b], loss_cpu[b]);
+            float diff = abs((float)loss[b] - loss_cpu[b]);
+            float thisThresh = std::max(thresh, loss_cpu[b] * 0.001f);
+            if (diff >= thisThresh || !isfinite(diff)) {
+                printf("numElementsPerBatch %d element %d %f %f\n", numElementsPerBatch, b, (float)loss[b], loss_cpu[b]);
             }
-            ASSERT_LT(diff, thresh);
+            EXPECT_LT(diff, thisThresh);
         }
     }
 

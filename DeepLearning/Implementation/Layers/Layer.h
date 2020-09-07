@@ -136,7 +136,7 @@ class Layer {
         previousLayer.get()->backward(errorOutput);
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
         assert(!compiled);
 
         assert(this->nextLayer.isEmpty());
@@ -146,7 +146,7 @@ class Layer {
         else
             featureOutput = Optional<Tensor>::empty();
 
-        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, true);
+        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, true, connectionType);
 
         if (errorInput.isPresent() && featureOutput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
@@ -164,10 +164,8 @@ class Layer {
     // FIXME: If there is a layer that does not breaks the backprop path, I should not allocate back prop tensors downstream from the
     // breakage.
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(!compiled);
         assert(this->previousLayer.isEmpty());
         assert(this->featureInput.isEmpty());

@@ -8,12 +8,10 @@ class NetworkOutput : public Layer {
 
     NetworkOutput(Optional<TensorPlacement> outputPlacement) : outputPlacement(outputPlacement) {}
 
-    virtual void connectToNextLayer(Layer *nextLayer) { assert(false); }
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) { assert(false); }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(this->previousLayer.isEmpty());
         assert(featureInput.isPresent());
         assert(this->featureInput.isEmpty());
