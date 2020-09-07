@@ -19,24 +19,22 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     virtual void compile() {
         assert(featureInput.isPresent());
-        assert(labelsTensor.isPresent());
-        assert(lossTensor.isPresent());
-        assert(labelsTensor.get().isInitialized());
-        assert(lossTensor.get().isInitialized());
+        assert(labelsInput.isPresent());
+        assert(errorOutput.isPresent());
+        assert(labelsInput.get().isInitialized());
+        assert(errorOutput.get().isInitialized());
         assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsTensor.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(labelsTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
-               labelsTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-        assert(featureInput.get().getDescriptor().getDimensions() == labelsTensor.get().getDescriptor().getDimensions());
-        assert(lossTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(lossTensor.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(lossTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+        assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        assert(labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
+               labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
+        assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+        assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
-        softmaxWorkspace = Tensor(featureInput.get().getPlacement(),
-                                  TensorDescriptor(TensorDescriptor::DataType::FP32, featureInput.get().getDescriptor().getDimensions()));
         lossWorkspace = Tensor(featureInput.get().getPlacement(),
                                TensorDescriptor(TensorDescriptor::DataType::FP32, featureInput.get().getDescriptor().getDimensions()));
 
@@ -44,107 +42,115 @@ class CategoricalCrossEntropyLoss : public Loss {
         batchSize = featureInput.get().getDescriptor().getDimensions()[0];
         elementsPerBatch = featureInput.get().getDescriptor().getTotalNumElements() / batchSize;
 
-        vector<unsigned long> onePerBatchDimensions;
-        onePerBatchDimensions.push_back(batchSize);
         inverseSumOfInputExponentials =
-            Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, onePerBatchDimensions));
+            Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
     }
 
     virtual void cleanup() {}
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
-        assert(inputTensor.isPresent());
-        assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        if (inputTensor.get() != featureInput.get())
+    virtual void infer(Optional<Tensor> rawPredictions, Optional<Tensor> predictions, Stream stream) {
+        assert(rawPredictions.isPresent());
+        assert(predictions.isPresent());
+        assert(rawPredictions.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        if (rawPredictions.get() != featureInput.get())
             return;
-        ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
-
-        // FIXME: what cudnn functions can I use here? cudnnReduceTensor(), cudnnScaleTensor(), cudnnOpTensor() ... ?
+        ScopedGpu scopedGpu(rawPredictions.get().getPlacement().getDeviceNum());
 
         // Softmax
-        if (inputTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchExponentiation((half*)inputTensor.get().getMemPtr(),
-                                 (float*)softmaxWorkspace.getMemPtr(),
-                                 inputTensor.get().getDescriptor().getTotalNumElements(),
+        if (rawPredictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            launchExponentiation((half*)rawPredictions.get().getMemPtr(),
+                                 (float*)predictions.get().getMemPtr(),
+                                 rawPredictions.get().getDescriptor().getTotalNumElements(),
                                  stream);
         } else {
-            launchExponentiation((float*)inputTensor.get().getMemPtr(),
-                                 (float*)softmaxWorkspace.getMemPtr(),
-                                 inputTensor.get().getDescriptor().getTotalNumElements(),
+            launchExponentiation((float*)rawPredictions.get().getMemPtr(),
+                                 (float*)predictions.get().getMemPtr(),
+                                 rawPredictions.get().getDescriptor().getTotalNumElements(),
                                  stream);
         }
-        launchSumManyToOne((float*)softmaxWorkspace.getMemPtr(),
+        // Compute the norm
+        launchSumManyToOne((float*)predictions.get().getMemPtr(),
                            (float*)inverseSumOfInputExponentials.getMemPtr(),
                            elementsPerBatch,
                            batchSize,
                            true,
                            false,
                            stream);
-        launchMultiplyByScalar((float*)softmaxWorkspace.getMemPtr(),
+        // Normalize predictions
+        launchMultiplyByScalar((float*)predictions.get().getMemPtr(),
                                (float*)inverseSumOfInputExponentials.getMemPtr(),
-                               (float*)softmaxWorkspace.getMemPtr(),
+                               (float*)predictions.get().getMemPtr(),
                                elementsPerBatch,
                                batchSize,
                                stream);
 
+        // FIXME: inverse sum of exponentials is the loss per batch item, I want to output that from this layer.
+        // And when a scalar loss is desired then connect a SumAll layer between this and the network output.
+        // At the API layer I should offer 3 options: loss per batch, loss per batch item, loss per batch item per class.
+    }
+
+    // predictions is featureOutput and loss is errorOutput
+    virtual void computeLoss(Tensor labels, Tensor predictions, Tensor loss, Stream dataStream, Stream stream) {
         // Cross Entropy Loss
-        if (labelsTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchCrossEntropyLoss((half*)labelsTensor.get().getMemPtr(),
-                                   (float*)softmaxWorkspace.getMemPtr(),
+        if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            launchCrossEntropyLoss((half*)labels.getMemPtr(),
+                                   (float*)predictions.getMemPtr(),
                                    (float*)lossWorkspace.getMemPtr(),
-                                   (float*)lossTensor.get().getMemPtr(),
+                                   (half*)loss.getMemPtr(),
+                                   elementsPerBatch,
+                                   batchSize,
+                                   stream);
+        } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            launchCrossEntropyLoss((float*)labels.getMemPtr(),
+                                   (float*)predictions.getMemPtr(),
+                                   (float*)lossWorkspace.getMemPtr(),
+                                   (half*)loss.getMemPtr(),
                                    elementsPerBatch,
                                    batchSize,
                                    stream);
         } else {
-            launchCrossEntropyLoss((float*)labelsTensor.get().getMemPtr(),
-                                   (float*)softmaxWorkspace.getMemPtr(),
-                                   (float*)lossWorkspace.getMemPtr(),
-                                   (float*)lossTensor.get().getMemPtr(),
-                                   elementsPerBatch,
-                                   batchSize,
+            assert(false);
+        }
+
+        if (lossScalingFactor == 1.0f) {
+            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                                          (half*)labels.getMemPtr(),
+                                          (half*)loss.getMemPtr(),
+                                          loss.getDescriptor().getTotalNumElements(),
+                                          stream);
+            } else {
+                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                                          (float*)labels.getMemPtr(),
+                                          (half*)loss.getMemPtr(),
+                                          loss.getDescriptor().getTotalNumElements(),
+                                          stream);
+            }
+        } else {
+            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                                          (half*)labels.getMemPtr(),
+                                          (float*)predictions.getMemPtr(),
+                                          loss.getDescriptor().getTotalNumElements(),
+                                          stream);
+            } else {
+                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                                          (float*)labels.getMemPtr(),
+                                          (float*)predictions.getMemPtr(),
+                                          loss.getDescriptor().getTotalNumElements(),
+                                          stream);
+            }
+            launchMultiplyByScalar((float*)predictions.getMemPtr(),
+                                   (float*)lossScalingFactorTensor.getMemPtr(),
+                                   (half*)loss.getMemPtr(),
+                                   loss.getDescriptor().getTotalNumElements(),
+                                   1,
                                    stream);
         }
     }
 
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        assert(errorOut.isPresent());
-
-        if (lossScalingFactor == 1.0f) {
-            if (labelsTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                launchElementwiseSubtract((float*)softmaxWorkspace.getMemPtr(),
-                                          (half*)labelsTensor.get().getMemPtr(),
-                                          (half*)errorOut.get().getMemPtr(),
-                                          errorOut.get().getDescriptor().getTotalNumElements(),
-                                          stream);
-            } else {
-                launchElementwiseSubtract((float*)softmaxWorkspace.getMemPtr(),
-                                          (float*)labelsTensor.get().getMemPtr(),
-                                          (half*)errorOut.get().getMemPtr(),
-                                          errorOut.get().getDescriptor().getTotalNumElements(),
-                                          stream);
-            }
-        } else {
-            if (labelsTensor.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                launchElementwiseSubtract((float*)softmaxWorkspace.getMemPtr(),
-                                          (half*)labelsTensor.get().getMemPtr(),
-                                          (float*)softmaxWorkspace.getMemPtr(),
-                                          errorOut.get().getDescriptor().getTotalNumElements(),
-                                          stream);
-            } else {
-                launchElementwiseSubtract((float*)softmaxWorkspace.getMemPtr(),
-                                          (float*)labelsTensor.get().getMemPtr(),
-                                          (float*)softmaxWorkspace.getMemPtr(),
-                                          errorOut.get().getDescriptor().getTotalNumElements(),
-                                          stream);
-            }
-            launchMultiplyByScalar((float*)softmaxWorkspace.getMemPtr(),
-                                   (float*)lossScalingFactorTensor.getMemPtr(),
-                                   (half*)errorOut.get().getMemPtr(),
-                                   errorOut.get().getDescriptor().getTotalNumElements(),
-                                   1,
-                                   stream);
-        }
+    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream) {
+        assert(loss.isPresent());
     }
 
    private:
@@ -152,6 +158,5 @@ class CategoricalCrossEntropyLoss : public Loss {
     unsigned int elementsPerBatch;
 
     Tensor inverseSumOfInputExponentials;
-    Tensor softmaxWorkspace;
     Tensor lossWorkspace;
 };

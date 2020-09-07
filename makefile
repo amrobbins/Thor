@@ -39,7 +39,6 @@ Nvcc = nvcc
 RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
-                build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
                 build/test/Utilities/Common/OptionalTest && \
@@ -56,11 +55,12 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Full
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
 
+                #build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
+
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
-ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
-            build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
+ALL_TESTS = build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
             build/test/Utilities/TensorOperations/Misc/MiscTest \
             build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest \
@@ -78,6 +78,8 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
             build/test/Utilities/Common/OptionalTest \
+
+            #build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
 
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \

@@ -38,14 +38,14 @@ class DeviceCrossing : public Layer {
             errorOut.get().copyFromAsync(errorIn, stream.putEvent());
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
         assert(!uninitialized);
         assert(!running);
         this->nextLayer = nextLayer;
         featureOutput = createFeatureOutputTensor();
         otherDeviceStream = Stream(outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU ? inputPlacement.getDeviceNum()
                                                                                                       : outputPlacement.getDeviceNum());
-        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, otherDeviceStream, true);
+        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, otherDeviceStream, true, connectionType);
 
         if (errorInput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
@@ -53,10 +53,8 @@ class DeviceCrossing : public Layer {
         }
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(!uninitialized);
         assert(featureInput.isPresent());
         assert(featureInput.get().getPlacement() == inputPlacement);

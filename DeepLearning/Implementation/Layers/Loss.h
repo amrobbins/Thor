@@ -11,124 +11,164 @@
  *
  * The loss tensor give the loss per element of the batch, so it is a one dimensions array of
  * batchSize elements, the batch loss is the summation of the elements of the loss tensor.
+ *
+ * featureInput: The unnormalized predictions
+ * labelsInput: ground truth labels
+ * featureOutput: The normalized predictions (i.e. softmax applied)
+ * errorOutput: The loss (per batch item per class, sum it for scalar loss), this value is scaled by lossScalingFactor
  */
+// FIXME: inferenceOnly support
+//        for inference only, this layer acts as a softmax layer, does not connect labels and does not compute loss and does not
+//        backpropagate loss.
 class Loss : public Layer {
    public:
     Loss(float lossScalingFactor = 1.0f) { this->lossScalingFactor = lossScalingFactor; }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> inputTensor,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
-        assert(inputTensor.isPresent());
-        assert(inputTensor.get().getDescriptor().getDimensions().size() >= 2);
-        assert(this->labelsTensor.isEmpty());
-        if (this->featureInput.isPresent()) {
-            assert(this->featureInput.get().getDescriptor().getDimensions() == inputTensor.get().getDescriptor().getDimensions());
-            assert(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            assert(this->featureInput.get().getPlacement() == inputTensor.get().getPlacement());
-        }
-
-        // First connection is the activations
-        // Second connection is the labels
-        if (this->featureInput.isEmpty()) {
-            // Allocates this->featureInput and this->errorOutput
-            Layer::connectToPreviousLayer(previousLayer, inputTensor, stream, backPropagateError);
-
-            // Allocate loss tensor
-            vector<unsigned long> onePerBatchDimensions;
-            onePerBatchDimensions.push_back(featureInput.get().getDescriptor().getDimensions()[0]);
-            lossTensor =
-                Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, onePerBatchDimensions));
-
-            // Allocate scaling factor tensor
-            vector<unsigned long> scalarDimensions;
-            scalarDimensions.push_back(1);
-            Tensor lossScalingFactorTensorCpu =
-                Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, scalarDimensions));
-            ((float *)lossScalingFactorTensorCpu.getMemPtr())[0] = lossScalingFactor;
-            lossScalingFactorTensor =
-                Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, scalarDimensions));
-            lossScalingFactorTensor.copyFromAsync(lossScalingFactorTensorCpu, stream);
-
-            return errorOutput;
+    // The feature input to this layer is the (unnormalized) likelihood predictions per batch item per classification class
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
+        if (connectionType == (int)ConnectionType::FORWARD_BACKWARD) {
+            return connectToPredictionsInputLayer(previousLayer, featureInput, stream, backPropagateError);
+        } else if (connectionType == (int)ConnectionType::LABELS) {
+            return connectToLabelsInputLayer(previousLayer, featureInput, stream);
         } else {
-            labelsTensor = inputTensor;
-            labelsStream = stream;
-
-            return Optional<Tensor>::empty();
+            assert(false);
         }
+    }
+
+    virtual Optional<Tensor> connectToPredictionsInputLayer(Layer *predictionsInputLayer,
+                                                            Optional<Tensor> featureInput,
+                                                            Stream stream,
+                                                            bool backPropagateError) {
+        assert(featureInput.isPresent());
+        assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
+        assert(this->featureInput.isEmpty());
+
+        if (labelsInput.isPresent()) {
+            assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
+            assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            assert(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
+        }
+
+        // Allocates this->featureInput and this->errorOutput
+        Layer::connectToPreviousLayer(predictionsInputLayer, featureInput, stream, backPropagateError);
+
+        // Allocate scaling factor tensor
+        Tensor lossScalingFactorTensorCpu =
+            Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        ((float *)lossScalingFactorTensorCpu.getMemPtr())[0] = lossScalingFactor;
+        lossScalingFactorTensor = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        lossScalingFactorTensor.copyFromAsync(lossScalingFactorTensorCpu, stream);
+
+        return errorOutput;
+    }
+
+    virtual Optional<Tensor> connectToLabelsInputLayer(Layer *labelsLayer, Optional<Tensor> labels, Stream labelsStream) {
+        assert(this->labelsInput.isEmpty());
+
+        assert(labels.isPresent());
+
+        if (this->featureInput.isPresent()) {
+            assert(this->featureInput.get().getDescriptor().getDimensions() == labels.get().getDescriptor().getDimensions());
+            assert(this->featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            assert(this->featureInput.get().getPlacement() == labels.get().getPlacement());
+        }
+
+        this->labelsInput = labels;
+        this->labelsStream = labelsStream;
+
+        // Labels do not cause back propagation
+        return Optional<Tensor>::empty();
     }
 
     virtual ~Loss() {}
 
     virtual void initialize() {
-        activationsReceived = false;
+        featureInputReceived = false;
         labelsReceived = false;
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
-        assert(!running);
-        assert(lossTensor.isPresent());
+    // The output of this layer is the normalized predictions, per batch item per classification class
+    // (i.e. softmax applied to the input predictions)
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType) {
+        if (connectionType == (int)ConnectionType::PREDICTIONS) {
+            connectToPredictionOutputLayer(nextLayer);
+        } else if (connectionType == (int)ConnectionType::LOSS) {
+            connectToLossOutputLayer(nextLayer);
+        } else {
+            assert(false);
+        }
+    }
+
+    virtual void connectToPredictionOutputLayer(Layer *predictionsOutputLayer) {
+        assert(!compiled);
         assert(this->nextLayer.isEmpty());
+        assert(featureOutput.isEmpty());
 
-        this->nextLayer = nextLayer;
+        this->nextLayer = predictionsOutputLayer;
+        featureOutput = createFeatureOutputTensor();
 
-        nextLayer->connectToPreviousLayer(this, lossTensor, stream, false);
+        predictionsOutputLayer->connectToPreviousLayer(this, featureOutput, stream, false);
 
         ensureNoDeviceCrossing();
     }
 
+    virtual void connectToLossOutputLayer(Layer *lossOutputLayer) {
+        assert(!compiled);
+        assert(this->lossOutputLayer.isEmpty());
+
+        this->lossOutputLayer = lossOutputLayer;
+        lossOutputLayer->connectToPreviousLayer(this, errorOutput, labelsStream, false);
+
+        ensureNoDeviceCrossing();
+    }
+
+    virtual Optional<Tensor> createFeatureOutputTensor() {
+        assert(featureInput.isPresent());
+        return featureInput.get().clone(TensorDescriptor::DataType::FP32);
+    }
+
     virtual void forward(Optional<Tensor> inputTensor) {
         assert(running);
-        assert(labelsTensor.isPresent());
-        assert(labelsTensor.get().isInitialized());
-        assert(lossTensor.isPresent());
-        assert(lossTensor.get().isInitialized());
+        assert(labelsInput.isPresent());
+        assert(labelsInput.get().isInitialized());
+        assert(errorOutput.isPresent());
+        assert(errorOutput.get().isInitialized());
         assert(labelsStream.isInitialized());
         assert(inputTensor.isPresent());
-        assert(featureOutput.isEmpty());
+        assert(featureOutput.isPresent());
         assert(featureInput.isPresent());
 
-        // Receiving activations
-        if (inputTensor.get() == featureInput.get()) {
-            assert(activationsReceived == false);
-            activationsReceived = true;
-            // Receiving labels
-        } else if (inputTensor.get() == labelsTensor.get()) {
-            assert(labelsReceived == false);
-            labelsReceived = true;
-            if (labelsStream != stream)
-                stream.waitEvent(labelsStream.putEvent());
-        }
+        assert(featureInputReceived == false);
+        featureInputReceived = true;
+        assert(inputTensor.get() == featureInput.get());
 
-        if (activationsReceived && labelsReceived) {
-            infer(featureInput, lossTensor, stream);
+        advanceDataIfReady();
+    }
 
-            activationsReceived = false;
-            labelsReceived = false;
-        } else {
-            return;
-        }
+    virtual void forwardLabels(Tensor labelsInput) {
+        assert(this->labelsInput.get() == labelsInput);
 
-        if (nextLayer.isEmpty())
-            return;
+        assert(labelsReceived == false);
+        labelsReceived = true;
 
-        // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayer.get()->forward(lossTensor);
+        if (stream != labelsStream)
+            stream.waitEvent(labelsStream.putEvent());
+
+        advanceDataIfReady();
     }
 
     virtual void backward(Optional<Tensor> errorInput) {
         assert(running);
-        assert(labelsTensor.isPresent());
-        assert(labelsTensor.get().isInitialized());
-        assert(lossTensor.isPresent());
-        assert(lossTensor.get().isInitialized());
+        assert(labelsInput.isPresent());
+        assert(labelsInput.get().isInitialized());
+        assert(errorOutput.isPresent());
+        assert(errorOutput.get().isInitialized());
         assert(labelsStream.isInitialized());
         assert(errorInput.isEmpty());
 
         if (errorOutput.isPresent())
-            backProp(featureInput, Optional<Tensor>::empty(), errorOutput, stream);
+            backProp(labelsInput, featureOutput, errorOutput, stream);
 
         if (previousLayer.isEmpty())
             return;
@@ -137,28 +177,57 @@ class Loss : public Layer {
         previousLayer.get()->backward(errorOutput);
     }
 
-    // lossTensor is populated during the call to connectToPreviousLayer(...)
-    virtual Tensor getLossTensor() { return lossTensor; }
-
     virtual void ensureNoDeviceCrossing() {
         if (featureInput.isPresent() && errorOutput.isPresent())
             assert(featureInput.get().getPlacement() == errorOutput.get().getPlacement());
         if (featureInput.isPresent()) {
-            if (labelsTensor.isPresent())
-                assert(labelsTensor.get().getPlacement() == featureInput.get().getPlacement());
-            if (lossTensor.isPresent())
-                assert(lossTensor.get().getPlacement() == featureInput.get().getPlacement());
+            if (labelsInput.isPresent())
+                assert(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
+            assert(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
     }
 
+    virtual void computeLoss(Tensor labels, Tensor featureOutput, Tensor errorOutput, Stream dataStream, Stream labelsStream) = 0;
+
+    enum class ConnectionType { FORWARD_BACKWARD = 5, LABELS, PREDICTIONS, LOSS };
+
    protected:
-    Optional<Tensor> labelsTensor;
-    Optional<Tensor> lossTensor;
+    Optional<Layer *> lossOutputLayer;
+
+    Optional<Tensor> labelsInput;
 
     float lossScalingFactor;
     Tensor lossScalingFactorTensor;
     Stream labelsStream;
 
-    bool activationsReceived;
+    bool featureInputReceived;
     bool labelsReceived;
+
+    virtual void advanceDataIfReady() {
+        if (featureInputReceived && labelsReceived) {
+            infer(featureInput, featureOutput, stream);
+            if (errorOutput.isPresent())
+                computeLoss(labelsInput, featureOutput, errorOutput, stream, stream);
+
+            featureInputReceived = false;
+            labelsReceived = false;
+        } else {
+            return;
+        }
+
+        if (nextLayer.isEmpty())
+            return;
+
+        if (nextLayer.isPresent())
+            nextLayer.get()->forward(featureOutput);
+        if (lossOutputLayer.isPresent())
+            lossOutputLayer.get()->forward(errorOutput);
+
+        if (inferenceOnly)
+            return;
+
+        // Initiate back propagation
+        assert(previousLayer.isPresent());
+        previousLayer.get()->backward(errorOutput);
+    }
 };

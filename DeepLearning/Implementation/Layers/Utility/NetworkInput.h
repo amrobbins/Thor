@@ -42,20 +42,18 @@ class NetworkInput : public Layer {
 
     virtual bool isInput() { return true; }
 
-    virtual void connectToNextLayer(Layer *nextLayer) {
+    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
         assert(this->nextLayer.isEmpty());
 
         this->nextLayer = nextLayer;
 
         featureOutput = createFeatureOutputTensor();
 
-        nextLayer->connectToPreviousLayer(this, featureOutput, stream, false);
+        nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, connectionType);
     }
 
-    virtual Optional<Tensor> connectToPreviousLayer(Layer *previousLayer,
-                                                    Optional<Tensor> featureInput,
-                                                    Stream stream,
-                                                    bool backPropagateError) {
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(false);
     }
 
