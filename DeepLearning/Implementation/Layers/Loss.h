@@ -18,8 +18,8 @@
  * errorOutput: The loss (per batch item per class, sum it for scalar loss), this value is scaled by lossScalingFactor
  */
 // FIXME: inferenceOnly support
-//        for inference only, this layer acts as a softmax layer, does not connect labels and does not compute loss and does not
-//        backpropagate loss.
+//        For inference only, this layer acts as a softmax layer and may optionally compute loss when labels are supplied.
+//        In inferenceOnly mode, it does not backpropagate loss.
 class Loss : public Layer {
    public:
     Loss(float lossScalingFactor = 1.0f) { this->lossScalingFactor = lossScalingFactor; }
@@ -108,7 +108,11 @@ class Loss : public Layer {
         this->nextLayer = predictionsOutputLayer;
         featureOutput = createFeatureOutputTensor();
 
-        predictionsOutputLayer->connectToPreviousLayer(this, featureOutput, stream, false);
+        // Predictions don't need labels to compute.
+        // Inputs to a layer must all be connected before any outputs of a layer are connected, so that the layer knows how to create the
+        // outputs. Backpropagation does require lables to compute. So when labelsStream is present, use it so that offloading predictions
+        // does not delay backpropagation, otherwise use the data stream.
+        predictionsOutputLayer->connectToPreviousLayer(this, featureOutput, labelsStream.isPresent() ? labelsStream.get() : stream, false);
 
         ensureNoDeviceCrossing();
     }
@@ -116,9 +120,17 @@ class Loss : public Layer {
     virtual void connectToLossOutputLayer(Layer *lossOutputLayer) {
         assert(!compiled);
         assert(this->lossOutputLayer.isEmpty());
+        assert(featureInput.isPresent());
 
         this->lossOutputLayer = lossOutputLayer;
-        lossOutputLayer->connectToPreviousLayer(this, errorOutput, labelsStream, false);
+
+        // Allocate loss output tensor
+        // FIXME: I want to output loss per batch item per class from loss layers, then another layer can be used
+        //        to reduce this when desired. I want to be able to offer loss per class, and this needs the unreduced loss.
+        uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
+        lossOutput = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+
+        lossOutputLayer->connectToPreviousLayer(this, lossOutput, labelsStream, false);
 
         ensureNoDeviceCrossing();
     }
@@ -130,18 +142,33 @@ class Loss : public Layer {
 
     virtual void forward(Optional<Tensor> inputTensor) {
         assert(running);
-        assert(labelsInput.isPresent());
-        assert(labelsInput.get().isInitialized());
-        assert(errorOutput.isPresent());
-        assert(errorOutput.get().isInitialized());
-        assert(labelsStream.isInitialized());
-        assert(inputTensor.isPresent());
+        if (!inferenceOnly) {
+            assert(labelsStream.isPresent());
+            assert(labelsInput.isPresent());
+            assert(errorOutput.isPresent());
+            assert(errorOutput.get().isInitialized());
+        }
+        if (labelsStream.isPresent()) {
+            assert(labelsStream.get().isInitialized());
+            assert(labelsInput.get().isInitialized());
+        }
         assert(featureOutput.isPresent());
         assert(featureInput.isPresent());
+        assert(inputTensor.isPresent());
+
+        if (inputTensor.get() == featureInput.get())
+            forwardFeatures(inputTensor);
+        else if (inputTensor.get() == labelsInput.get())
+            forwardLabels(inputTensor);
+        else
+            assert(false);
+    }
+
+    virtual void forwardFeatures(Tensor featureInput) {
+        assert(this->featureInput.get() == featureInput);
 
         assert(featureInputReceived == false);
         featureInputReceived = true;
-        assert(inputTensor.get() == featureInput.get());
 
         advanceDataIfReady();
     }
@@ -152,9 +179,6 @@ class Loss : public Layer {
         assert(labelsReceived == false);
         labelsReceived = true;
 
-        if (stream != labelsStream)
-            stream.waitEvent(labelsStream.putEvent());
-
         advanceDataIfReady();
     }
 
@@ -164,7 +188,8 @@ class Loss : public Layer {
         assert(labelsInput.get().isInitialized());
         assert(errorOutput.isPresent());
         assert(errorOutput.get().isInitialized());
-        assert(labelsStream.isInitialized());
+        assert(labelsStream.isPresent());
+        assert(labelsStream.get().isInitialized());
         assert(errorInput.isEmpty());
 
         if (errorOutput.isPresent())
@@ -187,7 +212,8 @@ class Loss : public Layer {
         }
     }
 
-    virtual void computeLoss(Tensor labels, Tensor featureOutput, Tensor errorOutput, Stream dataStream, Stream labelsStream) = 0;
+    virtual void computeLoss(Tensor labels, Tensor featureOutput, Tensor errorOutput, Stream stream) = 0;
+    virtual void computeLossGradient(Tensor labels, Tensor predictions, Tensor lossGradient, Stream stream) = 0;
 
     enum class ConnectionType { FORWARD_BACKWARD = 5, LABELS, PREDICTIONS, LOSS };
 
@@ -195,19 +221,34 @@ class Loss : public Layer {
     Optional<Layer *> lossOutputLayer;
 
     Optional<Tensor> labelsInput;
+    Optional<Tensor> lossOutput;
 
     float lossScalingFactor;
     Tensor lossScalingFactorTensor;
-    Stream labelsStream;
+    Optional<Stream> labelsStream;
 
     bool featureInputReceived;
     bool labelsReceived;
 
     virtual void advanceDataIfReady() {
         if (featureInputReceived && labelsReceived) {
+            // Normalize predictions
             infer(featureInput, featureOutput, stream);
+
+            // DataStream waits for labels to arrive,
+            // Labels stream waits for infer to finish
+            if (labelsStream.isPresent() && stream != labelsStream.get()) {
+                stream.waitEvent(labelsStream.get().putEvent());
+                labelsStream.get().waitEvent(stream.putEvent());
+            }
+
+            // Compute loss, for forward direction
+            if (lossOutput.isPresent())
+                computeLoss(labelsInput, featureOutput, lossOutput, labelsStream);
+
+            // Compute loss gradient, for backward direction
             if (errorOutput.isPresent())
-                computeLoss(labelsInput, featureOutput, errorOutput, stream, stream);
+                computeLossGradient(labelsInput, featureOutput, errorOutput, stream);
 
             featureInputReceived = false;
             labelsReceived = false;
@@ -221,7 +262,7 @@ class Loss : public Layer {
         if (nextLayer.isPresent())
             nextLayer.get()->forward(featureOutput);
         if (lossOutputLayer.isPresent())
-            lossOutputLayer.get()->forward(errorOutput);
+            lossOutputLayer.get()->forward(lossOutput);
 
         if (inferenceOnly)
             return;

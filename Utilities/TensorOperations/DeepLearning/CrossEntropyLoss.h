@@ -12,7 +12,7 @@ template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
 void launchCrossEntropyLoss(LABEL_TYPE *labels_d,
                             PROBABILITY_TYPE *probabilities_d,
                             float *workspace_d,
-                            half *loss_d,
+                            float *loss_d,
                             uint32_t elementsPerBatch,
                             uint32_t batchSize,
                             Stream stream);

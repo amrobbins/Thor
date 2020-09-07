@@ -17,7 +17,7 @@
 using std::set;
 using std::vector;
 
-TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
+TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -38,21 +38,22 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
 
         TensorDescriptor elementwiseDescriptorFP32(TensorDescriptor::DataType::FP32, dimensions);
         TensorDescriptor elementwiseDescriptorFP16(TensorDescriptor::DataType::FP16, dimensions);
-        Tensor labelsCpu(cpuPlacement, elementwiseDescriptorFP16);
+
+        Tensor labelsCpu(cpuPlacement, elementwiseDescriptorFP32);
         Tensor activationsCpu(cpuPlacement, elementwiseDescriptorFP16);
-        Tensor labelsGpu(gpuPlacement, elementwiseDescriptorFP16);
+        Tensor labelsGpu(gpuPlacement, elementwiseDescriptorFP32);
         Tensor activationsGpu(gpuPlacement, elementwiseDescriptorFP16);
 
         vector<unsigned long> batchDimensions;
         batchDimensions.push_back(batchSize);
-        Tensor lossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchDimensions}));
-        Tensor lossGpu_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchDimensions}));
+        TensorDescriptor batchwiseDescriptor(TensorDescriptor::DataType::FP32, batchDimensions);
+        Tensor lossCpu(cpuPlacement, batchwiseDescriptor);
+        Tensor lossGpu_h(cpuPlacement, batchwiseDescriptor);
 
         Stream stream(0);
-        Stream labelsStream(0);
 
         float *labels = (float *)labelsCpu.getMemPtr();
-        float *activations = (float *)activationsCpu.getMemPtr();
+        half *activations = (half *)activationsCpu.getMemPtr();
         double totalActivations = 0.0;
         while (totalActivations < 0.01) {
             totalActivations = 0.0;
@@ -74,62 +75,45 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
         layers.push_back(activationsInput);
         NoOpLayer *noOpLayer = new NoOpLayer();
         layers.push_back(noOpLayer);
+        NetworkInput *labelsInput = new NetworkInput(labelsGpu, stream);
+        layers.push_back(labelsInput);
         CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(lossScalingFactor);
         layers.push_back(categoricalCrossEntropyLoss);
         NetworkOutput *predictionsOutput = new NetworkOutput(gpuPlacement);
         layers.push_back(predictionsOutput);
+        NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
+        layers.push_back(lossOutput);
 
-        LayerTestHelper::connectNetwork(layers);
-
-        NetworkInput *labelsInputLayer = new NetworkInput(labelsGpu, stream);
-        NetworkOutput *lossOutputLayer = new NetworkOutput(gpuPlacement);
-
-        labelsInputLayer->connectToLabelsInput(categoricalCrossEntropyLoss);
-        categoricalCrossEntropyLoss->connectToLossOutputLayer(lossOutputLayer);
-        labelsInputLayer->parentCompile();
-        labelsInputLayer->compile();
-        labelsInputLayer->parentInitialize();
-        labelsInputLayer->initialize();
-        lossOutputLayer->parentCompile();
-        lossOutputLayer->compile();
-        lossOutputLayer->parentInitialize();
-        lossOutputLayer->initialize();
-
+        LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
+        LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+        LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::LABELS);
+        LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, predictionsOutput, (int)Loss::ConnectionType::PREDICTIONS);
+        LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::LOSS);
         LayerTestHelper::initializeNetwork(layers);
 
-        layers.push_back(labelsInputLayer);
-        layers.push_back(lossOutputLayer);
-
-        Tensor outputGpu = lossOutputLayer->getFeatureOutput();
+        Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
         activationsInput->forward(activationsGpu);
-        labelsInputLayer->forward(labelsGpu);
-        stream.waitEvent(lossOutputLayer->getOutputReadyEvent());
-
-        // FIXME: TEMP. Fix is to add LayerConnection to add a second output, 3 total LayerConnections, like:
-        // (featureIn)   <--+---------+--->
-        // (labels)      x--+---->    |
-        // (loss)           |    x----+--->
-        stream.synchronize();
-
-        lossGpu_h.copyFromAsync(categoricalCrossEntropyLoss->getErrorOutput(), stream);
+        labelsInput->forward(labelsGpu);
+        stream.waitEvent(lossOutput->getOutputReadyEvent());
+        lossGpu_h.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
         // Compute the expected loss
         float *labelsMem = (float *)labelsCpu.getMemPtr();
-        float *activationsMem = (float *)activationsCpu.getMemPtr();
-        half *lossMem = (half *)lossCpu.getMemPtr();
-        Tensor sumOfExponentials(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchDimensions}));
+        half *activationsMem = (half *)activationsCpu.getMemPtr();
+        float *lossMem = (float *)lossCpu.getMemPtr();
+        Tensor sumOfExponentials(cpuPlacement, batchwiseDescriptor);
         float *sumOfExponentialsMem = (float *)sumOfExponentials.getMemPtr();
         Tensor exponentials(cpuPlacement, elementwiseDescriptorFP32);
         float *exponentialsMem = (float *)exponentials.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
             sumOfExponentialsMem[b] = 0.0f;
             for (int i = 0; i < numElementsPerBatch; ++i) {
-                exponentialsMem[b * numElementsPerBatch + i] = exp(activationsMem[b * numElementsPerBatch + i]);
+                exponentialsMem[b * numElementsPerBatch + i] = exp((float)activationsMem[b * numElementsPerBatch + i]);
                 sumOfExponentialsMem[b] += exponentialsMem[b * numElementsPerBatch + i];
             }
         }
@@ -141,19 +125,18 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
             }
         }
         for (int b = 0; b < batchSize; ++b) {
-            float buff = 0.0f;
+            lossMem[b] = 0.0f;
             for (int i = 0; i < numElementsPerBatch; ++i) {
-                buff -= labelsMem[b * numElementsPerBatch + i] * log(exponentialsMem[b * numElementsPerBatch + i]);
+                lossMem[b] -= labelsMem[b * numElementsPerBatch + i] * log(exponentialsMem[b * numElementsPerBatch + i]);
             }
-            lossMem[b] = (half)buff;
         }
 
-        half *lossMemFromGpu = (half *)lossGpu_h.getMemPtr();
+        float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
-            float thresh = std::max((float)lossMem[b] / 320000.0f, 0.001f);
-            EXPECT_LT(abs((float)lossMem[b] - (float)lossMemFromGpu[b]), thresh);
-            if (abs((float)lossMem[b] - (float)lossMemFromGpu[b]) >= thresh)
-                printf("cpuF %f gpuF %f    %d\n", (float)lossMem[b], (float)lossMemFromGpu[b], b);
+            float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
+            EXPECT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
+            if (abs(lossMem[b] - lossMemFromGpu[b]) >= thresh)
+                printf("cpuF %f gpuF %f    %d\n", lossMem[b], lossMemFromGpu[b], b);
         }
 
         // Backward pass
@@ -164,27 +147,27 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
         categoricalCrossEntropyLoss->backward(Optional<Tensor>::empty());
         errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
 
-        float *errorOutputMem = (float *)errorOutputCpu.getMemPtr();
+        half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
             for (int i = 0; i < numElementsPerBatch; ++i) {
-                errorOutputMem[b * numElementsPerBatch + i] = (float)(half)(
-                    lossScalingFactor * (exponentialsMem[b * numElementsPerBatch + i] - labelsMem[b * numElementsPerBatch + i]));
+                errorOutputMem[b * numElementsPerBatch + i] =
+                    (lossScalingFactor * (exponentialsMem[b * numElementsPerBatch + i] - labelsMem[b * numElementsPerBatch + i]));
             }
         }
 
         stream.synchronize();
-
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
         float thresh = 0.01f;
         for (int i = 0; i < numElements; ++i) {
-            EXPECT_LT(abs(errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
-            if (abs(errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh)
-                printf("cpu %f gpu %f\n", errorOutputMem[i], (float)errorOutputFromGpu[i]);
+            EXPECT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+            if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh)
+                printf("cpu %f gpu %f\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i]);
         }
 
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
+
 /*
 TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
     srand(time(NULL));
@@ -335,6 +318,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResultFp16) {
     }
 }
 */
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

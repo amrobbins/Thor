@@ -3,7 +3,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
 /**
- * This is equivalent to a softmax activation layer followed by a categorical cross entropy loss.
+ * This is equivalent to a softmax activation layer followed by a cross entropy loss.
  *
  * The input predicted values to the loss layer will sum to 1.0 since they are put through a softmax activation first.
  * Those values are clamped to a minimum value of 10e-15, to avoid log(0.0f).
@@ -90,13 +90,13 @@ class CategoricalCrossEntropyLoss : public Loss {
     }
 
     // predictions is featureOutput and loss is errorOutput
-    virtual void computeLoss(Tensor labels, Tensor predictions, Tensor loss, Stream dataStream, Stream stream) {
+    virtual void computeLoss(Tensor labels, Tensor predictions, Tensor loss, Stream stream) {
         // Cross Entropy Loss
         if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             launchCrossEntropyLoss((half*)labels.getMemPtr(),
                                    (float*)predictions.getMemPtr(),
                                    (float*)lossWorkspace.getMemPtr(),
-                                   (half*)loss.getMemPtr(),
+                                   (float*)loss.getMemPtr(),
                                    elementsPerBatch,
                                    batchSize,
                                    stream);
@@ -104,26 +104,28 @@ class CategoricalCrossEntropyLoss : public Loss {
             launchCrossEntropyLoss((float*)labels.getMemPtr(),
                                    (float*)predictions.getMemPtr(),
                                    (float*)lossWorkspace.getMemPtr(),
-                                   (half*)loss.getMemPtr(),
+                                   (float*)loss.getMemPtr(),
                                    elementsPerBatch,
                                    batchSize,
                                    stream);
         } else {
             assert(false);
         }
+    }
 
+    virtual void computeLossGradient(Tensor labels, Tensor predictions, Tensor lossGradient, Stream stream) {
         if (lossScalingFactor == 1.0f) {
             if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
                 launchElementwiseSubtract((float*)predictions.getMemPtr(),
                                           (half*)labels.getMemPtr(),
-                                          (half*)loss.getMemPtr(),
-                                          loss.getDescriptor().getTotalNumElements(),
+                                          (half*)lossGradient.getMemPtr(),
+                                          lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             } else {
                 launchElementwiseSubtract((float*)predictions.getMemPtr(),
                                           (float*)labels.getMemPtr(),
-                                          (half*)loss.getMemPtr(),
-                                          loss.getDescriptor().getTotalNumElements(),
+                                          (half*)lossGradient.getMemPtr(),
+                                          lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             }
         } else {
@@ -131,26 +133,26 @@ class CategoricalCrossEntropyLoss : public Loss {
                 launchElementwiseSubtract((float*)predictions.getMemPtr(),
                                           (half*)labels.getMemPtr(),
                                           (float*)predictions.getMemPtr(),
-                                          loss.getDescriptor().getTotalNumElements(),
+                                          lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             } else {
                 launchElementwiseSubtract((float*)predictions.getMemPtr(),
                                           (float*)labels.getMemPtr(),
                                           (float*)predictions.getMemPtr(),
-                                          loss.getDescriptor().getTotalNumElements(),
+                                          lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             }
             launchMultiplyByScalar((float*)predictions.getMemPtr(),
                                    (float*)lossScalingFactorTensor.getMemPtr(),
-                                   (half*)loss.getMemPtr(),
-                                   loss.getDescriptor().getTotalNumElements(),
+                                   (half*)lossGradient.getMemPtr(),
+                                   lossGradient.getDescriptor().getTotalNumElements(),
                                    1,
                                    stream);
         }
     }
 
-    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream) {
-        assert(loss.isPresent());
+    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> predictions, Optional<Tensor> lossGradient, Stream stream) {
+        assert(lossGradient.isPresent());
     }
 
    private:

@@ -40,8 +40,8 @@ class LayerTestHelper {
         layers.clear();
     }
 
-    static void connectTwoLayers(Layer *firstLayer, Layer *secondLayer) {
-        firstLayer->connectToNextLayer(secondLayer);
+    static void connectTwoLayers(Layer *firstLayer, Layer *secondLayer, int connectionType = 0) {
+        firstLayer->connectToNextLayer(secondLayer, connectionType);
         firstLayer->postConnectToNextLayer();
     }
 
