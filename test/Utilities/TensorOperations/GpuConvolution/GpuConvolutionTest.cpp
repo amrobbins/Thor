@@ -22,9 +22,9 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
         int filterVerticalStride = (rand() % numInputRows) + 1;
         int leftAndRightPadWidth = (rand() % 20) + 1;
         int topAndBottomPadHeight = (rand() % 20) + 1;
-        int numFeatureInputChannels = (rand() % 33) + 1;
-        int numFeatureOutputChannels = (rand() % 33) + 1;
-        int batchSize = (rand() % 33) + 1;
+        int numFeatureInputChannels = (rand() % 10) + 1;
+        int numFeatureOutputChannels = (rand() % 10) + 1;
+        int batchSize = (rand() % 10) + 1;
 
         bool accumulate = rand() % 2;
 
@@ -113,9 +113,9 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
         int filterVerticalStride = (rand() % numInputRows) + 1;
         int leftAndRightPadWidth = (rand() % 20) + 1;
         int topAndBottomPadHeight = (rand() % 20) + 1;
-        int numFeatureInputChannels = (rand() % 33) + 1;
-        int numFeatureOutputChannels = (rand() % 33) + 1;
-        int batchSize = (rand() % 33) + 1;
+        int numFeatureInputChannels = (rand() % 10) + 1;
+        int numFeatureOutputChannels = (rand() % 10) + 1;
+        int batchSize = (rand() % 10) + 1;
 
         ConvolutionKernelRequirement convolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
                                                                   filterWidth,
@@ -230,9 +230,9 @@ void backwardFilterTest(bool accumulate) {
         int filterVerticalStride = (rand() % numInputRows) + 1;
         int leftAndRightPadWidth = (rand() % 20) + 1;
         int topAndBottomPadHeight = (rand() % 20) + 1;
-        int numFeatureInputChannels = (rand() % 33) + 1;
-        int numFeatureOutputChannels = (rand() % 33) + 1;
-        int batchSize = (rand() % 33) + 1;
+        int numFeatureInputChannels = (rand() % 10) + 1;
+        int numFeatureOutputChannels = (rand() % 10) + 1;
+        int batchSize = (rand() % 10) + 1;
 
         ConvolutionKernelRequirement convolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
                                                                   filterWidth,
@@ -362,9 +362,9 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
         int filterVerticalStride = (rand() % numInputRows) + 1;
         int leftAndRightPadWidth = (rand() % 20) + 1;
         int topAndBottomPadHeight = (rand() % 20) + 1;
-        int numFeatureInputChannels = (rand() % 33) + 1;
-        int numFeatureOutputChannels = (rand() % 33) + 1;
-        int batchSize = (rand() % 33) + 1;
+        int numFeatureInputChannels = (rand() % 10) + 1;
+        int numFeatureOutputChannels = (rand() % 10) + 1;
+        int batchSize = (rand() % 10) + 1;
 
         ConvolutionKernelRequirement convolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
                                                                   filterWidth,

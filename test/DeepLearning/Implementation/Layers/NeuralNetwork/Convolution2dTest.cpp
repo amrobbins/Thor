@@ -256,6 +256,76 @@ TEST(Convolution2d, Convolution2dWorks) {
                      filterWidth,
                      false);
 
+        // Test apply gradients
+        float learningRate = 1.0f / ((rand() % 100) + 1);
+        convolution2dLayer->setLearningRate(learningRate);
+        Tensor weights = convolution2dLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
+        Tensor weightsGpu_h = convolution2dLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
+        Tensor weightsGradientGpu_h = convolution2dLayer->getWeightsGradient().get().clone(TensorPlacement::MemDevices::CPU);
+        Tensor biases;
+        Tensor biasesGpu_h;
+        Tensor biasesGradientGpu_h;
+        if (hasBias) {
+            biases = convolution2dLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
+            biasesGpu_h = convolution2dLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
+            biasesGradientGpu_h = convolution2dLayer->getBiasesGradient().get().clone(TensorPlacement::MemDevices::CPU);
+        }
+
+        weights.copyFromAsync(convolution2dLayer->getWeights(), stream);
+        weightsGradientGpu_h.copyFromAsync(convolution2dLayer->getWeightsGradient(), stream);
+        if (hasBias) {
+            biases.copyFromAsync(convolution2dLayer->getBiases(), stream);
+            biasesGradientGpu_h.copyFromAsync(convolution2dLayer->getBiasesGradient(), stream);
+        }
+        stream.synchronize();
+
+        Event gradientsApplied = convolution2dLayer->updateWeightsAndBiasesWithScaledGradient();
+        stream.waitEvent(gradientsApplied);
+        weightsGpu_h.copyFromAsync(convolution2dLayer->getWeights(), stream);
+        if (hasBias)
+            biasesGpu_h.copyFromAsync(convolution2dLayer->getBiases(), stream);
+
+        stream.synchronize();
+
+        float maxDiff = 0.01;
+
+        weightsMem = (half *)weights.getMemPtr();
+        half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();
+        half *weightsGradientMem = (half *)weightsGradientGpu_h.getMemPtr();
+        for (int i = 0; i < numWeights; ++i) {
+            half expected = weightsMem[i] - learningRate * weightsGradientMem[i];
+            EXPECT_LT(abs((float)expected - (float)weightsGpuMem[i]), maxDiff);
+            if (abs((float)expected - (float)weightsGpuMem[i]) >= maxDiff) {
+                printf("%d  cpu %f  gpu %f     weight %f   gradient %f  learningRate %f\n",
+                       i,
+                       (float)expected,
+                       (float)weightsGpuMem[i],
+                       (float)weightsMem[i],
+                       (float)weightsGradientMem[i],
+                       learningRate);
+            }
+        }
+
+        if (hasBias) {
+            int numBiases = convolution2dLayer->getBiases().get().getDescriptor().getTotalNumElements();
+            half *biasesMem = (half *)biases.getMemPtr();
+            half *biasesGpuMem = (half *)biasesGpu_h.getMemPtr();
+            half *biasesGradientMem = (half *)biasesGradientGpu_h.getMemPtr();
+            for (int i = 0; i < numBiases; ++i) {
+                half expected = biasesMem[i] - learningRate * biasesGradientMem[i];
+                EXPECT_LT(abs((float)expected - (float)biasesGpuMem[i]), maxDiff);
+                if (abs((float)expected - (float)biasesGpuMem[i]) >= maxDiff) {
+                    printf("%d  cpu %f  gpu %f     bias %f   gradient %f  learningRate %f\n",
+                           i,
+                           (float)expected,
+                           (float)biasesGpuMem[i],
+                           (float)biasesMem[i],
+                           (float)biasesGradientMem[i],
+                           learningRate);
+                }
+            }
+        }
+
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
@@ -408,9 +478,93 @@ void backwardPass(Convolution2d *convolution2dLayer,
                 printf("%f %f   at [%d] batchSize %d thresh %f\n", cpuVal, gpuVal, i, batchSize, thresh + threshAdjust);
         }
     }
+}
 
-    // convolution2dLayer->getStreams()[0].waitEvent(convolution2dLayer->getGradientUpdateStream().get().putEvent());
-    // convolution2dLayer->getGradientUpdateStream().get().waitEvent(convolution2dLayer->getStreams()[0].putEvent());
+TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
+    srand(time(NULL));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    Stream stream(0);
+
+    for (int test = 0; test < 5; ++test) {
+        const int numInputColumns = 1 + (rand() % 50);
+        const int numInputRows = 1 + (rand() % 50);
+        const int filterHorizontalStride = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));
+        const int filterVerticalStride = numInputRows == 1 ? 1 : 1 + (rand() % (numInputRows - 1));
+        const int filterWidth = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));
+        const int filterHeight = numInputRows == 1 ? 1 : 1 + (rand() % (numInputRows - 1));
+        const int leftAndRightPadWidth = filterWidth < 10 ? rand() % filterWidth : rand() % 10;
+        const int topAndBottomPadHeight = filterHeight < 10 ? rand() % filterHeight : rand() % 10;
+        const int numInputChannels = 1 + (rand() % 10);
+        const int numOutputChannels = 1 + (rand() % 10);
+        const int batchSize = 1 + (rand() % 10);
+        const bool hasBias = (rand() % 4) != 0;
+
+        vector<unsigned long> inputDimensions;
+        inputDimensions.push_back(batchSize);
+        inputDimensions.push_back(numInputChannels);
+        inputDimensions.push_back(numInputRows);
+        inputDimensions.push_back(numInputColumns);
+        TensorDescriptor inputDescriptor(TensorDescriptor::DataType::FP16, inputDimensions);
+
+        Tensor featureIn = Tensor(cpuPlacement, inputDescriptor);
+
+        vector<Layer *> layers;
+        layers.push_back(
+            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NoOpLayer());
+        Convolution2d *convolution2dLayer = new Convolution2d(filterWidth,
+                                                              filterHeight,
+                                                              filterHorizontalStride,
+                                                              filterVerticalStride,
+                                                              leftAndRightPadWidth,
+                                                              topAndBottomPadHeight,
+                                                              numInputChannels,
+                                                              numOutputChannels,
+                                                              batchSize,
+                                                              numInputColumns,
+                                                              numInputRows,
+                                                              hasBias);
+        layers.push_back(convolution2dLayer);
+        layers.push_back(new NoOpLayer());
+        layers.push_back(new NetworkOutput(cpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+
+        Convolution2d::UniformRandomInitializer initializer(0.1, -0.1);
+        convolution2dLayer->initializeWeights(&initializer);
+        if (hasBias) {
+            convolution2dLayer->initializeBiases(&initializer);
+        }
+
+        Tensor weights = convolution2dLayer->getWeights().clone(cpuPlacement);
+        weights.copyFromAsync(convolution2dLayer->getWeights(), stream);
+        Tensor biases;
+        if (hasBias) {
+            biases = convolution2dLayer->getBiases().get().clone(cpuPlacement);
+            biases.copyFromAsync(convolution2dLayer->getBiases(), stream);
+        }
+
+        stream.synchronize();
+
+        int totalNumWeights = convolution2dLayer->getWeights().getDescriptor().getTotalNumElements();
+        half *weightsMem = (half *)weights.getMemPtr();
+        for (int i = 0; i < totalNumWeights; ++i) {
+            ASSERT_LT(abs((float)weightsMem[i]), 0.1);
+        }
+
+        if (hasBias) {
+            int totalNumBiases = convolution2dLayer->getBiases().get().getDescriptor().getTotalNumElements();
+            half *biasesMem = (half *)biases.getMemPtr();
+            for (int i = 0; i < totalNumBiases; ++i) {
+                ASSERT_LT(abs((float)biasesMem[i]), 0.1);
+            }
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
 }
 
 int main(int argc, char **argv) {
