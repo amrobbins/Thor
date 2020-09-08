@@ -212,8 +212,8 @@ class Loss : public Layer {
         }
     }
 
-    virtual void computeLoss(Tensor labels, Tensor featureOutput, Tensor errorOutput, Stream stream) = 0;
-    virtual void computeLossGradient(Tensor labels, Tensor predictions, Tensor lossGradient, Stream stream) = 0;
+    virtual void computeLoss(Tensor labels, Tensor normalizedPredictionsOut, Tensor loss, Stream stream) = 0;
+    virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) = 0;
 
     enum class ConnectionType { FORWARD_BACKWARD = 5, LABELS, PREDICTIONS, LOSS };
 
@@ -255,9 +255,6 @@ class Loss : public Layer {
         } else {
             return;
         }
-
-        if (nextLayer.isEmpty())
-            return;
 
         if (nextLayer.isPresent())
             nextLayer.get()->forward(featureOutput);
