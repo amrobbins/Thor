@@ -44,57 +44,61 @@ class CategoricalCrossEntropyLoss : public Loss {
 
         inverseSumOfInputExponentials =
             Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+
+        if (lossScalingFactor == 1.0) {
+        } else {
+            errorOutputWorkspace = errorOutput.get().clone(TensorDescriptor::DataType::FP32);
+        }
     }
 
     virtual void cleanup() {}
 
-    virtual void infer(Optional<Tensor> rawPredictions, Optional<Tensor> predictions, Stream stream) {
-        assert(rawPredictions.isPresent());
-        assert(predictions.isPresent());
-        assert(rawPredictions.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        if (rawPredictions.get() != featureInput.get())
+    virtual void infer(Optional<Tensor> rawPredictionsIn, Optional<Tensor> normalizedPredictionsOut, Stream stream) {
+        assert(rawPredictionsIn.isPresent());
+        assert(normalizedPredictionsOut.isPresent());
+        assert(rawPredictionsIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        if (rawPredictionsIn.get() != featureInput.get())
             return;
-        ScopedGpu scopedGpu(rawPredictions.get().getPlacement().getDeviceNum());
+        ScopedGpu scopedGpu(rawPredictionsIn.get().getPlacement().getDeviceNum());
 
         // Softmax
-        if (rawPredictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchExponentiation((half*)rawPredictions.get().getMemPtr(),
-                                 (float*)predictions.get().getMemPtr(),
-                                 rawPredictions.get().getDescriptor().getTotalNumElements(),
+
+        // Take the e^rawPrediction
+        if (rawPredictionsIn.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            launchExponentiation((half*)rawPredictionsIn.get().getMemPtr(),
+                                 (float*)normalizedPredictionsOut.get().getMemPtr(),
+                                 rawPredictionsIn.get().getDescriptor().getTotalNumElements(),
                                  stream);
         } else {
-            launchExponentiation((float*)rawPredictions.get().getMemPtr(),
-                                 (float*)predictions.get().getMemPtr(),
-                                 rawPredictions.get().getDescriptor().getTotalNumElements(),
+            launchExponentiation((float*)rawPredictionsIn.get().getMemPtr(),
+                                 (float*)normalizedPredictionsOut.get().getMemPtr(),
+                                 rawPredictionsIn.get().getDescriptor().getTotalNumElements(),
                                  stream);
         }
-        // Compute the norm
-        launchSumManyToOne((float*)predictions.get().getMemPtr(),
+        // sum the exponentials per batch item
+        launchSumManyToOne((float*)normalizedPredictionsOut.get().getMemPtr(),
                            (float*)inverseSumOfInputExponentials.getMemPtr(),
                            elementsPerBatch,
                            batchSize,
                            true,
                            false,
                            stream);
-        // Normalize predictions
-        launchMultiplyByScalar((float*)predictions.get().getMemPtr(),
+
+        // Normalize predictions to sum to 1 per batch item
+        launchMultiplyByScalar((float*)normalizedPredictionsOut.get().getMemPtr(),
                                (float*)inverseSumOfInputExponentials.getMemPtr(),
-                               (float*)predictions.get().getMemPtr(),
+                               (float*)normalizedPredictionsOut.get().getMemPtr(),
                                elementsPerBatch,
                                batchSize,
                                stream);
-
-        // FIXME: inverse sum of exponentials is the loss per batch item, I want to output that from this layer.
-        // And when a scalar loss is desired then connect a SumAll layer between this and the network output.
-        // At the API layer I should offer 3 options: loss per batch, loss per batch item, loss per batch item per class.
     }
 
-    // predictions is featureOutput and loss is errorOutput
-    virtual void computeLoss(Tensor labels, Tensor predictions, Tensor loss, Stream stream) {
+    // normalizedPredictions is featureOutput and loss is errorOutput
+    virtual void computeLoss(Tensor labels, Tensor normalizedPredictions, Tensor loss, Stream stream) {
         // Cross Entropy Loss
         if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             launchCrossEntropyLoss((half*)labels.getMemPtr(),
-                                   (float*)predictions.getMemPtr(),
+                                   (float*)normalizedPredictions.getMemPtr(),
                                    (float*)lossWorkspace.getMemPtr(),
                                    (float*)loss.getMemPtr(),
                                    elementsPerBatch,
@@ -102,7 +106,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                    stream);
         } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
             launchCrossEntropyLoss((float*)labels.getMemPtr(),
-                                   (float*)predictions.getMemPtr(),
+                                   (float*)normalizedPredictions.getMemPtr(),
                                    (float*)lossWorkspace.getMemPtr(),
                                    (float*)loss.getMemPtr(),
                                    elementsPerBatch,
@@ -111,18 +115,22 @@ class CategoricalCrossEntropyLoss : public Loss {
         } else {
             assert(false);
         }
+
+        // FIXME: At the API layer I should offer 3 options: loss per batch, loss per batch item, loss per batch item per class.
+        //        Currently this layer outputs loss per batch item, it should output loss per batch item per class and a subsequent layer
+        //        should reduce as desired.
     }
 
-    virtual void computeLossGradient(Tensor labels, Tensor predictions, Tensor lossGradient, Stream stream) {
+    virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {
         if (lossScalingFactor == 1.0f) {
             if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                           (half*)labels.getMemPtr(),
                                           (half*)lossGradient.getMemPtr(),
                                           lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             } else {
-                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                           (float*)labels.getMemPtr(),
                                           (half*)lossGradient.getMemPtr(),
                                           lossGradient.getDescriptor().getTotalNumElements(),
@@ -130,19 +138,19 @@ class CategoricalCrossEntropyLoss : public Loss {
             }
         } else {
             if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                           (half*)labels.getMemPtr(),
-                                          (float*)predictions.getMemPtr(),
+                                          (float*)errorOutputWorkspace.get().getMemPtr(),
                                           lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             } else {
-                launchElementwiseSubtract((float*)predictions.getMemPtr(),
+                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                           (float*)labels.getMemPtr(),
-                                          (float*)predictions.getMemPtr(),
+                                          (float*)errorOutputWorkspace.get().getMemPtr(),
                                           lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             }
-            launchMultiplyByScalar((float*)predictions.getMemPtr(),
+            launchMultiplyByScalar((float*)errorOutputWorkspace.get().getMemPtr(),
                                    (float*)lossScalingFactorTensor.getMemPtr(),
                                    (half*)lossGradient.getMemPtr(),
                                    lossGradient.getDescriptor().getTotalNumElements(),
@@ -151,7 +159,7 @@ class CategoricalCrossEntropyLoss : public Loss {
         }
     }
 
-    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> predictions, Optional<Tensor> lossGradient, Stream stream) {
+    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) {
         assert(lossGradient.isPresent());
     }
 
@@ -161,4 +169,6 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     Tensor inverseSumOfInputExponentials;
     Tensor lossWorkspace;
+
+    Optional<Tensor> errorOutputWorkspace;
 };

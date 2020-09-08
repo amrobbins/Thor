@@ -23,9 +23,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    cudaError_t cudaStatus;
-
-    for (int test = 0; test < 25; ++test) {
+    for (int test = 0; test < 50; ++test) {
         int numDimensions = (rand() % 5) + 2;
         vector<unsigned long> dimensions;
         int numElements = 1;
@@ -51,6 +49,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         Tensor lossGpu_h(cpuPlacement, batchwiseDescriptor);
 
         Stream stream(0);
+        Stream labelsStream(0);
 
         float *labels = (float *)labelsCpu.getMemPtr();
         half *activations = (half *)activationsCpu.getMemPtr();
@@ -75,7 +74,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         layers.push_back(activationsInput);
         NoOpLayer *noOpLayer = new NoOpLayer();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu, stream);
+        NetworkInput *labelsInput = new NetworkInput(labelsGpu, labelsStream);
         layers.push_back(labelsInput);
         CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(lossScalingFactor);
         layers.push_back(categoricalCrossEntropyLoss);
@@ -96,11 +95,20 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         // Network is runnable here
         activationsInput->forward(activationsGpu);
         labelsInput->forward(labelsGpu);
-        stream.waitEvent(lossOutput->getOutputReadyEvent());
-        lossGpu_h.copyFromAsync(outputGpu, stream);
 
-        cudaStatus = cudaStreamSynchronize(stream.getStream());
-        assert(cudaStatus == cudaSuccess);
+        labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
+        lossGpu_h.copyFromAsync(outputGpu, labelsStream);
+        Tensor predictionsGpu_h = predictionsOutput->getFeatureOutput().get().clone(cpuPlacement);
+        labelsStream.waitEvent(predictionsOutput->getOutputReadyEvent());
+        predictionsGpu_h.copyFromAsync(predictionsOutput->getFeatureOutput(), labelsStream);
+
+        Tensor errorOutputGpu = categoricalCrossEntropyLoss->getErrorOutput();
+        Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+        Tensor errorOutputGpu_h = errorOutputCpu.clone();
+        categoricalCrossEntropyLoss->backward(Optional<Tensor>::empty());
+        errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+
+        labelsStream.synchronize();
 
         // Compute the expected loss
         float *labelsMem = (float *)labelsCpu.getMemPtr();
@@ -124,6 +132,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
                     exponentialsMem[b * numElementsPerBatch + i] = 1.0e-15f;
             }
         }
+
         for (int b = 0; b < batchSize; ++b) {
             lossMem[b] = 0.0f;
             for (int i = 0; i < numElementsPerBatch; ++i) {
@@ -131,6 +140,16 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
             }
         }
 
+        // Verify the softmax output (predictions)
+        float thresh = 0.01f;
+        float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            EXPECT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
+            if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
+                printf("%d   cpu %f gpu %f\n", i, exponentialsMem[i], predictionsGpuMem[i]);
+        }
+
+        // Verify the loss output
         float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
             float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
@@ -140,12 +159,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         }
 
         // Backward pass
-        Tensor errorOutputGpu = categoricalCrossEntropyLoss->getErrorOutput();
-        Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
-        Tensor errorOutputGpu_h = errorOutputCpu.clone();
 
-        categoricalCrossEntropyLoss->backward(Optional<Tensor>::empty());
-        errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+        stream.synchronize();
 
         half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
@@ -155,13 +170,15 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
             }
         }
 
-        stream.synchronize();
+        // Verify the loss gradient
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
-        float thresh = 0.01f;
+        thresh = 0.01f;
         for (int i = 0; i < numElements; ++i) {
             EXPECT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
-            if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh)
+            if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
                 printf("cpu %f gpu %f\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i]);
+                fflush(stdout);
+            }
         }
 
         LayerTestHelper::tearDownNetwork(layers);
