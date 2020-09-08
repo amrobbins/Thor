@@ -287,6 +287,65 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accu
             }
         }
     }
+
+    // Test apply gradients
+    float learningRate = 1.0f / ((rand() % 100) + 1);
+    fullyConnectedLayer->setLearningRate(learningRate);
+    Tensor weightsGpu_h = fullyConnectedLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
+    Tensor biasesGpu_h;
+    if (hasBiases)
+        biasesGpu_h = fullyConnectedLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
+
+    Event gradientsApplied = fullyConnectedLayer->updateWeightsAndBiasesWithScaledGradient();
+    dataStream.waitEvent(gradientsApplied);
+    weightsGpu_h.copyFromAsync(fullyConnectedLayer->getWeights(), dataStream);
+    if (hasBiases)
+        biasesGpu_h.copyFromAsync(fullyConnectedLayer->getBiases(), dataStream);
+
+    dataStream.synchronize();
+
+    half *weightsMem = (half *)weights.getMemPtr();
+    half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();
+    half *weightsGradientMem = (half *)weightsGradientGpu_h.getMemPtr();
+    for (int i = 0; i < numWeights; ++i) {
+        half expected = weightsMem[i] - learningRate * weightsGradientMem[i];
+        maxDiff = abs(expected / 1000.0f);
+        if (maxDiff < 0.01)
+            maxDiff = 0.01;
+        EXPECT_LT(abs((float)expected - (float)weightsGpuMem[i]), maxDiff);
+        if (abs((float)expected - (float)weightsGpuMem[i]) >= maxDiff) {
+            printf("%d  cpu %f  gpu %f     weight %f   gradient %f  learningRate %f\n",
+                   i,
+                   (float)expected,
+                   (float)weightsGpuMem[i],
+                   (float)weightsMem[i],
+                   (float)weightsGradientMem[i],
+                   learningRate);
+        }
+    }
+
+    if (hasBiases) {
+        int numBiases = fullyConnectedLayer->getBiases().get().getDescriptor().getTotalNumElements();
+        half *biasesMem = (half *)biases.getMemPtr();
+        half *biasesGpuMem = (half *)biasesGpu_h.getMemPtr();
+        half *biasesGradientMem = (half *)biasesGradientGpu_h.getMemPtr();
+        for (int i = 0; i < numBiases; ++i) {
+            half expected = biasesMem[i] - learningRate * biasesGradientMem[i];
+            maxDiff = abs(expected / 1000.0f);
+            if (maxDiff < 0.01)
+                maxDiff = 0.01;
+            EXPECT_LT(abs((float)expected - (float)biasesGpuMem[i]), maxDiff);
+            if (abs((float)expected - (float)biasesGpuMem[i]) >= maxDiff) {
+                printf("%d  cpu %f  gpu %f     bias %f   gradient %f  learningRate %f\n",
+                       i,
+                       (float)expected,
+                       (float)biasesGpuMem[i],
+                       (float)biasesMem[i],
+                       (float)biasesGradientMem[i],
+                       learningRate);
+            }
+        }
+    }
 }
 
 TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
