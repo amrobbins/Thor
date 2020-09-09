@@ -18,20 +18,24 @@ class CategoricalCrossEntropyLoss : public Loss {
     CategoricalCrossEntropyLoss(float lossScalingFactor = 1.0f) : Loss(lossScalingFactor) {}
 
     virtual void compile() {
+        if (!inferenceOnly) {
+            assert(labelsInput.isPresent());
+            assert(errorOutput.isPresent());
+            assert(errorOutput.get().isInitialized());
+            assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+            assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        }
+        if (labelsInput.isPresent()) {
+            assert(labelsInput.get().isInitialized());
+            assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+            assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
+            assert(labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
+                   labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        }
         assert(featureInput.isPresent());
-        assert(labelsInput.isPresent());
-        assert(errorOutput.isPresent());
-        assert(labelsInput.get().isInitialized());
-        assert(errorOutput.get().isInitialized());
         assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
-               labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
         assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
-        assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
