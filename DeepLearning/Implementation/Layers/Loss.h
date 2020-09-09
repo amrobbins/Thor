@@ -208,7 +208,8 @@ class Loss : public Layer {
         if (featureInput.isPresent()) {
             if (labelsInput.isPresent())
                 assert(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
-            assert(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
+            if (errorOutput.isPresent())
+                assert(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
     }
 
