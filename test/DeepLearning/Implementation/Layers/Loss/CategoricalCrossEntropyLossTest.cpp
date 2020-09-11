@@ -34,7 +34,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         int batchSize = dimensions.front();
         int numElementsPerBatch = numElements / batchSize;
 
-        bool inferenceOnly = false;  // FIXME: (rand() % 5) == 0;
+        bool inferenceOnly = (rand() % 5) == 0;
 
         TensorDescriptor elementwiseDescriptorFP32(TensorDescriptor::DataType::FP32, dimensions);
         TensorDescriptor elementwiseDescriptorFP16(TensorDescriptor::DataType::FP16, dimensions);
@@ -94,6 +94,11 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::LOSS);
         LayerTestHelper::initializeNetwork(layers);
 
+        if (inferenceOnly) {
+            ASSERT_TRUE(categoricalCrossEntropyLoss->getErrorOutput().isEmpty());
+        }
+        ASSERT_TRUE(categoricalCrossEntropyLoss->getErrorInput().isEmpty());
+
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
@@ -106,11 +111,15 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         labelsStream.waitEvent(predictionsOutput->getOutputReadyEvent());
         predictionsGpu_h.copyFromAsync(predictionsOutput->getFeatureOutput(), labelsStream);
 
-        Tensor errorOutputGpu = categoricalCrossEntropyLoss->getErrorOutput();
-        Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
-        Tensor errorOutputGpu_h = errorOutputCpu.clone();
-        categoricalCrossEntropyLoss->backward(Optional<Tensor>::empty());
-        errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+        Tensor errorOutputGpu;
+        Tensor errorOutputCpu;
+        Tensor errorOutputGpu_h;
+        if (!inferenceOnly) {
+            errorOutputGpu = categoricalCrossEntropyLoss->getErrorOutput();
+            errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
+            errorOutputGpu_h = errorOutputCpu.clone();
+            errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+        }
 
         labelsStream.synchronize();
 

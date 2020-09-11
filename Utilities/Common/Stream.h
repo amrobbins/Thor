@@ -58,12 +58,12 @@ class Stream : private ReferenceCounted {
             destroy();
     }
 
-    Event putEvent(bool enableTiming = false) {
+    Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) {
         assert(!uninitialized());
 
         ScopedGpu scopedGpu(gpuNum);
 
-        Event event(gpuNum, enableTiming);
+        Event event(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
         cudaError_t cudaStatus = cudaEventRecord(event.getEvent(), cudaStream);
         assert(cudaStatus == cudaSuccess);
 

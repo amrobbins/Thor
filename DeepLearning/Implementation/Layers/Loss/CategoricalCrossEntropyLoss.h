@@ -50,7 +50,7 @@ class CategoricalCrossEntropyLoss : public Loss {
             Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
 
         if (lossScalingFactor == 1.0) {
-        } else {
+        } else if (!inferenceOnly) {
             errorOutputWorkspace = errorOutput.get().clone(TensorDescriptor::DataType::FP32);
         }
     }

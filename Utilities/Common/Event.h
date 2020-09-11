@@ -21,7 +21,9 @@ class Event : private ReferenceCounted {
    public:
     Event() : ReferenceCounted() {}
 
-    explicit Event(int gpuNum, bool enableTiming) { construct(gpuNum, enableTiming); }
+    explicit Event(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne = false) {
+        construct(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
+    }
 
     Event(const Event &event) {
         // implemented using operator=
@@ -78,7 +80,7 @@ class Event : private ReferenceCounted {
     int gpuNum;
     cudaEvent_t cudaEvent;
 
-    void construct(int gpuNum, bool enableTiming) {
+    void construct(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne) {
         ReferenceCounted::initialize();
 
         ScopedGpu scopedGpu(gpuNum);
@@ -86,7 +88,13 @@ class Event : private ReferenceCounted {
         cudaError_t cudaStatus;
         this->gpuNum = gpuNum;
 
-        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, enableTiming ? 0 : cudaEventDisableTiming);
+        unsigned int flags = 0;
+        if (!enableTiming)
+            flags |= cudaEventDisableTiming;
+        if (expectingHostToWaitOnThisOne)
+            flags |= cudaEventBlockingSync;
+
+        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, flags);
         assert(cudaStatus == cudaSuccess);
     }
 

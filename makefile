@@ -36,7 +36,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Implementation/SimpleNetworkTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
@@ -78,6 +79,7 @@ ALL_TESTS = build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossT
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
             build/test/Utilities/Common/OptionalTest \
             build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
+            build/test/DeepLearning/Implementation/SimpleNetworkTest \
 
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
@@ -446,6 +448,9 @@ build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest: build/t
 	mkdir -p build/test/Utilities/TensorOperations/DeepLearning/
 	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest.cpp $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
+build/test/DeepLearning/Implementation/SimpleNetworkTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/SimpleNetworkTest.cpp $(MLDEV)
+	mkdir -p build/test/DeepLearning/Implementation
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/SimpleNetworkTest test/DeepLearning/Implementation/SimpleNetworkTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(MLDEV_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 
