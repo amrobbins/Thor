@@ -100,7 +100,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         if (!inferenceOnly) {
             assert(!featureInputs.empty());
-            gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice());
+            // gradient upate streams have low priority so that this type of parallel work tends to build up
+            gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);
         }
     }
 
@@ -151,6 +152,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 assert(false);
             }
         }
+
+        clearGradientAccumulator = true;
     }
 
     // Callback can be used to directly apply the gradients to the weights,

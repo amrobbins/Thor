@@ -142,11 +142,7 @@ class ReferenceCounted {
         }
     }
 
-    long getReferenceCount() {
-        mtx.lock();
-        return (referenceCount.load())->fetch_add(0);
-        mtx.unlock();
-    }
+    long getReferenceCount() { return (referenceCount.load())->fetch_add(0); }
 
     void initialize() {
         referenceCount = new atomic<long>(1);

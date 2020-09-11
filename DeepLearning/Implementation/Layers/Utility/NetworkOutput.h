@@ -42,7 +42,7 @@ class NetworkOutput : public Layer {
         if (inputTensor.isPresent())
             outputTensor.get().copyFromAsync(inputTensor, stream);
 
-        outputReadyEvent = stream.putEvent();
+        outputReadyEvent = stream.putEvent(false, true);
     }
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
