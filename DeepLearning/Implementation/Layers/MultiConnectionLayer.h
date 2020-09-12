@@ -122,7 +122,8 @@ class MultiConnectionLayer : public Layer {
         else
             featureOutputs.emplace_back(Optional<Tensor>::empty());
 
-        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams.back(), true, connectionType));
+        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
+            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn(), connectionType));
 
         Optional<Tensor> firstErrorInput = getFirstPresentTensor(errorInputs);
         if (firstErrorInput.isPresent()) {

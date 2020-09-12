@@ -250,7 +250,8 @@ class Split : public MultiConnectionLayer {
         nextLayers.push_back(nextLayer);
         if (connection != 0)
             streams.emplace_back(placement.getDeviceNum());
-        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams.back(), true, connectionType));
+        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
+            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn(), connectionType));
 
         assert(errorInputs.back().isPresent());
         assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
