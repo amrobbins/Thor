@@ -50,16 +50,16 @@ TEST(InOut, NoOpWorks) {
         Tensor gpuSource(gpuPlacement, descriptor);
         Tensor cpuDest(cpuPlacement, descriptor);
 
-        Stream stream(0);
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(gpuSource));
+        layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
 
         half *sourceMem = (half *)cpuSource.getMemPtr();
         for (unsigned int i = 0; i < numElements; ++i)
             sourceMem[i] = (half)(float)i;
         gpuSource.copyFromAsync(cpuSource, stream);
-
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(gpuSource, stream));
-        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor gpuOutput = layers.back()->getFeatureOutput();
@@ -116,14 +116,13 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<Layer *> layers;
-
-        layers.push_back(new NetworkInput(sourceGpu, stream));
+        layers.push_back(new NetworkInput(sourceGpu));
         layers.push_back(new Map<unsigned int>(mapping, sourceGpu.getDescriptor().getDimensions()));
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -185,14 +184,13 @@ TEST(Map, MapsCorrectlyToFewerElements) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    Stream stream(0);
-    sourceGpu.copyFromAsync(sourceCpu, stream);
-
     vector<Layer *> layers;
-
-    layers.push_back(new NetworkInput(sourceGpu, stream));
+    layers.push_back(new NetworkInput(sourceGpu));
     layers.push_back(new Map<uint8_t>(mapping, sourceGpu.getDescriptor().getDimensions()));
     layers.push_back(new NetworkOutput(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    sourceGpu.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -252,14 +250,13 @@ TEST(Map, MapsCorrectlyToMoreElements) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    Stream stream(0);
-    sourceGpu.copyFromAsync(sourceCpu, stream);
-
     vector<Layer *> layers;
-
-    layers.push_back(new NetworkInput(sourceGpu, stream));
+    layers.push_back(new NetworkInput(sourceGpu));
     layers.push_back(new Map<unsigned long>(mapping, sourceGpu.getDescriptor().getDimensions()));
     layers.push_back(new NetworkOutput(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    sourceGpu.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -320,14 +317,13 @@ TEST(Flatten, FlattensCorrectly) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<Layer *> layers;
-
-        layers.push_back(new NetworkInput(sourceGpu, stream));
+        layers.push_back(new NetworkInput(sourceGpu));
         layers.push_back(new Flatten(numOutputDimensions));
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -380,14 +376,13 @@ TEST(Reshape, ReshapesCorrectly) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    Stream stream(0);
-    sourceGpu.copyFromAsync(sourceCpu, stream);
-
     vector<Layer *> layers;
-
-    layers.push_back(new NetworkInput(sourceGpu, stream));
+    layers.push_back(new NetworkInput(sourceGpu));
     layers.push_back(new Reshape(newDimensions));
     layers.push_back(new NetworkOutput(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    sourceGpu.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -438,14 +433,13 @@ TEST(TypeConversion, Converts) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<Layer *> layers;
-
-        layers.push_back(new NetworkInput(sourceGpu, stream));
+        layers.push_back(new NetworkInput(sourceGpu));
         layers.push_back(new TypeConversion(TensorDescriptor::DataType::INT32));
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -488,14 +482,13 @@ TEST(TensorFanout, CreatesFanout) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    Stream stream(0);
-    sourceGpu.copyFromAsync(sourceCpu, stream);
-
     vector<Layer *> layers;
-
-    layers.push_back(new NetworkInput(sourceGpu, stream));
+    layers.push_back(new NetworkInput(sourceGpu));
     layers.push_back(new TensorFanout());
     layers.push_back(new NetworkOutput(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    sourceGpu.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -551,10 +544,6 @@ inline int computeFlatIndex(int index[], long stridePerDimension[], int numDimen
 
 TEST(Concatenate, Concatenates) {
     srand(time(NULL));
-
-    vector<Stream> streams;
-    for (int i = 0; i < 10; ++i)
-        streams.emplace_back(0);
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
@@ -613,7 +602,7 @@ TEST(Concatenate, Concatenates) {
         vector<Layer *> layers;
 
         for (unsigned int i = 0; i < partsGpu.size(); ++i)
-            layers.push_back(new NetworkInput(partsGpu[i], streams[i]));
+            layers.push_back(new NetworkInput(partsGpu[i]));
         layers.push_back(new Concatenate(axis));
         for (unsigned int i = 0; i < layers.size() - 1; ++i)
             layers[i]->connectToNextLayer(layers.back());
@@ -633,13 +622,13 @@ TEST(Concatenate, Concatenates) {
             for (int i = 0; i < numElements; ++i) {
                 mem[i] = ((rand() % 100) / 10.0f) - 5.0f;
             }
-            partsGpu[i].copyFromAsync(partsCpu[i], streams[i]);
+            partsGpu[i].copyFromAsync(partsCpu[i], layers[i]->getStream());
             layers[i]->forward(partsGpu[i]);
         }
 
-        streams[9].waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
-        wholeCpu.copyFromAsync(wholeGpu, streams[9]);
-        streams[9].synchronize();
+        layers[0]->getStream().waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        wholeCpu.copyFromAsync(wholeGpu, layers[0]->getStream());
+        layers[0]->getStream().synchronize();
 
         half *wholeMem = (half *)wholeCpu.getMemPtr();
         vector<int> sourceTensorAxisIndexStart;
@@ -687,8 +676,6 @@ TEST(Concatenate, Concatenates) {
 TEST(Split, Splits) {
     srand(time(NULL));
 
-    Stream stream(0);
-
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -729,6 +716,10 @@ TEST(Split, Splits) {
 
         long numElements = wholeCpu.getDescriptor().getTotalNumElements();
 
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(wholeGpu));
+        Stream stream = layers.front()->getStream();
+
         stridePerSourceDimension[numDimensions - 1] = 1;
         for (int dest = 0; dest < numSplitTensors; dest++)
             stridePerDestDimension[dest * numDimensions + numDimensions - 1] = 1;
@@ -749,8 +740,6 @@ TEST(Split, Splits) {
         }
         wholeGpu.copyFromAsync(wholeCpu, stream);
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(wholeGpu, stream));
         vector<unsigned long> axisElements;
         for (int i = 0; i < numSplitTensors; ++i)
             axisElements.push_back(axisElementsPerDestArray[i]);
@@ -844,14 +833,13 @@ TEST(DeviceCrossing, Crosses) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    Stream stream(0);
-    sourceGpu0.copyFromAsync(sourceCpu, stream);
-
     vector<Layer *> layers;
-
-    layers.push_back(new NetworkInput(sourceGpu0, stream));
+    layers.push_back(new NetworkInput(sourceGpu0));
     layers.push_back(new DeviceCrossing(gpu0Placement, gpu1Placement));
     layers.push_back(new NetworkOutput(gpu1Placement));
+    Stream stream = layers.front()->getStream();
+
+    sourceGpu0.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -898,7 +886,10 @@ TEST(Pad, Pads) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(sourceGpu));
+        Stream stream = layers.front()->getStream();
+
         sourceGpu.copyFromAsync(sourceCpu, stream);
 
         map<unsigned int, pair<unsigned int, unsigned int>> paddingAmount;
@@ -922,9 +913,6 @@ TEST(Pad, Pads) {
         TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
         Tensor destCpu(cpuPlacement, destDescriptor);
 
-        vector<Layer *> layers;
-
-        layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Pad(paddingAmount));
         layers.push_back(new NetworkOutput(gpuPlacement));
 
@@ -1029,7 +1017,10 @@ TEST(Extract, Extracts) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(sourceGpu));
+        Stream stream = layers.front()->getStream();
+
         sourceGpu.copyFromAsync(sourceCpu, stream);
 
         vector<pair<unsigned int, unsigned int>> dimensionSpans;
@@ -1044,9 +1035,6 @@ TEST(Extract, Extracts) {
         TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
         Tensor destCpu(cpuPlacement, destDescriptor);
 
-        vector<Layer *> layers;
-
-        layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new Extract(dimensionSpans));
         layers.push_back(new NetworkOutput(gpuPlacement));
 

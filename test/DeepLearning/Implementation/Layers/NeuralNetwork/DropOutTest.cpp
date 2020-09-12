@@ -43,16 +43,16 @@ TEST(DropOut, InferenceWorks) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu, stream));
+        layers.push_back(new NetworkInput(sourceGpu));
         layers.push_back(new NoOpLayer());
         DropOut *dropOutLayer = new DropOut(0.25, false);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
@@ -122,16 +122,16 @@ TEST(DropOut, TrainingNoDropOut) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu, stream));
+        layers.push_back(new NetworkInput(sourceGpu));
         layers.push_back(new NoOpLayer());
         DropOut *dropOutLayer = new DropOut(0.0f, true);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
@@ -201,16 +201,16 @@ TEST(DropOut, TrainingAllDropOut) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        Stream stream(0);
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu, stream));
+        layers.push_back(new NetworkInput(sourceGpu));
         layers.push_back(new NoOpLayer());
         DropOut *dropOutLayer = new DropOut(1.0f, true);
         layers.push_back(dropOutLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
@@ -282,7 +282,10 @@ TEST(DropOut, TrainingSomeDropOut) {
                 sourceMem[i] = 1.2f;
         }
 
-        Stream stream(0);
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(sourceGpu));
+
+        Stream stream = layers.front()->getStream();
         sourceGpu.copyFromAsync(sourceCpu, stream);
 
         float dropOutRate = ((rand() % 60) / 100.0f) + 0.2;
@@ -290,8 +293,6 @@ TEST(DropOut, TrainingSomeDropOut) {
         if (dropOutRate < 1.0f)
             scalingFactor = 1 / (1.0f - dropOutRate);
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu, stream));
         layers.push_back(new NoOpLayer());
         DropOut *dropOutLayer = new DropOut(dropOutRate, true);
         layers.push_back(dropOutLayer);

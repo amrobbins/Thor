@@ -146,8 +146,6 @@ TEST(Pooling, MaxPoolingWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-
     for (int test = 0; test < 10; ++test) {
         uint32_t batchSize = (rand() % 10) + 1;
         uint32_t numFeatures = (rand() % 10) + 1;
@@ -179,8 +177,7 @@ TEST(Pooling, MaxPoolingWorks) {
 
         vector<Layer *> layers;
 
-        layers.push_back(
-            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         Pooling *poolingLayer = new Pooling(Pooling::Type::MAX,
                                             windowHeight,
@@ -198,6 +195,8 @@ TEST(Pooling, MaxPoolingWorks) {
         layers.push_back(poolingLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
+
+        Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -260,8 +259,6 @@ TEST(Pooling, AveragePoolingWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-
     for (int test = 0; test < 10; ++test) {
         uint32_t batchSize = (rand() % 10) + 1;
         uint32_t numFeatures = (rand() % 10) + 1;
@@ -293,8 +290,7 @@ TEST(Pooling, AveragePoolingWorks) {
 
         vector<Layer *> layers;
 
-        layers.push_back(
-            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         Pooling *poolingLayer = new Pooling(Pooling::Type::AVERAGE,
                                             windowHeight,
@@ -312,6 +308,8 @@ TEST(Pooling, AveragePoolingWorks) {
         layers.push_back(poolingLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
+
+        Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 

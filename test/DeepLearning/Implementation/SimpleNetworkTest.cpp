@@ -87,17 +87,13 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-    Stream labelsStream(0);
-
     Tensor featureIn =
         Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {BATCH_SIZE, NUM_CLASSES * FEATURES_PER_CLASS}));
     Tensor labelsIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {BATCH_SIZE, NUM_CLASSES}));
 
     NetworkInput *featureInput =
-        new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream);
-    NetworkInput *labelsInput =
-        new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP32, labelsIn.getDescriptor().getDimensions(), labelsStream);
+        new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions());
+    NetworkInput *labelsInput = new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP32, labelsIn.getDescriptor().getDimensions());
     FullyConnected *fullyConnectedLayer =
         new FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, NUM_CLASSES * FEATURES_PER_CLASS, BATCH_SIZE, true);
     Relu *relu = new Relu();
@@ -105,6 +101,9 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(1.0f);
     NetworkOutput *predictionsOutput = new NetworkOutput(cpuPlacement);
     NetworkOutput *lossOutput = new NetworkOutput(cpuPlacement);
+
+    Stream stream = featureInput->getStream();
+    Stream labelsStream = labelsInput->getStream();
 
     LayerTestHelper::connectTwoLayers(featureInput, fullyConnectedLayer);
     LayerTestHelper::connectTwoLayers(fullyConnectedLayer, relu);

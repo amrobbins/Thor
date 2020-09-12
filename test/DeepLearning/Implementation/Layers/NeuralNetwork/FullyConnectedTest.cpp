@@ -26,8 +26,6 @@ TEST(FullyConnected, FullyConnectedWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-
     for (int test = 0; test < 5; ++test) {
         uint64_t numInputFeatures = (rand() % 300) + 1;
         uint64_t numOutputFeatures = (rand() % 300) + 1;
@@ -62,8 +60,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         vector<Layer *> layers;
 
-        layers.push_back(
-            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
         fullyConnectedLayer->setInferenceOnly(inferenceOnly);
@@ -71,6 +68,8 @@ TEST(FullyConnected, FullyConnectedWorks) {
         layers.push_back(fullyConnectedLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
+
+        Stream dataStream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -89,14 +88,14 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         featureOutGpu_h = layers.back()->getFeatureOutput();
 
-        Event weightsUpdatedEvent = fullyConnectedLayer->updateWeightsAndBiases(weights, biases, stream.putEvent());
-        stream.waitEvent(weightsUpdatedEvent);
+        Event weightsUpdatedEvent = fullyConnectedLayer->updateWeightsAndBiases(weights, biases, dataStream.putEvent());
+        dataStream.waitEvent(weightsUpdatedEvent);
         if (!inferenceOnly)
             fullyConnectedLayer->getGradientUpdateStream().get().waitEvent(weightsUpdatedEvent);
 
         // Network is runnable here
         layers[0]->forward(featureIn);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        dataStream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
         matrixMultiplyCpuHalf((half *)featureIn.getMemPtr(),
                               (half *)weights.getMemPtr(),
@@ -122,7 +121,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
             }
         }
 
-        stream.synchronize();
+        dataStream.synchronize();
 
         half *cpuFeatureOut = (half *)featureOut.getMemPtr();
         half *gpuFeatureOut = (half *)featureOutGpu_h.getMemPtr();
@@ -354,8 +353,6 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-
     for (int test = 0; test < 5; ++test) {
         uint64_t numInputFeatures = (rand() % 1024) + 1;
         uint64_t numOutputFeatures = (rand() % 2048) + 1;
@@ -365,13 +362,14 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
         Tensor featureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
 
         vector<Layer *> layers;
-        layers.push_back(
-            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
         layers.push_back(fullyConnectedLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
+
+        Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 

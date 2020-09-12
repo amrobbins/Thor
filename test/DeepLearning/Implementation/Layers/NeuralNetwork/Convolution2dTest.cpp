@@ -40,8 +40,6 @@ TEST(Convolution2d, Convolution2dWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-
     for (int test = 0; test < 5; ++test) {
         const int numInputColumns = 1 + (rand() % 50);
         const int numInputRows = 1 + (rand() % 50);
@@ -117,8 +115,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         Tensor featureOutputCpu(cpuPlacement, outputDescriptor);
         Tensor featureOutputGpu_h;
 
-        layers.push_back(
-            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         Convolution2d *convolution2dLayer = new Convolution2d(filterWidth,
                                                               filterHeight,
@@ -137,6 +134,8 @@ TEST(Convolution2d, Convolution2dWorks) {
         layers.push_back(convolution2dLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
+
+        Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -486,8 +485,6 @@ TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    Stream stream(0);
-
     for (int test = 0; test < 5; ++test) {
         const int numInputColumns = 1 + (rand() % 50);
         const int numInputRows = 1 + (rand() % 50);
@@ -512,8 +509,7 @@ TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
         Tensor featureIn = Tensor(cpuPlacement, inputDescriptor);
 
         vector<Layer *> layers;
-        layers.push_back(
-            new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions(), stream));
+        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         Convolution2d *convolution2dLayer = new Convolution2d(filterWidth,
                                                               filterHeight,
@@ -530,6 +526,8 @@ TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
         layers.push_back(convolution2dLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));
+
+        Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 

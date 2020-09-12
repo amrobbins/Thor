@@ -8,36 +8,28 @@ class NetworkInput : public Layer {
    public:
     virtual ~NetworkInput() {}
 
-    NetworkInput(Optional<TensorPlacement> networkPlacement,
+    NetworkInput(TensorPlacement networkPlacement,
                  Optional<TensorDescriptor::DataType> contentDataType,
-                 Optional<vector<unsigned long>> contentDimensions,
-                 Stream stream) {
-        construct(networkPlacement, contentDataType, contentDimensions, stream);
+                 Optional<vector<unsigned long>> contentDimensions) {
+        construct(networkPlacement, contentDataType, contentDimensions);
     }
 
-    NetworkInput(Optional<Tensor> exampleTensor, Stream stream) {
-        if (exampleTensor.isPresent())
-            construct(exampleTensor.get().getPlacement(),
-                      exampleTensor.get().getDescriptor().getDataType(),
-                      exampleTensor.get().getDescriptor().getDimensions(),
-                      stream);
-        else
-            construct(Optional<TensorPlacement>::empty(),
-                      Optional<TensorDescriptor::DataType>::empty(),
-                      Optional<vector<unsigned long>>::empty(),
-                      stream);
+    NetworkInput(Tensor exampleTensor) {
+        assert(exampleTensor.isInitialized());
+        construct(exampleTensor.getPlacement(), exampleTensor.getDescriptor().getDataType(), exampleTensor.getDescriptor().getDimensions());
     }
 
-    void construct(Optional<TensorPlacement> networkPlacement,
+    void construct(TensorPlacement networkPlacement,
                    Optional<TensorDescriptor::DataType> contentDataType,
-                   Optional<vector<unsigned long>> contentDimensions,
-                   Stream stream) {
-        assert(contentDimensions.isPresent() == networkPlacement.isPresent());
+                   Optional<vector<unsigned long>> contentDimensions) {
         assert(contentDimensions.isPresent() == contentDataType.isPresent());
         this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
         this->contentDimensions = contentDimensions;
-        this->stream = stream;
+        int gpuNum = 0;
+        if (networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU)
+            gpuNum = networkPlacement.getDeviceNum();
+        this->stream = Stream(gpuNum);
     }
 
     virtual bool isInput() { return true; }
@@ -88,6 +80,6 @@ class NetworkInput : public Layer {
 
    protected:
     Optional<vector<unsigned long>> contentDimensions;
-    Optional<TensorPlacement> networkPlacement;
+    TensorPlacement networkPlacement;
     Optional<TensorDescriptor::DataType> contentDataType;
 };
