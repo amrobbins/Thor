@@ -63,7 +63,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
         FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
-        fullyConnectedLayer->setInferenceOnly(inferenceOnly);
+        fullyConnectedLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(fullyConnectedLayer);
         layers.push_back(new NoOpLayer());

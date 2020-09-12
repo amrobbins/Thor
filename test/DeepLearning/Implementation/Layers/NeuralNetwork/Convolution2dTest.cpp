@@ -129,7 +129,7 @@ TEST(Convolution2d, Convolution2dWorks) {
                                                               numInputColumns,
                                                               numInputRows,
                                                               hasBias);
-        convolution2dLayer->setInferenceOnly(inferenceOnly);
+        convolution2dLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(convolution2dLayer);
         layers.push_back(new NoOpLayer());

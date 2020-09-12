@@ -43,12 +43,12 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         weightsDimensions.push_back(numOutputFeatures);
         TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
         weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        if (!inferenceOnly)
+        if (!isInferenceOnly())
             weightsGradient = weights.clone();
         if (hasBias) {
             biases =
                 Tensor(featureInputs.front().get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
-            if (!inferenceOnly)
+            if (!isInferenceOnly())
                 biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
         }
 
@@ -72,7 +72,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
         }
 
-        if (!isBackPropStub() && !inferenceOnly) {
+        if (!isBackPropStub() && !isInferenceOnly()) {
             CublasMatrixMultiply::instance().chooseOptimalKernel(
                 gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, TensorDescriptor::DataType::FP16);
 
@@ -93,7 +93,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardDataSizeInBytes}));
         }
 
-        if (!inferenceOnly) {
+        if (!isInferenceOnly()) {
             CublasMatrixMultiply::instance().chooseOptimalKernel(
                 gpuNum, batchSize, numInputFeatures, batchSize, numOutputFeatures, true, false, TensorDescriptor::DataType::FP16);
 
@@ -131,7 +131,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                 cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numOutputFeatures, 1, 1);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-            if (!inferenceOnly) {
+            if (!isInferenceOnly()) {
                 reduceDescriptor = cudnnReduceTensorDescriptor_t();
                 cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceDescriptor.get());
                 assert(cudnnStatus == CUDNN_STATUS_SUCCESS);

@@ -18,7 +18,7 @@ class CategoricalCrossEntropyLoss : public Loss {
     CategoricalCrossEntropyLoss(float lossScalingFactor = 1.0f) : Loss(lossScalingFactor) {}
 
     virtual void compile() {
-        if (!inferenceOnly) {
+        if (!isInferenceOnly()) {
             assert(labelsInput.isPresent());
             assert(errorOutput.isPresent());
             assert(errorOutput.get().isInitialized());
@@ -50,7 +50,7 @@ class CategoricalCrossEntropyLoss : public Loss {
             Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
 
         if (lossScalingFactor == 1.0) {
-        } else if (!inferenceOnly) {
+        } else if (!isInferenceOnly()) {
             errorOutputWorkspace = errorOutput.get().clone(TensorDescriptor::DataType::FP32);
         }
     }

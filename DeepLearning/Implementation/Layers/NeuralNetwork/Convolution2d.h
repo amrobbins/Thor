@@ -94,12 +94,12 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         weightsDimensions.push_back(filterWidth);
         TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
         weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        if (!inferenceOnly)
+        if (!isInferenceOnly())
             weightsGradient = weights.clone();
         if (hasBias) {
             biases = Tensor(featureInputs.front().get().getPlacement(),
                             TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
-            if (!inferenceOnly)
+            if (!isInferenceOnly())
                 biasesGradient = biases.get().clone();
         }
 
