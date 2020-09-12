@@ -58,7 +58,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                   const int batchSize,
                   const int numInputColumns,
                   const int numInputRows)
-        : TrainableWeightsBiasesLayer(sharedWeightsPackage.biases.isPresent()),
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage),
           filterWidth(sharedWeightsPackage.weights.getDescriptor().getDimensions()[3]),
           filterHeight(sharedWeightsPackage.weights.getDescriptor().getDimensions()[2]),
           filterHorizontalStride(filterHorizontalStride),
