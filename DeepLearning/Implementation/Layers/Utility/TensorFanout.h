@@ -9,14 +9,9 @@ class TensorFanout : public MultiConnectionLayer {
     virtual ~TensorFanout() {}
 
     virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
-        // There is no actual movement of data on the inputs,
-        // instead streams are created to fork the execution.
-        if (featureOutputs.empty()) {
-            errorInputs.push_back(nextLayer->connectToPreviousLayer(this, featureInputs[0], streams[0], true, connectionType));
-        } else {
-            streams.emplace_back(streams[0].getGpuNum());
-            errorInputs.push_back(nextLayer->connectToPreviousLayer(this, featureInputs[0], streams.back(), true, connectionType));
-        }
+        streams.emplace_back(streams[0].getGpuNum());
+        errorInputs.push_back(
+            nextLayer->connectToPreviousLayer(this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn(), connectionType));
         nextLayers.push_back(nextLayer);
     }
 

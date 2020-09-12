@@ -237,7 +237,8 @@ class Concatenate : public MultiConnectionLayer {
         assert(!running);
         nextLayers.push_back(nextLayer);
         featureOutputs.emplace_back(createFeatureOutputTensor());
-        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams[0], true, connectionType));
+        errorInputs.emplace_back(
+            nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams[0], shouldConnectToBackPropErrorIn(), connectionType));
 
         assert(errorInputs.back().isPresent());
         assert(featureOutputs.back().isPresent());

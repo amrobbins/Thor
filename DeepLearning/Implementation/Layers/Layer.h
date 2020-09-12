@@ -69,6 +69,7 @@ class Layer {
         compiled = false;
         running = false;
         inferenceOnly = false;
+        connectToBackPropErrorIn = true;
     }
 
     // Use pointers for layers
@@ -146,7 +147,7 @@ class Layer {
         else
             featureOutput = Optional<Tensor>::empty();
 
-        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, true, connectionType);
+        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, shouldConnectToBackPropErrorIn(), connectionType);
 
         if (errorInput.isPresent() && featureOutput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
@@ -196,6 +197,12 @@ class Layer {
         assert(!compiled);
         this->inferenceOnly = inferenceOnly;
     }
+    // When connecting to the next layer, choose if this layer will connect to the back prop error tensor.
+    virtual void setConnectToBackPropErrorIn(bool connectToBackPropErrorIn) {
+        assert(!compiled);
+        this->connectToBackPropErrorIn = connectToBackPropErrorIn;
+    }
+    bool shouldConnectToBackPropErrorIn() { return connectToBackPropErrorIn; }
 
     virtual bool isBackPropStub() { return errorOutput.isEmpty(); }
 
@@ -242,4 +249,5 @@ class Layer {
 
    private:
     bool inferenceOnly;
+    bool connectToBackPropErrorIn;
 };

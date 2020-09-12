@@ -45,7 +45,8 @@ class DeviceCrossing : public Layer {
         featureOutput = createFeatureOutputTensor();
         otherDeviceStream = Stream(outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU ? inputPlacement.getDeviceNum()
                                                                                                       : outputPlacement.getDeviceNum());
-        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, otherDeviceStream, true, connectionType);
+        errorInput =
+            nextLayer->connectToPreviousLayer(this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn(), connectionType);
 
         if (errorInput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
