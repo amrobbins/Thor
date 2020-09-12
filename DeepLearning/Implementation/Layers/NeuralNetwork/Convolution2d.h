@@ -50,6 +50,43 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         numOutputColumns = tempConvolutionKernelRequirement.getNumOutputColumns();
     }
 
+    Convolution2d(SharedWeightsPackage sharedWeightsPackage,
+                  const int filterHorizontalStride,
+                  const int filterVerticalStride,
+                  const int leftAndRightPadWidth,
+                  const int topAndBottomPadHeight,
+                  const int batchSize,
+                  const int numInputColumns,
+                  const int numInputRows)
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage.biases.isPresent()),
+          filterWidth(sharedWeightsPackage.weights.getDescriptor().getDimensions()[3]),
+          filterHeight(sharedWeightsPackage.weights.getDescriptor().getDimensions()[2]),
+          filterHorizontalStride(filterHorizontalStride),
+          filterVerticalStride(filterVerticalStride),
+          leftAndRightPadWidth(leftAndRightPadWidth),
+          topAndBottomPadHeight(topAndBottomPadHeight),
+          numInputChannels(sharedWeightsPackage.weights.getDescriptor().getDimensions()[1]),
+          numOutputChannels(sharedWeightsPackage.weights.getDescriptor().getDimensions()[0]),
+          batchSize(batchSize),
+          numInputColumns(numInputColumns),
+          numInputRows(numInputRows) {
+        string anyGpuType = MachineEvaluator::instance().getGpuType(0);
+        ConvolutionKernelRequirement tempConvolutionKernelRequirement = ConvolutionKernelRequirement(anyGpuType,
+                                                                                                     filterWidth,
+                                                                                                     filterHeight,
+                                                                                                     filterHorizontalStride,
+                                                                                                     filterVerticalStride,
+                                                                                                     leftAndRightPadWidth,
+                                                                                                     topAndBottomPadHeight,
+                                                                                                     numInputChannels,
+                                                                                                     numOutputChannels,
+                                                                                                     batchSize,
+                                                                                                     numInputColumns,
+                                                                                                     numInputRows);
+        numOutputRows = tempConvolutionKernelRequirement.getNumOutputRows();
+        numOutputColumns = tempConvolutionKernelRequirement.getNumOutputColumns();
+    }
+
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(!featureInputs.empty());
         assert(featureInputs.back().isPresent());
@@ -84,23 +121,25 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, streams[0]);
         GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, streams[0]);
 
-        // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
-        // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter rows, S
-        // = filter columns
-        vector<unsigned long> weightsDimensions;
-        weightsDimensions.push_back(numOutputChannels);
-        weightsDimensions.push_back(numInputChannels);
-        weightsDimensions.push_back(filterHeight);
-        weightsDimensions.push_back(filterWidth);
-        TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
-        weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        if (!isInferenceOnly())
-            weightsGradient = weights.clone();
-        if (hasBias) {
-            biases = Tensor(featureInputs.front().get().getPlacement(),
-                            TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
+        if (!usingSharedWeights) {
+            // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
+            // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter
+            // rows, S = filter columns
+            vector<unsigned long> weightsDimensions;
+            weightsDimensions.push_back(numOutputChannels);
+            weightsDimensions.push_back(numInputChannels);
+            weightsDimensions.push_back(filterHeight);
+            weightsDimensions.push_back(filterWidth);
+            TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
             if (!isInferenceOnly())
-                biasesGradient = biases.get().clone();
+                weightsGradient = weights.clone();
+            if (hasBias) {
+                biases = Tensor(featureInputs.front().get().getPlacement(),
+                                TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
+                if (!isInferenceOnly())
+                    biasesGradient = biases.get().clone();
+            }
         }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.

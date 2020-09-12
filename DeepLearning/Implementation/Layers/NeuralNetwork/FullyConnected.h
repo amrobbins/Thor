@@ -15,6 +15,12 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
           numOutputFeatures(numOutputFeatures),
           batchSize(batchSize) {}
 
+    FullyConnected(SharedWeightsPackage sharedWeightsPackage, const int batchSize)
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage),
+          numInputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[0]),
+          numOutputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[1]),
+          batchSize(batchSize) {}
+
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(!featureInputs.empty());
         assert(featureInputs.back().isPresent());
@@ -35,21 +41,20 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         CublasMatrixMultiply::instance().chooseOptimalKernel(
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
 
-        // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
-        // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter rows, S
-        // = filter columns
-        vector<unsigned long> weightsDimensions;
-        weightsDimensions.push_back(numInputFeatures);
-        weightsDimensions.push_back(numOutputFeatures);
-        TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
-        weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-        if (!isInferenceOnly())
-            weightsGradient = weights.clone();
-        if (hasBias) {
-            biases =
-                Tensor(featureInputs.front().get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
+        if (!usingSharedWeights) {
+            vector<unsigned long> weightsDimensions;
+            weightsDimensions.push_back(numInputFeatures);
+            weightsDimensions.push_back(numOutputFeatures);
+            TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
             if (!isInferenceOnly())
-                biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
+                weightsGradient = weights.clone();
+            if (hasBias) {
+                biases = Tensor(featureInputs.front().get().getPlacement(),
+                                TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
+                if (!isInferenceOnly())
+                    biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
+            }
         }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
