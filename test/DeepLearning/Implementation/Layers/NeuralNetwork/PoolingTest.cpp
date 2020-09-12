@@ -190,7 +190,7 @@ TEST(Pooling, MaxPoolingWorks) {
                                             inputWidth,
                                             verticalPadding,
                                             horizontalPadding);
-        poolingLayer->setInferenceOnly(inferenceOnly);
+        poolingLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(poolingLayer);
         layers.push_back(new NoOpLayer());
@@ -303,7 +303,7 @@ TEST(Pooling, AveragePoolingWorks) {
                                             inputWidth,
                                             verticalPadding,
                                             horizontalPadding);
-        poolingLayer->setInferenceOnly(inferenceOnly);
+        poolingLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(poolingLayer);
         layers.push_back(new NoOpLayer());

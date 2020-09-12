@@ -74,7 +74,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         layers.push_back(labelsInput);
         CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(lossScalingFactor);
         if (inferenceOnly)
-            categoricalCrossEntropyLoss->setInferenceOnly(true);
+            categoricalCrossEntropyLoss->setConstructForInferenceOnly(true);
         layers.push_back(categoricalCrossEntropyLoss);
         NetworkOutput *predictionsOutput = new NetworkOutput(gpuPlacement);
         layers.push_back(predictionsOutput);

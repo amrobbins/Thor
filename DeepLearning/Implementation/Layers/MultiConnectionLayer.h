@@ -87,7 +87,7 @@ class MultiConnectionLayer : public Layer {
             stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
         } else {
             assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-            numEmptyErrorInputConnections -= 1;
+            stillWaitingForNumEmptyErrorInputConnections -= 1;
         }
         if (stillWaitingForErrorInputTensors.empty() && stillWaitingForNumEmptyErrorInputConnections == 0) {
             processedAllErrorInputs(streams[0].putEvent());
@@ -155,8 +155,8 @@ class MultiConnectionLayer : public Layer {
         previousLayers.push_back(previousLayer);
         featureInputs.emplace_back(featureInput);
         // backPropagateError allows the previous layer to specify that it does not support back propagation,
-        // inferenceOnly means that even though back propagation is supported, we are not using it since we are not training.
-        if (backPropagateError && !inferenceOnly)
+        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
+        if (backPropagateError && !isInferenceOnly())
             errorOutputs.emplace_back(featureInput.get().clone());
         else
             errorOutputs.emplace_back(Optional<Tensor>::empty());

@@ -80,7 +80,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
             } else {
                 assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-                numEmptyErrorInputConnections -= 1;
+                stillWaitingForNumEmptyErrorInputConnections -= 1;
             }
             if (stillWaitingForErrorInputTensors.empty() && stillWaitingForNumEmptyErrorInputConnections == 0) {
                 stillWaitingForErrorInputTensors = allErrorInputTensorIds;
@@ -98,7 +98,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual void parentCompile() {
         MultiConnectionLayer::parentCompile();
 
-        if (!inferenceOnly) {
+        if (!isInferenceOnly()) {
             assert(!featureInputs.empty());
             // gradient upate streams have low priority so that this type of parallel work tends to build up
             gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);

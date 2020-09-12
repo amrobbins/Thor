@@ -193,7 +193,7 @@ class Split : public MultiConnectionLayer {
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
             } else {
                 assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-                numEmptyErrorInputConnections -= 1;
+                stillWaitingForNumEmptyErrorInputConnections -= 1;
             }
             if (!stillWaitingForErrorInputTensors.empty() || stillWaitingForNumEmptyErrorInputConnections != 0)
                 return;

@@ -50,7 +50,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     void setTrainingMode(bool training) {
         assert(running == false);
-        assert(inferenceOnly == false);
+        assert(isInferenceOnly() == false);
         this->training = training;
     }
     bool getTrainingMode() { return training; }

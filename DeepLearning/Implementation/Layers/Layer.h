@@ -191,9 +191,11 @@ class Layer {
             assert(featureOutput.get().getPlacement() == errorInput.get().getPlacement());
     }
 
-    // FIXME: implement inference only connections that use isInferenceOnly()
     virtual bool isInferenceOnly() { return inferenceOnly; }
-    virtual void setInferenceOnly(bool inferenceOnly) { this->inferenceOnly = inferenceOnly; }
+    virtual void setConstructForInferenceOnly(bool inferenceOnly) {
+        assert(!compiled);
+        this->inferenceOnly = inferenceOnly;
+    }
 
     virtual bool isBackPropStub() { return errorOutput.isEmpty(); }
 
@@ -221,8 +223,6 @@ class Layer {
     }
 
    protected:
-    bool inferenceOnly;
-
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;
     Optional<Tensor> errorInput;
@@ -239,4 +239,7 @@ class Layer {
     bool compiled;
 
     mutex mtx;
+
+   private:
+    bool inferenceOnly;
 };

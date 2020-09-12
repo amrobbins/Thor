@@ -17,9 +17,6 @@
  * featureOutput: The normalized predictions (i.e. softmax applied)
  * errorOutput: The loss (per batch item per class, sum it for scalar loss), this value is scaled by lossScalingFactor
  */
-// FIXME: inferenceOnly support
-//        For inference only, this layer acts as a softmax layer and may optionally compute loss when labels are supplied.
-//        In inferenceOnly mode, it does not backpropagate loss.
 class Loss : public Layer {
    public:
     Loss(float lossScalingFactor = 1.0f) { this->lossScalingFactor = lossScalingFactor; }
@@ -142,7 +139,7 @@ class Loss : public Layer {
 
     virtual void forward(Optional<Tensor> inputTensor) {
         assert(running);
-        if (!inferenceOnly) {
+        if (!isInferenceOnly()) {
             assert(labelsStream.isPresent());
             assert(labelsInput.isPresent());
             assert(errorOutput.isPresent());
@@ -262,7 +259,7 @@ class Loss : public Layer {
         if (lossOutputLayer.isPresent())
             lossOutputLayer.get()->forward(lossOutput);
 
-        if (inferenceOnly)
+        if (isInferenceOnly())
             return;
 
         // Initiate back propagation
