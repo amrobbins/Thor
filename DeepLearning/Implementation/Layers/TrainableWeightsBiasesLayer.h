@@ -16,7 +16,30 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    public:
     virtual ~TrainableWeightsBiasesLayer() {}
 
-    TrainableWeightsBiasesLayer(bool hasBias) : hasBias(hasBias), weightUpdateCallback(nullptr) { clearGradientAccumulator = true; }
+    TrainableWeightsBiasesLayer(bool hasBias)
+        : hasBias(hasBias), usingSharedWeights(false), weightUpdateCallback(nullptr), clearGradientAccumulator(true) {}
+
+    struct SharedWeightsPackage {
+        Tensor weights;
+        Optional<Tensor> weightsGradient;
+        Optional<Tensor> biases;
+        Optional<Tensor> biasesGradient;
+
+        Optional<Stream> gradientUpdateStream;
+    };
+
+    TrainableWeightsBiasesLayer(SharedWeightsPackage sharedWeightsPackage)
+        : hasBias(sharedWeightsPackage.biases.isPresent()),
+          usingSharedWeights(false),
+          weightUpdateCallback(nullptr),
+          clearGradientAccumulator(true) {
+        weights = sharedWeightsPackage.weights;
+        weightsGradient = sharedWeightsPackage.weightsGradient;
+        biases = sharedWeightsPackage.biases;
+        biasesGradient = sharedWeightsPackage.biasesGradient;
+
+        gradientUpdateStream = sharedWeightsPackage.gradientUpdateStream;
+    }
 
     Event updateWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
         clearGradientAccumulator = true;
@@ -44,6 +67,18 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     }
 
     virtual Optional<Stream> getGradientUpdateStream() { return gradientUpdateStream; }
+
+    virtual SharedWeightsPackage getSharedWeightsPackage() {
+        SharedWeightsPackage sharedWeightsPackage;
+        sharedWeightsPackage.weights = weights;
+        sharedWeightsPackage.weightsGradient = weightsGradient;
+        sharedWeightsPackage.biases = biases;
+        sharedWeightsPackage.biasesGradient = biasesGradient;
+
+        sharedWeightsPackage.gradientUpdateStream = gradientUpdateStream;
+
+        return sharedWeightsPackage;
+    }
 
     virtual void backward(Optional<Tensor> errorInput) {
         assert(running);
@@ -100,8 +135,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         if (!isInferenceOnly()) {
             assert(!featureInputs.empty());
-            // gradient upate streams have low priority so that this type of parallel work tends to build up
-            gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);
+            if (!usingSharedWeights) {
+                // gradient upate streams have low priority so that this type of parallel work tends to build up
+                gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);
+            }
         }
     }
 
@@ -270,6 +307,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
    protected:
     const bool hasBias;
+    const bool usingSharedWeights;
     Optional<float> learningRate;
 
     Tensor weights;
