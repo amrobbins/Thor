@@ -50,9 +50,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         Tensor lossCpu(cpuPlacement, batchwiseDescriptor);
         Tensor lossGpu_h(cpuPlacement, batchwiseDescriptor);
 
-        Stream stream(0);
-        Stream labelsStream(0);
-
         float *labels = (float *)labelsCpu.getMemPtr();
         half *activations = (half *)activationsCpu.getMemPtr();
         double totalActivations = 0.0;
@@ -64,19 +61,16 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
                 labels[i] = ((rand() % 1000) / 999.0f);
             }
         }
-        labelsGpu.copyFromAsync(labelsCpu, stream);
-        activationsGpu.copyFromAsync(activationsCpu, stream);
-
         float lossScalingFactor = (rand() % 1000) / 100;
         if (rand() % 5)
             lossScalingFactor = 1.0f;
 
         vector<Layer *> layers;
-        NetworkInput *activationsInput = new NetworkInput(activationsGpu, stream);
+        NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
         NoOpLayer *noOpLayer = new NoOpLayer();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu, labelsStream);
+        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
         layers.push_back(labelsInput);
         CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(lossScalingFactor);
         if (inferenceOnly)
@@ -86,6 +80,12 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         layers.push_back(predictionsOutput);
         NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
         layers.push_back(lossOutput);
+
+        Stream stream = activationsInput->getStream();
+        Stream labelsStream = labelsInput->getStream();
+
+        labelsGpu.copyFromAsync(labelsCpu, stream);
+        activationsGpu.copyFromAsync(activationsCpu, stream);
 
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::FORWARD_BACKWARD);

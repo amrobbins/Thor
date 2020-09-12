@@ -18,8 +18,6 @@ using std::vector;
 TEST(Relu, Works) {
     srand(time(NULL));
 
-    Stream stream(0);
-
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -43,15 +41,16 @@ TEST(Relu, Works) {
         for (int i = 0; i < numElements; ++i) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
-        featureInGpu.copyFromAsync(featureInCpu, stream);
-
         vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu, stream));
+        layers.push_back(new NetworkInput(featureInGpu));
         layers.push_back(new NoOpLayer());
         Relu *relu = new Relu();
         layers.push_back(relu);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        featureInGpu.copyFromAsync(featureInCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -103,8 +102,6 @@ TEST(Relu, Works) {
 TEST(Tanh, Works) {
     srand(time(NULL));
 
-    Stream stream(0);
-
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -129,15 +126,16 @@ TEST(Tanh, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        featureInGpu.copyFromAsync(featureInCpu, stream);
-
         vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu, stream));
+        layers.push_back(new NetworkInput(featureInGpu));
         layers.push_back(new NoOpLayer());
         Tanh *tanhLayer = new Tanh();
         layers.push_back(tanhLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        featureInGpu.copyFromAsync(featureInCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
