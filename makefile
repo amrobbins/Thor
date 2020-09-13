@@ -114,6 +114,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
+                   build/DeepLearning/Api/Layers/LayerBase.o \
+                   build/DeepLearning/Api/Layers/Layer.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
@@ -344,6 +346,13 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: Dee
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o
 
+build/DeepLearning/Api/Layers/LayerBase.o: DeepLearning/Api/Layers/LayerBase.h DeepLearning/Api/Layers/LayerBase.cpp
+	mkdir -p build/DeepLearning/Api/Layers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/LayerBase.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/LayerBase.o
+
+build/DeepLearning/Api/Layers/Layer.o: DeepLearning/Api/Layers/Layer.h DeepLearning/Api/Layers/Layer.cpp
+	mkdir -p build/DeepLearning/Api/Layers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Layer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Layer.o
 
 
 

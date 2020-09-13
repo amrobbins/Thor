@@ -55,7 +55,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 streams[i].waitEvent(biasesUpdatedEvent);
         }
 
-        // This layer instance is done with the updated weights memory when the following event triggers
+        // This layer instance is finished with the newWeights tensor when the following event triggers
         return streams[0].putEvent();
     }
 
