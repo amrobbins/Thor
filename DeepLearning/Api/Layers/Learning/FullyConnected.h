@@ -112,14 +112,14 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    // Adds a DropOut layer before this FullyConnected layer
+    // Adds a DropOut layer before this FullyConnected layer, but after the BatchNormalization layer when that is also present.
     FullyConnected::Builder dropOut(float _dropProportion) {
         assert(!this->_dropProportion.isPresent());
         this->_dropProportion = _dropProportion;
         return *this;
     }
 
-    // Adds a BatchNormalization layer before this FullyConnected layer
+    // Adds a BatchNormalization layer before this FullyConnected layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
     FullyConnected::Builder batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                                                Optional<double> epsilon = Optional<double>::empty()) {

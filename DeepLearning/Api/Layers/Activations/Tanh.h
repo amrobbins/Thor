@@ -4,7 +4,7 @@
 
 namespace Thor {
 
-class Tanh : public LayerBase {
+class Tanh : public ActivationBase {
    public:
     virtual ~Tanh();
 };
