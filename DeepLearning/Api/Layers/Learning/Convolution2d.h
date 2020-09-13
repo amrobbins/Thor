@@ -201,14 +201,14 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    // Adds a DropOut layer before this Convolution2d layer
+    // Adds a DropOut layer before this Convolution2d layer, but after the BatchNormalization layer when that is also present.
     Convolution2d::Builder dropOut(float _dropProportion) {
         assert(!this->_dropProportion.isPresent());
         this->_dropProportion = _dropProportion;
         return *this;
     }
 
-    // Adds a BatchNormalization layer before this Convolution2d layer
+    // Adds a BatchNormalization layer before this Convolution2d layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
     Convolution2d::Builder batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                                               Optional<double> epsilon = Optional<double>::empty()) {

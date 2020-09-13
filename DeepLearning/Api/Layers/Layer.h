@@ -1,17 +1,12 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/LayerBase.h"
+// FIXME: include all the layer headers
 
 #include <assert.h>
 #include <memory>
 
 namespace Thor {
-
-class FullyConnected;
-class Convolution2d;
-class Pooling;
-class Relu;
-class Tanh;
 
 using std::shared_ptr;
 
