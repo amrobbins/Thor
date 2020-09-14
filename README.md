@@ -26,8 +26,8 @@ Dependencies
 Install:
 
 ```shell
-git clone https://github.com/amrobbins/MLDev.git
-cd MLDev
+git clone https://github.com/amrobbins/Thor.git
+cd Thor
 git clone https://github.com/google/googletest.git
 cd googletest
 mkdir build

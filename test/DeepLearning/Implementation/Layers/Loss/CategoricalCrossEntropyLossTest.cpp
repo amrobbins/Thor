@@ -1,7 +1,7 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
-#include "MLDev.h"
+#include "Thor.h"
 
 #include <math.h>
 #include <stdio.h>

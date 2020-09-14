@@ -21,7 +21,7 @@ int main(int argc, char *argv[]) {
     FILE *fin = fopen(argv[1], "r");
     assert(fin != NULL);
 
-    FILE *fout = fopen("MLDev.h", "w");
+    FILE *fout = fopen("Thor.h", "w");
     assert(fout != NULL);
 
     fputs("#pragma once\n\n", fout);
@@ -32,7 +32,7 @@ int main(int argc, char *argv[]) {
             continue;
         if (line[0] != '.' || line[1] != '/')
             continue;
-        if (line.find("/MLDev.h") != string::npos)
+        if (line.find("/Thor.h") != string::npos)
             continue;
 
         // TEMP FIXME:

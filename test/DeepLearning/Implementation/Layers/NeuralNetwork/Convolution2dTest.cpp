@@ -2,7 +2,7 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
 
-#include "MLDev.h"
+#include "Thor.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -286,7 +286,7 @@ TEST(Convolution2d, Convolution2dWorks) {
 
         stream.synchronize();
 
-        float maxDiff = 0.01;
+        float maxDiff = 0.03;
 
         weightsMem = (half *)weights.getMemPtr();
         half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();

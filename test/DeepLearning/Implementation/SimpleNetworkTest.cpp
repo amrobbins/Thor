@@ -1,6 +1,6 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
-#include "MLDev.h"
+#include "Thor.h"
 
 #include <stdio.h>
 #include <unistd.h>

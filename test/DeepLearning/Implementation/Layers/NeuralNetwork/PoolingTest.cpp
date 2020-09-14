@@ -2,7 +2,7 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
 
-#include "MLDev.h"
+#include "Thor.h"
 
 #include <stdio.h>
 #include <unistd.h>

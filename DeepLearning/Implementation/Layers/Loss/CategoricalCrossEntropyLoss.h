@@ -15,7 +15,7 @@ class CategoricalCrossEntropyLoss : public Loss {
    public:
     virtual ~CategoricalCrossEntropyLoss(){};
 
-    CategoricalCrossEntropyLoss(float lossScalingFactor = 1.0f) : Loss(lossScalingFactor) {}
+    CategoricalCrossEntropyLoss(Optional<float> lossScalingFactor) : Loss(lossScalingFactor.isPresent() ? lossScalingFactor.get() : 1.0f) {}
 
     virtual void compile() {
         if (!isInferenceOnly()) {

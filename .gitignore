@@ -1,6 +1,6 @@
 build/
-libMLDev.a
-MLDev.h
+libThor.a
+Thor.h
 
 # Compiled source #
 ###################
