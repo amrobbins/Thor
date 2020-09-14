@@ -751,7 +751,7 @@ TensorCoreMatrixMultiply::TensorCoreMatrixMultiply() : CURRENT_KERNEL_VERSION(2)
     // then it simply will not be used. This feature must never block the framework from executing.
     diskIndexFileName = std::getenv("HOME");
     if (!diskIndexFileName.empty())
-        diskIndexFileName += "/.config/MLDev/MatrixMultiplyOptimalKernelListing.bin";
+        diskIndexFileName += "/.config/Thor/MatrixMultiplyOptimalKernelListing.bin";
     optimalKernelListing = createDiskIndex();
 }
 

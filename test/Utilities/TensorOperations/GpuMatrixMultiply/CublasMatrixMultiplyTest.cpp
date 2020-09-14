@@ -1,4 +1,4 @@
-#include "MLDev.h"
+#include "Thor.h"
 
 #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
 

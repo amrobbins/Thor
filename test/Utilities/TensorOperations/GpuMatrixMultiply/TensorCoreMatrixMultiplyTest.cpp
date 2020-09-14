@@ -1,4 +1,4 @@
-#include "MLDev.h"
+#include "Thor.h"
 
 #include "gtest/gtest.h"
 #include "omp.h"

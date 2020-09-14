@@ -1,4 +1,4 @@
-#include "MLDev.h"
+#include "Thor.h"
 
 #include <stdio.h>
 #include "cuda.h"

@@ -12,7 +12,7 @@ class Convolution2d : public LayerBase {
 
     ~Convolution2d();
 
-    virtual Tensor getFeatureOutput();  // this is not implementation Tensor
+    virtual Tensor getFeatureOutput();
 
    private:
     bool initialized;
@@ -78,6 +78,7 @@ class Convolution2d::Builder {
         convolution2d->filterWidth = _filterWidth;
         convolution2d->verticalStride = _verticalStride;
         convolution2d->horizontalStride = _horizontalStride;
+        // FIXME: need API tensor
         //        if(_computeVerticalSamePadding)
         //            convolution2d->verticalPadding = computeSamePadding(featureInput.getDimensions[2], verticalStride, uint32_t
         //            filterHeight);
@@ -141,14 +142,12 @@ class Convolution2d::Builder {
     Convolution2d::Builder verticalPadding(uint32_t _verticalPadding) {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
-        assert(!this->_computeHorizontalSamePadding.isPresent());
         this->_verticalPadding = _verticalPadding;
         return *this;
     }
 
     Convolution2d::Builder horizontalPadding(uint32_t _horizontalPadding) {
         assert(!this->_horizontalPadding.isPresent());
-        assert(!this->_computeVerticalSamePadding.isPresent());
         assert(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = _horizontalPadding;
         return *this;
@@ -163,6 +162,22 @@ class Convolution2d::Builder {
         this->_horizontalPadding = 0;
         this->_computeHorizontalSamePadding = true;
         this->_computeVerticalSamePadding = true;
+        return *this;
+    }
+
+    Convolution2d::Builder verticalSamePadding() {
+        assert(!this->_verticalPadding.isPresent());
+        assert(!this->_computeVerticalSamePadding.isPresent());
+        this->_verticalPadding = 0;
+        this->_computeVerticalSamePadding = true;
+        return *this;
+    }
+
+    Convolution2d::Builder horizontalSamePadding() {
+        assert(!this->_horizontalPadding.isPresent());
+        assert(!this->_computeHorizontalSamePadding.isPresent());
+        this->_horizontalPadding = 0;
+        this->_computeHorizontalSamePadding = true;
         return *this;
     }
 
@@ -201,13 +216,6 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    // Adds a DropOut layer before this Convolution2d layer, but after the BatchNormalization layer when that is also present.
-    Convolution2d::Builder dropOut(float _dropProportion) {
-        assert(!this->_dropProportion.isPresent());
-        this->_dropProportion = _dropProportion;
-        return *this;
-    }
-
     // Adds a BatchNormalization layer before this Convolution2d layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
     Convolution2d::Builder batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
@@ -216,6 +224,13 @@ class Convolution2d::Builder {
         this->_useBatchNormalization = true;
         this->_batchNormExponentialRunningAverageFactor = exponentialRunningAverageFactor;
         this->_batchNormEpsilon = epsilon;
+        return *this;
+    }
+
+    // Adds a DropOut layer before this Convolution2d layer, but after the BatchNormalization layer when that is also present.
+    Convolution2d::Builder dropOut(float _dropProportion) {
+        assert(!this->_dropProportion.isPresent());
+        this->_dropProportion = _dropProportion;
         return *this;
     }
 

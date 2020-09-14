@@ -1,6 +1,6 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
-#include "MLDev.h"
+#include "Thor.h"
 
 atomic<unsigned long> Tensor::nextInstanceId(1);
 

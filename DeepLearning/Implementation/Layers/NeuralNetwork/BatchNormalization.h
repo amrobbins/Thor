@@ -18,15 +18,15 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     BatchNormalization(unsigned int batchSize,
                        unsigned int numFeatures,
                        bool training,
-                       double exponentialRunningAverageFactor = 0.05,
-                       double epsilon = 0.0001)
+                       Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
+                       Optional<double> epsilon = Optional<double>::empty())
         : TrainableWeightsBiasesLayer(true),
           batchSize(batchSize),
           numChannels(numFeatures),
           height(1),
           width(1),
-          exponentialRunningAverageFactor(exponentialRunningAverageFactor),
-          epsilon(epsilon) {
+          exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
+          epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
         setTrainingMode(training);
     }
 
@@ -36,15 +36,15 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                        unsigned int height,
                        unsigned int width,
                        bool training,
-                       double exponentialRunningAverageFactor = 0.05,
-                       double epsilon = 0.0001)
+                       Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
+                       Optional<double> epsilon = Optional<double>::empty())
         : TrainableWeightsBiasesLayer(true),
           batchSize(batchSize),
           numChannels(numChannels),
           height(height),
           width(width),
-          exponentialRunningAverageFactor(exponentialRunningAverageFactor),
-          epsilon(epsilon) {
+          exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
+          epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
         setTrainingMode(training);
     }
 

@@ -1,6 +1,6 @@
 #include "DeepLearning/Implementation/Tensor/DistributedTensor.h"
 
-#include "MLDev.h"
+#include "Thor.h"
 
 // FIXME : get rid of the copyFromAsync duplication,
 //        handle the minor difference some other way.
