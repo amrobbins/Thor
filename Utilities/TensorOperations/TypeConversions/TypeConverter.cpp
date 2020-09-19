@@ -1,5 +1,7 @@
 #include "TypeConverter.h"
 
+using namespace ThorImplementation;
+
 void TypeConverter::convertType(void *source,
                                 void *dest,
                                 TensorDescriptor::DataType sourceDataType,

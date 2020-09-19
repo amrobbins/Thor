@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 class Reshape : public Layer {
    public:
     virtual ~Reshape() {}
@@ -27,3 +29,5 @@ class Reshape : public Layer {
    private:
     vector<unsigned long> newDimensions;
 };
+
+}  // namespace ThorImplementation

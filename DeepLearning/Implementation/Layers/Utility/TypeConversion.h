@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 class TypeConversion : public Layer {
    public:
     virtual ~TypeConversion() {}
@@ -36,3 +38,5 @@ class TypeConversion : public Layer {
 
     TensorDescriptor::DataType dataType;
 };
+
+}  // namespace ThorImplementation

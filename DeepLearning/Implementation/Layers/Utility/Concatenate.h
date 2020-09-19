@@ -4,6 +4,8 @@
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
 
+namespace ThorImplementation {
+
 /**
  * All tensors that are being concatenated need to have the same number of dimensions.
  * All dimensions other than the concatenation axis need to be of equal size among all tensors.
@@ -295,3 +297,5 @@ class Concatenate : public MultiConnectionLayer {
     set<unsigned long> allFeatureInputTensorIds;
     set<unsigned long> stillWaitingForFeatureInputTensors;
 };
+
+}  // namespace ThorImplementation

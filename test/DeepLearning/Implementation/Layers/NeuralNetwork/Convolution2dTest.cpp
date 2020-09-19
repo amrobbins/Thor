@@ -17,6 +17,8 @@
 using std::set;
 using std::vector;
 
+using namespace ThorImplementation;
+
 // FIXME: make a test for multiple connections
 
 void backwardPass(Convolution2d *convolution2dLayer,

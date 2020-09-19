@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 
+namespace ThorImplementation {
+
 /**
  * A MultiConnectionLayer supports multiple input/output connection pairs.
  *
@@ -266,3 +268,5 @@ class MultiConnectionLayer : public Layer {
     virtual Optional<Layer *> getNextLayer() { return nextLayer; }
     virtual Stream getStream() { return stream; }
 };
+
+}  // namespace ThorImplementation

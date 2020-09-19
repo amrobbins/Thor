@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 // To run the network forward, for every input NetworkInput, load the tensor and call forward(myInputTensor)
 // Data type will be converted if necessary, memory will be copied across devices if necessary.
 class NetworkInput : public Layer {
@@ -83,3 +85,5 @@ class NetworkInput : public Layer {
     TensorPlacement networkPlacement;
     Optional<TensorDescriptor::DataType> contentDataType;
 };
+
+}  // namespace ThorImplementation

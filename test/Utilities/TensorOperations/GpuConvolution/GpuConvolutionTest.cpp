@@ -9,6 +9,8 @@
 using std::string;
 using std::vector;
 
+using namespace ThorImplementation;
+
 TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
     Stream stream(0);
 

@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Arithmetic/Relu.h"
 
+namespace ThorImplementation {
+
 class Relu : public Layer {
    public:
     virtual ~Relu() {}
@@ -36,3 +38,5 @@ class Relu : public Layer {
                            stream);
     }
 };
+
+}  // namespace ThorImplementation

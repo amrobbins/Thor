@@ -3,7 +3,7 @@
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
-// FIXME: inference only support
+namespace ThorImplementation {
 
 class Convolution2d : public TrainableWeightsBiasesLayer {
    public:
@@ -244,3 +244,5 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     Optional<Tensor> workspaceBackwardFilter;
     Optional<Tensor> workspaceBackwardBias;
 };
+
+}  // namespace ThorImplementation

@@ -8,14 +8,14 @@ using std::vector;
 
 class LayerTestHelper {
    public:
-    static void connectNetwork(vector<Layer *> &layers) {
+    static void connectNetwork(vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size() - 1; ++i) {
             layers[i]->connectToNextLayer(layers[i + 1]);
             layers[i]->postConnectToNextLayer();
         }
     }
 
-    static void initializeNetwork(vector<Layer *> &layers) {
+    static void initializeNetwork(vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->parentCompile();
             layers[i]->compile();
@@ -26,12 +26,12 @@ class LayerTestHelper {
         }
     }
 
-    static void connectAndInitializeNetwork(vector<Layer *> &layers) {
+    static void connectAndInitializeNetwork(vector<ThorImplementation::Layer *> &layers) {
         connectNetwork(layers);
         initializeNetwork(layers);
     }
 
-    static void tearDownNetwork(vector<Layer *> &layers) {
+    static void tearDownNetwork(vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->cleanup();
             layers[i]->parentCleanup();
@@ -40,12 +40,12 @@ class LayerTestHelper {
         layers.clear();
     }
 
-    static void connectTwoLayers(Layer *firstLayer, Layer *secondLayer, int connectionType = 0) {
+    static void connectTwoLayers(ThorImplementation::Layer *firstLayer, ThorImplementation::Layer *secondLayer, int connectionType = 0) {
         firstLayer->connectToNextLayer(secondLayer, connectionType);
         firstLayer->postConnectToNextLayer();
     }
 
-    static void initializeLayer(Layer *layer) {
+    static void initializeLayer(ThorImplementation::Layer *layer) {
         layer->parentCompile();
         layer->compile();
         layer->parentInitialize();

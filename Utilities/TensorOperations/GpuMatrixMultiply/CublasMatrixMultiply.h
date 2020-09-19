@@ -29,6 +29,8 @@ using std::mutex;
 using std::pair;
 using std::unordered_map;
 
+namespace ThorImplementation {
+
 /**
  * CublasMatrixMultiply is a singleton object that can find the optimal matrix multiply kernel for a matrix multiply operation
  * of a given set of dimensions on a specific type of GPU.
@@ -398,3 +400,5 @@ class CublasMatrixMultiply {
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
 };
+
+}  // namespace ThorImplementation

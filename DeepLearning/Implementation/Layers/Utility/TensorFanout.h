@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 // TensorFanout has a single input tensor that is connected to multiple output tensors.
 // New streams are created for outputs 1+
 class TensorFanout : public MultiConnectionLayer {
@@ -126,3 +128,5 @@ class TensorFanout : public MultiConnectionLayer {
    protected:
     half **errorInputArray_d;
 };
+
+}  // namespace ThorImplementation

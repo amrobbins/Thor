@@ -4,6 +4,8 @@
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
 
+namespace ThorImplementation {
+
 /**
  * All tensors that are being split will have the same number of dimensions.
  * All dimensions other than the split axis will be of equal size among all tensors.
@@ -294,3 +296,5 @@ class Split : public MultiConnectionLayer {
     long *stridePerSplitTensorDimension_d;
     long *axisElementsPerSplitTensor_d;
 };
+
+}  // namespace ThorImplementation

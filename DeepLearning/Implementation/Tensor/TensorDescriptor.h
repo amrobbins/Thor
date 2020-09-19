@@ -21,6 +21,8 @@ using std::is_reference;
 using std::is_same;
 using std::is_volatile;
 
+namespace ThorImplementation {
+
 class TensorDescriptor {
    public:
     enum class DataType { FP16 = 10, FP32, FP64, INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, BOOLEAN, PACKED_BOOLEAN };
@@ -360,3 +362,5 @@ class TensorDescriptor {
         return 0;
     }
 };
+
+}  // namespace ThorImplementation

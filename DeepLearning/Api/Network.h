@@ -1,8 +1,8 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
-#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayerBase.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <assert.h>
@@ -40,7 +40,7 @@ class Network {
                           uint32_t batchSize,
                           vector<NetworkInput> &inputs,
                           vector<NetworkOutput> &outputs,
-                          vector<TrainableWeightsBiasesLayer> &trainableLayers);
+                          vector<TrainableWeightsBiasesLayerBase> &trainableLayers);
 
     StatusCode evaluateGraph();
     void checkForFloatingInputs();
@@ -50,7 +50,7 @@ class Network {
         ThorImplementation::NetworkInput *stampNetworkInput(Thor::NetworkInput *networkInput, uint32_t gpuNum, uint32_t batchSize);
         ThorImplementation::NetworkOutput *stampNetworkOutput(Thor::NetworkOutput *networkOutput, uint32_t gpuNum, uint32_t batchSize);
         ThorImplementation::Loss *stampLoss(Thor::Loss *loss, uint32_t gpuNum, uint32_t batchSize);
-        ThorImplementation::TrainableWeightsBiasesLayer *stampTrainableWeightsBiasesLayer(Thor::TrainableWeightsBiasesLayer
+        ThorImplementation::TrainableWeightsBiasesLayer *stampTrainableWeightsBiasesLayer(Thor::TrainableWeightsBiasesLayerBase
        *trainableWeightsBiasesLayer, uint32_t gpuNum, uint32_t batchSize)); ThorImplementation::MultiConnectionLayer
        *stampMultiConnectionLayer(Thor::MultiConnectionLayer *multiConnectionLayer, uint32_t gpuNum, uint32_t batchSize);
         ThorImplementation::Layer stampBaseLayer(Thor::Layer *layer, uint32_t gpuNum, uint32_t batchSize);

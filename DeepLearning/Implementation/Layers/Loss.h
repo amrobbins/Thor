@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.h"
 
+namespace ThorImplementation {
+
 /**
  * A Loss layer may have 1 input and 1 output, the output of a loss layer is the loss tensor.
  *
@@ -267,3 +269,5 @@ class Loss : public Layer {
         previousLayer.get()->backward(errorOutput);
     }
 };
+
+}  // namespace ThorImplementation

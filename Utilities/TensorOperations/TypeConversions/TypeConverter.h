@@ -16,6 +16,8 @@ using std::is_convertible;
 using std::is_integral;
 using std::is_same;
 
+namespace ThorImplementation {
+
 // In-place conversions are supported and are about 20% slower than non-in-place conversions
 // To do an inplace conversion, just send the same pointer to the source and dest.
 class TypeConverter {
@@ -109,3 +111,5 @@ class TypeConverter {
     static void convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
     static void convertToBiggerElementsInPlaceOnGpu_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream);
 };
+
+}  // namespace ThorImplementation

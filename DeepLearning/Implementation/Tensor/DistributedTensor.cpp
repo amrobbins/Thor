@@ -2,6 +2,8 @@
 
 #include "Thor.h"
 
+using namespace ThorImplementation;
+
 // FIXME : get rid of the copyFromAsync duplication,
 //        handle the minor difference some other way.
 

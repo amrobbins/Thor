@@ -9,6 +9,8 @@
 #include "gtest/gtest.h"
 #pragma GCC diagnostic pop
 
+using namespace ThorImplementation;
+
 TEST(DistributedTensor, InstantiatesTensor) {
     vector<unsigned long> dimensions;
     dimensions.push_back(100);

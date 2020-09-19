@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
+namespace ThorImplementation {
+
 /**
  * This is equivalent to a softmax activation layer followed by a cross entropy loss.
  *
@@ -176,3 +178,5 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     Optional<Tensor> errorOutputWorkspace;
 };
+
+}  // namespace ThorImplementation

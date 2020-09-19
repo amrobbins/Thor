@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 /**
  * Performs DropOut, and corresponding scaling, during training.
  * Returns the input tensor as the output tensor during inference.
@@ -175,3 +177,5 @@ class DropOut : public Layer {
     cudnnDropoutDescriptor_t dropoutDescriptor;
     cudnnTensorDescriptor_t cudnnTensorDescriptor;
 };
+
+}  // namespace ThorImplementation

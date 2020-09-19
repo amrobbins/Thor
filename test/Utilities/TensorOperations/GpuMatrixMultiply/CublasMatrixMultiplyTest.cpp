@@ -7,6 +7,8 @@
 
 using std::string;
 
+using namespace ThorImplementation;
+
 #define INTEREST_KERNEL KernelWithSpec::KernelIndex::_256_96_bigSharedBlockA16Restrict
 
 inline void checkCudaErrors(cudaError_t cudaStatus) {

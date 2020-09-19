@@ -4,6 +4,8 @@
 #include "Utilities/TensorOperations/Misc/Extract.h"
 #include "Utilities/TensorOperations/Misc/Pad.h"
 
+namespace ThorImplementation {
+
 /**
  * Zero pad's the tensor
  *
@@ -136,3 +138,5 @@ class Pad : public Layer {
     Tensor padBefore_d;
     Tensor padAfter_d;
 };
+
+}  // namespace ThorImplementation

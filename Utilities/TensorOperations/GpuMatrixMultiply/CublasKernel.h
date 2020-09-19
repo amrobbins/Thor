@@ -15,6 +15,8 @@
 
 using std::atomic;
 
+namespace ThorImplementation {
+
 struct RunStats {
     RunStats() {
         errorFlag = false;
@@ -591,3 +593,5 @@ class CublasKernel : private ReferenceCounted {
         delete algorithmPerGpu;
     }
 };
+
+}  // namespace ThorImplementation

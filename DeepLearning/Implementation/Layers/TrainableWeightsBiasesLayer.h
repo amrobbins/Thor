@@ -2,8 +2,11 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
 #include "omp.h"
+
+namespace ThorImplementation {
 
 /**
  * A TrainableWeightsBiasesLayer has a trainable weights tensor and possibly a trainable biases tensor.
@@ -328,3 +331,5 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
 };
+
+}  // namespace ThorImplementation

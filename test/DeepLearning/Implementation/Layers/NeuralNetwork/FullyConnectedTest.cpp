@@ -15,6 +15,8 @@
 
 using std::vector;
 
+using namespace ThorImplementation;
+
 // FIXME: make a test with accumulate once cublasLt bug is fixed.
 // FIXME: make a test for multiple connections
 

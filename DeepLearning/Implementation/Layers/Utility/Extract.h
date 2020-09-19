@@ -4,6 +4,8 @@
 #include "Utilities/TensorOperations/Misc/Extract.h"
 #include "Utilities/TensorOperations/Misc/Pad.h"
 
+namespace ThorImplementation {
+
 /**
  * Extracts a chunk of a tensor defined by a span in each dimension.
  *
@@ -136,3 +138,5 @@ class Extract : public Layer {
     Tensor padBefore_d;
     Tensor padAfter_d;
 };
+
+}  // namespace ThorImplementation

@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 class DeviceCrossing : public Layer {
    public:
     virtual ~DeviceCrossing() {}
@@ -73,3 +75,5 @@ class DeviceCrossing : public Layer {
 
     Stream otherDeviceStream;
 };
+
+}  // namespace ThorImplementation

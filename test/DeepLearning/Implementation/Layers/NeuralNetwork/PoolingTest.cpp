@@ -16,6 +16,8 @@
 
 using std::vector;
 
+using namespace ThorImplementation;
+
 Tensor maxPooling(Tensor featureIn,
                   uint32_t windowHeight,
                   uint32_t windowWidth,

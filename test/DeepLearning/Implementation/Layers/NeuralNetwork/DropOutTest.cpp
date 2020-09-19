@@ -16,6 +16,8 @@
 using std::set;
 using std::vector;
 
+using namespace ThorImplementation;
+
 TEST(DropOut, InferenceWorks) {
     srand(time(NULL));
 
