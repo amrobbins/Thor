@@ -1,4 +1,5 @@
 #pragma once
+#include <assert.h>
 #include <memory>
 
 struct CalledGetOnEmptyOptionalException : public std::exception {

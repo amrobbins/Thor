@@ -1,11 +1,14 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Loss/LossBase.h"
+#include "DeepLearning/Api/Tensor.h"
 
 #include <assert.h>
 #include <memory>
 
 namespace Thor {
+
+class Network;
 
 using std::shared_ptr;
 
@@ -16,8 +19,14 @@ class Loss {
 
     virtual ~Loss() {}
 
+    Tensor getLossTensor() { return loss->getLossTensor(); }
+
    private:
     shared_ptr<LossBase> loss;
+
+    LossBase *getRawLoss();
+
+    friend class Network;
 };
 
 }  // namespace Thor

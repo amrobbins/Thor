@@ -16,12 +16,9 @@ class FullyConnected : LayerBase {
 
     FullyConnected() { initialized = false; }
 
-    virtual Tensor getFeatureOutput();
-
    private:
     bool initialized;
 
-    Tensor featureInput;
     uint32_t numOutputFeatures;
     bool hasBias;
     Initializer weightsInitializer;
@@ -69,13 +66,13 @@ class FullyConnected::Builder {
         fullyConnected->useBatchNormalization = _useBatchNormalization;
         fullyConnected->batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         fullyConnected->batchNormEpsilon = _batchNormEpsilon;
+        fullyConnected->featureOutput = Tensor();
         fullyConnected->initialized = true;
 
         return Layer(fullyConnected);
     }
 
     FullyConnected::Builder featureInput(Tensor _featureInput) {
-        assert(_featureInput.isInitialized());
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;

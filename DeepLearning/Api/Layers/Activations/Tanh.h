@@ -2,6 +2,8 @@
 
 namespace Thor {
 
+class Activation;
+
 class Tanh : public ActivationBase {
    public:
     class Builder;
@@ -11,15 +13,15 @@ class Tanh : public ActivationBase {
 
    private:
     bool initialized;
-    float dropProportion;
+    // FIXME: Add feature input
 };
 
 class Tanh::Builder {
    public:
-    virtual Layer build() {
+    virtual Activation build() {
         Tanh *tanh = new Tanh();
         tanh->initialized = true;
-        return Layer(tanh);
+        return Activation(tanh);
     }
 
    private:
