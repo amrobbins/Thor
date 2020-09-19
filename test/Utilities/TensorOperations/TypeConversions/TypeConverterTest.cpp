@@ -4,6 +4,8 @@
 
 #include "gtest/gtest.h"
 
+using namespace ThorImplementation;
+
 TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
     srand(time(NULL));
 

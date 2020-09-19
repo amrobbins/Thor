@@ -5,6 +5,8 @@
 
 using std::string;
 
+namespace ThorImplementation {
+
 class TensorPlacement {
    public:
     enum class MemDevices { INVALID = 0, CPU, GPU };
@@ -35,3 +37,5 @@ class TensorPlacement {
     MemDevices memDevice;
     int deviceNum;
 };
+
+}  // namespace ThorImplementation

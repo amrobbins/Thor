@@ -5,6 +5,8 @@
 
 #include <thread>
 
+namespace ThorImplementation {
+
 class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     virtual ~FullyConnected() {}
@@ -351,3 +353,5 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
     Optional<cudnnReduceTensorDescriptor_t> reduceDescriptor;
 };
+
+}  // namespace ThorImplementation

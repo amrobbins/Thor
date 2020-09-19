@@ -5,6 +5,8 @@
 
 #include <type_traits>
 
+namespace ThorImplementation {
+
 template <typename INDEX_TYPE>
 class Map : public Layer {
    public:
@@ -229,3 +231,5 @@ class Map : public Layer {
         // launch.
     }
 };
+
+}  // namespace ThorImplementation

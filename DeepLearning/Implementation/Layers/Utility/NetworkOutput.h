@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 class NetworkOutput : public Layer {
    public:
     virtual ~NetworkOutput() {}
@@ -54,3 +56,5 @@ class NetworkOutput : public Layer {
 
     Optional<TensorPlacement> outputPlacement;
 };
+
+}  // namespace ThorImplementation

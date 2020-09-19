@@ -27,6 +27,8 @@ using std::pair;
 using std::string;
 using std::unordered_map;
 
+namespace ThorImplementation {
+
 /**
  * GpuConvolution is a singleton object that can find the optimal convolution kernel for a convolution operation with a given set of
  * parameters.
@@ -117,3 +119,5 @@ class GpuConvolution {
     void addConvolutionBias(Tensor dataOutput, Tensor biases, Stream stream);
     void computeConvolutionBiasesGradient(Tensor errorInput, Tensor biasesGradient, Tensor workspace, Stream stream);
 };
+
+}  // namespace ThorImplementation

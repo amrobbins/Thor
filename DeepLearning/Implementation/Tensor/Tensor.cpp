@@ -2,6 +2,8 @@
 
 #include "Thor.h"
 
+using namespace ThorImplementation;
+
 atomic<unsigned long> Tensor::nextInstanceId(1);
 
 Tensor::Tensor() : ReferenceCounted() {}

@@ -2,6 +2,8 @@
 
 #include "omp.h"
 
+namespace ThorImplementation {
+
 class ConvolutionTestHelper {
    public:
     static int computeOutputDimensionSize(int inputDimensionSize, int perSidePadding, int filterSize, int filterStride) {
@@ -361,3 +363,5 @@ class ConvolutionTestHelper {
         copyStream.synchronize();
     }
 };
+
+}  // namespace ThorImplementation

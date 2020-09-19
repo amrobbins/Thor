@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 class Flatten : public Layer {
    public:
     virtual ~Flatten() {}
@@ -45,3 +47,5 @@ class Flatten : public Layer {
 
     unsigned int toNumDimensions;
 };
+
+}  // namespace ThorImplementation

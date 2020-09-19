@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 
+namespace ThorImplementation {
+
 /**
  * Parameter epsilon is used in the batch normalization formula and must be >= 0.00001.
  * Parameter exponentialRunningAverageFactor is used to determine how long to remember past results and how much weight to give the newest
@@ -272,3 +274,5 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     vector<Tensor> resultSaveMean;
     vector<Tensor> resultSaveInvVariance;
 };
+
+}  // namespace ThorImplementation

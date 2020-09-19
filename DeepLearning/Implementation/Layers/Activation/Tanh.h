@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Arithmetic/Tanh.h"
 
+namespace ThorImplementation {
+
 class Tanh : public Layer {
    public:
     virtual ~Tanh() {}
@@ -41,3 +43,5 @@ class Tanh : public Layer {
 
     TensorDescriptor::DataType dataType;
 };
+
+}  // namespace ThorImplementation

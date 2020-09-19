@@ -16,6 +16,8 @@
 
 using std::mutex;
 
+using ThorImplementation::TensorPlacement;
+
 #define DEBUG_REF_COUNTS
 
 /**

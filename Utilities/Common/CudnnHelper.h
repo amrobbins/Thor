@@ -4,6 +4,8 @@
 
 #include <cudnn.h>
 
+namespace ThorImplementation {
+
 class CudnnHelper {
    public:
     static cudnnDataType_t getCudnnDataType(const TensorDescriptor::DataType dataType) {
@@ -23,3 +25,5 @@ class CudnnHelper {
         }
     }
 };
+
+}  // namespace ThorImplementation

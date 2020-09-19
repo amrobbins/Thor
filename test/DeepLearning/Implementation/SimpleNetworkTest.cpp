@@ -15,6 +15,8 @@
 using std::set;
 using std::vector;
 
+using namespace ThorImplementation;
+
 int popRandomElement(set<int> &elements) {
     int numElements = elements.size();
     int chosenElement = rand() % numElements;

@@ -11,6 +11,8 @@
 using std::advance;
 using std::set;
 
+using namespace ThorImplementation;
+
 inline int randomElement(set<int> &filledSet) {
     assert(!filledSet.empty());
     set<int>::iterator it = filledSet.begin();

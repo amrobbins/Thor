@@ -35,6 +35,8 @@ using std::mutex;
 using std::recursive_mutex;
 using std::unique_lock;
 
+namespace ThorImplementation {
+
 class Tensor;
 
 /**
@@ -177,3 +179,5 @@ class DistributedTensor : private ReferenceCounted {
     void copyObject(const DistributedTensor &other);
     void destroy();
 };
+
+}  // namespace ThorImplementation

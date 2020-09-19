@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 
+namespace ThorImplementation {
+
 class Pooling : public Layer {
    public:
     enum class Type { MAX = 11, AVERAGE = 12 };
@@ -201,3 +203,5 @@ class Pooling : public Layer {
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
     Optional<cudnnTensorDescriptor_t> featureInputDescriptor;
 };
+
+}  // namespace ThorImplementation

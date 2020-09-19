@@ -20,6 +20,8 @@ using std::pair;
 using std::set;
 using std::vector;
 
+using namespace ThorImplementation;
+
 inline int randomElement(set<int> &filledSet) {
     assert(!filledSet.empty());
     set<int>::iterator it = filledSet.begin();

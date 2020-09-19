@@ -2,8 +2,10 @@
 
 #include "DeepLearning/Implementation/Tensor/DistributedTensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
 #include "Utilities/Common/Optional.h"
+#include "Utilities/Common/Stream.h"
 #include "Utilities/TensorOperations/Arithmetic/Average.h"
 #include "Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h"
 #include "Utilities/TensorOperations/Arithmetic/Exponentiation.h"
@@ -33,6 +35,11 @@ using std::set;
 using std::unique_lock;
 using std::unordered_multimap;
 using std::vector;
+
+using ::Optional;
+using ::Stream;
+
+namespace ThorImplementation {
 
 class Tensor;
 class TensorDescriptor;
@@ -251,3 +258,5 @@ class Layer {
     bool inferenceOnly;
     bool connectToBackPropErrorIn;
 };
+
+}  // namespace ThorImplementation

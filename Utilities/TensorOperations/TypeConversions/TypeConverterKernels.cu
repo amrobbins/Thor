@@ -2,6 +2,8 @@
 
 #include <stdio.h>
 
+using namespace ThorImplementation;
+
 // Launch out-of-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);

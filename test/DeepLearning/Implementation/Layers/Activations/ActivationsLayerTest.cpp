@@ -15,6 +15,8 @@
 using std::set;
 using std::vector;
 
+using namespace ThorImplementation;
+
 TEST(Relu, Works) {
     srand(time(NULL));
 

@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Layers/LayerBase.h"
 #include "DeepLearning/Api/Tensor.h"
 // FIXME: include all the layer headers
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 
 #include <assert.h>
 #include <memory>

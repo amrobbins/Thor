@@ -17,6 +17,8 @@
 using std::set;
 using std::vector;
 
+using namespace ThorImplementation;
+
 TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
     srand(time(NULL));
 

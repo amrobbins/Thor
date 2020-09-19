@@ -49,6 +49,8 @@
 // B_cols (N): number of output features
 //-----------------------------------------------
 
+using namespace ThorImplementation;
+
 // This variant allows non-packed matrices and uses a workspace
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,

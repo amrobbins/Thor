@@ -3,6 +3,8 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 
+using namespace ThorImplementation;
+
 __global__ void addConvolutionBiasKernel(
     half *data, half *biases, unsigned int batchDimension, unsigned int channelDimension, unsigned int elementDimension) {
     unsigned int elementIndex = blockIdx.x * 2048 + threadIdx.x;
