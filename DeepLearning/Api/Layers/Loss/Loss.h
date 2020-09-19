@@ -19,7 +19,11 @@ class Loss {
 
     virtual ~Loss() {}
 
-    Tensor getLossTensor() { return loss->getLossTensor(); }
+    uint32_t getId() const { return loss->getId(); }
+
+    Tensor getFeatureInput() const { return loss->getFeatureInput(); }
+    Tensor getPredictions() const { return loss->getFeatureOutput(); }
+    Tensor getLossTensor() const { return loss->getLossTensor(); }
 
    protected:
     shared_ptr<LossBase> loss;
