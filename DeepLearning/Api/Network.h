@@ -1,8 +1,17 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayerBase.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Loss/Loss.h"
+#include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+
+#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <assert.h>
@@ -42,19 +51,19 @@ class Network {
                           vector<NetworkOutput> &outputs,
                           vector<TrainableWeightsBiasesLayerBase> &trainableLayers);
 
-    StatusCode evaluateGraph();
-    void checkForFloatingInputs();
-    void checkForDanglingOUtputs();
+    virtual StatusCode evaluateGraph();
+    virtual void checkForFloatingInputs();
+    virtual void checkForDanglingOUtputs();
 
-    /*
-        ThorImplementation::NetworkInput *stampNetworkInput(Thor::NetworkInput *networkInput, uint32_t gpuNum, uint32_t batchSize);
-        ThorImplementation::NetworkOutput *stampNetworkOutput(Thor::NetworkOutput *networkOutput, uint32_t gpuNum, uint32_t batchSize);
-        ThorImplementation::Loss *stampLoss(Thor::Loss *loss, uint32_t gpuNum, uint32_t batchSize);
-        ThorImplementation::TrainableWeightsBiasesLayer *stampTrainableWeightsBiasesLayer(Thor::TrainableWeightsBiasesLayerBase
-       *trainableWeightsBiasesLayer, uint32_t gpuNum, uint32_t batchSize)); ThorImplementation::MultiConnectionLayer
-       *stampMultiConnectionLayer(Thor::MultiConnectionLayer *multiConnectionLayer, uint32_t gpuNum, uint32_t batchSize);
-        ThorImplementation::Layer stampBaseLayer(Thor::Layer *layer, uint32_t gpuNum, uint32_t batchSize);
-    */
+    virtual ThorImplementation::NetworkInput *stampNetworkInput(Thor::NetworkInput *networkInput, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::NetworkOutput *stampNetworkOutput(Thor::NetworkOutput *networkOutput, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::Loss *stampLoss(Thor::Loss *loss, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::TrainableWeightsBiasesLayer *stampTrainableWeightsBiasesLayer(
+        Thor::TrainableWeightsBiasesLayerBase *trainableWeightsBiasesLayer, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::MultiConnectionLayer *stampMultiConnectionLayer(Thor::MultiConnectionLayer *multiConnectionLayer,
+                                                                                uint32_t gpuNum,
+                                                                                uint32_t batchSize);
+    virtual ThorImplementation::Layer *stampBaseLayer(Thor::Layer *layer, uint32_t gpuNum, uint32_t batchSize);
 
     friend class ExecutorBase;
 };

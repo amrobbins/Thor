@@ -21,7 +21,7 @@ class Loss {
 
     Tensor getLossTensor() { return loss->getLossTensor(); }
 
-   private:
+   protected:
     shared_ptr<LossBase> loss;
 
     LossBase *getRawLoss();
