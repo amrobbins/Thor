@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/LayerBase.h"
+#include "DeepLearning/Api/Tensor.h"
 
 #include <assert.h>
 #include <atomic>
@@ -14,6 +15,8 @@ class LossBase : public LayerBase {
    public:
     LossBase() {}
     virtual ~LossBase() {}
+
+    Tensor getLossTensor();
 };
 
 }  // namespace Thor

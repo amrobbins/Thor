@@ -12,6 +12,7 @@ class DropOut : public LayerBase {
    private:
     bool initialized;
     float dropProportion;
+    // FIXME: Add feature input
 };
 
 class DropOut::Builder {

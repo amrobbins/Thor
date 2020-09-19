@@ -12,8 +12,6 @@ class Pooling : public LayerBase {
 
     ~Pooling();
 
-    virtual Tensor getFeatureOutput();  // this is not implementation Tensor
-
    private:
     bool initialized;
 
@@ -63,6 +61,7 @@ class Pooling::Builder {
         pooling->windowWidth = _windowWidth;
         pooling->verticalStride = _verticalStride;
         pooling->horizontalStride = _horizontalStride;
+        // FIXME: need API tensor
         //        if(_computeVerticalSamePadding)
         //            pooling->verticalPadding = computeSamePadding(featureInput.getDimensions[2], verticalStride, uint32_t
         //            windowHeight);
@@ -83,7 +82,6 @@ class Pooling::Builder {
     }
 
     Pooling::Builder featureInput(Tensor _featureInput) {
-        assert(_featureInput.isInitialized());
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;

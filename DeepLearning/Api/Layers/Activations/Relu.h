@@ -2,6 +2,8 @@
 
 namespace Thor {
 
+class Activation;
+
 class Relu : public ActivationBase {
    public:
     class Builder;
@@ -11,15 +13,15 @@ class Relu : public ActivationBase {
 
    private:
     bool initialized;
-    float dropProportion;
+    // FIXME: Add feature input
 };
 
 class Relu::Builder {
    public:
-    virtual Layer build() {
+    virtual Activation build() {
         Relu *relu = new Relu();
         relu->initialized = true;
-        return Layer(relu);
+        return Activation(relu);
     }
 
    private:

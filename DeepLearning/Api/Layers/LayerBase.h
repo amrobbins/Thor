@@ -1,5 +1,8 @@
 #pragma once
 
+#include "DeepLearning/Api/Tensor.h"
+#include "Utilities/Common/Optional.h"
+
 #include <assert.h>
 #include <atomic>
 #include <utility>
@@ -13,13 +16,22 @@ class LayerBase {
     LayerBase() : id(nextId.fetch_add(1)) {}
     virtual ~LayerBase() {}
 
+    uint32_t getId() { return id; }
+
+    virtual Optional<Tensor> getFeatureInput() { return featureInput; }
+    virtual Optional<Tensor> getFeatureOutput() { return featureOutput; }
+
     bool operator==(const LayerBase &other) const { return id == other.id; }
     bool operator!=(const LayerBase &other) const { return id != other.id; }
     bool operator<(const LayerBase &other) const { return id < other.id; }
     bool operator>(const LayerBase &other) const { return id > other.id; }
 
+   protected:
+    Optional<Tensor> featureInput;
+    Optional<Tensor> featureOutput;
+
    private:
-    const uint32_t id;
+    uint32_t id;
     static atomic<uint32_t> nextId;
 };
 

@@ -280,29 +280,23 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     void initializeWeights(const Initializer *initializer) {
         assert(compiled);
+        initializer->initializeWeights(this);
+        /*
+                const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
 
-        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
+                if (uniformRandomInitializer) {
+                    uniformRandomInitializer->initializeWeights(this);
+                    return;
+                }
 
-        if (uniformRandomInitializer) {
-            uniformRandomInitializer->initializeWeights(this);
-            return;
-        }
-
-        assert(false);
+                assert(false);
+        */
     }
 
     void initializeBiases(const Initializer *initializer) {
         assert(compiled);
         assert(hasBias);
-
-        const UniformRandomInitializer *uniformRandomInitializer = dynamic_cast<const UniformRandomInitializer *>(initializer);
-
-        if (uniformRandomInitializer) {
-            uniformRandomInitializer->initializeBiases(this);
-            return;
-        }
-
-        assert(false);
+        initializer->initializeBiases(this);
     }
 
    protected:

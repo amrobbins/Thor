@@ -1,12 +1,15 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/LayerBase.h"
+#include "DeepLearning/Api/Tensor.h"
 // FIXME: include all the layer headers
 
 #include <assert.h>
 #include <memory>
 
 namespace Thor {
+
+class Network;
 
 using std::shared_ptr;
 
@@ -18,15 +21,20 @@ class Layer {
 
     virtual ~Layer() {}
 
-    Layer *getLayer();
+    virtual Optional<Tensor> getFeatureInput() { return layer->getFeatureInput(); }
+    virtual Optional<Tensor> getFeatureOutput() { return layer->getFeatureOutput(); }
 
     bool operator==(const Layer &other) const;
     bool operator!=(const Layer &other) const;
     bool operator<(const Layer &other) const;
     bool operator>(const Layer &other) const;
 
-   private:
+   protected:
     shared_ptr<LayerBase> layer;
+
+    LayerBase *getRawLayer();
+
+    friend class Network;
 };
 
 }  // namespace Thor

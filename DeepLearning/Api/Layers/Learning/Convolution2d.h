@@ -12,8 +12,6 @@ class Convolution2d : public LayerBase {
 
     ~Convolution2d();
 
-    virtual Tensor getFeatureOutput();
-
    private:
     bool initialized;
 
@@ -103,7 +101,6 @@ class Convolution2d::Builder {
     }
 
     Convolution2d::Builder featureInput(Tensor _featureInput) {
-        assert(_featureInput.isInitialized());
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;

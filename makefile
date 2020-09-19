@@ -115,6 +115,10 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
                    build/DeepLearning/Api/Layers/LayerBase.o \
+                   build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o \
+                   build/DeepLearning/Api/Executors/LocalExecutor.o \
+                   build/DeepLearning/Api/Network.o \
+                   build/DeepLearning/Api/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
@@ -349,6 +353,22 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: Dee
 build/DeepLearning/Api/Layers/LayerBase.o: DeepLearning/Api/Layers/LayerBase.h DeepLearning/Api/Layers/LayerBase.cpp
 	mkdir -p build/DeepLearning/Api/Layers
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/LayerBase.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/LayerBase.o
+
+build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o: DeepLearning/Api/Visualizers/ConsoleVisualizer.h DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp
+	mkdir -p build/DeepLearning/Api/Visualizers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o
+
+build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/LocalExecutor.h DeepLearning/Api/Executors/LocalExecutor.cpp
+	mkdir -p build/DeepLearning/Api/Executors
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Executors/LocalExecutor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Executors/LocalExecutor.o
+
+build/DeepLearning/Api/Network.o: DeepLearning/Api/Network.h DeepLearning/Api/Network.cpp
+	mkdir -p build/DeepLearning/Api
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network.o
+
+build/DeepLearning/Api/Tensor.o: DeepLearning/Api/Tensor.h DeepLearning/Api/Tensor.cpp
+	mkdir -p build/DeepLearning/Api
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Tensor.o
 
 build/DeepLearning/Api/Layers/Layer.o: DeepLearning/Api/Layers/Layer.h DeepLearning/Api/Layers/Layer.cpp
 	mkdir -p build/DeepLearning/Api/Layers

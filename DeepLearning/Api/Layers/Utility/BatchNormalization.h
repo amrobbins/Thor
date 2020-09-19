@@ -13,6 +13,7 @@ class BatchNormalization : public LayerBase {
     bool initialized;
     Optional<double> exponentialRunningAverageFactor;
     Optional<double> epsilon;
+    // FIXME: Add feature input
 };
 
 class BatchNormalization::Builder {
