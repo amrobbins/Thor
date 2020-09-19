@@ -16,10 +16,10 @@ class LayerBase {
     LayerBase() : id(nextId.fetch_add(1)) {}
     virtual ~LayerBase() {}
 
-    uint32_t getId() { return id; }
+    uint32_t getId() const { return id; }
 
-    virtual Optional<Tensor> getFeatureInput() { return featureInput; }
-    virtual Optional<Tensor> getFeatureOutput() { return featureOutput; }
+    virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
+    virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
 
     bool operator==(const LayerBase &other) const { return id == other.id; }
     bool operator!=(const LayerBase &other) const { return id != other.id; }

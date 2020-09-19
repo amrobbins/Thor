@@ -23,8 +23,10 @@ class Layer {
 
     virtual ~Layer() {}
 
-    virtual Optional<Tensor> getFeatureInput() { return layer->getFeatureInput(); }
-    virtual Optional<Tensor> getFeatureOutput() { return layer->getFeatureOutput(); }
+    uint32_t getId() const { return layer->getId(); }
+
+    virtual Optional<Tensor> getFeatureInput() const { return layer->getFeatureInput(); }
+    virtual Optional<Tensor> getFeatureOutput() const { return layer->getFeatureOutput(); }
 
     bool operator==(const Layer &other) const;
     bool operator!=(const Layer &other) const;
@@ -34,7 +36,7 @@ class Layer {
    protected:
     shared_ptr<LayerBase> layer;
 
-    LayerBase *getRawLayer();
+    LayerBase *getRawLayer() const;
 
     friend class Network;
 };

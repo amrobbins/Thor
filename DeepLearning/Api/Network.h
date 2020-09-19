@@ -21,6 +21,36 @@
 using std::set;
 using std::vector;
 
+namespace ThorImplementation {
+
+class StampedNetwork {
+   public:
+    vector<ThorImplementation::NetworkInput *> inputs;
+    vector<ThorImplementation::NetworkOutput *> outputs;
+    vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
+    vector<ThorImplementation::Layer *> otherLayers;
+
+    void clear() {
+        for (uint32_t i = 0; i < inputs.size(); ++i)
+            delete inputs[i];
+        inputs.clear();
+
+        for (uint32_t i = 0; i < outputs.size(); ++i)
+            delete outputs[i];
+        outputs.clear();
+
+        for (uint32_t i = 0; i < trainableLayers.size(); ++i)
+            delete trainableLayers[i];
+        trainableLayers.clear();
+
+        for (uint32_t i = 0; i < otherLayers.size(); ++i)
+            delete otherLayers[i];
+        otherLayers.clear();
+    }
+};
+
+}  // namespace ThorImplementation
+
 namespace Thor {
 
 class ExecutorBase;
@@ -45,25 +75,27 @@ class Network {
 
     uint32_t getBatchSize();
     void computeMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
-    uint32_t stampNetwork(uint32_t gpuNum,
-                          uint32_t batchSize,
-                          vector<NetworkInput> &inputs,
-                          vector<NetworkOutput> &outputs,
-                          vector<TrainableWeightsBiasesLayerBase> &trainableLayers);
+    StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
 
     virtual StatusCode evaluateGraph();
-    virtual void checkForFloatingInputs();
-    virtual void checkForDanglingOUtputs();
+    virtual StatusCode checkForFloatingInputs();
+    virtual StatusCode checkForDanglingOutputs();
 
-    virtual ThorImplementation::NetworkInput *stampNetworkInput(Thor::NetworkInput *networkInput, uint32_t gpuNum, uint32_t batchSize);
-    virtual ThorImplementation::NetworkOutput *stampNetworkOutput(Thor::NetworkOutput *networkOutput, uint32_t gpuNum, uint32_t batchSize);
-    virtual ThorImplementation::Loss *stampLoss(Thor::Loss *loss, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::NetworkInput *stampNetworkInput(const Thor::NetworkInput *networkInput,
+                                                                uint32_t gpuNum,
+                                                                uint32_t batchSize);
+    virtual ThorImplementation::NetworkOutput *stampNetworkOutput(const Thor::NetworkOutput *networkOutput,
+                                                                  uint32_t gpuNum,
+                                                                  uint32_t batchSize);
+    virtual ThorImplementation::Loss *stampLoss(const Thor::LossBase *loss, uint32_t gpuNum, uint32_t batchSize);
     virtual ThorImplementation::TrainableWeightsBiasesLayer *stampTrainableWeightsBiasesLayer(
-        Thor::TrainableWeightsBiasesLayerBase *trainableWeightsBiasesLayer, uint32_t gpuNum, uint32_t batchSize);
-    virtual ThorImplementation::MultiConnectionLayer *stampMultiConnectionLayer(Thor::MultiConnectionLayer *multiConnectionLayer,
+        const Thor::TrainableWeightsBiasesLayerBase *trainableWeightsBiasesLayer, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::MultiConnectionLayer *stampMultiConnectionLayer(const Thor::MultiConnectionLayerBase *multiConnectionLayer,
                                                                                 uint32_t gpuNum,
                                                                                 uint32_t batchSize);
-    virtual ThorImplementation::Layer *stampBaseLayer(Thor::Layer *layer, uint32_t gpuNum, uint32_t batchSize);
+    virtual ThorImplementation::Layer *stampBaseLayer(const Thor::LayerBase *layer, uint32_t gpuNum, uint32_t batchSize);
+
+    class GpuOutOfMemoryError {};
 
     friend class ExecutorBase;
 };
