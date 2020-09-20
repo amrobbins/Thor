@@ -3,7 +3,7 @@
 #include "DeepLearning/Api/Executors/ExecutorBase.h"
 #include "DeepLearning/Api/HyperparameterControllers/HyperparameterController.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
-#include "DeepLearning/Api/Network.h"
+#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 

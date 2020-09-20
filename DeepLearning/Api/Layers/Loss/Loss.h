@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Loss/LossBase.h"
-#include "DeepLearning/Api/Tensor.h"
 
 #include <assert.h>
 #include <memory>
