@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeepLearning/Api/Tensor.h"
+#include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Common/Optional.h"
 
 #include <assert.h>
@@ -16,7 +16,7 @@ class LayerBase {
     LayerBase() : id(nextId.fetch_add(1)) {}
     virtual ~LayerBase() {}
 
-    uint32_t getId() const { return id; }
+    uint64_t getId() const { return id; }
 
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
     virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
@@ -31,8 +31,8 @@ class LayerBase {
     Optional<Tensor> featureOutput;
 
    private:
-    uint32_t id;
-    static atomic<uint32_t> nextId;
+    uint64_t id;
+    static atomic<uint64_t> nextId;
 };
 
 }  // namespace Thor

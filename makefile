@@ -117,8 +117,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/LayerBase.o \
                    build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o \
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
-                   build/DeepLearning/Api/Network.o \
-                   build/DeepLearning/Api/Tensor.o \
+                   build/DeepLearning/Api/Network/Network.o \
+                   build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
@@ -362,13 +362,13 @@ build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/Loc
 	mkdir -p build/DeepLearning/Api/Executors
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Executors/LocalExecutor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Executors/LocalExecutor.o
 
-build/DeepLearning/Api/Network.o: DeepLearning/Api/Network.h DeepLearning/Api/Network.cpp
-	mkdir -p build/DeepLearning/Api
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network.o
+build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h DeepLearning/Api/Network/Network.cpp
+	mkdir -p build/DeepLearning/Api/Network
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
 
-build/DeepLearning/Api/Tensor.o: DeepLearning/Api/Tensor.h DeepLearning/Api/Tensor.cpp
-	mkdir -p build/DeepLearning/Api
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Tensor.o
+build/DeepLearning/Api/Tensor/Tensor.o: DeepLearning/Api/Tensor/Tensor.h DeepLearning/Api/Tensor/Tensor.cpp
+	mkdir -p build/DeepLearning/Api/Tensor
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Tensor/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Tensor/Tensor.o
 
 build/DeepLearning/Api/Layers/Layer.o: DeepLearning/Api/Layers/Layer.h DeepLearning/Api/Layers/Layer.cpp
 	mkdir -p build/DeepLearning/Api/Layers

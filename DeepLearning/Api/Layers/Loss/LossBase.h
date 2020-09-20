@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/LayerBase.h"
-#include "DeepLearning/Api/Tensor.h"
 
 #include <assert.h>
 #include <atomic>
