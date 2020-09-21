@@ -26,7 +26,7 @@ class DropOut::Builder {
         return Layer(dropOut);
     }
 
-    DropOut::Builder exponentialRunningAverageFactor(float dropProportion) {
+    DropOut::Builder dropProportion(float dropProportion) {
         assert(!_dropProportion.isPresent());
         assert(dropProportion > 0.0);
         this->_dropProportion = dropProportion;

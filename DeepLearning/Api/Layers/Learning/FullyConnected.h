@@ -5,16 +5,43 @@
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/LayerBase.h"
+#include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
+#include "DeepLearning/Api/Layers/Utility/DropOut.h"
 
 #include <assert.h>
 
 namespace Thor {
 
-class FullyConnected : LayerBase {
+class FullyConnected : TrainableWeightsBiasesLayerBase {
    public:
     class Builder;
 
     FullyConnected() { initialized = false; }
+
+    virtual bool isMultiLayer() { return useBatchNormalization || dropProportion > 0.0f || activation.isPresent(); }
+    virtual void toSingleLayers(vector<LayerBase *> &singleLayers) {
+        if (isMultiLayer()) {
+            singleLayers.push_back(this);
+        } else {
+            if (useBatchNormalization) {
+                BatchNormalization::Builder builder;
+                if (batchNormExponentialRunningAverageFactor.isPresent())
+                    builder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor);
+                if (batchNormEpsilon.isPresent())
+                    builder.epsilon(batchNormEpsilon);
+                singleLayers.push_back(builder.build());
+            }
+            if (dropProportion > 0.0f) {
+                singleLayers.push_back(DropOut::Builder().dropProportion(dropProportion).build());
+            }
+
+            singleLayers.push_back(this);
+
+            if (activation.isPresent()) {
+                singleLayers.push_back(activation.get());
+            }
+        }
+    }
 
    private:
     bool initialized;
@@ -23,7 +50,7 @@ class FullyConnected : LayerBase {
     bool hasBias;
     Initializer weightsInitializer;
     Initializer biasInitializer;
-    Activation activation;
+    Optional<Activation> activation;
 
     float dropProportion;
 
@@ -35,7 +62,7 @@ class FullyConnected : LayerBase {
 // featureInput and numOutputFeatures are required, all other parameters are optional.
 class FullyConnected::Builder {
    public:
-    Builder();
+    Builder() { _activationExplicitlyRemoved = false; }
 
     virtual Layer build() {
         assert(_featureInput.isPresent());
@@ -46,7 +73,7 @@ class FullyConnected::Builder {
             _weightsInitializer = Initializer(new XavierInitializer());
         if (_biasInitializer.isEmpty())
             _biasInitializer = Initializer(new UniformRandomInitializer());
-        if (_activation.isEmpty())
+        if (_activation.isEmpty() && !_activationExplicitlyRemoved)
             _activation = Activation(new Relu());
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
@@ -103,9 +130,15 @@ class FullyConnected::Builder {
     }
 
     // Adds an activation layer after this FullyConnected layer
-    FullyConnected::Builder activation(Activation _activation) {
+    FullyConnected::Builder activation(Optional<Activation> _activation) {
         assert(!this->_activation.isPresent());
-        this->_activation = _activation;
+        assert(!_activationExplicitlyRemoved);
+
+        if (_activation.isEmpty()) {
+            _activationExplicitlyRemoved = true;
+        } else {
+            this->_activation = _activation;
+        }
         return *this;
     }
 
@@ -134,6 +167,7 @@ class FullyConnected::Builder {
     Optional<Initializer> _weightsInitializer;
     Optional<Initializer> _biasInitializer;
     Optional<Activation> _activation;
+    bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;
 

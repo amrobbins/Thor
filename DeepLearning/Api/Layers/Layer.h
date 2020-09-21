@@ -30,16 +30,18 @@ class Layer {
     virtual Optional<Tensor> getFeatureInput() const { return layer->getFeatureInput(); }
     virtual Optional<Tensor> getFeatureOutput() const { return layer->getFeatureOutput(); }
 
-    virtual bool isMultiLayer() { return false; }
-    virtual void toSingleLayers(vector<Layer> &singleLayers) { singleLayers.push_back(*this); }
-
     bool operator==(const Layer &other) const;
     bool operator!=(const Layer &other) const;
     bool operator<(const Layer &other) const;
     bool operator>(const Layer &other) const;
 
+    operator LayerBase *() { return getRawLayer(); }
+
    protected:
     shared_ptr<LayerBase> layer;
+
+    virtual bool isMultiLayer() { return layer->isMultiLayer(); }
+    virtual void toRawSingleLayers(vector<LayerBase *> &singleLayers) { layer->toSingleLayers(singleLayers); }
 
     LayerBase *getRawLayer() const;
 

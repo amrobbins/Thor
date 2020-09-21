@@ -9,7 +9,7 @@ namespace Thor {
 
 using std::shared_ptr;
 
-class Activation {
+class Activation : public Layer {
    public:
     Activation();
     Activation(ActivationBase *activationBase) { activation = shared_ptr<ActivationBase>(activationBase); }

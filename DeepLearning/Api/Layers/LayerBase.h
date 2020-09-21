@@ -21,6 +21,9 @@ class LayerBase {
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
     virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
 
+    virtual bool isMultiLayer() { return false; }
+    virtual void toSingleLayers(vector<LayerBase *> &singleLayers) { singleLayers.push_back(this); }
+
     bool operator==(const LayerBase &other) const { return id == other.id; }
     bool operator!=(const LayerBase &other) const { return id != other.id; }
     bool operator<(const LayerBase &other) const { return id < other.id; }

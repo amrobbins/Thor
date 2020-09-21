@@ -4,7 +4,7 @@
 
 namespace Thor {
 
-class Convolution2d : public LayerBase {
+class Convolution2d : public TrainableWeightsBiasesLayerBase {
    public:
     class Builder;
 
