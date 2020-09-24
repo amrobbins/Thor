@@ -1,35 +1,28 @@
 #pragma once
 
-#include "DeepLearning/Api/Layers/Loss/LossBase.h"
+#include "DeepLearning/Api/Layers/Layer.h"
 
 #include <assert.h>
-#include <memory>
+#include <atomic>
+#include <utility>
+
+using std::atomic;
 
 namespace Thor {
 
-class Network;
-
-using std::shared_ptr;
-
-class Loss {
+class Loss : public Layer {
    public:
-    Loss();
-    Loss(LossBase *lossBase) { loss = shared_ptr<LossBase>(lossBase); }
-
+    Loss() {}
     virtual ~Loss() {}
 
-    uint32_t getId() const { return loss->getId(); }
-
-    Tensor getFeatureInput() const { return loss->getFeatureInput(); }
-    Tensor getPredictions() const { return loss->getFeatureOutput(); }
-    Tensor getLossTensor() const { return loss->getLossTensor(); }
+    Tensor getPredictions() const { return featureOutput.get(); }
+    Tensor getLoss() const { return lossTensor; }
 
    protected:
-    shared_ptr<LossBase> loss;
+    Tensor lossTensor;
 
-    LossBase *getRawLoss();
-
-    friend class Network;
+   private:
+    Tensor getFeatureOutput() { assert(false); }
 };
 
 }  // namespace Thor

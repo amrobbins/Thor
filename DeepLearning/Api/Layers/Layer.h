@@ -1,49 +1,55 @@
 #pragma once
 
-#include "DeepLearning/Api/Layers/LayerBase.h"
-// FIXME: include all the layer headers
-#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
-#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Tensor/Tensor.h"
+#include "Utilities/Common/Optional.h"
+
+#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <assert.h>
+#include <atomic>
 #include <memory>
-#include <vector>
+#include <utility>
 
-using std::vector;
+using std::atomic;
+using std::make_shared;
+using std::shared_ptr;
+using std::unique_ptr;
 
 namespace Thor {
 
-class Network;
-
-using std::shared_ptr;
-
-// Layer is a wrapper that wraps every supported network layer and allows an "anyLayer" typed parameter
 class Layer {
    public:
-    Layer() {}
-    Layer(LayerBase *layerBase);
-
+    Layer() : id(nextId.fetch_add(1)) {}
     virtual ~Layer() {}
 
-    uint32_t getId() const { return layer->getId(); }
+    uint64_t getId() const { return id; }
 
-    virtual Optional<Tensor> getFeatureInput() const { return layer->getFeatureInput(); }
-    virtual Optional<Tensor> getFeatureOutput() const { return layer->getFeatureOutput(); }
+    virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
+    virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
 
-    bool operator==(const Layer &other) const;
-    bool operator!=(const Layer &other) const;
-    bool operator<(const Layer &other) const;
-    bool operator>(const Layer &other) const;
+    bool operator==(const Layer &other) const { return id == other.id; }
+    bool operator!=(const Layer &other) const { return id != other.id; }
+    bool operator<(const Layer &other) const { return id < other.id; }
+    bool operator>(const Layer &other) const { return id > other.id; }
 
-    operator LayerBase *() { return getRawLayer(); }
+    virtual shared_ptr<Layer> clone() const = 0;
 
    protected:
-    shared_ptr<LayerBase> layer;
+    Optional<Tensor> featureInput;
+    Optional<Tensor> featureOutput;
 
-    virtual bool isMultiLayer() { return layer->isMultiLayer(); }
-    virtual void toRawSingleLayers(vector<LayerBase *> &singleLayers) { layer->toSingleLayers(singleLayers); }
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const = 0;
 
-    LayerBase *getRawLayer() const;
+    virtual bool isMultiLayer() const { return false; }
+    virtual void toSingleLayers(vector<shared_ptr<Layer>> &singleLayers) const {
+        assert(!isMultiLayer());
+        singleLayers.push_back(clone());
+    }
+
+   private:
+    uint64_t id;
+    static atomic<uint64_t> nextId;
 
     friend class Network;
 };

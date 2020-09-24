@@ -2,38 +2,56 @@
 
 namespace Thor {
 
-class BatchNormalization : public LayerBase {
+class BatchNormalization : public Layer {
    public:
     class Builder;
     BatchNormalization() : initialized(false) {}
 
-    virtual ~BatchNormalization();
+    virtual ~BatchNormalization() {}
+
+    virtual shared_ptr<Layer> clone() const { return make_shared<BatchNormalization>(*this); }
+
+   protected:
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
+        // FIXME
+        return nullptr;
+    }
 
    private:
-    bool initialized;
+    Tensor featureInput;
     Optional<double> exponentialRunningAverageFactor;
     Optional<double> epsilon;
-    // FIXME: Add feature input
+    bool initialized;
 };
 
 class BatchNormalization::Builder {
    public:
-    virtual Layer build() {
-        BatchNormalization *batchNormalization = new BatchNormalization();
-        batchNormalization->exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
-        batchNormalization->epsilon = _epsilon;
-        batchNormalization->initialized = true;
-        return Layer(batchNormalization);
+    virtual BatchNormalization build() {
+        assert(_featureInput.isPresent());
+
+        BatchNormalization batchNormalization;
+        batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
+        batchNormalization.epsilon = _epsilon;
+        batchNormalization.featureInput = _featureInput;
+        batchNormalization.featureOutput = _featureInput.get().clone();
+        batchNormalization.initialized = true;
+        return batchNormalization;
     }
 
-    BatchNormalization::Builder exponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
+    virtual BatchNormalization::Builder &featureInput(Tensor _featureInput) {
+        assert(!this->_featureInput.isPresent());
+        this->_featureInput = _featureInput;
+        return *this;
+    }
+
+    virtual BatchNormalization::Builder &exponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
         assert(!_exponentialRunningAverageFactor.isPresent());
         assert(exponentialRunningAverageFactor > 0.0);
         this->_exponentialRunningAverageFactor = exponentialRunningAverageFactor;
         return *this;
     }
 
-    BatchNormalization::Builder epsilon(double epsilon) {
+    virtual BatchNormalization::Builder &epsilon(double epsilon) {
         assert(!_epsilon.isPresent());
         assert(epsilon > 0.0);
         this->_epsilon = epsilon;
@@ -43,6 +61,7 @@ class BatchNormalization::Builder {
    private:
     Optional<double> _exponentialRunningAverageFactor;
     Optional<double> _epsilon;
+    Optional<Tensor> _featureInput;
 };
 
 }  // namespace Thor

@@ -19,7 +19,6 @@ class NetworkOutput : public Layer {
         assert(this->featureInput.isEmpty());
 
         this->featureInput = featureInput;
-        this->featureOutput = featureInput;
         this->previousLayer = previousLayer;
         this->stream = stream;
 

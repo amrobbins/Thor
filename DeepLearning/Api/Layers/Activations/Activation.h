@@ -1,23 +1,26 @@
 #pragma once
 
-#include "DeepLearning/Api/Layers/Activations/ActivationBase.h"
+#include "DeepLearning/Api/Layers/Layer.h"
 
 #include <assert.h>
-#include <memory>
+#include <atomic>
+#include <utility>
+
+using std::atomic;
 
 namespace Thor {
 
-using std::shared_ptr;
-
 class Activation : public Layer {
    public:
-    Activation();
-    Activation(ActivationBase *activationBase) { activation = shared_ptr<ActivationBase>(activationBase); }
-
+    Activation() {}
     virtual ~Activation() {}
 
-   private:
-    shared_ptr<ActivationBase> activation;
+    virtual shared_ptr<Layer> clone() const { assert(false); }
+
+    virtual shared_ptr<Activation> cloneWithReconnect(Tensor newFeatureInput) { assert(false); }
+
+   protected:
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const { assert(false); }
 };
 
 }  // namespace Thor

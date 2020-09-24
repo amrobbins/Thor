@@ -114,12 +114,13 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
-                   build/DeepLearning/Api/Layers/LayerBase.o \
                    build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o \
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
                    build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
+                   build/DeepLearning/Api/Layers/Learning/FullyConnected.o \
+                   build/DeepLearning/Api/Layers/Learning/Convolution2d.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
@@ -350,10 +351,6 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: Dee
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o
 
-build/DeepLearning/Api/Layers/LayerBase.o: DeepLearning/Api/Layers/LayerBase.h DeepLearning/Api/Layers/LayerBase.cpp
-	mkdir -p build/DeepLearning/Api/Layers
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/LayerBase.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/LayerBase.o
-
 build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o: DeepLearning/Api/Visualizers/ConsoleVisualizer.h DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp
 	mkdir -p build/DeepLearning/Api/Visualizers
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o
@@ -373,6 +370,14 @@ build/DeepLearning/Api/Tensor/Tensor.o: DeepLearning/Api/Tensor/Tensor.h DeepLea
 build/DeepLearning/Api/Layers/Layer.o: DeepLearning/Api/Layers/Layer.h DeepLearning/Api/Layers/Layer.cpp
 	mkdir -p build/DeepLearning/Api/Layers
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Layer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Layer.o
+
+build/DeepLearning/Api/Layers/Learning/FullyConnected.o: DeepLearning/Api/Layers/Learning/FullyConnected.h
+	mkdir -p build/DeepLearning/Api/Layers/Learning
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Layer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/FullyConnected.o
+
+build/DeepLearning/Api/Layers/Learning/Convolution2d.o: DeepLearning/Api/Layers/Learning/Convolution2d.h
+	mkdir -p build/DeepLearning/Api/Layers/Learning
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Layer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Convolution2d.o
 
 
 

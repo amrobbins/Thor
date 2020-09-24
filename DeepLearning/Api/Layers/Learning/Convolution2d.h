@@ -1,16 +1,26 @@
 #pragma once
 
-#include "DeepLearning/Api/Layers/LayerBase.h"
+#include "DeepLearning/Api/Layers/Layer.h"
 
 namespace Thor {
 
-class Convolution2d : public TrainableWeightsBiasesLayerBase {
+class Convolution2d : public TrainableWeightsBiasesLayer {
    public:
     class Builder;
 
     Convolution2d() { initialized = false; }
+    virtual ~Convolution2d() {}
 
-    ~Convolution2d();
+    virtual shared_ptr<Layer> clone() const { return make_shared<Convolution2d>(*this); }
+
+   protected:
+    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activation.isPresent(); }
+    virtual void toSingleLayers(vector<shared_ptr<Layer>> &singleLayers) const;
+
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
+        // FIXME
+        return nullptr;
+    }
 
    private:
     bool initialized;
@@ -26,7 +36,7 @@ class Convolution2d : public TrainableWeightsBiasesLayerBase {
     bool hasBias;
     Initializer weightsInitializer;
     Initializer biasInitializer;
-    Activation activation;
+    Optional<Activation> activation;
 
     float dropProportion;
 
@@ -38,9 +48,9 @@ class Convolution2d : public TrainableWeightsBiasesLayerBase {
 // featureInput, numOutputChannels, filterHeight and filterWidth are required, all other parameters are optional.
 class Convolution2d::Builder {
    public:
-    Builder();
+    Builder() { _activationExplicitlyRemoved = false; }
 
-    virtual Layer build() {
+    virtual Convolution2d build() {
         assert(_featureInput.isPresent());
         assert(_numOutputChannels.isPresent());
         assert(_filterHeight.isPresent());
@@ -60,44 +70,54 @@ class Convolution2d::Builder {
             _weightsInitializer = Initializer(new XavierInitializer());
         if (_biasInitializer.isEmpty())
             _biasInitializer = Initializer(new UniformRandomInitializer());
-        if (_activation.isEmpty())
-            _activation = Activation(new Relu());
+        if (_activation.isEmpty() && !_activationExplicitlyRemoved)
+            _activation = Relu();
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
             _useBatchNormalization = false;
         }
 
-        Convolution2d *convolution2d = new Convolution2d();
+        Convolution2d convolution2d;
 
-        convolution2d->featureInput = _featureInput;  // featureInput should be immutable
-        convolution2d->numOutputChannels = _numOutputChannels;
-        convolution2d->filterHeight = _filterHeight;
-        convolution2d->filterWidth = _filterWidth;
-        convolution2d->verticalStride = _verticalStride;
-        convolution2d->horizontalStride = _horizontalStride;
-        // FIXME: need API tensor
-        //        if(_computeVerticalSamePadding)
-        //            convolution2d->verticalPadding = computeSamePadding(featureInput.getDimensions[2], verticalStride, uint32_t
-        //            filterHeight);
-        //        else
-        convolution2d->verticalPadding = _verticalPadding;
-        //        if(_computeHorizontalSamePadding)
-        //            convolution2d->horizontalPadding = computeSamePadding(featureInput.getDimensions[3], horizontalStride, uint32_t
-        //            filterWidth);
-        //        else
-        convolution2d->horizontalPadding = _horizontalPadding;
-        convolution2d->hasBias = _hasBias;
-        convolution2d->weightsInitializer = _weightsInitializer;
-        convolution2d->biasInitializer = _biasInitializer;
-        convolution2d->activation = _activation;
-        convolution2d->dropProportion = _dropProportion;
-        convolution2d->useBatchNormalization = _useBatchNormalization;
-        convolution2d->batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
-        convolution2d->batchNormEpsilon = _batchNormEpsilon;
-        convolution2d->initialized = true;
+        convolution2d.featureInput = _featureInput;
+        convolution2d.numOutputChannels = _numOutputChannels;
+        convolution2d.filterHeight = _filterHeight;
+        convolution2d.filterWidth = _filterWidth;
+        convolution2d.verticalStride = _verticalStride;
+        convolution2d.horizontalStride = _horizontalStride;
+        if (_computeVerticalSamePadding)
+            convolution2d.verticalPadding =
+                computeSamePadding(convolution2d.featureInput.getDimensions()[1], convolution2d.verticalStride, convolution2d.filterHeight);
+        else
+            convolution2d.verticalPadding = _verticalPadding;
+        if (_computeHorizontalSamePadding)
+            convolution2d.horizontalPadding = computeSamePadding(
+                convolution2d.featureInput.getDimensions()[2], convolution2d.horizontalStride, convolution2d.filterWidth);
+        else
+            convolution2d.horizontalPadding = _horizontalPadding;
 
-        return Layer(convolution2d);
+        uint32_t outputHeight = computeOutputDimension(convolution2d.featureInput.getDimensions()[1],
+                                                       convolution2d.verticalStride,
+                                                       convolution2d.filterHeight,
+                                                       convolution2d.verticalPadding);
+        uint32_t outputWidth = computeOutputDimension(convolution2d.featureInput.getDimensions()[2],
+                                                      convolution2d.horizontalStride,
+                                                      convolution2d.filterWidth,
+                                                      convolution2d.horizontalPadding);
+        convolution2d.featureOutput = Tensor(convolution2d.featureInput.getDataType(), {_numOutputChannels, outputHeight, outputWidth});
+
+        convolution2d.hasBias = _hasBias;
+        convolution2d.weightsInitializer = _weightsInitializer;
+        convolution2d.biasInitializer = _biasInitializer;
+        convolution2d.activation = _activation;
+        convolution2d.dropProportion = _dropProportion;
+        convolution2d.useBatchNormalization = _useBatchNormalization;
+        convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
+        convolution2d.batchNormEpsilon = _batchNormEpsilon;
+        convolution2d.initialized = true;
+
+        return convolution2d;
     }
 
     Convolution2d::Builder featureInput(Tensor _featureInput) {
@@ -207,9 +227,15 @@ class Convolution2d::Builder {
     }
 
     // Adds an activation layer after this Convolution2d layer
-    Convolution2d::Builder activation(Activation _activation) {
+    Convolution2d::Builder activation(Optional<Activation> _activation) {
         assert(!this->_activation.isPresent());
-        this->_activation = _activation;
+        assert(!_activationExplicitlyRemoved);
+
+        if (_activation.isEmpty()) {
+            _activationExplicitlyRemoved = true;
+        } else {
+            this->_activation = _activation.get();
+        }
         return *this;
     }
 
@@ -246,12 +272,18 @@ class Convolution2d::Builder {
     Optional<Initializer> _weightsInitializer;
     Optional<Initializer> _biasInitializer;
     Optional<Activation> _activation;
+    bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;
 
     Optional<bool> _useBatchNormalization;
     Optional<double> _batchNormExponentialRunningAverageFactor;
     Optional<double> _batchNormEpsilon;
+
+    uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
+        assert(filterSize <= inputSize + 2 * padding);
+        return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
+    }
 
     // outputSize = 1 + (((inputSize+ 2*padding) - filterSize) / filterStride);
     // padding = ((outputSize - 1) * filterStride + filterSize - inputSize) / 2
