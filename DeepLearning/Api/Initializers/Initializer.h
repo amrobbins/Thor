@@ -11,7 +11,7 @@ using std::shared_ptr;
 
 class Initializer {
    public:
-    Initializer();
+    Initializer() {}
     Initializer(InitializerBase *initializerBase) { initializer = shared_ptr<InitializerBase>(initializerBase); }
 
     virtual ~Initializer() {}

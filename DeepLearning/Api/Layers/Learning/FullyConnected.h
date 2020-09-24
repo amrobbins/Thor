@@ -4,7 +4,7 @@
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/LayerBase.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 
@@ -12,35 +12,24 @@
 
 namespace Thor {
 
-class FullyConnected : TrainableWeightsBiasesLayerBase {
+class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     class Builder;
 
     FullyConnected() { initialized = false; }
 
-    virtual bool isMultiLayer() { return useBatchNormalization || dropProportion > 0.0f || activation.isPresent(); }
-    virtual void toSingleLayers(vector<LayerBase *> &singleLayers) {
-        if (isMultiLayer()) {
-            singleLayers.push_back(this);
-        } else {
-            if (useBatchNormalization) {
-                BatchNormalization::Builder builder;
-                if (batchNormExponentialRunningAverageFactor.isPresent())
-                    builder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor);
-                if (batchNormEpsilon.isPresent())
-                    builder.epsilon(batchNormEpsilon);
-                singleLayers.push_back(builder.build());
-            }
-            if (dropProportion > 0.0f) {
-                singleLayers.push_back(DropOut::Builder().dropProportion(dropProportion).build());
-            }
+    virtual ~FullyConnected() {}
 
-            singleLayers.push_back(this);
+    virtual shared_ptr<Layer> clone() const { return make_shared<FullyConnected>(*this); }
 
-            if (activation.isPresent()) {
-                singleLayers.push_back(activation.get());
-            }
-        }
+   protected:
+    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activation.isPresent(); }
+
+    virtual void toSingleLayers(vector<shared_ptr<Layer>> &singleLayers) const;
+
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
+        // FIXME
+        return nullptr;
     }
 
    private:
@@ -64,7 +53,7 @@ class FullyConnected::Builder {
    public:
     Builder() { _activationExplicitlyRemoved = false; }
 
-    virtual Layer build() {
+    virtual FullyConnected build() {
         assert(_featureInput.isPresent());
         assert(_numOutputFeatures.isPresent());
         if (_hasBias.isEmpty())
@@ -74,29 +63,29 @@ class FullyConnected::Builder {
         if (_biasInitializer.isEmpty())
             _biasInitializer = Initializer(new UniformRandomInitializer());
         if (_activation.isEmpty() && !_activationExplicitlyRemoved)
-            _activation = Activation(new Relu());
+            _activation = Relu();
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
             _useBatchNormalization = false;
         }
 
-        FullyConnected *fullyConnected = new FullyConnected();
+        FullyConnected fullyConnected;
 
-        fullyConnected->featureInput = _featureInput;  // featureInput should be immutable
-        fullyConnected->numOutputFeatures = _numOutputFeatures;
-        fullyConnected->hasBias = _hasBias;
-        fullyConnected->weightsInitializer = _weightsInitializer;
-        fullyConnected->biasInitializer = _biasInitializer;
-        fullyConnected->activation = _activation;
-        fullyConnected->dropProportion = _dropProportion;
-        fullyConnected->useBatchNormalization = _useBatchNormalization;
-        fullyConnected->batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
-        fullyConnected->batchNormEpsilon = _batchNormEpsilon;
-        fullyConnected->featureOutput = Tensor();
-        fullyConnected->initialized = true;
+        fullyConnected.featureInput = _featureInput;
+        fullyConnected.featureOutput = _featureInput.get().clone();
+        fullyConnected.numOutputFeatures = _numOutputFeatures;
+        fullyConnected.hasBias = _hasBias;
+        fullyConnected.weightsInitializer = _weightsInitializer;
+        fullyConnected.biasInitializer = _biasInitializer;
+        fullyConnected.activation = _activation;
+        fullyConnected.dropProportion = _dropProportion;
+        fullyConnected.useBatchNormalization = _useBatchNormalization;
+        fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
+        fullyConnected.batchNormEpsilon = _batchNormEpsilon;
+        fullyConnected.initialized = true;
 
-        return Layer(fullyConnected);
+        return fullyConnected;
     }
 
     FullyConnected::Builder featureInput(Tensor _featureInput) {
@@ -137,7 +126,7 @@ class FullyConnected::Builder {
         if (_activation.isEmpty()) {
             _activationExplicitlyRemoved = true;
         } else {
-            this->_activation = _activation;
+            this->_activation = _activation.get();
         }
         return *this;
     }
