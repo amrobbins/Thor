@@ -18,15 +18,19 @@ using std::unique_ptr;
 
 namespace Thor {
 
+class Network;
+
 class Layer {
    public:
-    Layer() : id(nextId.fetch_add(1)) {}
+    Layer() : initialized(false), id(nextId.fetch_add(1)) {}
     virtual ~Layer() {}
 
     uint64_t getId() const { return id; }
 
-    virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
     virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
+    virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
+
+    bool isInitialized() { return initialized; }
 
     bool operator==(const Layer &other) const { return id == other.id; }
     bool operator!=(const Layer &other) const { return id != other.id; }
@@ -46,6 +50,10 @@ class Layer {
         assert(!isMultiLayer());
         singleLayers.push_back(clone());
     }
+
+    virtual void addToNetwork(Network *network);
+
+    bool initialized;
 
    private:
     uint64_t id;

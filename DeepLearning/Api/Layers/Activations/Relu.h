@@ -7,7 +7,7 @@ namespace Thor {
 class Relu : public Activation {
    public:
     class Builder;
-    Relu() : initialized(false) {}
+    Relu() {}
 
     virtual ~Relu() {}
 
@@ -26,30 +26,36 @@ class Relu : public Activation {
         relu->featureOutput = newFeatureInput.clone();
         return relu;
     }
-
-   private:
-    Tensor featureInput;
-    bool initialized;
 };
 
 class Relu::Builder {
    public:
     virtual Relu build() {
+        assert(_network.isPresent());
         assert(_featureInput.isPresent());
 
         Relu relu;
         relu.featureInput = _featureInput;
         relu.featureOutput = _featureInput.get().clone();
         relu.initialized = true;
+        relu.addToNetwork(_network.get());
         return relu;
+    }
+
+    virtual Relu::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
     }
 
     virtual Relu::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
+        return *this;
     }
 
    private:
+    Optional<Network *> _network;
     Optional<Tensor> _featureInput;
 };
 

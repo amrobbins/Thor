@@ -5,7 +5,7 @@ namespace Thor {
 class DropOut : public Layer {
    public:
     class Builder;
-    DropOut() : initialized(false) {}
+    DropOut() {}
 
     virtual ~DropOut() {}
 
@@ -19,12 +19,12 @@ class DropOut : public Layer {
 
    private:
     float dropProportion;
-    bool initialized;
 };
 
 class DropOut::Builder {
    public:
     virtual DropOut build() {
+        assert(_network.isPresent());
         assert(_featureInput.isPresent());
         assert(_dropProportion.isPresent());
 
@@ -33,7 +33,14 @@ class DropOut::Builder {
         dropOut.featureOutput = _featureInput.get().clone();
         dropOut.dropProportion = _dropProportion;
         dropOut.initialized = true;
+        dropOut.addToNetwork(_network.get());
         return dropOut;
+    }
+
+    virtual DropOut::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
     }
 
     virtual DropOut::Builder &featureInput(Tensor _featureInput) {
@@ -50,6 +57,7 @@ class DropOut::Builder {
     }
 
    private:
+    Optional<Network *> _network;
     Optional<Tensor> _featureInput;
     Optional<float> _dropProportion;
 };

@@ -8,7 +8,7 @@ namespace Thor {
 
 class NetworkOutput : public Layer {
    public:
-    NetworkOutput() { initialized = false; }
+    NetworkOutput() {}
 
     virtual ~NetworkOutput() {}
 
@@ -32,13 +32,13 @@ class NetworkOutput : public Layer {
     }
 
    private:
-    bool initialized;
     Tensor::DataType dataType;
 };
 
 class NetworkOutput::Builder {
    public:
     virtual NetworkOutput build() {
+        assert(_network.isPresent());
         assert(!_inputTensor.isEmpty());
         if (_dataType.isEmpty())
             _dataType = Tensor::DataType::FP32;
@@ -48,7 +48,14 @@ class NetworkOutput::Builder {
         networkOutput.featureInput = _inputTensor;
         networkOutput.featureOutput = Tensor(_dataType, _inputTensor.get().getDimensions());
         networkOutput.initialized = true;
+        networkOutput.addToNetwork(_network.get());
         return networkOutput;
+    }
+
+    virtual NetworkOutput::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
     }
 
     virtual NetworkOutput::Builder &inputTensor(Tensor _inputTensor) {
@@ -64,6 +71,7 @@ class NetworkOutput::Builder {
     }
 
    private:
+    Optional<Network *> _network;
     Optional<Tensor> _inputTensor;
     Optional<Tensor::DataType> _dataType;
 };

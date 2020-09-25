@@ -7,7 +7,7 @@ namespace Thor {
 class CategoricalCrossEntropyLoss : public Loss {
    public:
     class Builder;
-    CategoricalCrossEntropyLoss() : initialized(false) {}
+    CategoricalCrossEntropyLoss() {}
 
     virtual ~CategoricalCrossEntropyLoss() {}
 
@@ -20,14 +20,13 @@ class CategoricalCrossEntropyLoss : public Loss {
     }
 
    private:
-    Tensor featureInput;
     Optional<float> lossScalingFactor;
-    bool initialized;
 };
 
 class CategoricalCrossEntropyLoss::Builder {
    public:
     virtual CategoricalCrossEntropyLoss build() {
+        assert(_network.isPresent());
         assert(_featureInput.isPresent());
 
         CategoricalCrossEntropyLoss categoricalCrossEntropyLoss;
@@ -36,10 +35,17 @@ class CategoricalCrossEntropyLoss::Builder {
         categoricalCrossEntropyLoss.featureOutput = _featureInput.get().clone();
         categoricalCrossEntropyLoss.lossTensor = Tensor(Tensor::DataType::FP32, vector<uint64_t>());
         categoricalCrossEntropyLoss.initialized = true;
+        categoricalCrossEntropyLoss.addToNetwork(_network.get());
         return categoricalCrossEntropyLoss;
     }
 
-    virtual BatchNormalization::Builder &featureInput(Tensor _featureInput) {
+    virtual CategoricalCrossEntropyLoss::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
+    }
+
+    virtual CategoricalCrossEntropyLoss::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
     }
@@ -55,6 +61,7 @@ class CategoricalCrossEntropyLoss::Builder {
     enum class LossFormat { PER_BATCH = 5, PER_BATCH_ITEM, PER_CLASS, PER_BATCH_ITEM_PER_CLASS };
 
    private:
+    Optional<Network *> _network;
     Optional<Tensor> _featureInput;
     Optional<float> _lossScalingFactor;
 };

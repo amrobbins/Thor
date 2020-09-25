@@ -16,7 +16,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     class Builder;
 
-    FullyConnected() { initialized = false; }
+    FullyConnected() {}
 
     virtual ~FullyConnected() {}
 
@@ -33,8 +33,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     }
 
    private:
-    bool initialized;
-
     uint32_t numOutputFeatures;
     bool hasBias;
     Initializer weightsInitializer;
@@ -54,7 +52,8 @@ class FullyConnected::Builder {
     Builder() { _activationExplicitlyRemoved = false; }
 
     virtual FullyConnected build() {
-        assert(_featureInput.isPresent());
+        assert(_network.isPresent());
+        assert(!_featureInputs.empty());
         assert(_numOutputFeatures.isPresent());
         if (_hasBias.isEmpty())
             _hasBias = false;
@@ -72,9 +71,11 @@ class FullyConnected::Builder {
 
         FullyConnected fullyConnected;
 
-        fullyConnected.featureInput = _featureInput;
-        fullyConnected.featureOutput = _featureInput.get().clone();
+        fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
+        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i)
+            fullyConnected.featureOutputs.push_back(
+                Tensor(fullyConnected.featureInputs[0].getDataType(), {fullyConnected.numOutputFeatures}));
         fullyConnected.hasBias = _hasBias;
         fullyConnected.weightsInitializer = _weightsInitializer;
         fullyConnected.biasInitializer = _biasInitializer;
@@ -84,42 +85,52 @@ class FullyConnected::Builder {
         fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         fullyConnected.batchNormEpsilon = _batchNormEpsilon;
         fullyConnected.initialized = true;
+        fullyConnected.addToNetwork(_network.get());
 
         return fullyConnected;
     }
 
-    FullyConnected::Builder featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        this->_featureInput = _featureInput;
+    virtual FullyConnected::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
         return *this;
     }
 
-    FullyConnected::Builder numOutputFeatures(uint32_t _numOutputFeatures) {
+    virtual FullyConnected::Builder featureInput(Tensor _featureInput) {
+        this->_featureInputs.push_back(_featureInput);
+        if (_featureInputs.size() > 1) {
+            assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            assert(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
+        return *this;
+    }
+
+    virtual FullyConnected::Builder numOutputFeatures(uint32_t _numOutputFeatures) {
         assert(!this->_numOutputFeatures.isPresent());
         this->_numOutputFeatures = _numOutputFeatures;
         return *this;
     }
 
-    FullyConnected::Builder hasBias(bool _hasBias) {
+    virtual FullyConnected::Builder hasBias(bool _hasBias) {
         assert(!this->_hasBias.isPresent());
         this->_hasBias = _hasBias;
         return *this;
     }
 
-    FullyConnected::Builder weightsInitializer(Initializer _weightsInitializer) {
+    virtual FullyConnected::Builder weightsInitializer(Initializer _weightsInitializer) {
         assert(!this->_weightsInitializer.isPresent());
         this->_weightsInitializer = _weightsInitializer;
         return *this;
     }
 
-    FullyConnected::Builder biasInitializer(Initializer _biasInitializer) {
+    virtual FullyConnected::Builder biasInitializer(Initializer _biasInitializer) {
         assert(!this->_biasInitializer.isPresent());
         this->_biasInitializer = _biasInitializer;
         return *this;
     }
 
     // Adds an activation layer after this FullyConnected layer
-    FullyConnected::Builder activation(Optional<Activation> _activation) {
+    virtual FullyConnected::Builder activation(Optional<Activation> _activation) {
         assert(!this->_activation.isPresent());
         assert(!_activationExplicitlyRemoved);
 
@@ -133,8 +144,8 @@ class FullyConnected::Builder {
 
     // Adds a BatchNormalization layer before this FullyConnected layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
-    FullyConnected::Builder batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                                               Optional<double> epsilon = Optional<double>::empty()) {
+    virtual FullyConnected::Builder batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
+                                                       Optional<double> epsilon = Optional<double>::empty()) {
         assert(!_useBatchNormalization.isPresent());
         this->_useBatchNormalization = true;
         this->_batchNormExponentialRunningAverageFactor = exponentialRunningAverageFactor;
@@ -143,14 +154,15 @@ class FullyConnected::Builder {
     }
 
     // Adds a DropOut layer before this FullyConnected layer, but after the BatchNormalization layer when that is also present.
-    FullyConnected::Builder dropOut(float _dropProportion) {
+    virtual FullyConnected::Builder dropOut(float _dropProportion) {
         assert(!this->_dropProportion.isPresent());
         this->_dropProportion = _dropProportion;
         return *this;
     }
 
    private:
-    Optional<Tensor> _featureInput;
+    Optional<Network *> _network;
+    vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputFeatures;
     Optional<bool> _hasBias;
     Optional<Initializer> _weightsInitializer;
