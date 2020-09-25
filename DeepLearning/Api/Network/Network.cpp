@@ -7,9 +7,6 @@ Network::StatusCode Network::create() {
     if (status != StatusCode::SUCCESS)
         return status;
 
-    if (status != StatusCode::SUCCESS)
-        return status;
-
     return StatusCode::SUCCESS;
 }
 
@@ -17,6 +14,12 @@ void computeMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes) {
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
 Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
+    if (!frozen) {
+        StatusCode status = evaluateGraph();
+        if (status != StatusCode::SUCCESS)
+            return status;
+    }
+
     stampedNetwork.clear();
 
     // Instantiate all layers
@@ -71,6 +74,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 // Tensors are the edges that connect the Layers which are nodes.
 
 Network::StatusCode Network::evaluateGraph() {
+    allTensors.clear();
+    tensorToLoadingLayers.clear();
+    tensorToDrivingLayer.clear();
+
     for (auto it = network.begin(); it != network.end(); ++it) {
         Layer *layer = it->get();
 
@@ -148,6 +155,8 @@ Network::StatusCode Network::evaluateGraph() {
     status = checkForDanglingOutputs();
     if (status != StatusCode::SUCCESS)
         return status;
+
+    frozen = true;
 
     return StatusCode::SUCCESS;
 }

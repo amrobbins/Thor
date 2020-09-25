@@ -10,7 +10,7 @@ class NetworkInput : public Layer {
    public:
     class Builder;
 
-    NetworkInput() { initialized = false; }
+    NetworkInput() {}
 
     virtual ~NetworkInput() {}
 
@@ -38,7 +38,6 @@ class NetworkInput : public Layer {
     }
 
    private:
-    bool initialized;
     vector<uint64_t> dimensions;
     Tensor::DataType dataType;
 };
@@ -46,6 +45,7 @@ class NetworkInput : public Layer {
 class NetworkInput::Builder {
    public:
     virtual NetworkInput build() {
+        assert(_network.isPresent());
         assert(_dimensions.isPresent());
         assert(_dataType.isPresent());
 
@@ -55,7 +55,14 @@ class NetworkInput::Builder {
         networkInput.featureInput = Tensor(_dataType, _dimensions);
         networkInput.featureOutput = Tensor(Tensor::DataType::FP16, _dimensions);
         networkInput.initialized = true;
+        networkInput.addToNetwork(_network.get());
         return networkInput;
+    }
+
+    virtual NetworkInput::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
     }
 
     // Note: dimensions do not include batch size
@@ -72,6 +79,7 @@ class NetworkInput::Builder {
     }
 
    private:
+    Optional<Network *> _network;
     Optional<vector<uint64_t>> _dimensions;
     Optional<Tensor::DataType> _dataType;
 };

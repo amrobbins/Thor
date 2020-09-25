@@ -1,11 +1,13 @@
 #pragma once
 
+#include "DeepLearning/Api/Network/Network.h"
+
 namespace Thor {
 
-class BatchNormalization : public Layer {
+class BatchNormalization : public TrainableWeightsBiasesLayer {
    public:
     class Builder;
-    BatchNormalization() : initialized(false) {}
+    BatchNormalization() {}
 
     virtual ~BatchNormalization() {}
 
@@ -18,29 +20,39 @@ class BatchNormalization : public Layer {
     }
 
    private:
-    Tensor featureInput;
     Optional<double> exponentialRunningAverageFactor;
     Optional<double> epsilon;
-    bool initialized;
 };
 
 class BatchNormalization::Builder {
    public:
     virtual BatchNormalization build() {
-        assert(_featureInput.isPresent());
+        assert(_network.isPresent());
+        assert(!_featureInputs.empty());
 
         BatchNormalization batchNormalization;
+        batchNormalization.featureInputs = _featureInputs;
+        for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i)
+            batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
         batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
         batchNormalization.epsilon = _epsilon;
-        batchNormalization.featureInput = _featureInput;
-        batchNormalization.featureOutput = _featureInput.get().clone();
         batchNormalization.initialized = true;
+        batchNormalization.addToNetwork(_network.get());
         return batchNormalization;
     }
 
-    virtual BatchNormalization::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        this->_featureInput = _featureInput;
+    virtual BatchNormalization::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
+    }
+
+    virtual BatchNormalization::Builder featureInput(Tensor _featureInput) {
+        this->_featureInputs.push_back(_featureInput);
+        if (_featureInputs.size() > 1) {
+            assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            assert(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
         return *this;
     }
 
@@ -59,9 +71,10 @@ class BatchNormalization::Builder {
     }
 
    private:
+    Optional<Network *> _network;
+    vector<Tensor> _featureInputs;
     Optional<double> _exponentialRunningAverageFactor;
     Optional<double> _epsilon;
-    Optional<Tensor> _featureInput;
 };
 
 }  // namespace Thor

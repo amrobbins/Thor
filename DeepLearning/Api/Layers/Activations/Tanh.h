@@ -7,7 +7,7 @@ namespace Thor {
 class Tanh : public Activation {
    public:
     class Builder;
-    Tanh() : initialized(false) {}
+    Tanh() {}
 
     virtual ~Tanh() {}
 
@@ -26,30 +26,36 @@ class Tanh : public Activation {
         tanh->featureOutput = newFeatureInput.clone();
         return tanh;
     }
-
-   private:
-    Tensor featureInput;
-    bool initialized;
 };
 
 class Tanh::Builder {
    public:
     virtual Tanh build() {
+        assert(_network.isPresent());
         assert(_featureInput.isPresent());
 
         Tanh tanh;
         tanh.featureInput = _featureInput;
         tanh.featureOutput = _featureInput.get().clone();
         tanh.initialized = true;
+        tanh.addToNetwork(_network.get());
         return tanh;
+    }
+
+    virtual Tanh::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
     }
 
     virtual Tanh::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
+        return *this;
     }
 
    private:
+    Optional<Network *> _network;
     Optional<Tensor> _featureInput;
 };
 

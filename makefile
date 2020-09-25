@@ -36,7 +36,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/SimpleNetworkTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
+                build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
@@ -60,7 +61,8 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
-ALL_TESTS = build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
+ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
+            build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
             build/test/Utilities/TensorOperations/Misc/MiscTest \
             build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest \
@@ -486,7 +488,9 @@ build/test/DeepLearning/Implementation/SimpleNetworkTest: build/test/googletest/
 	mkdir -p build/test/DeepLearning/Implementation
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/SimpleNetworkTest test/DeepLearning/Implementation/SimpleNetworkTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-
+build/test/DeepLearning/Api/Layers/Activations/ActivationsTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Activations/ActivationsTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Activations
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Activations/ActivationsTest test/DeepLearning/Api/Layers/Activations/ActivationsTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 

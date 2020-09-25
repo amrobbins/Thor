@@ -63,17 +63,8 @@ class Network {
    public:
     enum class StatusCode { SUCCESS = 0, FLOATING_INPUT, DANGLING_OUTPUT, GPU_OUT_OF_MEMORY };
 
-    Network() {}
+    Network() : frozen(false) {}
     virtual ~Network() {}
-
-    // Take a snapshot of layer and add the snapshot to the network
-    void addToNetwork(const Layer &layer) {
-        vector<shared_ptr<Layer>> singleLayers;
-        layer.toSingleLayers(singleLayers);
-        for (uint64_t i = 0; i < singleLayers.size(); ++i) {
-            addSingleLayerToNetwork(singleLayers[i]);
-        }
-    }
 
     StatusCode create();
 
@@ -93,7 +84,6 @@ class Network {
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForFloatingInputs();
     virtual StatusCode checkForDanglingOutputs();
-    virtual StatusCode populateTensorAttributes();
 
     virtual void stampNetworkInput(const Thor::NetworkInput *networkInput,
                                    uint32_t gpuNum,
@@ -104,10 +94,6 @@ class Network {
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork);
     virtual void stampLoss(const Thor::Loss *loss, uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual void stampTrainableWeightsBiasesLayer(const Thor::TrainableWeightsBiasesLayer *trainableWeightsBiasesLayer,
-                                                  uint32_t gpuNum,
-                                                  uint32_t batchSize,
-                                                  ThorImplementation::StampedNetwork &stampedNetwork);
     virtual void stampMultiConnectionLayer(const Thor::MultiConnectionLayer *multiConnectionLayer,
                                            uint32_t gpuNum,
                                            uint32_t batchSize,
@@ -124,9 +110,23 @@ class Network {
         network.insert(layer);
     }
 
+    // Take a snapshot of layer and add the snapshot to the network
+    void addToNetwork(const Layer *layer) {
+        frozen = false;
+        vector<shared_ptr<Layer>> singleLayers;
+        layer->toSingleLayers(singleLayers);
+        for (uint64_t i = 0; i < singleLayers.size(); ++i) {
+            addSingleLayerToNetwork(singleLayers[i]);
+        }
+    }
+
     class GpuOutOfMemoryError {};
 
+    friend void Layer::addToNetwork(Network *network);
     friend class Executor;
+
+   protected:
+    bool frozen;
 };
 
 }  // namespace Thor
