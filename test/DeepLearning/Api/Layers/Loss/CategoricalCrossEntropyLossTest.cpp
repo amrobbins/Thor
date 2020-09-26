@@ -19,7 +19,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
     for (int i = 0; i < numDimensions; ++i)
-        dimensions.push_back(rand() % 1000);
+        dimensions.push_back(1 + (rand() % 1000));
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
     Tensor featureInput(dataType, dimensions);
 
@@ -48,7 +48,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
 
     Optional<Tensor> actualLoss = crossEntropy.getLoss();
     ASSERT_TRUE(actualLoss.isPresent());
-    ASSERT_EQ(actualLoss.get().getDataType(), dataType);
+    ASSERT_EQ(actualLoss.get().getDataType(), Tensor::DataType::FP32);
     ASSERT_TRUE(actualLoss.get().getDimensions().empty());
 
     Optional<float> actualLossScalingFactor = crossEntropy.getLossScalingFactor();
@@ -74,7 +74,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
 
     Optional<Tensor> cloneLoss = clone->getLoss();
     ASSERT_TRUE(cloneLoss.isPresent());
-    ASSERT_EQ(cloneLoss.get().getDataType(), dataType);
+    ASSERT_EQ(cloneLoss.get().getDataType(), Tensor::DataType::FP32);
     ASSERT_TRUE(cloneLoss.get().getDimensions().empty());
 
     Optional<float> cloneLossScalingFactor = clone->getLossScalingFactor();

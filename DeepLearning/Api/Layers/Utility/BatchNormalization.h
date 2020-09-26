@@ -13,6 +13,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<BatchNormalization>(*this); }
 
+    virtual Optional<double> getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
+    virtual Optional<double> getEpsilon() { return epsilon; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
         // FIXME
@@ -32,8 +35,11 @@ class BatchNormalization::Builder {
 
         BatchNormalization batchNormalization;
         batchNormalization.featureInputs = _featureInputs;
-        for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i)
+        for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
             batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
+            batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
+            batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs[i]] = batchNormalization.featureInputs[i];
+        }
         batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
         batchNormalization.epsilon = _epsilon;
         batchNormalization.initialized = true;
@@ -59,6 +65,7 @@ class BatchNormalization::Builder {
     virtual BatchNormalization::Builder &exponentialRunningAverageFactor(double exponentialRunningAverageFactor) {
         assert(!_exponentialRunningAverageFactor.isPresent());
         assert(exponentialRunningAverageFactor > 0.0);
+        assert(exponentialRunningAverageFactor <= 1.0);
         this->_exponentialRunningAverageFactor = exponentialRunningAverageFactor;
         return *this;
     }

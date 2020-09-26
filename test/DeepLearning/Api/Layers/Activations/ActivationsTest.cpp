@@ -19,7 +19,7 @@ TEST(Relu, Builds) {
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
     for (int i = 0; i < numDimensions; ++i)
-        dimensions.push_back(rand() % 1000);
+        dimensions.push_back(1 + (rand() % 1000));
 
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
 
@@ -71,7 +71,7 @@ TEST(Tanh, Builds) {
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
     for (int i = 0; i < numDimensions; ++i)
-        dimensions.push_back(rand() % 1000);
+        dimensions.push_back(1 + (rand() % 1000));
 
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
 

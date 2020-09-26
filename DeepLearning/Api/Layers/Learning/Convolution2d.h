@@ -104,9 +104,12 @@ class Convolution2d::Builder {
                                                       convolution2d.filterWidth,
                                                       convolution2d.horizontalPadding);
 
-        for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i)
+        for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
             convolution2d.featureOutputs.push_back(
                 Tensor(convolution2d.featureInputs[0].getDataType(), {_numOutputChannels, outputHeight, outputWidth}));
+            convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
+            convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
+        }
 
         convolution2d.hasBias = _hasBias;
         convolution2d.weightsInitializer = _weightsInitializer;

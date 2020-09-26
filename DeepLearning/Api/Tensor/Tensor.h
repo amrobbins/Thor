@@ -16,17 +16,15 @@ class Tensor {
 
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, vector<uint64_t> dimensions)
-        : id(nextId.fetch_add(1)), dataType(dataType), dimensions(dimensions), initialized(true) {}
+        : id(nextId.fetch_add(1)), dataType(dataType), dimensions(dimensions), initialized(true) {
+        for (uint32_t i = 0; i < dimensions.size(); ++i) {
+            assert(dimensions[i] != 0);
+        }
+    }
     virtual ~Tensor() {}
 
     // Cloned tensors have identical characteristics but different id's
-    Tensor clone() {
-        Tensor cloned;
-        cloned.dataType = dataType;
-        cloned.dimensions = dimensions;
-        cloned.initialized = initialized;
-        return cloned;
-    }
+    Tensor clone() { return Tensor(dataType, dimensions); }
 
     uint64_t getId() const {
         assert(initialized);

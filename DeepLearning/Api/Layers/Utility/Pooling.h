@@ -21,10 +21,6 @@ class Pooling : public Layer {
     }
 
    private:
-    bool initialized;
-
-    Tensor featureInput;
-    Tensor featureOutput;
     uint32_t windowHeight;
     uint32_t windowWidth;
     uint32_t verticalStride;
@@ -39,6 +35,7 @@ class Pooling::Builder {
     Builder();
 
     virtual Pooling build() {
+        assert(_network.isPresent());
         assert(_featureInput.isPresent());
         assert(_windowHeight.isPresent());
         assert(_windowWidth.isPresent());
@@ -61,72 +58,78 @@ class Pooling::Builder {
         pooling.horizontalStride = _horizontalStride;
         if (_computeVerticalSamePadding)
             pooling.verticalPadding =
-                computeSamePadding(pooling.featureInput.getDimensions()[1], pooling.verticalStride, pooling.windowHeight);
+                computeSamePadding(pooling.featureInput.get().getDimensions()[1], pooling.verticalStride, pooling.windowHeight);
         else
             pooling.verticalPadding = _verticalPadding;
         if (_computeHorizontalSamePadding)
             pooling.horizontalPadding =
-                computeSamePadding(pooling.featureInput.getDimensions()[2], pooling.horizontalStride, pooling.windowWidth);
+                computeSamePadding(pooling.featureInput.get().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth);
         else
             pooling.horizontalPadding = _horizontalPadding;
 
         uint32_t outputHeight = computeOutputDimension(
-            pooling.featureInput.getDimensions()[1], pooling.verticalStride, pooling.windowHeight, pooling.verticalPadding);
+            pooling.featureInput.get().getDimensions()[1], pooling.verticalStride, pooling.windowHeight, pooling.verticalPadding);
         uint32_t outputWidth = computeOutputDimension(
-            pooling.featureInput.getDimensions()[2], pooling.horizontalStride, pooling.windowWidth, pooling.horizontalPadding);
+            pooling.featureInput.get().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth, pooling.horizontalPadding);
         pooling.featureOutput =
-            Tensor(pooling.featureInput.getDataType(), {pooling.featureInput.getDimensions()[0], outputHeight, outputWidth});
+            Tensor(pooling.featureInput.get().getDataType(), {pooling.featureInput.get().getDimensions()[0], outputHeight, outputWidth});
 
         pooling.initialized = true;
-
+        pooling.addToNetwork(_network.get());
         return pooling;
     }
 
-    Pooling::Builder &featureInput(Tensor _featureInput) {
+    virtual Pooling::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
+    }
+
+    virtual Pooling::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
         return *this;
     }
 
-    Pooling::Builder &windowHeight(uint32_t _windowHeight) {
+    virtual Pooling::Builder &windowHeight(uint32_t _windowHeight) {
         assert(!this->_windowHeight.isPresent());
         this->_windowHeight = _windowHeight;
         return *this;
     }
 
-    Pooling::Builder &windowWidth(uint32_t _windowWidth) {
+    virtual Pooling::Builder &windowWidth(uint32_t _windowWidth) {
         assert(!this->_windowWidth.isPresent());
         this->_windowWidth = _windowWidth;
         return *this;
     }
 
-    Pooling::Builder &verticalStride(uint32_t _verticalStride) {
+    virtual Pooling::Builder &verticalStride(uint32_t _verticalStride) {
         assert(!this->_verticalStride.isPresent());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
-    Pooling::Builder &horizontalStride(uint32_t _horizontalStride) {
+    virtual Pooling::Builder &horizontalStride(uint32_t _horizontalStride) {
         assert(!this->_horizontalStride.isPresent());
         this->_horizontalStride = _horizontalStride;
         return *this;
     }
 
-    Pooling::Builder &verticalPadding(uint32_t _verticalPadding) {
+    virtual Pooling::Builder &verticalPadding(uint32_t _verticalPadding) {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
         this->_verticalPadding = _verticalPadding;
         return *this;
     }
 
-    Pooling::Builder &horizontalPadding(uint32_t _horizontalPadding) {
+    virtual Pooling::Builder &horizontalPadding(uint32_t _horizontalPadding) {
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = _horizontalPadding;
         return *this;
     }
 
-    Pooling::Builder &samePadding() {
+    virtual Pooling::Builder &samePadding() {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
@@ -138,7 +141,7 @@ class Pooling::Builder {
         return *this;
     }
 
-    Pooling::Builder &verticalSamePadding() {
+    virtual Pooling::Builder &verticalSamePadding() {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
         this->_verticalPadding = 0;
@@ -146,7 +149,7 @@ class Pooling::Builder {
         return *this;
     }
 
-    Pooling::Builder &horizontalSamePadding() {
+    virtual Pooling::Builder &horizontalSamePadding() {
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = 0;
@@ -154,7 +157,7 @@ class Pooling::Builder {
         return *this;
     }
 
-    Pooling::Builder &noPadding() {
+    virtual Pooling::Builder &noPadding() {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
@@ -165,6 +168,7 @@ class Pooling::Builder {
     }
 
    private:
+    Optional<Network *> _network;
     Optional<Tensor> _featureInput;
     Optional<uint32_t> _windowHeight;
     Optional<uint32_t> _windowWidth;
