@@ -271,6 +271,22 @@ class Convolution2d::Builder {
         return *this;
     }
 
+    static uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
+        assert(filterSize <= inputSize + 2 * padding);
+        assert(stride > 0);
+        return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
+    }
+
+    // outputSize = 1 + (((inputSize+ 2*padding) - filterSize) / filterStride);
+    // padding = ((outputSize - 1) * filterStride + filterSize - inputSize) / 2
+    // where outputSize == inputSize, so
+    // padding = ((inputSize - 1) * filterStride + filterSize - inputSize) / 2
+    // = ((filterStride-1)*inputSize - filterStride + filterSize) / 2
+    static uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t filterSize) {
+        // And round up.
+        return (1 + (stride - 1) * inputSize - stride + filterSize) / 2;
+    }
+
    private:
     Optional<Network *> _network;
     vector<Tensor> _featureInputs;
@@ -294,21 +310,6 @@ class Convolution2d::Builder {
     Optional<bool> _useBatchNormalization;
     Optional<double> _batchNormExponentialRunningAverageFactor;
     Optional<double> _batchNormEpsilon;
-
-    uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
-        assert(filterSize <= inputSize + 2 * padding);
-        return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
-    }
-
-    // outputSize = 1 + (((inputSize+ 2*padding) - filterSize) / filterStride);
-    // padding = ((outputSize - 1) * filterStride + filterSize - inputSize) / 2
-    // where outputSize == inputSize, so
-    // padding = ((inputSize - 1) * filterStride + filterSize - inputSize) / 2
-    // = ((filterStride-1)*inputSize - filterStride + filterSize) / 2
-    uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t filterSize) {
-        // And round up.
-        return (1 + (stride - 1) * inputSize - stride + filterSize) / 2;
-    }
 };
 
 }  // namespace Thor

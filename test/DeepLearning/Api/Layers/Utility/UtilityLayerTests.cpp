@@ -11,8 +11,6 @@ using std::shared_ptr;
 
 using namespace Thor;
 
-// NetworkInput.h NetworkOutput.h Stub.h DropOut.h BatchNormalization.h Pooling.h
-
 TEST(NetworkInput, Builds) {
     srand(time(nullptr));
 
@@ -234,9 +232,9 @@ TEST(BatchNormalizationSingleFeatureInput, Builds) {
 
     Tensor featureInput(dataType, dimensions);
 
-    double exponentialRunningAverageFactor = ((rand() % 100) + 1) / 1000.0f;
+    double exponentialRunningAverageFactor = (1 + (rand() % 100)) / 1000.0f;
 
-    double epsilon = ((rand() % 100) + 1) / 100000.0f;
+    double epsilon = (1 + (rand() % 100)) / 100000.0f;
 
     BatchNormalization batchNormalization = BatchNormalization::Builder()
                                                 .network(network)
@@ -307,9 +305,9 @@ TEST(BatchNormalizationMultipleFeatureInputs, Builds) {
     Tensor featureInput0(dataType, dimensions);
     Tensor featureInput1(dataType, dimensions);
 
-    double exponentialRunningAverageFactor = (rand() % 100) / 1000.0f;
+    double exponentialRunningAverageFactor = (1 + (rand() % 100)) / 1000.0f;
 
-    double epsilon = (rand() % 100) / 100000.0f;
+    double epsilon = (1 + (rand() % 100)) / 100000.0f;
 
     BatchNormalization batchNormalization = BatchNormalization::Builder()
                                                 .network(network)
@@ -398,22 +396,6 @@ TEST(BatchNormalizationMultipleFeatureInputs, Builds) {
     ASSERT_FALSE(batchNormalization < *clone);
 }
 
-/*
-    Pooling::Builder &network(Network &_network) {
-    Pooling::Builder &featureInput(Tensor _featureInput) {
-    Pooling::Builder &windowHeight(uint32_t _windowHeight) {
-    Pooling::Builder &windowWidth(uint32_t _windowWidth) {
-    Pooling::Builder &verticalStride(uint32_t _verticalStride) {
-    Pooling::Builder &horizontalStride(uint32_t _horizontalStride) {
-    Pooling::Builder &verticalPadding(uint32_t _verticalPadding) {
-    Pooling::Builder &horizontalPadding(uint32_t _horizontalPadding) {
-    Pooling::Builder &samePadding() {
-    Pooling::Builder &verticalSamePadding() {
-    Pooling::Builder &horizontalSamePadding() {
-    Pooling::Builder &noPadding() {
-*/
-
-/*
 TEST(PoolingNoPadding, Builds) {
     srand(time(nullptr));
 
@@ -422,20 +404,24 @@ TEST(PoolingNoPadding, Builds) {
     vector<uint64_t> dimensions;
     int numDimensions = 3;
     for (int i = 0; i < numDimensions; ++i)
-        dimensions.push_back(1 + (rand() % 1000));
-
+        dimensions.push_back(10 + (rand() % 1000));
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    uint32_t windowHeight = 1 + (rand() % dimensions[1]);
+    uint32_t windowWidth = 1 + (rand() % dimensions[2]);
+    uint32_t verticalStride = 1 + (rand() % 10);
+    uint32_t horizontalStride = 1 + (rand() % 10);
 
     Tensor featureInput(dataType, dimensions);
     Pooling pooling = Pooling::Builder()
-                        .network(network)
-                        .featureInput(featureInput)
-                        .windowHeight(windowHeight)
-                        .windowWidth(windowWidth)
-                        .verticalStride(verticalStride)
-                        .horizontalStride(horizontalStride)
-                        .noPadding()
-                        .build();
+                          .network(network)
+                          .featureInput(featureInput)
+                          .windowHeight(windowHeight)
+                          .windowWidth(windowWidth)
+                          .verticalStride(verticalStride)
+                          .horizontalStride(horizontalStride)
+                          .noPadding()
+                          .build();
 
     ASSERT_TRUE(pooling.isInitialized());
 
@@ -444,10 +430,24 @@ TEST(PoolingNoPadding, Builds) {
     ASSERT_EQ(actualInput.get().getDataType(), dataType);
     ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
 
+    vector<uint64_t> outputDimensions;
+    uint32_t outputHeight = Pooling::Builder::computeOutputDimension(dimensions[1], verticalStride, windowHeight, 0);
+    uint32_t outputWidth = Pooling::Builder::computeOutputDimension(dimensions[2], horizontalStride, windowWidth, 0);
+    outputDimensions.push_back(dimensions[0]);
+    outputDimensions.push_back(outputHeight);
+    outputDimensions.push_back(outputWidth);
+
     Optional<Tensor> actualOutput = pooling.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
     ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+    ASSERT_EQ(actualOutput.get().getDimensions(), outputDimensions);
+
+    ASSERT_EQ(pooling.getWindowHeight(), windowHeight);
+    ASSERT_EQ(pooling.getWindowWidth(), windowWidth);
+    ASSERT_EQ(pooling.getVerticalStride(), verticalStride);
+    ASSERT_EQ(pooling.getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(pooling.getVerticalPadding(), 0u);
+    ASSERT_EQ(pooling.getHorizontalPadding(), 0u);
 
     shared_ptr<Layer> cloneLayer = pooling.clone();
     Pooling *clone = dynamic_cast<Pooling *>(cloneLayer.get());
@@ -463,7 +463,14 @@ TEST(PoolingNoPadding, Builds) {
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), outputDimensions);
+
+    ASSERT_EQ(clone->getWindowHeight(), windowHeight);
+    ASSERT_EQ(clone->getWindowWidth(), windowWidth);
+    ASSERT_EQ(clone->getVerticalStride(), verticalStride);
+    ASSERT_EQ(clone->getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(clone->getVerticalPadding(), 0u);
+    ASSERT_EQ(clone->getHorizontalPadding(), 0u);
 
     ASSERT_EQ(pooling.getId(), clone->getId());
     ASSERT_GT(pooling.getId(), 1u);
@@ -473,7 +480,267 @@ TEST(PoolingNoPadding, Builds) {
     ASSERT_FALSE(pooling > *clone);
     ASSERT_FALSE(pooling < *clone);
 }
-*/
+
+TEST(PoolingSamePadding, Builds) {
+    srand(time(nullptr));
+
+    for (int test = 0; test < 50; ++test) {
+        Network network;
+
+        vector<uint64_t> dimensions;
+        int numDimensions = 3;
+        for (int i = 0; i < numDimensions; ++i)
+            dimensions.push_back(10 + (rand() % 1000));
+        Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+        uint32_t windowHeight = 1 + (rand() % dimensions[1]);
+        uint32_t windowWidth = 1 + (rand() % dimensions[2]);
+        uint32_t verticalStride = 1 + (rand() % 10);
+        uint32_t horizontalStride = 1 + (rand() % 10);
+
+        Tensor featureInput(dataType, dimensions);
+        Pooling pooling = Pooling::Builder()
+                              .network(network)
+                              .featureInput(featureInput)
+                              .windowHeight(windowHeight)
+                              .windowWidth(windowWidth)
+                              .verticalStride(verticalStride)
+                              .horizontalStride(horizontalStride)
+                              .samePadding()
+                              .build();
+
+        ASSERT_TRUE(pooling.isInitialized());
+
+        Optional<Tensor> actualInput = pooling.getFeatureInput();
+        ASSERT_TRUE(actualInput.isPresent());
+        ASSERT_EQ(actualInput.get().getDataType(), dataType);
+        ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+        Optional<Tensor> actualOutput = pooling.getFeatureOutput();
+        ASSERT_TRUE(actualOutput.isPresent());
+        ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+        ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
+        for (uint32_t d = 0; d < dimensions.size(); ++d) {
+            ASSERT_LE(abs(actualOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+        }
+
+        uint32_t verticalPadding = Pooling::Builder::computeSamePadding(dimensions[1], verticalStride, windowHeight);
+        uint32_t horizontalPadding = Pooling::Builder::computeSamePadding(dimensions[2], horizontalStride, windowWidth);
+        ASSERT_EQ(pooling.getWindowHeight(), windowHeight);
+        ASSERT_EQ(pooling.getWindowWidth(), windowWidth);
+        ASSERT_EQ(pooling.getVerticalStride(), verticalStride);
+        ASSERT_EQ(pooling.getHorizontalStride(), horizontalStride);
+        ASSERT_EQ(pooling.getVerticalPadding(), verticalPadding);
+        ASSERT_EQ(pooling.getHorizontalPadding(), horizontalPadding);
+
+        shared_ptr<Layer> cloneLayer = pooling.clone();
+        Pooling *clone = dynamic_cast<Pooling *>(cloneLayer.get());
+        assert(clone != nullptr);
+
+        ASSERT_TRUE(clone->isInitialized());
+
+        Optional<Tensor> cloneInput = clone->getFeatureInput();
+        ASSERT_TRUE(cloneInput.isPresent());
+        ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+        ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+        Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+        ASSERT_TRUE(cloneOutput.isPresent());
+        ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+        ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
+        for (uint32_t d = 0; d < dimensions.size(); ++d) {
+            ASSERT_LE(abs(cloneOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+        }
+
+        ASSERT_EQ(clone->getWindowHeight(), windowHeight);
+        ASSERT_EQ(clone->getWindowWidth(), windowWidth);
+        ASSERT_EQ(clone->getVerticalStride(), verticalStride);
+        ASSERT_EQ(clone->getHorizontalStride(), horizontalStride);
+        ASSERT_EQ(clone->getVerticalPadding(), verticalPadding);
+        ASSERT_EQ(clone->getHorizontalPadding(), horizontalPadding);
+
+        ASSERT_EQ(pooling.getId(), clone->getId());
+        ASSERT_GT(pooling.getId(), 1u);
+
+        ASSERT_TRUE(pooling == *clone);
+        ASSERT_FALSE(pooling != *clone);
+        ASSERT_FALSE(pooling > *clone);
+        ASSERT_FALSE(pooling < *clone);
+    }
+}
+
+TEST(PoolingDefaultPadding, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 3;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(10 + (rand() % 1000));
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    uint32_t windowHeight = 1 + (rand() % dimensions[1]);
+    uint32_t windowWidth = 1 + (rand() % dimensions[2]);
+    uint32_t verticalStride = 1 + (rand() % 10);
+    uint32_t horizontalStride = 1 + (rand() % 10);
+
+    Tensor featureInput(dataType, dimensions);
+    Pooling pooling = Pooling::Builder()
+                          .network(network)
+                          .featureInput(featureInput)
+                          .windowHeight(windowHeight)
+                          .windowWidth(windowWidth)
+                          .verticalStride(verticalStride)
+                          .horizontalStride(horizontalStride)
+                          .build();
+
+    ASSERT_TRUE(pooling.isInitialized());
+
+    Optional<Tensor> actualInput = pooling.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = pooling.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
+    for (uint32_t d = 0; d < dimensions.size(); ++d) {
+        ASSERT_LE(abs(actualOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+    }
+
+    uint32_t verticalPadding = Pooling::Builder::computeSamePadding(dimensions[1], verticalStride, windowHeight);
+    uint32_t horizontalPadding = Pooling::Builder::computeSamePadding(dimensions[2], horizontalStride, windowWidth);
+    ASSERT_EQ(pooling.getWindowHeight(), windowHeight);
+    ASSERT_EQ(pooling.getWindowWidth(), windowWidth);
+    ASSERT_EQ(pooling.getVerticalStride(), verticalStride);
+    ASSERT_EQ(pooling.getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(pooling.getVerticalPadding(), verticalPadding);
+    ASSERT_EQ(pooling.getHorizontalPadding(), horizontalPadding);
+
+    shared_ptr<Layer> cloneLayer = pooling.clone();
+    Pooling *clone = dynamic_cast<Pooling *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
+    for (uint32_t d = 0; d < dimensions.size(); ++d) {
+        ASSERT_LE(abs(cloneOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+    }
+
+    ASSERT_EQ(clone->getWindowHeight(), windowHeight);
+    ASSERT_EQ(clone->getWindowWidth(), windowWidth);
+    ASSERT_EQ(clone->getVerticalStride(), verticalStride);
+    ASSERT_EQ(clone->getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(clone->getVerticalPadding(), verticalPadding);
+    ASSERT_EQ(clone->getHorizontalPadding(), horizontalPadding);
+
+    ASSERT_EQ(pooling.getId(), clone->getId());
+    ASSERT_GT(pooling.getId(), 1u);
+
+    ASSERT_TRUE(pooling == *clone);
+    ASSERT_FALSE(pooling != *clone);
+    ASSERT_FALSE(pooling > *clone);
+    ASSERT_FALSE(pooling < *clone);
+}
+
+TEST(PoolingSpecifiedPadding, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 3;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(10 + (rand() % 1000));
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    uint32_t windowHeight = 1 + (rand() % dimensions[1]);
+    uint32_t windowWidth = 1 + (rand() % dimensions[2]);
+    uint32_t verticalStride = 1 + (rand() % 10);
+    uint32_t horizontalStride = 1 + (rand() % 10);
+    uint32_t verticalPadding = rand() % 5;
+    uint32_t horizontalPadding = rand() % 5;
+
+    Tensor featureInput(dataType, dimensions);
+    Pooling pooling = Pooling::Builder()
+                          .network(network)
+                          .featureInput(featureInput)
+                          .windowHeight(windowHeight)
+                          .windowWidth(windowWidth)
+                          .verticalStride(verticalStride)
+                          .horizontalStride(horizontalStride)
+                          .verticalPadding(verticalPadding)
+                          .horizontalPadding(horizontalPadding)
+                          .build();
+
+    ASSERT_TRUE(pooling.isInitialized());
+
+    Optional<Tensor> actualInput = pooling.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    vector<uint64_t> outputDimensions;
+    uint32_t outputHeight = Pooling::Builder::computeOutputDimension(dimensions[1], verticalStride, windowHeight, verticalPadding);
+    uint32_t outputWidth = Pooling::Builder::computeOutputDimension(dimensions[2], horizontalStride, windowWidth, horizontalPadding);
+    outputDimensions.push_back(dimensions[0]);
+    outputDimensions.push_back(outputHeight);
+    outputDimensions.push_back(outputWidth);
+
+    Optional<Tensor> actualOutput = pooling.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDimensions(), outputDimensions);
+
+    ASSERT_EQ(pooling.getWindowHeight(), windowHeight);
+    ASSERT_EQ(pooling.getWindowWidth(), windowWidth);
+    ASSERT_EQ(pooling.getVerticalStride(), verticalStride);
+    ASSERT_EQ(pooling.getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(pooling.getVerticalPadding(), verticalPadding);
+    ASSERT_EQ(pooling.getHorizontalPadding(), horizontalPadding);
+
+    shared_ptr<Layer> cloneLayer = pooling.clone();
+    Pooling *clone = dynamic_cast<Pooling *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), outputDimensions);
+
+    ASSERT_EQ(clone->getWindowHeight(), windowHeight);
+    ASSERT_EQ(clone->getWindowWidth(), windowWidth);
+    ASSERT_EQ(clone->getVerticalStride(), verticalStride);
+    ASSERT_EQ(clone->getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(clone->getVerticalPadding(), verticalPadding);
+    ASSERT_EQ(clone->getHorizontalPadding(), horizontalPadding);
+
+    ASSERT_EQ(pooling.getId(), clone->getId());
+    ASSERT_GT(pooling.getId(), 1u);
+
+    ASSERT_TRUE(pooling == *clone);
+    ASSERT_FALSE(pooling != *clone);
+    ASSERT_FALSE(pooling > *clone);
+    ASSERT_FALSE(pooling < *clone);
+}
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
