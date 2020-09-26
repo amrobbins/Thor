@@ -14,6 +14,13 @@ class Pooling : public Layer {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Pooling>(*this); }
 
+    uint32_t getWindowHeight() { return windowHeight; }
+    uint32_t getWindowWidth() { return windowWidth; }
+    uint32_t getVerticalStride() { return verticalStride; }
+    uint32_t getHorizontalStride() { return horizontalStride; }
+    uint32_t getVerticalPadding() { return verticalPadding; }
+    uint32_t getHorizontalPadding() { return horizontalPadding; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
         // FIXME
@@ -32,11 +39,10 @@ class Pooling : public Layer {
 // featureInput, windowHeight and windowWidth are required, all other parameters are optional.
 class Pooling::Builder {
    public:
-    Builder();
-
     virtual Pooling build() {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
+        assert(_featureInput.get().getDimensions().size() == 3);
         assert(_windowHeight.isPresent());
         assert(_windowWidth.isPresent());
 
@@ -46,8 +52,12 @@ class Pooling::Builder {
             _horizontalStride = 1;
         if (_verticalPadding.isEmpty())
             _computeVerticalSamePadding = true;
+        else if (_computeVerticalSamePadding.isEmpty())
+            _computeVerticalSamePadding = false;
         if (_horizontalPadding.isEmpty())
             _computeHorizontalSamePadding = true;
+        else if (_computeHorizontalSamePadding.isEmpty())
+            _computeHorizontalSamePadding = false;
 
         Pooling pooling;
 
@@ -167,6 +177,22 @@ class Pooling::Builder {
         return *this;
     }
 
+    static uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t windowSize, uint32_t padding) {
+        assert(windowSize <= inputSize + 2 * padding);
+        assert(stride > 0);
+        return 1 + (((inputSize + 2 * padding) - windowSize) / stride);
+    }
+
+    // outputSize = 1 + (((inputSize+ 2*padding) - windowSize) / windowStride);
+    // padding = ((outputSize - 1) * windowStride + windowSize - inputSize) / 2
+    // where outputSize == inputSize, so
+    // padding = ((inputSize - 1) * windowStride + windowSize - inputSize) / 2
+    //         = ((windowStride-1)*inputSize - windowStride + windowSize) / 2
+    static uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t windowSize) {
+        // And round up.
+        return (1 + (stride - 1) * inputSize - stride + windowSize) / 2;
+    }
+
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
@@ -178,21 +204,6 @@ class Pooling::Builder {
     Optional<bool> _computeHorizontalSamePadding;
     Optional<uint32_t> _verticalPadding;
     Optional<uint32_t> _horizontalPadding;
-
-    uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t windowSize, uint32_t padding) {
-        assert(windowSize <= inputSize + 2 * padding);
-        return 1 + (((inputSize + 2 * padding) - windowSize) / stride);
-    }
-
-    // outputSize = 1 + (((inputSize+ 2*padding) - windowSize) / windowStride);
-    // padding = ((outputSize - 1) * windowStride + windowSize - inputSize) / 2
-    // where outputSize == inputSize, so
-    // padding = ((inputSize - 1) * windowStride + windowSize - inputSize) / 2
-    //         = ((windowStride-1)*inputSize - windowStride + windowSize) / 2
-    uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t windowSize) {
-        // And round up.
-        return (1 + (stride - 1) * inputSize - stride + windowSize) / 2;
-    }
 };
 
 }  // namespace Thor
