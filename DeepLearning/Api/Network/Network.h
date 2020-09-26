@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
