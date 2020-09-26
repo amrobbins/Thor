@@ -1,0 +1,481 @@
+#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+
+#include "Thor.h"
+
+#include "gtest/gtest.h"
+
+#include <stdio.h>
+#include <memory>
+
+using std::shared_ptr;
+
+using namespace Thor;
+
+// NetworkInput.h NetworkOutput.h Stub.h DropOut.h BatchNormalization.h Pooling.h
+
+TEST(NetworkInput, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, dimensions);
+    NetworkInput networkInput = NetworkInput::Builder().network(network).dimensions(dimensions).dataType(dataType).build();
+
+    ASSERT_TRUE(networkInput.isInitialized());
+
+    Optional<Tensor> actualInput = networkInput.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = networkInput.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+
+    shared_ptr<Layer> cloneLayer = networkInput.clone();
+    NetworkInput *clone = dynamic_cast<NetworkInput *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+
+    ASSERT_EQ(networkInput.getId(), clone->getId());
+    ASSERT_GT(networkInput.getId(), 1u);
+
+    ASSERT_TRUE(networkInput == *clone);
+    ASSERT_FALSE(networkInput != *clone);
+    ASSERT_FALSE(networkInput > *clone);
+    ASSERT_FALSE(networkInput < *clone);
+}
+
+TEST(NetworkOutput, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    Tensor::DataType outputDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, dimensions);
+    NetworkOutput networkOutput = NetworkOutput::Builder().network(network).inputTensor(featureInput).dataType(outputDataType).build();
+
+    ASSERT_TRUE(networkOutput.isInitialized());
+
+    Optional<Tensor> actualInput = networkOutput.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = networkOutput.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), outputDataType);
+    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+
+    shared_ptr<Layer> cloneLayer = networkOutput.clone();
+    NetworkOutput *clone = dynamic_cast<NetworkOutput *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), outputDataType);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+
+    ASSERT_EQ(networkOutput.getId(), clone->getId());
+    ASSERT_GT(networkOutput.getId(), 1u);
+
+    ASSERT_TRUE(networkOutput == *clone);
+    ASSERT_FALSE(networkOutput != *clone);
+    ASSERT_FALSE(networkOutput > *clone);
+    ASSERT_FALSE(networkOutput < *clone);
+}
+
+TEST(Stub, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, dimensions);
+    Stub stub = Stub::Builder().network(network).inputTensor(featureInput).build();
+
+    ASSERT_TRUE(stub.isInitialized());
+
+    Optional<Tensor> actualInput = stub.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    shared_ptr<Layer> cloneLayer = stub.clone();
+    Stub *clone = dynamic_cast<Stub *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    ASSERT_EQ(stub.getId(), clone->getId());
+    ASSERT_GT(stub.getId(), 1u);
+
+    ASSERT_TRUE(stub == *clone);
+    ASSERT_FALSE(stub != *clone);
+    ASSERT_FALSE(stub > *clone);
+    ASSERT_FALSE(stub < *clone);
+}
+
+TEST(DropOut, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    float dropProportion = ((rand() % 100) + 1) / 1000.0f;
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, dimensions);
+    DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(dropProportion).build();
+
+    ASSERT_TRUE(dropOut.isInitialized());
+
+    Optional<Tensor> actualInput = dropOut.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = dropOut.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+
+    float actualDropProportion = dropOut.getDropProportion();
+    ASSERT_EQ(actualDropProportion, dropProportion);
+
+    shared_ptr<Layer> cloneLayer = dropOut.clone();
+    DropOut *clone = dynamic_cast<DropOut *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+
+    float cloneDropProportion = clone->getDropProportion();
+    ASSERT_EQ(cloneDropProportion, dropProportion);
+
+    ASSERT_EQ(dropOut.getId(), clone->getId());
+    ASSERT_GT(dropOut.getId(), 1u);
+
+    ASSERT_TRUE(dropOut == *clone);
+    ASSERT_FALSE(dropOut != *clone);
+    ASSERT_FALSE(dropOut > *clone);
+    ASSERT_FALSE(dropOut < *clone);
+}
+
+TEST(BatchNormalizationSingleFeatureInput, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, dimensions);
+
+    double exponentialRunningAverageFactor = ((rand() % 100) + 1) / 1000.0f;
+
+    double epsilon = ((rand() % 100) + 1) / 100000.0f;
+
+    BatchNormalization batchNormalization = BatchNormalization::Builder()
+                                                .network(network)
+                                                .featureInput(featureInput)
+                                                .exponentialRunningAverageFactor(exponentialRunningAverageFactor)
+                                                .epsilon(epsilon)
+                                                .build();
+
+    ASSERT_TRUE(batchNormalization.isInitialized());
+
+    Optional<Tensor> actualInput = batchNormalization.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = batchNormalization.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+
+    double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
+    ASSERT_EQ(actualExponentialRunningAverageFactor, exponentialRunningAverageFactor);
+
+    double actualEpsilon = batchNormalization.getEpsilon();
+    ASSERT_EQ(actualEpsilon, epsilon);
+
+    shared_ptr<Layer> cloneLayer = batchNormalization.clone();
+    BatchNormalization *clone = dynamic_cast<BatchNormalization *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+
+    double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();
+    ASSERT_EQ(cloneExponentialRunningAverageFactor, exponentialRunningAverageFactor);
+
+    double cloneEpsilon = clone->getEpsilon();
+    ASSERT_EQ(cloneEpsilon, epsilon);
+
+    ASSERT_EQ(batchNormalization.getId(), clone->getId());
+    ASSERT_GT(batchNormalization.getId(), 1u);
+
+    ASSERT_TRUE(batchNormalization == *clone);
+    ASSERT_FALSE(batchNormalization != *clone);
+    ASSERT_FALSE(batchNormalization > *clone);
+    ASSERT_FALSE(batchNormalization < *clone);
+}
+
+TEST(BatchNormalizationMultipleFeatureInputs, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions0 = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions0; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    Tensor featureInput0(dataType, dimensions);
+    Tensor featureInput1(dataType, dimensions);
+
+    double exponentialRunningAverageFactor = (rand() % 100) / 1000.0f;
+
+    double epsilon = (rand() % 100) / 100000.0f;
+
+    BatchNormalization batchNormalization = BatchNormalization::Builder()
+                                                .network(network)
+                                                .featureInput(featureInput0)
+                                                .featureInput(featureInput1)
+                                                .exponentialRunningAverageFactor(exponentialRunningAverageFactor)
+                                                .epsilon(epsilon)
+                                                .build();
+
+    ASSERT_TRUE(batchNormalization.isInitialized());
+
+    vector<Tensor> featureInputs = batchNormalization.getFeatureInputs();
+    vector<Tensor> featureOutputs = batchNormalization.getFeatureOutputs();
+    assert(featureInputs[0] == featureInput0);
+    assert(featureInputs[1] == featureInput1);
+
+    ASSERT_EQ(batchNormalization.getFeatureOutput(featureInput0), featureOutputs[0]);
+    ASSERT_EQ(batchNormalization.getFeatureOutput(featureInput1), featureOutputs[1]);
+    ASSERT_NE(featureOutputs[0].getId(), featureOutputs[1].getId());
+
+    assert(batchNormalization.getFeatureInput(featureOutputs[1]) == featureInputs[1]);
+    assert(batchNormalization.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureInputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDimensions(), dimensions);
+
+    double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
+    ASSERT_EQ(actualExponentialRunningAverageFactor, exponentialRunningAverageFactor);
+
+    double actualEpsilon = batchNormalization.getEpsilon();
+    ASSERT_EQ(actualEpsilon, epsilon);
+
+    shared_ptr<Layer> cloneLayer = batchNormalization.clone();
+    BatchNormalization *clone = dynamic_cast<BatchNormalization *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    featureInputs.clear();
+    featureOutputs.clear();
+    featureInputs = clone->getFeatureInputs();
+    featureOutputs = clone->getFeatureOutputs();
+    assert(featureInputs[0] == featureInput0);
+    assert(featureInputs[1] == featureInput1);
+
+    ASSERT_EQ(batchNormalization.getFeatureOutput(featureInput0), featureOutputs[0]);
+    ASSERT_EQ(batchNormalization.getFeatureOutput(featureInput1), featureOutputs[1]);
+    ASSERT_NE(featureOutputs[0].getId(), featureOutputs[1].getId());
+
+    assert(batchNormalization.getFeatureInput(featureOutputs[1]) == featureInputs[1]);
+    assert(batchNormalization.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureInputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDimensions(), dimensions);
+
+    double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();
+    ASSERT_EQ(cloneExponentialRunningAverageFactor, exponentialRunningAverageFactor);
+
+    double cloneEpsilon = clone->getEpsilon();
+    ASSERT_EQ(cloneEpsilon, epsilon);
+
+    ASSERT_EQ(batchNormalization.getId(), clone->getId());
+    ASSERT_GT(batchNormalization.getId(), 1u);
+
+    ASSERT_TRUE(batchNormalization == *clone);
+    ASSERT_FALSE(batchNormalization != *clone);
+    ASSERT_FALSE(batchNormalization > *clone);
+    ASSERT_FALSE(batchNormalization < *clone);
+}
+
+/*
+    Pooling::Builder &network(Network &_network) {
+    Pooling::Builder &featureInput(Tensor _featureInput) {
+    Pooling::Builder &windowHeight(uint32_t _windowHeight) {
+    Pooling::Builder &windowWidth(uint32_t _windowWidth) {
+    Pooling::Builder &verticalStride(uint32_t _verticalStride) {
+    Pooling::Builder &horizontalStride(uint32_t _horizontalStride) {
+    Pooling::Builder &verticalPadding(uint32_t _verticalPadding) {
+    Pooling::Builder &horizontalPadding(uint32_t _horizontalPadding) {
+    Pooling::Builder &samePadding() {
+    Pooling::Builder &verticalSamePadding() {
+    Pooling::Builder &horizontalSamePadding() {
+    Pooling::Builder &noPadding() {
+*/
+
+/*
+TEST(PoolingNoPadding, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 3;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, dimensions);
+    Pooling pooling = Pooling::Builder()
+                        .network(network)
+                        .featureInput(featureInput)
+                        .windowHeight(windowHeight)
+                        .windowWidth(windowWidth)
+                        .verticalStride(verticalStride)
+                        .horizontalStride(horizontalStride)
+                        .noPadding()
+                        .build();
+
+    ASSERT_TRUE(pooling.isInitialized());
+
+    Optional<Tensor> actualInput = pooling.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = pooling.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
+
+    shared_ptr<Layer> cloneLayer = pooling.clone();
+    Pooling *clone = dynamic_cast<Pooling *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(cloneOutput.isPresent());
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
+
+    ASSERT_EQ(pooling.getId(), clone->getId());
+    ASSERT_GT(pooling.getId(), 1u);
+
+    ASSERT_TRUE(pooling == *clone);
+    ASSERT_FALSE(pooling != *clone);
+    ASSERT_FALSE(pooling > *clone);
+    ASSERT_FALSE(pooling < *clone);
+}
+*/
+
+int main(int argc, char **argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

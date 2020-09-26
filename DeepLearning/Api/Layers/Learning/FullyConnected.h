@@ -73,9 +73,12 @@ class FullyConnected::Builder {
 
         fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
-        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i)
+        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
             fullyConnected.featureOutputs.push_back(
                 Tensor(fullyConnected.featureInputs[0].getDataType(), {fullyConnected.numOutputFeatures}));
+            fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs[i];
+            fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs[i]] = fullyConnected.featureInputs[i];
+        }
         fullyConnected.hasBias = _hasBias;
         fullyConnected.weightsInitializer = _weightsInitializer;
         fullyConnected.biasInitializer = _biasInitializer;

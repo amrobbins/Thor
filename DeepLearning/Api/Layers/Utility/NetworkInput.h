@@ -74,7 +74,7 @@ class NetworkInput::Builder {
 
     virtual NetworkInput::Builder &dataType(Tensor::DataType _dataType) {
         assert(Tensor::dataTypeValid(_dataType));
-        this->_dimensions = _dimensions;
+        this->_dataType = _dataType;
         return *this;
     }
 

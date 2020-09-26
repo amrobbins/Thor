@@ -11,6 +11,8 @@ class DropOut : public Layer {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<DropOut>(*this); }
 
+    virtual float getDropProportion() { return dropProportion; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
         // FIXME
@@ -52,6 +54,7 @@ class DropOut::Builder {
     virtual DropOut::Builder &dropProportion(float dropProportion) {
         assert(!_dropProportion.isPresent());
         assert(dropProportion > 0.0);
+        assert(dropProportion <= 1.0);
         this->_dropProportion = dropProportion;
         return *this;
     }

@@ -37,6 +37,7 @@ Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
 RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
+                build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
@@ -63,6 +64,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest &
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
 ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
+            build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests \
             build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest \
             build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
@@ -497,6 +499,10 @@ build/test/DeepLearning/Api/Layers/Activations/ActivationsTest: build/test/googl
 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Utility/UtilityLayerTests.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Utility
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests test/DeepLearning/Api/Layers/Utility/UtilityLayerTests.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 
