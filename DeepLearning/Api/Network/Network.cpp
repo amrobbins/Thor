@@ -39,6 +39,11 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
                 continue;
             }
 
+            const Stub *stub = dynamic_cast<const Stub *>(layer);
+            if (stub) {
+                continue;
+            }
+
             const Loss *loss = dynamic_cast<const Loss *>(layer);
             if (loss) {
                 stampLoss(loss, gpuNum, batchSize, stampedNetwork);
@@ -96,6 +101,15 @@ Network::StatusCode Network::evaluateGraph() {
         if (networkOutput) {
             uint32_t layerId = networkOutput->getId();
             Tensor inputTensor = networkOutput->getFeatureInput();
+            allTensors.insert(inputTensor.getId());
+            tensorToLoadingLayers[inputTensor.getId()].push_back(layerId);
+            continue;
+        }
+
+        const Stub *stub = dynamic_cast<const Stub *>(layer);
+        if (stub) {
+            uint32_t layerId = stub->getId();
+            Tensor inputTensor = stub->getFeatureInput();
             allTensors.insert(inputTensor.getId());
             tensorToLoadingLayers[inputTensor.getId()].push_back(layerId);
             continue;

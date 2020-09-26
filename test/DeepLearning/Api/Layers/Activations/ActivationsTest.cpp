@@ -17,7 +17,7 @@ TEST(Relu, Builds) {
     Network network;
 
     vector<uint64_t> dimensions;
-    int numDimensions = rand() % 6;
+    int numDimensions = 1 + rand() % 6;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(rand() % 1000);
 
@@ -69,7 +69,7 @@ TEST(Tanh, Builds) {
     Network network;
 
     vector<uint64_t> dimensions;
-    int numDimensions = rand() % 6;
+    int numDimensions = 1 + rand() % 6;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(rand() % 1000);
 

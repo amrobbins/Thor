@@ -50,6 +50,7 @@ class Tanh::Builder {
 
     virtual Tanh::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
+        assert(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
         return *this;
     }

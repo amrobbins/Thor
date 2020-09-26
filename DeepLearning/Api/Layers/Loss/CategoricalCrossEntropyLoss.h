@@ -13,6 +13,8 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalCrossEntropyLoss>(*this); }
 
+    Optional<float> getLossScalingFactor() { return lossScalingFactor; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
         // FIXME
@@ -47,7 +49,9 @@ class CategoricalCrossEntropyLoss::Builder {
 
     virtual CategoricalCrossEntropyLoss::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
+        assert(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
+        return *this;
     }
 
     CategoricalCrossEntropyLoss::Builder &lossScalingFactor(float lossScalingFactor) {
