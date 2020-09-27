@@ -520,8 +520,11 @@ TEST(PoolingSamePadding, Builds) {
         ASSERT_TRUE(actualOutput.isPresent());
         ASSERT_EQ(actualOutput.get().getDataType(), dataType);
         ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
-        for (uint32_t d = 0; d < dimensions.size(); ++d) {
-            ASSERT_LE(abs(actualOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+        ASSERT_EQ(actualOutput.get().getDimensions()[0], dimensions[0]);
+        for (uint32_t d = 1; d < dimensions.size(); ++d) {
+            uint32_t diff = actualOutput.get().getDimensions()[d] - dimensions[d];
+            ASSERT_GE(diff, 0u);
+            ASSERT_LE(diff, 1u);
         }
 
         uint32_t verticalPadding = Pooling::Builder::computeSamePadding(dimensions[1], verticalStride, windowHeight);
@@ -548,8 +551,11 @@ TEST(PoolingSamePadding, Builds) {
         ASSERT_TRUE(cloneOutput.isPresent());
         ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
         ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
-        for (uint32_t d = 0; d < dimensions.size(); ++d) {
-            ASSERT_LE(abs(cloneOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+        ASSERT_EQ(cloneOutput.get().getDimensions()[0], dimensions[0]);
+        for (uint32_t d = 1; d < dimensions.size(); ++d) {
+            uint32_t diff = cloneOutput.get().getDimensions()[d] - dimensions[d];
+            ASSERT_GE(diff, 0u);
+            ASSERT_LE(diff, 1u);
         }
 
         ASSERT_EQ(clone->getWindowHeight(), windowHeight);
@@ -606,8 +612,11 @@ TEST(PoolingDefaultPadding, Builds) {
     ASSERT_TRUE(actualOutput.isPresent());
     ASSERT_EQ(actualOutput.get().getDataType(), dataType);
     ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
-    for (uint32_t d = 0; d < dimensions.size(); ++d) {
-        ASSERT_LE(abs(actualOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+    ASSERT_EQ(actualOutput.get().getDimensions()[0], dimensions[0]);
+    for (uint32_t d = 1; d < dimensions.size(); ++d) {
+        uint32_t diff = actualOutput.get().getDimensions()[d] - dimensions[d];
+        ASSERT_GE(diff, 0u);
+        ASSERT_LE(diff, 1u);
     }
 
     uint32_t verticalPadding = Pooling::Builder::computeSamePadding(dimensions[1], verticalStride, windowHeight);
@@ -634,8 +643,11 @@ TEST(PoolingDefaultPadding, Builds) {
     ASSERT_TRUE(cloneOutput.isPresent());
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
-    for (uint32_t d = 0; d < dimensions.size(); ++d) {
-        ASSERT_LE(abs(cloneOutput.get().getDimensions()[d] - (double)dimensions[d]), 1.0);
+    ASSERT_EQ(cloneOutput.get().getDimensions()[0], dimensions[0]);
+    for (uint32_t d = 1; d < dimensions.size(); ++d) {
+        uint32_t diff = cloneOutput.get().getDimensions()[d] - dimensions[d];
+        ASSERT_GE(diff, 0u);
+        ASSERT_LE(diff, 1u);
     }
 
     ASSERT_EQ(clone->getWindowHeight(), windowHeight);

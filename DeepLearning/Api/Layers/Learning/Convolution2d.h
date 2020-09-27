@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Initializers/XavierInitializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
+#include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
@@ -21,8 +22,15 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Convolution2d>(*this); }
 
+    virtual uint32_t getFilterHeight() { return filterHeight; }
+    virtual uint32_t getFilterWidth() { return filterWidth; }
+    virtual uint32_t getVerticalStride() { return verticalStride; }
+    virtual uint32_t getHorizontalStride() { return horizontalStride; }
+    virtual uint32_t getVerticalPadding() { return verticalPadding; }
+    virtual uint32_t getHoriztonalPadding() { return horizontalPadding; }
+
    protected:
-    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder.isPresent(); }
+    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder; }
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
@@ -42,7 +50,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     bool hasBias;
     Initializer weightsInitializer;
     Initializer biasInitializer;
-    Optional<Activation::Builder> activationBuilder;
+    shared_ptr<Activation::Builder> activationBuilder;
 
     float dropProportion;
 
@@ -81,8 +89,8 @@ class Convolution2d::Builder {
             _weightsInitializer = XavierInitializer();
         if (_biasInitializer.isEmpty())
             _biasInitializer = UniformRandomInitializer();
-        if (_activationBuilder.isEmpty() && !_activationExplicitlyRemoved)
-            _activationBuilder = Relu::Builder();
+        if (!_activationBuilder && !_activationExplicitlyRemoved)
+            _activationBuilder = make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
@@ -146,6 +154,7 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &featureInput(Tensor _featureInput) {
+        assert(_featureInput.getDimensions().size() == 3);
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
@@ -255,15 +264,25 @@ class Convolution2d::Builder {
     }
 
     // Adds an activation layer after this Convolution2d layer
-    virtual Convolution2d::Builder &activationBuilder(Optional<Activation::Builder> _activationBuilder) {
-        assert(!this->_activationBuilder.isPresent());
+    virtual Convolution2d::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
+        assert(!this->_activationBuilder);
         assert(!_activationExplicitlyRemoved);
 
-        if (_activationBuilder.isEmpty()) {
-            _activationExplicitlyRemoved = true;
+        if (dynamic_cast<Relu::Builder *>(&_activationBuilder)) {
+            this->_activationBuilder = make_shared<Relu::Builder>(*dynamic_cast<Relu::Builder *>(&_activationBuilder));
+        } else if (dynamic_cast<Tanh::Builder *>(&_activationBuilder)) {
+            this->_activationBuilder = make_shared<Tanh::Builder>(*dynamic_cast<Tanh::Builder *>(&_activationBuilder));
         } else {
-            this->_activationBuilder = _activationBuilder.get();
+            assert(false);
         }
+
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &noActivation() {
+        assert(!this->_activationBuilder);
+
+        _activationExplicitlyRemoved = true;
         return *this;
     }
 
@@ -316,7 +335,7 @@ class Convolution2d::Builder {
     Optional<bool> _hasBias;
     Optional<Initializer> _weightsInitializer;
     Optional<Initializer> _biasInitializer;
-    Optional<Activation::Builder> _activationBuilder;
+    shared_ptr<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;
