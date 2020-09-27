@@ -18,19 +18,11 @@ class Tanh : public Activation {
         // FIXME
         return nullptr;
     }
-
-    virtual shared_ptr<Activation> cloneWithReconnect(Tensor newFeatureInput) {
-        shared_ptr<Tanh> tanh = make_shared<Tanh>();
-        *tanh = *this;
-        tanh->featureInput = newFeatureInput;
-        tanh->featureOutput = newFeatureInput.clone();
-        return tanh;
-    }
 };
 
-class Tanh::Builder {
+class Tanh::Builder : public Activation::Builder {
    public:
-    virtual Tanh build() {
+    virtual shared_ptr<Layer> build() {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
 
@@ -39,20 +31,14 @@ class Tanh::Builder {
         tanh.featureOutput = _featureInput.get().clone();
         tanh.initialized = true;
         tanh.addToNetwork(_network.get());
-        return tanh;
+        return tanh.clone();
     }
 
-    virtual Tanh::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
-        this->_network = &_network;
-        return *this;
-    }
+    virtual void network(Network &_network) { this->_network = &_network; }
 
-    virtual Tanh::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
+    virtual void featureInput(Tensor _featureInput) {
         assert(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
-        return *this;
     }
 
    private:

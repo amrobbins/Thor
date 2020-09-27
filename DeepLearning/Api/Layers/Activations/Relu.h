@@ -18,19 +18,11 @@ class Relu : public Activation {
         // FIXME
         return nullptr;
     }
-
-    virtual shared_ptr<Activation> cloneWithReconnect(Tensor newFeatureInput) {
-        shared_ptr<Relu> relu = make_shared<Relu>();
-        *relu = *this;
-        relu->featureInput = newFeatureInput;
-        relu->featureOutput = newFeatureInput.clone();
-        return relu;
-    }
 };
 
-class Relu::Builder {
+class Relu::Builder : public Activation::Builder {
    public:
-    virtual Relu build() {
+    virtual shared_ptr<Layer> build() {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
 
@@ -39,20 +31,14 @@ class Relu::Builder {
         relu.featureOutput = _featureInput.get().clone();
         relu.initialized = true;
         relu.addToNetwork(_network.get());
-        return relu;
+        return relu.clone();
     }
 
-    virtual Relu::Builder &network(Network &_network) {
-        assert(!this->_network.isPresent());
-        this->_network = &_network;
-        return *this;
-    }
+    virtual void network(Network &_network) { this->_network = &_network; }
 
-    virtual Relu::Builder &featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
+    virtual void featureInput(Tensor _featureInput) {
         assert(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
-        return *this;
     }
 
    private:

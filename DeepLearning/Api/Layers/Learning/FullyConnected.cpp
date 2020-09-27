@@ -1,40 +1,68 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
-void FullyConnected::toSingleLayers(vector<shared_ptr<Layer>> &singleLayers) const {
-    if (isMultiLayer()) {
-        Tensor currentFeatureInput = getFeatureInput();
+using namespace Thor;
 
-        if (useBatchNormalization) {
-            BatchNormalization::Builder builder;
-            if (batchNormExponentialRunningAverageFactor.isPresent())
-                builder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor.get());
-            if (batchNormEpsilon.isPresent())
-                builder.epsilon(batchNormEpsilon.get());
-            BatchNormalization batchNormalization = builder.featureInput(currentFeatureInput).build();
-            currentFeatureInput = batchNormalization.getFeatureOutput();
-            singleLayers.push_back(batchNormalization.clone());
+void FullyConnected::convertToSingleLayersAndAddToNetwork() {
+    assert(isMultiLayer());
+
+    BatchNormalization::Builder batchNormBuilder;
+    if (useBatchNormalization) {
+        batchNormBuilder.network(*network);
+        if (batchNormExponentialRunningAverageFactor.isPresent())
+            batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor.get());
+        if (batchNormEpsilon.isPresent())
+            batchNormBuilder.epsilon(batchNormEpsilon.get());
+    }
+
+    FullyConnected::Builder fullyConnectedBuilder;
+    fullyConnectedBuilder.network(*network)
+        .numOutputFeatures(numOutputFeatures)
+        .hasBias(hasBias)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
+        .noActivation();
+
+    vector<Tensor> currentFeatureInputs;
+
+    for (uint32_t i = 0; i < featureInputs.size(); ++i)
+        currentFeatureInputs.push_back(featureInputs[i]);
+
+    if (useBatchNormalization) {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            batchNormBuilder.featureInput(currentFeatureInputs[i]);
         }
+        BatchNormalization batchNormalization = batchNormBuilder.build();
+        for (uint32_t i = 0; i < featureInputs.size(); ++i)
+            currentFeatureInputs[i] = batchNormalization.getFeatureOutputs()[i];
+    }
 
-        if (dropProportion > 0.0f) {
-            DropOut dropOut = DropOut::Builder().dropProportion(dropProportion).featureInput(currentFeatureInput).build();
-            currentFeatureInput = dropOut.getFeatureOutput();
-            singleLayers.push_back(dropOut.clone());
+    if (dropProportion > 0.0f) {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            DropOut dropOut =
+                DropOut::Builder().network(*network).dropProportion(dropProportion).featureInput(currentFeatureInputs[i]).build();
+            currentFeatureInputs[i] = dropOut.getFeatureOutput();
         }
+    }
 
-        FullyConnected onlyFullyConnected = Builder()
-                                                .featureInput(currentFeatureInput)
-                                                .numOutputFeatures(numOutputFeatures)
-                                                .hasBias(hasBias)
-                                                .weightsInitializer(weightsInitializer)
-                                                .biasInitializer(biasInitializer)
-                                                .build();
-        currentFeatureInput = onlyFullyConnected.getFeatureOutput();
-        singleLayers.push_back(onlyFullyConnected.clone());
+    for (uint32_t i = 0; i < featureInputs.size(); ++i)
+        fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
+    FullyConnected fullyConnected = fullyConnectedBuilder.build();
+    for (uint32_t i = 0; i < featureInputs.size(); ++i)
+        currentFeatureInputs[i] = fullyConnected.getFeatureOutputs()[i];
 
-        if (activation.isPresent()) {
-            singleLayers.push_back(activation.get().cloneWithReconnect(currentFeatureInput));
+    if (activationBuilder) {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            activationBuilder->network(*network);
+            activationBuilder->featureInput(currentFeatureInputs[i]);
+            shared_ptr<Layer> activation = activationBuilder->build();
+            currentFeatureInputs[i] = activation->getFeatureOutput();
         }
-    } else {
-        singleLayers.push_back(clone());
+    }
+
+    // Replace the outputs on the compound layer to be the outputs of the last stage
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        fullyConnected.featureOutputs[i] = currentFeatureInputs[i];
+        outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
+        inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
     }
 }

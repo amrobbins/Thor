@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Network/Network.h"
 
 #include <assert.h>
 #include <atomic>
@@ -17,7 +18,15 @@ class Activation : public Layer {
 
     virtual shared_ptr<Layer> clone() const { assert(false); }
 
-    virtual shared_ptr<Activation> cloneWithReconnect(Tensor newFeatureInput) { assert(false); }
+    virtual shared_ptr<Activation> cloneReconnectAndAddToNetwork(Tensor newFeatureInput, Network &network) { assert(false); }
+
+    class Builder {
+       public:
+        virtual ~Builder() {}
+        virtual void network(Network &network) { assert(false); }
+        virtual void featureInput(Tensor featureInput) { assert(false); }
+        virtual shared_ptr<Layer> build() { assert(false); }
+    };
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const { assert(false); }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "DeepLearning/Api/Initializers/InitializerBase.h"
+#include "DeepLearning/Api/Initializers/Initializer.h"
 
 #include <assert.h>
 #include <memory>
@@ -12,12 +12,8 @@ using std::shared_ptr;
 class Initializer {
    public:
     Initializer() {}
-    Initializer(InitializerBase *initializerBase) { initializer = shared_ptr<InitializerBase>(initializerBase); }
 
     virtual ~Initializer() {}
-
-   private:
-    shared_ptr<InitializerBase> initializer;
 };
 
 }  // namespace Thor
