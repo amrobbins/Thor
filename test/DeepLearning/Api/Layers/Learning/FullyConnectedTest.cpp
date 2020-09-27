@@ -98,6 +98,103 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
     ASSERT_FALSE(fullyConnected < *clone);
 }
 
+TEST(FullyConnectedMultipleFeatureInputs, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 1 + rand() % 6;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(1 + (rand() % 1000));
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput0(dataType, dimensions);
+    Tensor featureInput1(dataType, dimensions);
+
+    uint32_t numOutputFeatures = 1 + (rand() % 1000);
+    bool hasBias = rand() % 2;
+
+    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
+
+    FullyConnected fullyConnected = FullyConnected::Builder()
+                                        .network(network)
+                                        .featureInput(featureInput0)
+                                        .featureInput(featureInput1)
+                                        .numOutputFeatures(numOutputFeatures)
+                                        .hasBias(hasBias)
+                                        .dropOut(dropProportion)
+                                        .build();
+
+    ASSERT_TRUE(fullyConnected.isInitialized());
+
+    vector<uint64_t> outputDimensions = {numOutputFeatures};
+    vector<Tensor> featureInputs = fullyConnected.getFeatureInputs();
+    vector<Tensor> featureOutputs = fullyConnected.getFeatureOutputs();
+    assert(featureInputs[0] == featureInput0);
+    assert(featureInputs[1] == featureInput1);
+
+    ASSERT_EQ(fullyConnected.getFeatureOutput(featureInput0), featureOutputs[0]);
+    ASSERT_EQ(fullyConnected.getFeatureOutput(featureInput1), featureOutputs[1]);
+    ASSERT_NE(featureOutputs[0].getId(), featureOutputs[1].getId());
+
+    assert(fullyConnected.getFeatureInput(featureOutputs[1]) == featureInputs[1]);
+    assert(fullyConnected.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureInputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
+
+    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDimensions(), outputDimensions);
+
+    shared_ptr<Layer> cloneLayer = fullyConnected.clone();
+    FullyConnected *clone = dynamic_cast<FullyConnected *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    featureInputs.clear();
+    featureOutputs.clear();
+    featureInputs = clone->getFeatureInputs();
+    featureOutputs = clone->getFeatureOutputs();
+    assert(featureInputs[0] == featureInput0);
+    assert(featureInputs[1] == featureInput1);
+
+    ASSERT_EQ(clone->getFeatureOutput(featureInput0), featureOutputs[0]);
+    ASSERT_EQ(clone->getFeatureOutput(featureInput1), featureOutputs[1]);
+    ASSERT_NE(featureOutputs[0].getId(), featureOutputs[1].getId());
+
+    assert(clone->getFeatureInput(featureOutputs[1]) == featureInputs[1]);
+    assert(clone->getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureInputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
+
+    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDimensions(), outputDimensions);
+
+    ASSERT_EQ(fullyConnected.getId(), clone->getId());
+    ASSERT_GT(fullyConnected.getId(), 1u);
+
+    ASSERT_TRUE(fullyConnected == *clone);
+    ASSERT_FALSE(fullyConnected != *clone);
+    ASSERT_FALSE(fullyConnected > *clone);
+    ASSERT_FALSE(fullyConnected < *clone);
+}
+
 /*
 
 TEST(FullyConnectedMultipleFeatureInputs, Builds) {
