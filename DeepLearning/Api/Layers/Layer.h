@@ -46,10 +46,7 @@ class Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const = 0;
 
     virtual bool isMultiLayer() const { return false; }
-    virtual void toSingleLayers(vector<shared_ptr<Layer>> &singleLayers) const {
-        assert(!isMultiLayer());
-        singleLayers.push_back(clone());
-    }
+    virtual void convertToSingleLayersAndAddToNetwork() { assert(false); }
 
     virtual void addToNetwork(Network *network);
 

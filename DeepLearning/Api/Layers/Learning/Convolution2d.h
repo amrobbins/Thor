@@ -1,6 +1,14 @@
 #pragma once
 
+#include "DeepLearning/Api/Initializers/Initializer.h"
+#include "DeepLearning/Api/Initializers/UniformRandomInitializer.h"
+#include "DeepLearning/Api/Initializers/XavierInitializer.h"
+#include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
+#include "DeepLearning/Api/Layers/Utility/DropOut.h"
 
 namespace Thor {
 
@@ -14,8 +22,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual shared_ptr<Layer> clone() const { return make_shared<Convolution2d>(*this); }
 
    protected:
-    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activation.isPresent(); }
-    virtual void toSingleLayers(vector<shared_ptr<Layer>> &singleLayers) const;
+    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder.isPresent(); }
+    virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
         // FIXME
@@ -23,6 +31,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     }
 
    private:
+    Network *network;
     uint32_t numOutputChannels;
     uint32_t filterHeight;
     uint32_t filterWidth;
@@ -33,7 +42,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     bool hasBias;
     Initializer weightsInitializer;
     Initializer biasInitializer;
-    Optional<Activation> activation;
+    Optional<Activation::Builder> activationBuilder;
 
     float dropProportion;
 
@@ -60,16 +69,20 @@ class Convolution2d::Builder {
             _horizontalStride = 1;
         if (_verticalPadding.isEmpty())
             _computeVerticalSamePadding = true;
+        else if (_computeVerticalSamePadding.isEmpty())
+            _computeVerticalSamePadding = false;
         if (_horizontalPadding.isEmpty())
             _computeHorizontalSamePadding = true;
+        else if (_computeHorizontalSamePadding.isEmpty())
+            _computeHorizontalSamePadding = false;
         if (_hasBias.isEmpty())
             _hasBias = false;
         if (_weightsInitializer.isEmpty())
-            _weightsInitializer = Initializer(new XavierInitializer());
+            _weightsInitializer = XavierInitializer();
         if (_biasInitializer.isEmpty())
-            _biasInitializer = Initializer(new UniformRandomInitializer());
-        if (_activation.isEmpty() && !_activationExplicitlyRemoved)
-            _activation = Relu();
+            _biasInitializer = UniformRandomInitializer();
+        if (_activationBuilder.isEmpty() && !_activationExplicitlyRemoved)
+            _activationBuilder = Relu::Builder();
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
@@ -78,6 +91,7 @@ class Convolution2d::Builder {
 
         Convolution2d convolution2d;
 
+        convolution2d.network = _network;
         convolution2d.featureInputs = _featureInputs;
         convolution2d.numOutputChannels = _numOutputChannels;
         convolution2d.filterHeight = _filterHeight;
@@ -114,7 +128,7 @@ class Convolution2d::Builder {
         convolution2d.hasBias = _hasBias;
         convolution2d.weightsInitializer = _weightsInitializer;
         convolution2d.biasInitializer = _biasInitializer;
-        convolution2d.activation = _activation;
+        convolution2d.activationBuilder = _activationBuilder;
         convolution2d.dropProportion = _dropProportion;
         convolution2d.useBatchNormalization = _useBatchNormalization;
         convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
@@ -131,7 +145,7 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder featureInput(Tensor _featureInput) {
+    virtual Convolution2d::Builder &featureInput(Tensor _featureInput) {
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
@@ -140,51 +154,51 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder numOutputChannels(uint32_t _numOutputChannels) {
+    virtual Convolution2d::Builder &numOutputChannels(uint32_t _numOutputChannels) {
         assert(!this->_numOutputChannels.isPresent());
         this->_numOutputChannels = _numOutputChannels;
         return *this;
     }
 
-    virtual Convolution2d::Builder filterHeight(uint32_t _filterHeight) {
+    virtual Convolution2d::Builder &filterHeight(uint32_t _filterHeight) {
         assert(!this->_filterHeight.isPresent());
         this->_filterHeight = _filterHeight;
         return *this;
     }
 
-    virtual Convolution2d::Builder filterWidth(uint32_t _filterWidth) {
+    virtual Convolution2d::Builder &filterWidth(uint32_t _filterWidth) {
         assert(!this->_filterWidth.isPresent());
         this->_filterWidth = _filterWidth;
         return *this;
     }
 
-    virtual Convolution2d::Builder verticalStride(uint32_t _verticalStride) {
+    virtual Convolution2d::Builder &verticalStride(uint32_t _verticalStride) {
         assert(!this->_verticalStride.isPresent());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
-    virtual Convolution2d::Builder horizontalStride(uint32_t _horizontalStride) {
+    virtual Convolution2d::Builder &horizontalStride(uint32_t _horizontalStride) {
         assert(!this->_horizontalStride.isPresent());
         this->_horizontalStride = _horizontalStride;
         return *this;
     }
 
-    virtual Convolution2d::Builder verticalPadding(uint32_t _verticalPadding) {
+    virtual Convolution2d::Builder &verticalPadding(uint32_t _verticalPadding) {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
         this->_verticalPadding = _verticalPadding;
         return *this;
     }
 
-    virtual Convolution2d::Builder horizontalPadding(uint32_t _horizontalPadding) {
+    virtual Convolution2d::Builder &horizontalPadding(uint32_t _horizontalPadding) {
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = _horizontalPadding;
         return *this;
     }
 
-    virtual Convolution2d::Builder samePadding() {
+    virtual Convolution2d::Builder &samePadding() {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
@@ -196,7 +210,7 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder verticalSamePadding() {
+    virtual Convolution2d::Builder &verticalSamePadding() {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
         this->_verticalPadding = 0;
@@ -204,7 +218,7 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder horizontalSamePadding() {
+    virtual Convolution2d::Builder &horizontalSamePadding() {
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeHorizontalSamePadding.isPresent());
         this->_horizontalPadding = 0;
@@ -212,7 +226,7 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder noPadding() {
+    virtual Convolution2d::Builder &noPadding() {
         assert(!this->_verticalPadding.isPresent());
         assert(!this->_horizontalPadding.isPresent());
         assert(!this->_computeVerticalSamePadding.isPresent());
@@ -222,41 +236,41 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder hasBias(bool _hasBias) {
+    virtual Convolution2d::Builder &hasBias(bool _hasBias) {
         assert(!this->_hasBias.isPresent());
         this->_hasBias = _hasBias;
         return *this;
     }
 
-    virtual Convolution2d::Builder weightsInitializer(Initializer _weightsInitializer) {
+    virtual Convolution2d::Builder &weightsInitializer(Initializer _weightsInitializer) {
         assert(!this->_weightsInitializer.isPresent());
         this->_weightsInitializer = _weightsInitializer;
         return *this;
     }
 
-    virtual Convolution2d::Builder biasInitializer(Initializer _biasInitializer) {
+    virtual Convolution2d::Builder &biasInitializer(Initializer _biasInitializer) {
         assert(!this->_biasInitializer.isPresent());
         this->_biasInitializer = _biasInitializer;
         return *this;
     }
 
     // Adds an activation layer after this Convolution2d layer
-    virtual Convolution2d::Builder activation(Optional<Activation> _activation) {
-        assert(!this->_activation.isPresent());
+    virtual Convolution2d::Builder &activationBuilder(Optional<Activation::Builder> _activationBuilder) {
+        assert(!this->_activationBuilder.isPresent());
         assert(!_activationExplicitlyRemoved);
 
-        if (_activation.isEmpty()) {
+        if (_activationBuilder.isEmpty()) {
             _activationExplicitlyRemoved = true;
         } else {
-            this->_activation = _activation.get();
+            this->_activationBuilder = _activationBuilder.get();
         }
         return *this;
     }
 
     // Adds a BatchNormalization layer before this Convolution2d layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
-    virtual Convolution2d::Builder batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                                                      Optional<double> epsilon = Optional<double>::empty()) {
+    virtual Convolution2d::Builder &batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
+                                                       Optional<double> epsilon = Optional<double>::empty()) {
         assert(!_useBatchNormalization.isPresent());
         this->_useBatchNormalization = true;
         this->_batchNormExponentialRunningAverageFactor = exponentialRunningAverageFactor;
@@ -265,7 +279,7 @@ class Convolution2d::Builder {
     }
 
     // Adds a DropOut layer before this Convolution2d layer, but after the BatchNormalization layer when that is also present.
-    virtual Convolution2d::Builder dropOut(float _dropProportion) {
+    virtual Convolution2d::Builder &dropOut(float _dropProportion) {
         assert(!this->_dropProportion.isPresent());
         this->_dropProportion = _dropProportion;
         return *this;
@@ -302,7 +316,7 @@ class Convolution2d::Builder {
     Optional<bool> _hasBias;
     Optional<Initializer> _weightsInitializer;
     Optional<Initializer> _biasInitializer;
-    Optional<Activation> _activation;
+    Optional<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

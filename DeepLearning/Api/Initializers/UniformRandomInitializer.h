@@ -1,12 +1,12 @@
 #pragma once
 
-#include "DeepLearning/Api/Initializers/InitializerBase.h"
+#include "DeepLearning/Api/Initializers/Initializer.h"
 
 #include <assert.h>
 
 namespace Thor {
 
-class UniformRandomInitializer : public InitializerBase {
+class UniformRandomInitializer : public Initializer {
    public:
     virtual ~UniformRandomInitializer() {}
 };

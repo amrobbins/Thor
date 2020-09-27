@@ -106,19 +106,18 @@ class Network {
 
     void createBatchDimensions(vector<uint64_t> &batchDimensions, vector<uint64_t> tensorDimensions, uint32_t batchSize);
 
-    void addSingleLayerToNetwork(shared_ptr<Layer> layer) {
+    void addSingleLayerToNetwork(const Layer *layer) {
         assert(!layer->isMultiLayer());
-        network.insert(layer);
+        network.insert(layer->clone());
     }
 
     // Take a snapshot of layer and add the snapshot to the network
-    void addToNetwork(const Layer *layer) {
+    void addToNetwork(Layer *layer) {
         frozen = false;
-        vector<shared_ptr<Layer>> singleLayers;
-        layer->toSingleLayers(singleLayers);
-        for (uint64_t i = 0; i < singleLayers.size(); ++i) {
-            addSingleLayerToNetwork(singleLayers[i]);
-        }
+        if (layer->isMultiLayer())
+            layer->convertToSingleLayersAndAddToNetwork();
+        else
+            addSingleLayerToNetwork(layer);
     }
 
     class GpuOutOfMemoryError {};

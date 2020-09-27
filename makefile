@@ -36,7 +36,9 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
+                build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
+                build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
                 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
@@ -63,7 +65,9 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest &
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
-ALL_TESTS = build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
+ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
+            build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest \
+            build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
             build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests \
             build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest \
             build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
@@ -379,11 +383,11 @@ build/DeepLearning/Api/Layers/Layer.o: DeepLearning/Api/Layers/Layer.h DeepLearn
 
 build/DeepLearning/Api/Layers/Learning/FullyConnected.o: DeepLearning/Api/Layers/Learning/FullyConnected.h
 	mkdir -p build/DeepLearning/Api/Layers/Learning
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Layer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/FullyConnected.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/FullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/FullyConnected.o
 
 build/DeepLearning/Api/Layers/Learning/Convolution2d.o: DeepLearning/Api/Layers/Learning/Convolution2d.h
 	mkdir -p build/DeepLearning/Api/Layers/Learning
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Layer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Convolution2d.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Convolution2d.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Convolution2d.o
 
 
 
@@ -503,6 +507,14 @@ build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest: build/t
 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Utility/UtilityLayerTests.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Utility
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests test/DeepLearning/Api/Layers/Utility/UtilityLayerTests.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Learning/FullyConnectedTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Learning
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest test/DeepLearning/Api/Layers/Learning/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Learning/Convolution2dTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Learning
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest test/DeepLearning/Api/Layers/Learning/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 

@@ -1,12 +1,12 @@
 #pragma once
 
-#include "DeepLearning/Api/Initializers/InitializerBase.h"
+#include "DeepLearning/Api/Initializers/Initializer.h"
 
 #include <assert.h>
 
 namespace Thor {
 
-class XavierInitializer : public InitializerBase {
+class XavierInitializer : public Initializer {
    public:
     virtual ~XavierInitializer() {}
 };
