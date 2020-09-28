@@ -96,10 +96,9 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     NetworkInput *featureInput =
         new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions());
     NetworkInput *labelsInput = new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP32, labelsIn.getDescriptor().getDimensions());
-    FullyConnected *fullyConnectedLayer =
-        new FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, NUM_CLASSES * FEATURES_PER_CLASS, BATCH_SIZE, true);
+    FullyConnected *fullyConnectedLayer = new FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, true);
     Relu *relu = new Relu();
-    FullyConnected *logitsLayer = new FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, NUM_CLASSES, BATCH_SIZE, true);
+    FullyConnected *logitsLayer = new FullyConnected(NUM_CLASSES, true);
     CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(1.0f);
     NetworkOutput *predictionsOutput = new NetworkOutput(cpuPlacement);
     NetworkOutput *lossOutput = new NetworkOutput(cpuPlacement);

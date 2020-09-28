@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 
 #include <assert.h>
 
@@ -31,8 +32,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+        assert(!isMultiLayer());
+        // FIXME: support shared weights
+        return new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
     }
 
    private:

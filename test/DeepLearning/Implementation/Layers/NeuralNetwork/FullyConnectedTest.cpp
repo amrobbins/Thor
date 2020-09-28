@@ -64,7 +64,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
-        FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
+        FullyConnected *fullyConnectedLayer = new FullyConnected(numOutputFeatures, hasBiases);
         fullyConnectedLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(fullyConnectedLayer);
@@ -366,7 +366,7 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
-        FullyConnected *fullyConnectedLayer = new FullyConnected(numInputFeatures, numOutputFeatures, batchSize, hasBiases);
+        FullyConnected *fullyConnectedLayer = new FullyConnected(numOutputFeatures, hasBiases);
         layers.push_back(fullyConnectedLayer);
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(cpuPlacement));

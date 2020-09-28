@@ -125,11 +125,7 @@ TEST(Convolution2d, Convolution2dWorks) {
                                                               filterVerticalStride,
                                                               leftAndRightPadWidth,
                                                               topAndBottomPadHeight,
-                                                              numInputChannels,
                                                               numOutputChannels,
-                                                              batchSize,
-                                                              numInputColumns,
-                                                              numInputRows,
                                                               hasBias);
         convolution2dLayer->setConstructForInferenceOnly(inferenceOnly);
 
@@ -519,11 +515,7 @@ TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
                                                               filterVerticalStride,
                                                               leftAndRightPadWidth,
                                                               topAndBottomPadHeight,
-                                                              numInputChannels,
                                                               numOutputChannels,
-                                                              batchSize,
-                                                              numInputColumns,
-                                                              numInputRows,
                                                               hasBias);
         layers.push_back(convolution2dLayer);
         layers.push_back(new NoOpLayer());

@@ -68,6 +68,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
     // Now that all implementation layers are present, connect all implementation layers
     // It is done in this order because that is much easier than recursively traversing the network from input to output.
     for (auto it = network.begin(); it != network.end(); ++it) {
+        // FIXME: I think this is where placement gets sent as a parameter. NetworkInput will be a special case that gets batchSize
+        // connectMultiConnectionLayer(input tensor)
+
         // outputLayer[layer->getId()] is the layer that makes the output connection
         // inputLayer[layer->getId()] is the layer on which to connect the input tensor
     }

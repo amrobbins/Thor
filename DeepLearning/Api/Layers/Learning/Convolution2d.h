@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
 
 namespace Thor {
 
@@ -34,8 +35,10 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+        assert(!isMultiLayer());
+        // FIXME: support shared weights
+        return new ThorImplementation::Convolution2d(
+            filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
     }
 
    private:

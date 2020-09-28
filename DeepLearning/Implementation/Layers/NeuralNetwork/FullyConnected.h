@@ -11,24 +11,20 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     virtual ~FullyConnected() {}
 
-    FullyConnected(const uint32_t numInputFeatures, const uint32_t numOutputFeatures, const int batchSize, const bool hasBias)
-        : TrainableWeightsBiasesLayer(hasBias),
-          numInputFeatures(numInputFeatures),
-          numOutputFeatures(numOutputFeatures),
-          batchSize(batchSize) {}
+    FullyConnected(const uint32_t numOutputFeatures, const bool hasBias)
+        : TrainableWeightsBiasesLayer(hasBias), numOutputFeatures(numOutputFeatures) {}
 
-    FullyConnected(SharedWeightsPackage sharedWeightsPackage, const int batchSize)
+    FullyConnected(SharedWeightsPackage sharedWeightsPackage)
         : TrainableWeightsBiasesLayer(sharedWeightsPackage),
-          numInputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[0]),
-          numOutputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[1]),
-          batchSize(batchSize) {}
+          numOutputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[1]) {}
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(!featureInputs.empty());
         assert(featureInputs.back().isPresent());
 
         return Tensor(featureInputs.back().get().getPlacement(),
-                      TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numOutputFeatures));
+                      TensorDescriptor(
+                          TensorDescriptor::DataType::FP16, featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures));
     }
 
     virtual void compile() {
@@ -39,6 +35,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(!streams.empty());
         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
         ScopedGpu scopedGpu(gpuNum);
+
+        batchSize = featureInputs[0].get().getDescriptor().getDimensions()[0];
+        numInputFeatures = featureInputs[0].get().getDescriptor().getDimensions()[1];
 
         CublasMatrixMultiply::instance().chooseOptimalKernel(
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
@@ -340,9 +339,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     static const float BETA_CLEAR;
     static const float BETA_ACCUMULATE;
 
-    const uint32_t numInputFeatures;
+    uint32_t numInputFeatures;
     const uint32_t numOutputFeatures;
-    const int batchSize;
+    int batchSize;
 
     Optional<Tensor> workspaceForward;
     Optional<Tensor> workspaceBackwardData;

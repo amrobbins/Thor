@@ -21,13 +21,6 @@ class NetworkOutput : public Layer {
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
         assert(initialized);
-
-        vector<uint64_t> batchDimensions;
-        batchDimensions.push_back(batchSize);
-        vector<uint64_t> dimensions = featureInput.get().getDimensions();
-        for (uint32_t i = 0; i < dimensions.size(); ++i)
-            batchDimensions.push_back(dimensions[i]);
-
         return new ThorImplementation::NetworkOutput(placement);
     }
 

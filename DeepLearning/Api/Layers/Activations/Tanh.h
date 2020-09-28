@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
+#include "DeepLearning/Implementation/Layers/Activation/Tanh.h"
 
 namespace Thor {
 
@@ -14,9 +15,9 @@ class Tanh : public Activation {
     virtual shared_ptr<Layer> clone() const { return make_shared<Tanh>(*this); }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
+        assert(initialized);
+        return new ThorImplementation::Tanh();
     }
 };
 
