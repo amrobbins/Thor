@@ -149,8 +149,6 @@ Network buildAlexNet() {
 
     assert(latestOutputTensor.getDimensions() == {256, 6, 6});
 
-    // FIXME: auto flatten
-
     // Input tensor is automatically flattened when sent to a fully connected layer.
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
@@ -160,6 +158,8 @@ Network buildAlexNet() {
                              .dropOut(0.5)
                              .build()
                              .getFeatureOutput();
+
+    assert(latestOutputTensor.getDimensions() == {4096});
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
@@ -177,6 +177,8 @@ Network buildAlexNet() {
                              .hasBias(true)
                              .build()
                              .getFeatureOutput();
+
+    assert(latestOutputTensor.getDimensions() == {1000});
 
     Tensor labelsTensor =
         NetworkInput::Builder().network(alexNet).dimensions({1000}).dataType(Tensor::DataType::FP32).build().getFeatureOutput();
