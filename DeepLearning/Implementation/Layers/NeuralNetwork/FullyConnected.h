@@ -137,6 +137,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                 cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numOutputFeatures, 1, 1);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
+            /*
             if (!isInferenceOnly()) {
                 reduceDescriptor = cudnnReduceTensorDescriptor_t();
                 cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceDescriptor.get());
@@ -155,11 +156,13 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                              featureOutputDescriptor,
                                                              biasesDescriptor,
                                                              &reduceWorkspaceSizeInBytes);
+
                 assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
                 if (reduceWorkspaceSizeInBytes > 0)
                     workspaceBackwardBias = Tensor(featureInputs.front().get().getPlacement(),
                                                    TensorDescriptor(TensorDescriptor::DataType::UINT8, {reduceWorkspaceSizeInBytes}));
             }
+            */
         }
     }
 
@@ -346,7 +349,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     Optional<Tensor> workspaceForward;
     Optional<Tensor> workspaceBackwardData;
     Optional<Tensor> workspaceBackwardWeights;
-    Optional<Tensor> workspaceBackwardBias;
+    // Optional<Tensor> workspaceBackwardBias;
 
     Optional<cudnnTensorDescriptor_t> biasesDescriptor;
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;

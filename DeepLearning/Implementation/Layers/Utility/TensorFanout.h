@@ -10,10 +10,10 @@ class TensorFanout : public MultiConnectionLayer {
    public:
     virtual ~TensorFanout() {}
 
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         streams.emplace_back(streams[0].getGpuNum());
-        errorInputs.push_back(
-            nextLayer->connectToPreviousLayer(this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn(), connectionType));
+        errorInputs.push_back(nextLayer->connectToPreviousLayer(
+            this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn(), loaderConnectionType));
         nextLayers.push_back(nextLayer);
     }
 

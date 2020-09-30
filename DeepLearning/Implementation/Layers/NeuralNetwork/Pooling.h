@@ -15,10 +15,6 @@ class Pooling : public Layer {
             int windowWidth,
             int verticalStride,
             int horizontalStride,
-            int batchSize,
-            int numFeatures,
-            int inputHeight,
-            int inputWidth,
             int verticalPadding,
             int horizontalPadding)
         : poolingType(poolingType),
@@ -26,10 +22,6 @@ class Pooling : public Layer {
           windowWidth(windowWidth),
           verticalStride(verticalStride),
           horizontalStride(horizontalStride),
-          batchSize(batchSize),
-          numFeatures(numFeatures),
-          inputHeight(inputHeight),
-          inputWidth(inputWidth),
           verticalPadding(verticalPadding),
           horizontalPadding(horizontalPadding) {
         assert(poolingType == Type::MAX || poolingType == Type::AVERAGE);
@@ -37,15 +29,6 @@ class Pooling : public Layer {
         assert(windowWidth > 0);
         assert(verticalStride > 0);
         assert(horizontalStride > 0);
-        assert(batchSize > 0);
-        assert(numFeatures > 0);
-        assert(inputHeight > 0);
-        assert(inputWidth > 0);
-        assert(inputHeight >= windowHeight);
-        assert(inputWidth >= windowWidth);
-
-        outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
-        outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
     }
 
     virtual void compile() {
@@ -57,10 +40,19 @@ class Pooling : public Layer {
         // Dimensions are NCHW
         vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
         assert(inputDimensions.size() == 4);
-        assert(inputDimensions[0] == (uint32_t)batchSize);
-        assert(inputDimensions[1] == (uint32_t)numFeatures);
-        assert(inputDimensions[2] == (uint32_t)inputHeight);
-        assert(inputDimensions[3] == (uint32_t)inputWidth);
+        batchSize = inputDimensions[0];
+        numFeatures = inputDimensions[1];
+        inputHeight = inputDimensions[2];
+        inputWidth = inputDimensions[3];
+        assert(batchSize > 0);
+        assert(numFeatures > 0);
+        assert(inputHeight > 0);
+        assert(inputWidth > 0);
+        assert(inputHeight >= windowHeight);
+        assert(inputWidth >= windowWidth);
+        outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
+        outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
+
         vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
         assert(outputDimensions.size() == 4);
         assert(outputDimensions[0] == (uint32_t)batchSize);
@@ -102,6 +94,22 @@ class Pooling : public Layer {
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
+
+        vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        assert(inputDimensions.size() == 4);
+        batchSize = inputDimensions[0];
+        numFeatures = inputDimensions[1];
+        inputHeight = inputDimensions[2];
+        inputWidth = inputDimensions[3];
+        assert(batchSize > 0);
+        assert(numFeatures > 0);
+        assert(inputHeight > 0);
+        assert(inputWidth > 0);
+        assert(inputHeight >= windowHeight);
+        assert(inputWidth >= windowWidth);
+        outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
+        outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
+
         vector<unsigned long> featureOutputDimensions;
         featureOutputDimensions.push_back(batchSize);
         featureOutputDimensions.push_back(numFeatures);

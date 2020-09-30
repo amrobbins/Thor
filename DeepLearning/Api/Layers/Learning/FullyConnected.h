@@ -31,10 +31,16 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual void convertToSingleLayersAndAddToNetwork();
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        assert(!isMultiLayer());
-        // FIXME: support shared weights
-        return new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+        assert(connectingApiTensor == getFeatureInput());
+
+        ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
+        Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
+        return fullyConnected;
     }
 
    private:
@@ -50,6 +56,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     bool useBatchNormalization;
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
+
+    friend class Network;
 };
 
 // featureInput and numOutputFeatures are required, all other parameters are optional.
@@ -141,24 +149,19 @@ class FullyConnected::Builder {
     virtual FullyConnected::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
         assert(!this->_activationBuilder);
         assert(!_activationExplicitlyRemoved);
-
-        // FIXME: is there a better solution so that I don't have to know in advance every type of activation?
-        // maybe not?
-        // https://stackoverflow.com/questions/55084135/is-it-possible-to-automatically-cast-to-most-derived-type#:~:text=C%2B%2B%20Is%20it%20possible%20to,need%20is%20a%20virtual%20function.
-        // The issue is that I want to own the memory of the object and so I need to instantiate the object, therefore I need to know what
-        // type of object to instantiate. so what I need is:
-        //  this->_activationBuilder =
-        //  make_shared<derivedTypeOf(_activationBuilder)>(*dynamic_cast<derivedTypeOf(_activationBuilder)*>(&_activationBuilder));
-
-        if (dynamic_cast<Relu::Builder *>(&_activationBuilder)) {
-            this->_activationBuilder = make_shared<Relu::Builder>(*dynamic_cast<Relu::Builder *>(&_activationBuilder));
-        } else if (dynamic_cast<Tanh::Builder *>(&_activationBuilder)) {
-            this->_activationBuilder = make_shared<Tanh::Builder>(*dynamic_cast<Tanh::Builder *>(&_activationBuilder));
-        } else {
-            assert(false);
-        }
-
+        this->_activationBuilder = _activationBuilder.clone();
         return *this;
+        /*
+                if (dynamic_cast<Relu::Builder *>(&_activationBuilder)) {
+                    this->_activationBuilder = make_shared<Relu::Builder>(*dynamic_cast<Relu::Builder *>(&_activationBuilder));
+                } else if (dynamic_cast<Tanh::Builder *>(&_activationBuilder)) {
+                    this->_activationBuilder = make_shared<Tanh::Builder>(*dynamic_cast<Tanh::Builder *>(&_activationBuilder));
+                } else {
+                    assert(false);
+                }
+
+                return *this;
+        */
     }
 
     virtual FullyConnected::Builder &noActivation() {
@@ -167,6 +170,9 @@ class FullyConnected::Builder {
         _activationExplicitlyRemoved = true;
         return *this;
     }
+
+    // FIXME: batchNormalization and dropOut should be passed as builders. To support this Layer::Builder will need to be created with
+    // virtual shared_ptr<Layer::Builder> clone.
 
     // Adds a BatchNormalization layer before this FullyConnected layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.

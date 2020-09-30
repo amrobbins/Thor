@@ -109,8 +109,8 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     LayerTestHelper::connectTwoLayers(featureInput, fullyConnectedLayer);
     LayerTestHelper::connectTwoLayers(fullyConnectedLayer, relu);
     LayerTestHelper::connectTwoLayers(relu, logitsLayer);
-    LayerTestHelper::connectTwoLayers(logitsLayer, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::FORWARD_BACKWARD);
-    LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::LABELS);
+    LayerTestHelper::connectTwoLayers(logitsLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+    LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
     LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, predictionsOutput, (int)Loss::ConnectionType::PREDICTIONS);
     LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::LOSS);
 

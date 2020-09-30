@@ -238,7 +238,7 @@ class Split : public MultiConnectionLayer {
         stridePerPackedTensorDimension_d = nullptr;
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         assert(!running);
         assert(featureInputs.size() == 1);
 
@@ -253,7 +253,7 @@ class Split : public MultiConnectionLayer {
         if (connection != 0)
             streams.emplace_back(placement.getDeviceNum());
         errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
-            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn(), connectionType));
+            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn(), loaderConnectionType));
 
         assert(errorInputs.back().isPresent());
         assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());

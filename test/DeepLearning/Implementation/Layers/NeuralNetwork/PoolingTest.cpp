@@ -181,17 +181,8 @@ TEST(Pooling, MaxPoolingWorks) {
 
         layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
-        Pooling *poolingLayer = new Pooling(Pooling::Type::MAX,
-                                            windowHeight,
-                                            windowWidth,
-                                            verticalStride,
-                                            horizontalStride,
-                                            batchSize,
-                                            numFeatures,
-                                            inputHeight,
-                                            inputWidth,
-                                            verticalPadding,
-                                            horizontalPadding);
+        Pooling *poolingLayer = new Pooling(
+            Pooling::Type::MAX, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
         poolingLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(poolingLayer);
@@ -294,17 +285,8 @@ TEST(Pooling, AveragePoolingWorks) {
 
         layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(new NoOpLayer());
-        Pooling *poolingLayer = new Pooling(Pooling::Type::AVERAGE,
-                                            windowHeight,
-                                            windowWidth,
-                                            verticalStride,
-                                            horizontalStride,
-                                            batchSize,
-                                            numFeatures,
-                                            inputHeight,
-                                            inputWidth,
-                                            verticalPadding,
-                                            horizontalPadding);
+        Pooling *poolingLayer = new Pooling(
+            Pooling::Type::AVERAGE, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
         poolingLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(poolingLayer);

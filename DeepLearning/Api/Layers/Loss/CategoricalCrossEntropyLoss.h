@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
+#include "DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLoss.h"
 
 namespace Thor {
 
@@ -16,9 +17,17 @@ class CategoricalCrossEntropyLoss : public Loss {
     Optional<float> getLossScalingFactor() { return lossScalingFactor; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+        assert(connectingApiTensor == getFeatureInput());
+
+        ThorImplementation::CategoricalCrossEntropyLoss *categoricalCrossEntropy =
+            new ThorImplementation::CategoricalCrossEntropyLoss(lossScalingFactor);
+        Thor::Layer::connectTwoLayers(drivingLayer, categoricalCrossEntropy, drivingApiLayer, this, connectingApiTensor);
+        return categoricalCrossEntropy;
     }
 
    private:

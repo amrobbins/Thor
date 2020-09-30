@@ -13,6 +13,8 @@ namespace Thor {
 
 class Activation : public Layer {
    public:
+    class Builder;
+
     Activation() {}
     virtual ~Activation() {}
 
@@ -20,16 +22,17 @@ class Activation : public Layer {
 
     virtual shared_ptr<Activation> cloneReconnectAndAddToNetwork(Tensor newFeatureInput, Network &network) { assert(false); }
 
-    class Builder {
-       public:
-        virtual ~Builder() {}
-        virtual void network(Network &network) { assert(false); }
-        virtual void featureInput(Tensor featureInput) { assert(false); }
-        virtual shared_ptr<Layer> build() { assert(false); }
-    };
-
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const { assert(false); }
+};
+
+class Activation::Builder {
+   public:
+    virtual ~Builder() {}
+    virtual void network(Network &network) { assert(false); }
+    virtual void featureInput(Tensor featureInput) { assert(false); }
+    virtual shared_ptr<Layer> build() { assert(false); }
+    virtual shared_ptr<Builder> clone() { assert(false); }
 };
 
 }  // namespace Thor

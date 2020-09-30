@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
 
 namespace Thor {
 
@@ -17,14 +18,23 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual Optional<double> getEpsilon() { return epsilon; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+
+        ThorImplementation::BatchNormalization *batchNormalization =
+            new ThorImplementation::BatchNormalization(true, exponentialRunningAverageFactor, epsilon);
+        Thor::Layer::connectTwoLayers(drivingLayer, batchNormalization, drivingApiLayer, this, connectingApiTensor);
+        return batchNormalization;
     }
 
    private:
     Optional<double> exponentialRunningAverageFactor;
     Optional<double> epsilon;
+
+    // friend class Network;
 };
 
 class BatchNormalization::Builder {

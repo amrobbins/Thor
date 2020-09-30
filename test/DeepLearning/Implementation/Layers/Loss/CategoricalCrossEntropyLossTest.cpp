@@ -90,8 +90,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectResult) {
         activationsGpu.copyFromAsync(activationsCpu, stream);
 
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
-        LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::FORWARD_BACKWARD);
-        LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, (int)Loss::ConnectionType::LABELS);
+        LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+        LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
         LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, predictionsOutput, (int)Loss::ConnectionType::PREDICTIONS);
         LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::LOSS);
         LayerTestHelper::initializeNetwork(layers);

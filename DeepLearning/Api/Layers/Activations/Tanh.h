@@ -15,10 +15,19 @@ class Tanh : public Activation {
     virtual shared_ptr<Layer> clone() const { return make_shared<Tanh>(*this); }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
         assert(initialized);
-        return new ThorImplementation::Tanh();
+        assert(connectingApiTensor == featureInput.get());
+
+        ThorImplementation::Tanh *tanh = new ThorImplementation::Tanh();
+        Thor::Layer::connectTwoLayers(drivingLayer, tanh, drivingApiLayer, this, connectingApiTensor);
+        return tanh;
     }
+
+    // friend class Network;
 };
 
 class Tanh::Builder : public Activation::Builder {
@@ -41,6 +50,8 @@ class Tanh::Builder : public Activation::Builder {
         assert(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
     }
+
+    virtual shared_ptr<Activation::Builder> clone() { return make_shared<Tanh::Builder>(*this); }
 
    private:
     Optional<Network *> _network;

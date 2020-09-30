@@ -21,19 +21,36 @@ class Pooling : public Layer {
     uint32_t getVerticalPadding() { return verticalPadding; }
     uint32_t getHorizontalPadding() { return horizontalPadding; }
 
+    enum class Type { AVERAGE = 3, MAX };
+
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+        assert(connectingApiTensor == getFeatureInput());
+
+        ThorImplementation::Pooling::Type implementationPoolingType;
+        implementationPoolingType =
+            type == Type::AVERAGE ? ThorImplementation::Pooling::Type::AVERAGE : ThorImplementation::Pooling::Type::MAX;
+
+        ThorImplementation::Pooling *pooling = new ThorImplementation::Pooling(
+            implementationPoolingType, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
+        Thor::Layer::connectTwoLayers(drivingLayer, pooling, drivingApiLayer, this, connectingApiTensor);
+        return pooling;
     }
 
    private:
+    Type type;
     uint32_t windowHeight;
     uint32_t windowWidth;
     uint32_t verticalStride;
     uint32_t horizontalStride;
     uint32_t verticalPadding;
     uint32_t horizontalPadding;
+
+    // friend class Network;
 };
 
 // featureInput, windowHeight and windowWidth are required, all other parameters are optional.
@@ -42,6 +59,7 @@ class Pooling::Builder {
     virtual Pooling build() {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
+        assert(_type.isPresent());
         assert(_featureInput.get().getDimensions().size() == 3);
         assert(_windowHeight.isPresent());
         assert(_windowWidth.isPresent());
@@ -62,6 +80,7 @@ class Pooling::Builder {
         Pooling pooling;
 
         pooling.featureInput = _featureInput;
+        pooling.type = _type;
         pooling.windowHeight = _windowHeight;
         pooling.windowWidth = _windowWidth;
         pooling.verticalStride = _verticalStride;
@@ -98,6 +117,12 @@ class Pooling::Builder {
     virtual Pooling::Builder &featureInput(Tensor _featureInput) {
         assert(!this->_featureInput.isPresent());
         this->_featureInput = _featureInput;
+        return *this;
+    }
+
+    virtual Pooling::Builder &type(Pooling::Type _type) {
+        assert(_type == Pooling::Type::AVERAGE || _type == Pooling::Type::MAX);
+        this->_type = _type;
         return *this;
     }
 
@@ -196,6 +221,7 @@ class Pooling::Builder {
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
+    Optional<Pooling::Type> _type;
     Optional<uint32_t> _windowHeight;
     Optional<uint32_t> _windowWidth;
     Optional<uint32_t> _verticalStride;

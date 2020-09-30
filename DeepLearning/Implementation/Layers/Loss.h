@@ -89,17 +89,17 @@ class Loss : public Layer {
 
     // The output of this layer is the normalized predictions, per batch item per classification class
     // (i.e. softmax applied to the input predictions)
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType) {
-        if (connectionType == (int)ConnectionType::PREDICTIONS) {
-            connectToPredictionOutputLayer(nextLayer);
-        } else if (connectionType == (int)ConnectionType::LOSS) {
-            connectToLossOutputLayer(nextLayer);
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType, int loaderConnectionType = 0) {
+        if (driverConnectionType == (int)ConnectionType::PREDICTIONS) {
+            connectToPredictionOutputLayer(nextLayer, loaderConnectionType);
+        } else if (driverConnectionType == (int)ConnectionType::LOSS) {
+            connectToLossOutputLayer(nextLayer, loaderConnectionType);
         } else {
             assert(false);
         }
     }
 
-    virtual void connectToPredictionOutputLayer(Layer *predictionsOutputLayer) {
+    virtual void connectToPredictionOutputLayer(Layer *predictionsOutputLayer, int loaderConnectionType) {
         assert(!compiled);
         assert(this->nextLayer.isEmpty());
         assert(featureOutput.isEmpty());
@@ -111,12 +111,13 @@ class Loss : public Layer {
         // Inputs to a layer must all be connected before any outputs of a layer are connected, so that the layer knows how to create the
         // outputs. Backpropagation does require lables to compute. So when labelsStream is present, use it so that offloading predictions
         // does not delay backpropagation, otherwise use the data stream.
-        predictionsOutputLayer->connectToPreviousLayer(this, featureOutput, labelsStream.isPresent() ? labelsStream.get() : stream, false);
+        predictionsOutputLayer->connectToPreviousLayer(
+            this, featureOutput, labelsStream.isPresent() ? labelsStream.get() : stream, false, loaderConnectionType);
 
         ensureNoDeviceCrossing();
     }
 
-    virtual void connectToLossOutputLayer(Layer *lossOutputLayer) {
+    virtual void connectToLossOutputLayer(Layer *lossOutputLayer, int loaderConnectionType) {
         assert(!compiled);
         assert(this->lossOutputLayer.isEmpty());
         assert(featureInput.isPresent());
@@ -129,7 +130,7 @@ class Loss : public Layer {
         uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
         lossOutput = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
 
-        lossOutputLayer->connectToPreviousLayer(this, lossOutput, labelsStream, false);
+        lossOutputLayer->connectToPreviousLayer(this, lossOutput, labelsStream, false, loaderConnectionType);
 
         ensureNoDeviceCrossing();
     }
@@ -211,6 +212,9 @@ class Loss : public Layer {
                 assert(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
     }
+
+    virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
+    virtual Optional<Tensor> getLossOutput() { return lossOutput; }
 
     virtual void computeLoss(Tensor labels, Tensor normalizedPredictionsOut, Tensor loss, Stream stream) = 0;
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) = 0;

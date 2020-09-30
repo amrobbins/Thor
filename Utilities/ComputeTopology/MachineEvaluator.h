@@ -77,6 +77,7 @@ class MachineEvaluator {
     unsigned int getNumMultiProcessors();
 
     unsigned long getTotalGlobalMemBytes(int gpuNum);
+    unsigned long getFreeMemBytes(int gpuNum);
 
     // returns the previously active device
     static int swapActiveDevice(int newGpuNum);

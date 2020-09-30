@@ -34,11 +34,17 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder; }
     virtual void convertToSingleLayersAndAddToNetwork();
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        assert(!isMultiLayer());
-        // FIXME: support shared weights
-        return new ThorImplementation::Convolution2d(
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+        assert(connectingApiTensor == getFeatureInput());
+
+        ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
+        Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
+        return convolution2d;
     }
 
    private:

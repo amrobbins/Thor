@@ -19,6 +19,20 @@ class Relu : public Activation {
         assert(initialized);
         return new ThorImplementation::Relu();
     }
+
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+        assert(connectingApiTensor == featureInput.get());
+
+        ThorImplementation::Relu *relu = new ThorImplementation::Relu();
+        Thor::Layer::connectTwoLayers(drivingLayer, relu, drivingApiLayer, this, connectingApiTensor);
+        return relu;
+    }
+
+    // friend class Network;
 };
 
 class Relu::Builder : public Activation::Builder {
@@ -41,6 +55,8 @@ class Relu::Builder : public Activation::Builder {
         assert(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
     }
+
+    virtual shared_ptr<Activation::Builder> clone() { return make_shared<Relu::Builder>(*this); }
 
    private:
     Optional<Network *> _network;

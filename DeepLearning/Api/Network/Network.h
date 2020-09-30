@@ -20,9 +20,14 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <assert.h>
+#include <deque>
 #include <set>
+#include <utility>
 #include <vector>
 
+using std::deque;
+using std::make_pair;
+using std::pair;
 using std::set;
 using std::vector;
 
@@ -35,22 +40,42 @@ class StampedNetwork {
     vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
     vector<ThorImplementation::Layer *> otherLayers;
 
+    map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
+    map<const Thor::Layer *, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
+    map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
+
     void clear() {
-        for (uint32_t i = 0; i < inputs.size(); ++i)
+        for (uint32_t i = 0; i < inputs.size(); ++i) {
+            inputs[i]->parentCleanup();
+            inputs[i]->cleanup();
             delete inputs[i];
+        }
         inputs.clear();
 
-        for (uint32_t i = 0; i < outputs.size(); ++i)
+        for (uint32_t i = 0; i < outputs.size(); ++i) {
+            outputs[i]->parentCleanup();
+            outputs[i]->cleanup();
             delete outputs[i];
+        }
         outputs.clear();
 
-        for (uint32_t i = 0; i < trainableLayers.size(); ++i)
+        for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+            trainableLayers[i]->parentCleanup();
+            trainableLayers[i]->cleanup();
             delete trainableLayers[i];
+        }
         trainableLayers.clear();
 
-        for (uint32_t i = 0; i < otherLayers.size(); ++i)
+        for (uint32_t i = 0; i < otherLayers.size(); ++i) {
+            otherLayers[i]->parentCleanup();
+            otherLayers[i]->cleanup();
             delete otherLayers[i];
+        }
         otherLayers.clear();
+
+        apiTensorToPhysicalDrivingLayer.clear();
+        apiLayerToPhysicalLayer.clear();
+        apiTensorToApiDrivingLayer.clear();
     }
 };
 
@@ -67,42 +92,46 @@ class Network {
     Network() : frozen(false) {}
     virtual ~Network() {}
 
-    StatusCode create();
-
    protected:
     set<shared_ptr<Layer>> network;
-    set<uint32_t> allTensors;
-    map<uint32_t, vector<uint32_t>> tensorToLoadingLayers;
-    map<uint32_t, uint32_t> tensorToDrivingLayer;
-    // Api layerId to implementation layer:
-    map<uint32_t, ThorImplementation::Layer *> inputLayer;
-    map<uint32_t, ThorImplementation::Layer *> outputLayer;
-    map<uint32_t, ThorImplementation::Layer *> outputLossLayer;
+    vector<pair<Optional<Tensor>, Layer *>> orderedNetwork;
 
-    void computeMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
+    set<Tensor> allTensors;
+    map<Tensor, vector<Layer *>> apiTensorToApiLoadingLayers;
+    map<Tensor, Layer *> apiTensorToApiDrivingLayer;
+    // Api layerId to implementation layer:
+    // map<uint64_t, ThorImplementation::Layer *> inputLayer;
+    // map<uint64_t, ThorImplementation::Layer *> outputLayer;
+    // map<uint64_t, ThorImplementation::Layer *> outputLossLayer;
+
+    void computeFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
+    void computeNonFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
     StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
+
+    uint64_t firstInstanceFixedBytes;
+    uint64_t firstInstancePerBatchItemBytes;
+    uint64_t nonFirstInstanceFixedBytes;
+    uint64_t nonFirstInstancePerBatchItemBytes;
 
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForFloatingInputs();
     virtual StatusCode checkForDanglingOutputs();
+    virtual void topologicalSort();
 
     virtual void stampNetworkInput(const Thor::NetworkInput *networkInput,
                                    uint32_t gpuNum,
                                    uint32_t batchSize,
                                    ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual void stampNetworkOutput(const Thor::NetworkOutput *networkOutput,
+    virtual void stampNetworkOutput(Tensor inputTensor,
+                                    const Thor::NetworkOutput *networkOutput,
                                     uint32_t gpuNum,
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual void stampLoss(const Thor::Loss *loss, uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual void stampMultiConnectionLayer(const Thor::MultiConnectionLayer *multiConnectionLayer,
-                                           uint32_t gpuNum,
-                                           uint32_t batchSize,
-                                           ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual void stampBaseLayer(const Thor::Layer *layer,
-                                uint32_t gpuNum,
-                                uint32_t batchSize,
-                                ThorImplementation::StampedNetwork &stampedNetwork);
+    virtual void stampLayer(Tensor inputTensor,
+                            const Thor::Layer *layer,
+                            uint32_t gpuNum,
+                            uint32_t batchSize,
+                            ThorImplementation::StampedNetwork &stampedNetwork);
 
     void createBatchDimensions(vector<uint64_t> &batchDimensions, vector<uint64_t> tensorDimensions, uint32_t batchSize);
 
