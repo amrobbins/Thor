@@ -17,7 +17,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
     Network network;
 
     vector<uint64_t> dimensions;
-    int numDimensions = 1;
+    int numDimensions = 2;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(1 + (rand() % 1000));
 
@@ -92,7 +92,7 @@ TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     Network network;
 
     vector<uint64_t> dimensions;
-    int numDimensions = 1;
+    int numDimensions = 2;
     for (int i = 0; i < numDimensions; ++i)
         dimensions.push_back(1 + (rand() % 1000));
 

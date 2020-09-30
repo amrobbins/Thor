@@ -10,7 +10,9 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
+#include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
 
 #include <assert.h>
 
@@ -112,7 +114,7 @@ class FullyConnected::Builder {
     }
 
     virtual FullyConnected::Builder &featureInput(Tensor _featureInput) {
-        assert(_featureInput.getDimensions().size() == 1);
+        assert(_featureInput.getDimensions().size() == 2);
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());

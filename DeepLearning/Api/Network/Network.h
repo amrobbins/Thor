@@ -92,6 +92,9 @@ class Network {
     Network() : frozen(false) {}
     virtual ~Network() {}
 
+    // Figure this out. Want to add a subnetwork into the larger network, but how to connect subnetwork inputs and outputs?
+    void addSubnetwork(Network subnetwork) { assert(false); }
+
    protected:
     set<shared_ptr<Layer>> network;
     vector<pair<Optional<Tensor>, Layer *>> orderedNetwork;

@@ -48,20 +48,20 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 
         // All layers are connected, so now they can all be compiled
         for (uint32_t i = 0; i < stampedNetwork.inputs.size(); ++i) {
-            stampedNetwork.inputs[i]->compile();
             stampedNetwork.inputs[i]->parentCompile();
+            stampedNetwork.inputs[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.outputs.size(); ++i) {
-            stampedNetwork.outputs[i]->compile();
             stampedNetwork.outputs[i]->parentCompile();
+            stampedNetwork.outputs[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
-            stampedNetwork.trainableLayers[i]->compile();
             stampedNetwork.trainableLayers[i]->parentCompile();
+            stampedNetwork.trainableLayers[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
-            stampedNetwork.otherLayers[i]->compile();
             stampedNetwork.otherLayers[i]->parentCompile();
+            stampedNetwork.otherLayers[i]->compile();
         }
 
     } catch (GpuOutOfMemoryError ex) {
@@ -287,7 +287,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
 
     // Stamp type converter if needed
     ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
-    if (networkInput->getDataType() == Tensor::DataType::FP32) {
+    if (networkInput->getDataType() != Tensor::DataType::FP16) {
         implementationTypeConversion = new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP16);
         implementationNetworkInput->connectToNextLayer(implementationTypeConversion);
         outputLayer = implementationTypeConversion;
@@ -366,7 +366,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     }
 
     // Stamp type converter if needed
-    if (networkOutput->getDataType() == Tensor::DataType::FP32) {
+    if (networkOutput->getDataType() != Tensor::DataType::FP16) {
         ThorImplementation::TypeConversion *implementationTypeConversion =
             new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP32);
         Thor::Layer::connectTwoLayers(physicalDrivingLayer, implementationTypeConversion, apiDrivingLayer, nullptr, inputTensor);

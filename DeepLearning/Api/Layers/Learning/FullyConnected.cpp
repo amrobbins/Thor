@@ -27,13 +27,22 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         currentFeatureInputs.push_back(featureInputs[i]);
 
+    // Flatten to 2 dimensions {batchSize, numInputFeatures} if not already a 2d tensor.
+    vector<uint64_t> featureInputDimensions = featureInputs.front().getDimensions();
+    assert(featureInputDimensions.size() >= 2);
+    if (featureInputDimensions.size() > 2) {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            Flatten flatten = Flatten::Builder().network(*network).featureInput(currentFeatureInputs[i]).numOutputDimensions(2).build();
+            currentFeatureInputs[i] = flatten.getFeatureOutput();
+        }
+    }
+
     if (useBatchNormalization) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             batchNormBuilder.featureInput(currentFeatureInputs[i]);
         }
         BatchNormalization batchNormalization = batchNormBuilder.build();
-        for (uint32_t i = 0; i < featureInputs.size(); ++i)
-            currentFeatureInputs[i] = batchNormalization.getFeatureOutputs()[i];
+        currentFeatureInputs = batchNormalization.getFeatureOutputs();
     }
 
     if (dropProportion > 0.0f) {
@@ -47,8 +56,7 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
     FullyConnected fullyConnected = fullyConnectedBuilder.build();
-    for (uint32_t i = 0; i < featureInputs.size(); ++i)
-        currentFeatureInputs[i] = fullyConnected.getFeatureOutputs()[i];
+    currentFeatureInputs = fullyConnected.getFeatureOutputs();
 
     if (activationBuilder) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
