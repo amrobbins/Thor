@@ -114,7 +114,7 @@ class FullyConnected::Builder {
     }
 
     virtual FullyConnected::Builder &featureInput(Tensor _featureInput) {
-        assert(_featureInput.getDimensions().size() == 2);
+        assert(_featureInput.getDimensions().size() == 1);
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());

@@ -159,6 +159,8 @@ Network buildAlexNet() {
                              .build()
                              .getFeatureOutput();
 
+    assert(latestOutputTensor.getDimensions() == {4096});
+
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
                              .featureInput(latestOutputTensor)
@@ -175,6 +177,8 @@ Network buildAlexNet() {
                              .hasBias(true)
                              .build()
                              .getFeatureOutput();
+
+    assert(latestOutputTensor.getDimensions() == {1000});
 
     Tensor labelsTensor =
         NetworkInput::Builder().network(alexNet).dimensions({1000}).dataType(Tensor::DataType::FP32).build().getFeatureOutput();

@@ -29,10 +29,10 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
 
     // Flatten to 2 dimensions {batchSize, numInputFeatures} if not already a 2d tensor.
     vector<uint64_t> featureInputDimensions = featureInputs.front().getDimensions();
-    assert(featureInputDimensions.size() >= 2);
-    if (featureInputDimensions.size() > 2) {
+    assert(featureInputDimensions.size() >= 1);
+    if (featureInputDimensions.size() > 1) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            Flatten flatten = Flatten::Builder().network(*network).featureInput(currentFeatureInputs[i]).numOutputDimensions(2).build();
+            Flatten flatten = Flatten::Builder().network(*network).featureInput(currentFeatureInputs[i]).numOutputDimensions(1).build();
             currentFeatureInputs[i] = flatten.getFeatureOutput();
         }
     }
