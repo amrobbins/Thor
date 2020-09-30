@@ -26,8 +26,12 @@ class NetworkInput : public Layer {
         ThorImplementation::TensorDescriptor::DataType implementationDataType;
         if (dataType == Tensor::DataType::FP32)
             implementationDataType = ThorImplementation::TensorDescriptor::DataType::FP32;
-        else
+        else if (dataType == Tensor::DataType::FP16)
             implementationDataType = ThorImplementation::TensorDescriptor::DataType::FP16;
+        else if (dataType == Tensor::DataType::UINT8)
+            implementationDataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
+        else
+            assert(false);
 
         vector<uint64_t> batchDimensions;
         batchDimensions.push_back(batchSize);

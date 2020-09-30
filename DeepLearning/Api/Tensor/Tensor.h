@@ -12,7 +12,7 @@ namespace Thor {
 
 class Tensor {
    public:
-    enum class DataType { FP32 = 2, FP16 };
+    enum class DataType { FP32 = 2, FP16, UINT8 };
 
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, vector<uint64_t> dimensions)
