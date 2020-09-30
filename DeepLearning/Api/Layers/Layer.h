@@ -32,10 +32,24 @@ class Layer {
 
     bool isInitialized() { return initialized; }
 
+    virtual uint64_t getFirstInstanceFixedMemRequirementInBytes() const { assert(false); }
+    virtual uint64_t getFirstInstancePerBatchItemMemRequirementInBytes() const { assert(false); }
+    // Layers with weights that share the weights mem with other instances of the same layer on the same gpu will have less non first
+    // instance fixed mem requirements.
+    virtual uint64_t getNonFirstInstanceFixedMemRequirementInBytes() const { return getFirstInstanceFixedMemRequirementInBytes(); }
+    virtual uint64_t getNonFirstInstancePerBatchItemMemRequirementInBytes() const {
+        return getFirstInstancePerBatchItemMemRequirementInBytes();
+    }
+
     bool operator==(const Layer &other) const { return id == other.id; }
     bool operator!=(const Layer &other) const { return id != other.id; }
     bool operator<(const Layer &other) const { return id < other.id; }
     bool operator>(const Layer &other) const { return id > other.id; }
+
+    virtual int getConnectionType(Tensor connectingTensor) const {
+        assert(connectingTensor == getFeatureInput() || connectingTensor == getFeatureOutput());
+        return 0;
+    }
 
     virtual shared_ptr<Layer> clone() const = 0;
 
@@ -43,12 +57,27 @@ class Layer {
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const = 0;
+    // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
+    // physical layers
+    //       that are direct replacements for API layers.
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const = 0;
 
     virtual bool isMultiLayer() const { return false; }
     virtual void convertToSingleLayersAndAddToNetwork() { assert(false); }
 
     virtual void addToNetwork(Network *network);
+
+    // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
+    // physical layers
+    //       that are direct replacements for API layers.
+    static void connectTwoLayers(ThorImplementation::Layer *drivingLayer,
+                                 ThorImplementation::Layer *loadingLayer,
+                                 const Thor::Layer *drivingApiLayer = nullptr,
+                                 const Thor::Layer *loadingApiLayer = nullptr,
+                                 const Thor::Tensor connectingApiTensor = Thor::Tensor());
 
     bool initialized;
 

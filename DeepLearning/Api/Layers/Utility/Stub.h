@@ -18,6 +18,13 @@ class Stub : public Layer {
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const { assert(false); }
 
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(false);
+    }
+
    private:
     Tensor getFeatureOutput();
 };

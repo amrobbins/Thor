@@ -10,7 +10,7 @@ class NetworkOutput : public Layer {
 
     NetworkOutput(Optional<TensorPlacement> outputPlacement) : outputPlacement(outputPlacement) {}
 
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) { assert(false); }
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) { assert(false); }
 
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {

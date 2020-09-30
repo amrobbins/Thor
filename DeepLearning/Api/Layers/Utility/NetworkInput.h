@@ -20,7 +20,7 @@ class NetworkInput : public Layer {
     virtual shared_ptr<Layer> clone() const { return make_shared<NetworkInput>(*this); }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
+    virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
         assert(initialized);
 
         ThorImplementation::TensorDescriptor::DataType implementationDataType;
@@ -37,9 +37,18 @@ class NetworkInput : public Layer {
         return new ThorImplementation::NetworkInput(placement, implementationDataType, batchDimensions);
     }
 
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(false);
+    }
+
    private:
     vector<uint64_t> dimensions;
     Tensor::DataType dataType;
+
+    friend class Network;
 };
 
 class NetworkInput::Builder {

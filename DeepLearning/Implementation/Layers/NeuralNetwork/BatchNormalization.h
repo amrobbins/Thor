@@ -9,42 +9,20 @@ namespace ThorImplementation {
  * Parameter exponentialRunningAverageFactor is used to determine how long to remember past results and how much weight to give the newest
  * result, via equation: runningMean = runningMean*(1-exponentialRunningAverageFactor) + newMean*exponentialRunningAverageFactor
  *
- * This layer will synchronize all streams with stream[0] when multiple connections are present, for compatibility with cuDNN.
+ * This layer will serialize processing of each input by synchronizing all streams with stream[0] when multiple connections are present, for
+ * compatibility with cuDNN.
+ *
+ * Batch Normalization supports 2d or 4d input tensor
  */
 
 class BatchNormalization : public TrainableWeightsBiasesLayer {
    public:
     virtual ~BatchNormalization() {}
 
-    // 2D Batch Normalization - e.g. after fully connected
-    BatchNormalization(unsigned int batchSize,
-                       unsigned int numFeatures,
-                       bool training,
+    BatchNormalization(bool training,
                        Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                        Optional<double> epsilon = Optional<double>::empty())
         : TrainableWeightsBiasesLayer(true),
-          batchSize(batchSize),
-          numChannels(numFeatures),
-          height(1),
-          width(1),
-          exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
-          epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
-        setTrainingMode(training);
-    }
-
-    // 4D Batch Normalization - e.g. after convolution 2d
-    BatchNormalization(unsigned int batchSize,
-                       unsigned int numChannels,
-                       unsigned int height,
-                       unsigned int width,
-                       bool training,
-                       Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
-                       Optional<double> epsilon = Optional<double>::empty())
-        : TrainableWeightsBiasesLayer(true),
-          batchSize(batchSize),
-          numChannels(numChannels),
-          height(height),
-          width(width),
           exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
           epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
         setTrainingMode(training);
@@ -71,6 +49,18 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         assert(!featureInputs.empty());
         assert(!featureOutputs.empty());
         assert(featureInputs.size() == featureOutputs.size());
+
+        vector<uint64_t> inputDimensions = featureInputs.front().get().getDescriptor().getDimensions();
+        assert(inputDimensions.size() == 2 || inputDimensions.size() == 4);
+        batchSize = inputDimensions[0];
+        numChannels = inputDimensions[1];
+        if (inputDimensions.size() == 2) {
+            height = 1;
+            width = 1;
+        } else {
+            height = inputDimensions[2];
+            width = inputDimensions[3];
+        }
 
         featureInputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.get());
@@ -256,10 +246,10 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     static const float BETA_CLEAR;
     static const float BETA_ACCUMULATE;
 
-    const unsigned int batchSize;
-    const unsigned int numChannels;
-    const unsigned int height;
-    const unsigned int width;
+    unsigned int batchSize;
+    unsigned int numChannels;
+    unsigned int height;
+    unsigned int width;
 
     bool training;
     double exponentialRunningAverageFactor;

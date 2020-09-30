@@ -19,9 +19,16 @@ class NetworkOutput : public Layer {
     Tensor::DataType getDataType() const { return dataType; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
         assert(initialized);
-        return new ThorImplementation::NetworkOutput(placement);
+        assert(connectingApiTensor == featureInput.get());
+
+        ThorImplementation::NetworkOutput *networkOutput = new ThorImplementation::NetworkOutput(placement);
+        Thor::Layer::connectTwoLayers(drivingLayer, networkOutput, drivingApiLayer, this, connectingApiTensor);
+        return networkOutput;
     }
 
    private:

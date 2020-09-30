@@ -235,12 +235,12 @@ class Concatenate : public MultiConnectionLayer {
         stridePerPackedTensorDimension_d = nullptr;
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         assert(!running);
         nextLayers.push_back(nextLayer);
         featureOutputs.emplace_back(createFeatureOutputTensor());
-        errorInputs.emplace_back(
-            nextLayer->connectToPreviousLayer(this, featureOutputs.back(), streams[0], shouldConnectToBackPropErrorIn(), connectionType));
+        errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
+            this, featureOutputs.back(), streams[0], shouldConnectToBackPropErrorIn(), loaderConnectionType));
 
         assert(errorInputs.back().isPresent());
         assert(featureOutputs.back().isPresent());

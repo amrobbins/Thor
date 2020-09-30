@@ -36,14 +36,14 @@ class NetworkInput : public Layer {
 
     virtual bool isInput() { return true; }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         assert(this->nextLayer.isEmpty());
 
         this->nextLayer = nextLayer;
 
         featureOutput = createFeatureOutputTensor();
 
-        nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, connectionType);
+        nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, loaderConnectionType);
     }
 
     virtual Optional<Tensor> connectToPreviousLayer(

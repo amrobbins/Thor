@@ -11,7 +11,6 @@ class LayerTestHelper {
     static void connectNetwork(vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size() - 1; ++i) {
             layers[i]->connectToNextLayer(layers[i + 1]);
-            layers[i]->postConnectToNextLayer();
         }
     }
 
@@ -21,8 +20,8 @@ class LayerTestHelper {
             layers[i]->compile();
         }
         for (unsigned int i = 0; i < layers.size(); ++i) {
-            layers[i]->parentInitialize();
             layers[i]->initialize();
+            layers[i]->parentInitialize();
         }
     }
 
@@ -40,9 +39,11 @@ class LayerTestHelper {
         layers.clear();
     }
 
-    static void connectTwoLayers(ThorImplementation::Layer *firstLayer, ThorImplementation::Layer *secondLayer, int connectionType = 0) {
-        firstLayer->connectToNextLayer(secondLayer, connectionType);
-        firstLayer->postConnectToNextLayer();
+    static void connectTwoLayers(ThorImplementation::Layer *firstLayer,
+                                 ThorImplementation::Layer *secondLayer,
+                                 int driverConnectionType = 0,
+                                 int loaderConnectionType = 0) {
+        firstLayer->connectToNextLayer(secondLayer, driverConnectionType, loaderConnectionType);
     }
 
     static void initializeLayer(ThorImplementation::Layer *layer) {

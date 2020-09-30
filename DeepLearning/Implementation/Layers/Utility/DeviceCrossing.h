@@ -40,15 +40,15 @@ class DeviceCrossing : public Layer {
             errorOut.get().copyFromAsync(errorIn, stream.putEvent());
     }
 
-    virtual void connectToNextLayer(Layer *nextLayer, int connectionType = 0) {
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         assert(!uninitialized);
         assert(!running);
         this->nextLayer = nextLayer;
         featureOutput = createFeatureOutputTensor();
         otherDeviceStream = Stream(outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU ? inputPlacement.getDeviceNum()
                                                                                                       : outputPlacement.getDeviceNum());
-        errorInput =
-            nextLayer->connectToPreviousLayer(this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn(), connectionType);
+        errorInput = nextLayer->connectToPreviousLayer(
+            this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn(), loaderConnectionType);
 
         if (errorInput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());

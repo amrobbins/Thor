@@ -264,6 +264,16 @@ unsigned long MachineEvaluator::getTotalGlobalMemBytes(int gpuNum) {
     return deviceProps[gpuNum].totalGlobalMem;
 }
 
+unsigned long MachineEvaluator::getFreeMemBytes(int gpuNum) {
+    assert((unsigned int)gpuNum < numGpus);
+
+    ScopedGpu scopedGpu(gpuNum);
+    size_t freeMemBytes;
+    size_t totalMemBytes;
+    cudaMemGetInfo(&freeMemBytes, &totalMemBytes);
+    return freeMemBytes;
+}
+
 cublasLtHandle_t MachineEvaluator::getCublasLtHandle(int gpuNum) {
     assert((unsigned int)gpuNum < numGpus);
     return cublasLtHandlePerDevice[gpuNum];

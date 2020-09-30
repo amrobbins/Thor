@@ -1,5 +1,9 @@
 #pragma once
 
+#include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
+
 namespace Thor {
 
 class DropOut : public Layer {
@@ -14,13 +18,22 @@ class DropOut : public Layer {
     virtual float getDropProportion() { return dropProportion; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement, uint32_t batchSize) const {
-        // FIXME
-        return nullptr;
+    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
+                                             ThorImplementation::Layer *drivingLayer,
+                                             Thor::Layer *drivingApiLayer = nullptr,
+                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+        assert(initialized);
+        assert(connectingApiTensor == getFeatureInput());
+
+        ThorImplementation::DropOut *dropOut = new ThorImplementation::DropOut(dropProportion, true);
+        Thor::Layer::connectTwoLayers(drivingLayer, dropOut, drivingApiLayer, this, connectingApiTensor);
+        return dropOut;
     }
 
    private:
     float dropProportion;
+
+    // friend class Network;
 };
 
 class DropOut::Builder {

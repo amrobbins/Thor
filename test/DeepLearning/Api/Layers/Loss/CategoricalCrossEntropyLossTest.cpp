@@ -25,7 +25,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
 
     Optional<float> lossScalingFactor;
     if (rand() % 2)
-        lossScalingFactor = (rand() % 100) / 10.0f;
+        lossScalingFactor = (1 + (rand() % 100)) / 10.0f;
 
     CategoricalCrossEntropyLoss::Builder crossEntropyBuilder =
         CategoricalCrossEntropyLoss::Builder().network(network).featureInput(featureInput);
