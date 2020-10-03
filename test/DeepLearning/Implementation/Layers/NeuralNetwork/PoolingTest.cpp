@@ -18,17 +18,17 @@ using std::vector;
 
 using namespace ThorImplementation;
 
-Tensor maxPooling(Tensor featureIn,
-                  uint32_t windowHeight,
-                  uint32_t windowWidth,
-                  uint32_t verticalStride,
-                  uint32_t horizontalStride,
-                  uint32_t batchSize,
-                  uint32_t numFeatures,
-                  uint32_t inputHeight,
-                  uint32_t inputWidth,
-                  uint32_t verticalPadding,
-                  uint32_t horizontalPadding) {
+Tensor maxPoolingForward(Tensor featureIn,
+                         uint32_t windowHeight,
+                         uint32_t windowWidth,
+                         uint32_t verticalStride,
+                         uint32_t horizontalStride,
+                         uint32_t batchSize,
+                         uint32_t numFeatures,
+                         uint32_t inputHeight,
+                         uint32_t inputWidth,
+                         uint32_t verticalPadding,
+                         uint32_t horizontalPadding) {
     vector<unsigned long> featureInDimensions = featureIn.getDescriptor().getDimensions();
     assert(featureInDimensions[0] == batchSize);
     assert(featureInDimensions[1] == numFeatures);
@@ -50,8 +50,8 @@ Tensor maxPooling(Tensor featureIn,
 #pragma omp parallel for schedule(static, 1)
     for (uint32_t batch = 0; batch < batchSize; ++batch) {
         for (uint32_t feature = 0; feature < numFeatures; ++feature) {
-            for (uint32_t row = 0; row + windowHeight <= paddedInputHeight; row += verticalStride) {
-                for (uint32_t col = 0; col + windowWidth <= paddedInputWidth; col += horizontalStride) {
+            for (uint32_t row = 0; row + (windowHeight - 1) < paddedInputHeight; row += verticalStride) {
+                for (uint32_t col = 0; col + (windowWidth - 1) < paddedInputWidth; col += horizontalStride) {
                     float maxValue = -INFINITY;
                     for (uint32_t windowRow = 0; windowRow < windowHeight; ++windowRow) {
                         for (uint32_t windowCol = 0; windowCol < windowWidth; ++windowCol) {
@@ -78,17 +78,102 @@ Tensor maxPooling(Tensor featureIn,
     return featureOut;
 }
 
-Tensor averagePooling(Tensor featureIn,
-                      uint32_t windowHeight,
-                      uint32_t windowWidth,
-                      uint32_t verticalStride,
-                      uint32_t horizontalStride,
-                      uint32_t batchSize,
-                      uint32_t numFeatures,
-                      uint32_t inputHeight,
-                      uint32_t inputWidth,
-                      uint32_t verticalPadding,
-                      uint32_t horizontalPadding) {
+Tensor maxPoolingBackward(Tensor featureIn,
+                          Tensor featureOut,
+                          Tensor errorIn,
+                          uint32_t windowHeight,
+                          uint32_t windowWidth,
+                          uint32_t verticalStride,
+                          uint32_t horizontalStride,
+                          uint32_t batchSize,
+                          uint32_t numFeatures,
+                          uint32_t inputHeight,
+                          uint32_t inputWidth,
+                          uint32_t verticalPadding,
+                          uint32_t horizontalPadding) {
+    Tensor errorOut(TensorPlacement::MemDevices::CPU,
+                    TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+    half *errorOutMem = (half *)errorOut.getMemPtr();
+    for (uint32_t i = 0; i < errorOut.getDescriptor().getTotalNumElements(); ++i)
+        errorOutMem[i] = 0.0f;
+
+    uint32_t paddedInputHeight = inputHeight + 2 * verticalPadding;
+    uint32_t paddedInputWidth = inputWidth + 2 * horizontalPadding;
+
+#pragma omp parallel for schedule(static, 1)
+    for (uint32_t batch = 0; batch < batchSize; ++batch) {
+        for (uint32_t feature = 0; feature < numFeatures; ++feature) {
+            for (uint32_t verticalWindow = 0; verticalWindow * verticalStride + (windowHeight - 1) < paddedInputHeight; ++verticalWindow) {
+                for (uint32_t horizontalWindow = 0; horizontalWindow * horizontalStride + (windowWidth - 1) < paddedInputWidth;
+                     ++horizontalWindow) {
+                    for (uint32_t windowRow = 0; windowRow < windowHeight; ++windowRow) {
+                        for (uint32_t windowCol = 0; windowCol < windowWidth; ++windowCol) {
+                            uint32_t imageRow = verticalWindow * verticalStride + windowRow;
+                            uint32_t imageCol = horizontalWindow * horizontalStride + windowCol;
+                            uint32_t inputRow = imageRow - verticalPadding;
+                            uint32_t inputCol = imageCol - horizontalPadding;
+
+                            // printf("horizontalWindow %d imageCol %d\n", horizontalWindow, imageCol);
+
+                            if (inputRow < 0 || inputCol < 0 || inputRow >= inputHeight || inputCol >= inputWidth)
+                                continue;
+
+                            half featureInValue = *(half *)featureIn.getElement({batch, feature, inputRow, inputCol});
+
+                            uint32_t outputRow = verticalWindow;
+                            uint32_t outputCol = horizontalWindow;
+
+                            // vector<uint64_t> featureOutDimensions = featureOut.getDescriptor().getDimensions();
+                            // printf("inputRows %d inputCols %d windowHeight %d windowWidth %d verticalPadding %d horizontalPadding %d
+                            // verticalStride %d horizontalStride %d imageRow %d imageCol %d outputRow %d outputCol %d\n", inputHeight,
+                            // inputWidth, windowHeight, windowWidth, verticalPadding, horizontalPadding, verticalStride, horizontalStride,
+                            // imageRow, imageCol, outputRow, outputCol); printf("[%ld][%ld][%ld][%ld] vs [%d][%d][%d][%d]\n",
+                            // featureOutDimensions[0], featureOutDimensions[1], featureOutDimensions[2], featureOutDimensions[3], batch,
+                            // feature, outputRow, outputCol); fflush(stdout);
+
+                            half featureOutValue = *(half *)featureOut.getElement({batch, feature, outputRow, outputCol});
+
+                            // If the input is the max in the window
+                            if (featureOutValue == featureInValue) {
+                                half errorValue = *(half *)errorIn.getElement({batch, feature, outputRow, outputCol});
+                                // if(*(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) != 0)
+                                printf("Summing..... %f = %f + %f    at %d  (windowRow %d windowCol %d)\n",
+                                       (float)*(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) + (float)errorValue,
+                                       (float)*(half *)errorOut.getElement({batch, feature, inputRow, inputCol}),
+                                       (float)errorValue,
+                                       batch * numFeatures * inputHeight * inputWidth + feature * inputHeight * inputWidth +
+                                           inputRow * inputWidth + inputCol,
+                                       windowRow,
+                                       windowCol);
+                                *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) =
+                                    *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) + errorValue;
+
+                                // Looks like cudnn considers just the first max element in the window as the winner.
+                                windowRow = windowHeight;
+                                windowCol = windowWidth;
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return errorOut;
+}
+
+Tensor averagePoolingForward(Tensor featureIn,
+                             uint32_t windowHeight,
+                             uint32_t windowWidth,
+                             uint32_t verticalStride,
+                             uint32_t horizontalStride,
+                             uint32_t batchSize,
+                             uint32_t numFeatures,
+                             uint32_t inputHeight,
+                             uint32_t inputWidth,
+                             uint32_t verticalPadding,
+                             uint32_t horizontalPadding) {
     vector<unsigned long> featureInDimensions = featureIn.getDescriptor().getDimensions();
     assert(featureInDimensions[0] == batchSize);
     assert(featureInDimensions[1] == numFeatures);
@@ -110,8 +195,8 @@ Tensor averagePooling(Tensor featureIn,
 #pragma omp parallel for schedule(static, 1)
     for (uint32_t batch = 0; batch < batchSize; ++batch) {
         for (uint32_t feature = 0; feature < numFeatures; ++feature) {
-            for (uint32_t row = 0; row + windowHeight <= paddedInputHeight; row += verticalStride) {
-                for (uint32_t col = 0; col + windowWidth <= paddedInputWidth; col += horizontalStride) {
+            for (uint32_t row = 0; row + (windowHeight - 1) < paddedInputHeight; row += verticalStride) {
+                for (uint32_t col = 0; col + (windowWidth - 1) < paddedInputWidth; col += horizontalStride) {
                     float averageValue = 0;
                     int numValues = 0;
                     for (uint32_t windowRow = 0; windowRow < windowHeight; ++windowRow) {
@@ -125,12 +210,11 @@ Tensor averagePooling(Tensor featureIn,
                                     {batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
                                 numValues += 1;
                                 averageValue += value;
-                            } else {
-                                numValues += 1;
                             }
                         }
                     }
-                    averageValue /= numValues;
+                    if (numValues != 0)
+                        averageValue /= numValues;
                     uint32_t outputRow = row / verticalStride;
                     uint32_t outputCol = col / horizontalStride;
                     *(half *)featureOut.getElement({batch, feature, outputRow, outputCol}) = averageValue;
@@ -148,7 +232,7 @@ TEST(Pooling, MaxPoolingWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 10; ++test) {
+    for (int test = 0; test < 100; ++test) {  // FIXME
         uint32_t batchSize = (rand() % 10) + 1;
         uint32_t numFeatures = (rand() % 10) + 1;
         uint32_t inputHeight = (rand() % 50) + 1;
@@ -174,7 +258,7 @@ TEST(Pooling, MaxPoolingWorks) {
         const int featureInSize = featureIn.getDescriptor().getTotalNumElements();
         half *featureInMem = (half *)featureIn.getMemPtr();
         for (int i = 0; i < featureInSize; ++i) {
-            featureInMem[i] = ((rand() % 1000) / 5.0f) - 100.0f;
+            featureInMem[i] = ((rand() % 100000) / 500.0f) - 100.0f;
         }
 
         vector<Layer *> layers;
@@ -196,6 +280,8 @@ TEST(Pooling, MaxPoolingWorks) {
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
             ASSERT_TRUE(poolingLayer->getErrorOutput().isEmpty());
+            LayerTestHelper::tearDownNetwork(layers);
+            continue;
         }
 
         featureOutGpu_h = layers.back()->getFeatureOutput();
@@ -206,22 +292,23 @@ TEST(Pooling, MaxPoolingWorks) {
         layers[0]->forward(featureIn);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
-        featureOut = maxPooling(featureIn,
-                                windowHeight,
-                                windowWidth,
-                                verticalStride,
-                                horizontalStride,
-                                batchSize,
-                                numFeatures,
-                                inputHeight,
-                                inputWidth,
-                                verticalPadding,
-                                horizontalPadding);
+        featureOut = maxPoolingForward(featureIn,
+                                       windowHeight,
+                                       windowWidth,
+                                       verticalStride,
+                                       horizontalStride,
+                                       batchSize,
+                                       numFeatures,
+                                       inputHeight,
+                                       inputWidth,
+                                       verticalPadding,
+                                       horizontalPadding);
         vector<unsigned long> featureOutDimensions = featureOut.getDescriptor().getDimensions();
         assert(featureOutDimensions[0] == batchSize);
         assert(featureOutDimensions[1] == numFeatures);
         assert(featureOutDimensions[2] == outputHeight);
         assert(featureOutDimensions[3] == outputWidth);
+        const int featureOutSize = featureOut.getDescriptor().getTotalNumElements();
 
         stream.synchronize();
 
@@ -241,6 +328,47 @@ TEST(Pooling, MaxPoolingWorks) {
         }
 
         // Backward pass
+        // For max pooling, if(featureOut[i] = maxInWindow) then back prop error as is. Else back prop 0.
+        Tensor errorInput = poolingLayer->getErrorInput();
+        Tensor errorOutput = poolingLayer->getErrorOutput();
+        Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
+        Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutput.getDescriptor());
+        half *errorInputCpuMem = (half *)errorInputCpu.getMemPtr();
+
+        for (int i = 0; i < featureOutSize; ++i) {
+            errorInputCpuMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+
+        Tensor errorOutputCpu = maxPoolingBackward(featureIn,
+                                                   featureOut,
+                                                   errorInputCpu,
+                                                   windowHeight,
+                                                   windowWidth,
+                                                   verticalStride,
+                                                   horizontalStride,
+                                                   batchSize,
+                                                   numFeatures,
+                                                   inputHeight,
+                                                   inputWidth,
+                                                   verticalPadding,
+                                                   horizontalPadding);
+
+        errorInput.copyFromAsync(errorInputCpu, stream);
+        poolingLayer->backward(errorInput);
+        errorOutputGpu_h.copyFromAsync(errorOutput, stream);
+        stream.synchronize();
+        half *errorOutputCpuMem = (half *)errorOutputCpu.getMemPtr();
+        half *errorOutputGpuMem_h = (half *)errorOutputGpu_h.getMemPtr();
+        float maxDiff = (windowWidth * windowHeight) * 0.005;
+        for (int i = 0; i < featureInSize; ++i) {
+            float diff = abs((float)errorOutputCpuMem[i] - (float)errorOutputGpuMem_h[i]);
+            if (true || diff >= maxDiff)
+                printf("%d CPU %f GPU %f\n", i, (float)errorOutputCpuMem[i], (float)errorOutputGpuMem_h[i]);
+            if (diff >= 0.05) {
+                fflush(stdout);
+                ASSERT_LT(diff, maxDiff);
+            }
+        }
 
         LayerTestHelper::tearDownNetwork(layers);
     }
@@ -310,17 +438,17 @@ TEST(Pooling, AveragePoolingWorks) {
         layers[0]->forward(featureIn);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
-        featureOut = averagePooling(featureIn,
-                                    windowHeight,
-                                    windowWidth,
-                                    verticalStride,
-                                    horizontalStride,
-                                    batchSize,
-                                    numFeatures,
-                                    inputHeight,
-                                    inputWidth,
-                                    verticalPadding,
-                                    horizontalPadding);
+        featureOut = averagePoolingForward(featureIn,
+                                           windowHeight,
+                                           windowWidth,
+                                           verticalStride,
+                                           horizontalStride,
+                                           batchSize,
+                                           numFeatures,
+                                           inputHeight,
+                                           inputWidth,
+                                           verticalPadding,
+                                           horizontalPadding);
         vector<unsigned long> featureOutDimensions = featureOut.getDescriptor().getDimensions();
         assert(featureOutDimensions[0] == batchSize);
         assert(featureOutDimensions[1] == numFeatures);
