@@ -113,8 +113,6 @@ Tensor maxPoolingBackward(Tensor featureIn,
                             uint32_t inputRow = imageRow - verticalPadding;
                             uint32_t inputCol = imageCol - horizontalPadding;
 
-                            // printf("horizontalWindow %d imageCol %d\n", horizontalWindow, imageCol);
-
                             if (inputRow < 0 || inputCol < 0 || inputRow >= inputHeight || inputCol >= inputWidth)
                                 continue;
 
@@ -123,28 +121,11 @@ Tensor maxPoolingBackward(Tensor featureIn,
                             uint32_t outputRow = verticalWindow;
                             uint32_t outputCol = horizontalWindow;
 
-                            // vector<uint64_t> featureOutDimensions = featureOut.getDescriptor().getDimensions();
-                            // printf("inputRows %d inputCols %d windowHeight %d windowWidth %d verticalPadding %d horizontalPadding %d
-                            // verticalStride %d horizontalStride %d imageRow %d imageCol %d outputRow %d outputCol %d\n", inputHeight,
-                            // inputWidth, windowHeight, windowWidth, verticalPadding, horizontalPadding, verticalStride, horizontalStride,
-                            // imageRow, imageCol, outputRow, outputCol); printf("[%ld][%ld][%ld][%ld] vs [%d][%d][%d][%d]\n",
-                            // featureOutDimensions[0], featureOutDimensions[1], featureOutDimensions[2], featureOutDimensions[3], batch,
-                            // feature, outputRow, outputCol); fflush(stdout);
-
                             half featureOutValue = *(half *)featureOut.getElement({batch, feature, outputRow, outputCol});
 
                             // If the input is the max in the window
                             if (featureOutValue == featureInValue) {
                                 half errorValue = *(half *)errorIn.getElement({batch, feature, outputRow, outputCol});
-                                // if(*(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) != 0)
-                                printf("Summing..... %f = %f + %f    at %d  (windowRow %d windowCol %d)\n",
-                                       (float)*(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) + (float)errorValue,
-                                       (float)*(half *)errorOut.getElement({batch, feature, inputRow, inputCol}),
-                                       (float)errorValue,
-                                       batch * numFeatures * inputHeight * inputWidth + feature * inputHeight * inputWidth +
-                                           inputRow * inputWidth + inputCol,
-                                       windowRow,
-                                       windowCol);
                                 *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) =
                                     *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) + errorValue;
 
@@ -226,13 +207,88 @@ Tensor averagePoolingForward(Tensor featureIn,
     return featureOut;
 }
 
+Tensor averagePoolingBackward(Tensor errorIn,
+                              uint32_t windowHeight,
+                              uint32_t windowWidth,
+                              uint32_t verticalStride,
+                              uint32_t horizontalStride,
+                              uint32_t batchSize,
+                              uint32_t numFeatures,
+                              uint32_t inputHeight,
+                              uint32_t inputWidth,
+                              uint32_t verticalPadding,
+                              uint32_t horizontalPadding) {
+    Tensor errorOut(TensorPlacement::MemDevices::CPU,
+                    TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+    half *errorOutMem = (half *)errorOut.getMemPtr();
+    for (uint32_t i = 0; i < errorOut.getDescriptor().getTotalNumElements(); ++i)
+        errorOutMem[i] = 0.0f;
+
+    uint32_t paddedInputHeight = inputHeight + 2 * verticalPadding;
+    uint32_t paddedInputWidth = inputWidth + 2 * horizontalPadding;
+
+    vector<vector<uint32_t>> numElements;
+
+    for (uint32_t verticalWindow = 0; verticalWindow * verticalStride + (windowHeight - 1) < paddedInputHeight; ++verticalWindow) {
+        numElements.emplace_back();
+        for (uint32_t horizontalWindow = 0; horizontalWindow * horizontalStride + (windowWidth - 1) < paddedInputWidth;
+             ++horizontalWindow) {
+            numElements[verticalWindow].push_back(0);
+            for (uint32_t windowRow = 0; windowRow < windowHeight; ++windowRow) {
+                for (uint32_t windowCol = 0; windowCol < windowWidth; ++windowCol) {
+                    uint32_t imageRow = verticalWindow * verticalStride + windowRow;
+                    uint32_t imageCol = horizontalWindow * horizontalStride + windowCol;
+                    uint32_t inputRow = imageRow - verticalPadding;
+                    uint32_t inputCol = imageCol - horizontalPadding;
+
+                    if (inputRow < 0 || inputCol < 0 || inputRow >= inputHeight || inputCol >= inputWidth)
+                        continue;
+                    numElements[verticalWindow][horizontalWindow] += 1;
+                }
+            }
+        }
+    }
+
+    for (uint32_t batch = 0; batch < batchSize; ++batch) {
+        for (uint32_t feature = 0; feature < numFeatures; ++feature) {
+            for (uint32_t verticalWindow = 0; verticalWindow * verticalStride + (windowHeight - 1) < paddedInputHeight; ++verticalWindow) {
+                numElements.emplace_back();
+                for (uint32_t horizontalWindow = 0; horizontalWindow * horizontalStride + (windowWidth - 1) < paddedInputWidth;
+                     ++horizontalWindow) {
+                    for (uint32_t windowRow = 0; windowRow < windowHeight; ++windowRow) {
+                        for (uint32_t windowCol = 0; windowCol < windowWidth; ++windowCol) {
+                            uint32_t imageRow = verticalWindow * verticalStride + windowRow;
+                            uint32_t imageCol = horizontalWindow * horizontalStride + windowCol;
+                            uint32_t inputRow = imageRow - verticalPadding;
+                            uint32_t inputCol = imageCol - horizontalPadding;
+
+                            if (inputRow < 0 || inputCol < 0 || inputRow >= inputHeight || inputCol >= inputWidth)
+                                continue;
+
+                            uint32_t outputRow = verticalWindow;
+                            uint32_t outputCol = horizontalWindow;
+
+                            half errorValue = *(half *)errorIn.getElement({batch, feature, outputRow, outputCol});
+                            *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) =
+                                *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) +
+                                errorValue / numElements[verticalWindow][horizontalWindow];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return errorOut;
+}
+
 TEST(Pooling, MaxPoolingWorks) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 100; ++test) {  // FIXME
+    for (int test = 0; test < 10; ++test) {
         uint32_t batchSize = (rand() % 10) + 1;
         uint32_t numFeatures = (rand() % 10) + 1;
         uint32_t inputHeight = (rand() % 50) + 1;
@@ -362,9 +418,8 @@ TEST(Pooling, MaxPoolingWorks) {
         float maxDiff = (windowWidth * windowHeight) * 0.005;
         for (int i = 0; i < featureInSize; ++i) {
             float diff = abs((float)errorOutputCpuMem[i] - (float)errorOutputGpuMem_h[i]);
-            if (true || diff >= maxDiff)
+            if (diff >= maxDiff) {
                 printf("%d CPU %f GPU %f\n", i, (float)errorOutputCpuMem[i], (float)errorOutputGpuMem_h[i]);
-            if (diff >= 0.05) {
                 fflush(stdout);
                 ASSERT_LT(diff, maxDiff);
             }
@@ -454,6 +509,7 @@ TEST(Pooling, AveragePoolingWorks) {
         assert(featureOutDimensions[1] == numFeatures);
         assert(featureOutDimensions[2] == outputHeight);
         assert(featureOutDimensions[3] == outputWidth);
+        const int featureOutSize = featureOut.getDescriptor().getTotalNumElements();
 
         stream.synchronize();
 
@@ -474,6 +530,43 @@ TEST(Pooling, AveragePoolingWorks) {
         }
 
         // Backward pass
+        Tensor errorInput = poolingLayer->getErrorInput();
+        Tensor errorOutput = poolingLayer->getErrorOutput();
+        Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
+        Tensor errorOutputGpu_h = Tensor(cpuPlacement, errorOutput.getDescriptor());
+        half *errorInputCpuMem = (half *)errorInputCpu.getMemPtr();
+
+        for (int i = 0; i < featureOutSize; ++i) {
+            errorInputCpuMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+
+        Tensor errorOutputCpu = averagePoolingBackward(errorInputCpu,
+                                                       windowHeight,
+                                                       windowWidth,
+                                                       verticalStride,
+                                                       horizontalStride,
+                                                       batchSize,
+                                                       numFeatures,
+                                                       inputHeight,
+                                                       inputWidth,
+                                                       verticalPadding,
+                                                       horizontalPadding);
+
+        errorInput.copyFromAsync(errorInputCpu, stream);
+        poolingLayer->backward(errorInput);
+        errorOutputGpu_h.copyFromAsync(errorOutput, stream);
+        stream.synchronize();
+        half *errorOutputCpuMem = (half *)errorOutputCpu.getMemPtr();
+        half *errorOutputGpuMem_h = (half *)errorOutputGpu_h.getMemPtr();
+        maxDiff = (windowWidth * windowHeight) * 0.0015;
+        for (int i = 0; i < featureInSize; ++i) {
+            float diff = abs((float)errorOutputCpuMem[i] - (float)errorOutputGpuMem_h[i]);
+            if (diff >= maxDiff) {
+                printf("%d CPU %f GPU %f\n", i, (float)errorOutputCpuMem[i], (float)errorOutputGpuMem_h[i]);
+                fflush(stdout);
+                ASSERT_LT(diff, maxDiff);
+            }
+        }
 
         LayerTestHelper::tearDownNetwork(layers);
     }
