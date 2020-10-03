@@ -17,13 +17,22 @@ using std::vector;
 
 using namespace Thor;
 
-// This version of alexnet is modified from the original paper by stacking the two convolution paths channelwise
+/**
+ * This is an example that shows how to build and train a convolutional neural network using Thor's API.
+ *
+ * A well known convolutional network, AlexNet, is constructed for this example.
+ * This version of alexnet is modified from the original paper by stacking the two convolution paths channelwise,
+ * for simplicitly of this example code.
+ *
+ * Original whitepaper: https://papers.nips.cc/paper/4824-imagenet-classification-with-deep-convolutional-neural-networks.pdf
+ */
+
 Network buildAlexNet() {
     Network alexNet;
 
-    Tensor latestOutputTensor;
+    UniformRandomInitializer uniformRandomInitializer::Builder().min(-0.1).max(0.1).build();
 
-    // FIXME: initializer
+    Tensor latestOutputTensor;
 
     latestOutputTensor =
         NetworkInput::Builder().network(alexNet).dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build().getFeatureOutput();
@@ -207,14 +216,13 @@ Network buildAlexNet() {
 }
 
 int main() {
-    srand(time(NULL));
-
     Network alexNet = buildAlexnet();
 
     FileSystemLoader fileSystemLoader = FileSystemLoader::Buider()
-                                            .trainingData("/home/andrew/ImageNet/train")
-                                            .validationData("/home/andrew/ImageNet/validation")
-                                            .testData("/home/andrew/ImageNet/test")
+                                            .trainingData({"/home/andrew/ImageNet/train"}, {"*jpg"})
+                                            .validationData({"/home/andrew/ImageNet/validation"}, {"*jpg"})
+                                            .testData({"/home/andrew/ImageNet/test"}, {"*jpg"})
+                                            .preprocessor(ImageCropper::Builder().centered(224, 224).build())
                                             .build();
 
     HyperparameterController learningRateController =
@@ -223,15 +231,15 @@ int main() {
     // Also want to create dashboards for viewing in a browser as other types of visualizers
     Visualizer consoleVisualizer = ConsoleVisualizer::Builder().build();
 
-    LocalExecutor executor = LocalExecutor::Builder()
-                                 .network(alexNet)
-                                 .loader(fileSystemLoader)
-                                 .hyperparameterController(learningRateController)
-                                 .visualizer(consoleVisualizer)
-                                 .build();
+    LocalExecutor localExecutor = LocalExecutor::Builder()
+                                      .network(alexNet)
+                                      .loader(fileSystemLoader)
+                                      .hyperparameterController(learningRateController)
+                                      .visualizer(consoleVisualizer)
+                                      .build();
 
-    executor.trainEpochs(50);
-    executor.createSnapshot("/home/andrew/ImageNet/trainedNetworks");
+    localExecutor.trainEpochs(50);
+    localExecutor.createSnapshot("/home/andrew/ImageNet/trainedNetworks");
 
     // Also need to offer:
     //
@@ -239,8 +247,13 @@ int main() {
     //
     // For training business-sized data sets.
 
+    // Determining how to stamp the neural network on the GPU(s) is the job of the framework.
+    // The LocalExecutor determines how many GPUs are on the current machine and optimizes computation among them accordingly.
+    // Highly optimized kernels are used for the core computations. This framework achieves just over 100 TFLOPS of
+    // matrix multiply on an nvidia 20 series Titan GPU.
+
     // The user can create a custom version of anything that is constructed using a builder interface.
-    // For example some new type of neural network layer, or a custom visualizer, or a training parameter controller.
+    // For example some new type of neural network layer, or a custom visualizer, or a data loader.
     // This is meant to promote encapsulation, ease of use, and IP creation for reuse across the organization.
 
     return 0;
