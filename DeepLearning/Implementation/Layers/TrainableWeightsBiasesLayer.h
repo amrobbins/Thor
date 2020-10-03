@@ -166,6 +166,14 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                      -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
+        } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
+                   weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            sumScale((float *)weights.getMemPtr(),
+                     (float *)weights.getMemPtr(),
+                     (float *)weightsGradient.getMemPtr(),
+                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
+                     weights.getDescriptor().getTotalNumElements(),
+                     stream);
         } else {
             assert(false);
         }
@@ -184,6 +192,14 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                        biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
                 sumScale((half *)biases.get().getMemPtr(),
                          (half *)biases.get().getMemPtr(),
+                         (float *)biasesGradient.get().getMemPtr(),
+                         -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
+                         biases.get().getDescriptor().getTotalNumElements(),
+                         stream);
+            } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
+                       biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+                sumScale((float *)biases.get().getMemPtr(),
+                         (float *)biases.get().getMemPtr(),
                          (float *)biasesGradient.get().getMemPtr(),
                          -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
                          biases.get().getDescriptor().getTotalNumElements(),

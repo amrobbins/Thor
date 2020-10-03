@@ -42,6 +42,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
@@ -66,6 +67,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
 ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
+            build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest \
             build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest \
             build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
             build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests \
@@ -495,6 +497,10 @@ build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest: build/t
 build/test/DeepLearning/Implementation/SimpleNetworkTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/SimpleNetworkTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/SimpleNetworkTest test/DeepLearning/Implementation/SimpleNetworkTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Api/Layers/Activations/ActivationsTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Activations/ActivationsTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Activations

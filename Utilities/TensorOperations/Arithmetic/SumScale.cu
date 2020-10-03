@@ -45,3 +45,24 @@ void launchSumScale(half result_d[], half noScaleSource[], float scaleSource[], 
     ScopedGpu scopedGpu(stream.getGpuNum());
     sumScale<<<gridSize, blockSize, 0, stream.getStream()>>>(result_d, noScaleSource, scaleSource, scale, numElements);
 }
+
+__global__ void sumScale(float *dest, float *noScaleSource, float *scaleSource, float scale, int numElements) {
+    int element = blockIdx.x * 512 + threadIdx.x;
+
+#pragma unroll 2
+    for (int i = 0; i < 2; ++i) {
+        if (element >= numElements)
+            return;
+
+        dest[element] = noScaleSource[element] + scale * scaleSource[element];
+
+        element += 256;
+    }
+}
+
+void launchSumScale(float result_d[], float noScaleSource[], float scaleSource[], float scale, int numElements, Stream stream) {
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 511) / 512);
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    sumScale<<<gridSize, blockSize, 0, stream.getStream()>>>(result_d, noScaleSource, scaleSource, scale, numElements);
+}
