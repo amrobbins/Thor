@@ -50,6 +50,8 @@ class Pooling : public Layer {
         assert(inputWidth > 0);
         assert(inputHeight >= windowHeight);
         assert(inputWidth >= windowWidth);
+        assert(verticalPadding < windowHeight);
+        assert(horizontalPadding < windowWidth);
         outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
         outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
@@ -67,7 +69,7 @@ class Pooling : public Layer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus =
             cudnnSetPooling2dDescriptor(poolingDescriptor,
-                                        poolingType == Type::MAX ? CUDNN_POOLING_MAX : CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING,
+                                        poolingType == Type::MAX ? CUDNN_POOLING_MAX : CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING,
                                         CUDNN_NOT_PROPAGATE_NAN,
                                         windowHeight,
                                         windowWidth,
