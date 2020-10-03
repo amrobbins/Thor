@@ -231,6 +231,10 @@ class Layer {
         launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
+    void sumScale(float result_d[], float nonScaledSource_d[], float scaledSource_d[], float scale, int numElements, Stream stream) {
+        launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
+    }
+
    protected:
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;

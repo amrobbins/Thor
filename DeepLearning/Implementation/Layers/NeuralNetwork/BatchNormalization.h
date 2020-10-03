@@ -25,6 +25,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         : TrainableWeightsBiasesLayer(true),
           exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
           epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
+        learningRate = 0.001;
         setTrainingMode(training);
     }
 
@@ -86,6 +87,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
         vector<unsigned long> derivedBnTensorDimensions = {batchSize, numChannels, height, width};
 
+        // Cudnn forces the use of FP32 for the weights currently
+        // https://docs.nvidia.com/deeplearning/cudnn/api/index.html#cudnnDeriveBNTensorDescriptor
         weights =
             Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
         biases =
@@ -100,10 +103,10 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i) {
-            resultSaveMean[i] = Tensor(featureInputs[0].get().getPlacement(),
-                                       TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-            resultSaveInvVariance[i] = Tensor(featureInputs[0].get().getPlacement(),
-                                              TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            resultSaveMean.push_back(Tensor(featureInputs[0].get().getPlacement(),
+                                            TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions)));
+            resultSaveInvVariance.push_back(Tensor(featureInputs[0].get().getPlacement(),
+                                                   TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions)));
         }
 
         Tensor oneInit_h =
@@ -127,6 +130,13 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             for (unsigned int i = 0; i < streams.size(); ++i)
                 streams[i].waitEvent(initializedEvent);
         }
+
+        // Start with the actual average until there are enough elements observed so that the running average is a larger divisor than the
+        // actual.
+        assert(exponentialRunningAverageFactor > 0.0);
+        assert(exponentialRunningAverageFactor <= 1.0);
+        currentExponentialRunningAverageFactor = 1.0;
+        itemsObserved = 0;
     }
 
     void cleanup() {
@@ -157,6 +167,13 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
         cudnnStatus_t cudnnStatus;
 
+        if (currentExponentialRunningAverageFactor != exponentialRunningAverageFactor) {
+            ++itemsObserved;
+            currentExponentialRunningAverageFactor = 1.0 / itemsObserved;
+            if (currentExponentialRunningAverageFactor < exponentialRunningAverageFactor)
+                currentExponentialRunningAverageFactor = exponentialRunningAverageFactor;
+        }
+
         if (training) {
             cudnnStatus =
                 cudnnBatchNormalizationForwardTraining(streams[0].getCudnnHandle(),
@@ -170,12 +187,13 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                        derivedBnDescriptor,
                                                        weights.getMemPtr(),
                                                        biases.get().getMemPtr(),
-                                                       exponentialRunningAverageFactor,
+                                                       currentExponentialRunningAverageFactor,
                                                        resultRunningMean.getMemPtr(),
                                                        resultRunningVariance.getMemPtr(),
                                                        epsilon,
                                                        resultSaveMean[connectionNumber].getMemPtr(),
                                                        resultSaveInvVariance[connectionNumber].getMemPtr());
+
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
             cudnnStatus =
@@ -253,6 +271,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     bool training;
     double exponentialRunningAverageFactor;
+    uint32_t itemsObserved;
+    double currentExponentialRunningAverageFactor;
     double epsilon;
 
     Optional<cudnnTensorDescriptor_t> featureInputDescriptor;

@@ -7,3 +7,4 @@
 
 void launchSumScale(half result_d[], half noScaleSource[], half scaleSource[], float scale, int numElements, Stream stream);
 void launchSumScale(half result_d[], half noScaleSource[], float scaleSource[], float scale, int numElements, Stream stream);
+void launchSumScale(float result_d[], float noScaleSource[], float scaleSource[], float scale, int numElements, Stream stream);
