@@ -28,8 +28,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
     uint32_t numOutputFeatures = 1 + (rand() % 1000);
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer uniformRandomInitializer;
-    XavierInitializer xavierInitializer;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -41,9 +40,9 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
                                         .featureInput(featureInput)
                                         .numOutputFeatures(numOutputFeatures)
                                         .hasBias(hasBias)
-                                        .weightsInitializer(uniformRandomInitializer)
-                                        .biasInitializer(xavierInitializer)
-                                        .activationBuilder(tanhBuilder)
+                                        .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                                        .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                                        .activationBuilder(&tanhBuilder)
                                         .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                         .dropOut(dropProportion)
                                         .build();

@@ -1,5 +1,3 @@
-#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-
 #include "Thor.h"
 
 #include <stdio.h>
@@ -17,13 +15,23 @@ using std::vector;
 
 using namespace Thor;
 
+void printDimensions(vector<uint64_t> actualDimensions) {
+    for (uint32_t i = 0; i < actualDimensions.size(); ++i) {
+        printf("[%ld]", actualDimensions[i]);
+    }
+    printf("\n");
+}
+
 // This version of alexnet is modified from the original paper by stacking the two convolution paths channelwise
 Network buildAlexNet() {
     Network alexNet;
 
     Tensor latestOutputTensor;
 
-    // FIXME: initializer
+    vector<uint64_t> expectedDimensions, actualDimensions;
+
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+    Relu::Builder reluBuilder;
 
     latestOutputTensor =
         NetworkInput::Builder().network(alexNet).dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build().getFeatureOutput();
@@ -40,9 +48,9 @@ Network buildAlexNet() {
                              .horizontalStride(4)
                              .noPadding()
                              .hasBias(true)
-                             .weightsInitializer(uniformRandomInitializer)
-                             .biasInitializer(uniformRandomInitializer)
-                             .activationBuilder(Relu::Builder())
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .activationBuilder(&reluBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -57,7 +65,8 @@ Network buildAlexNet() {
                              .build()
                              .getFeatureOutput();
 
-    assert(latestOutputTensor.getDimensions() == {96, 27, 27});
+    expectedDimensions = {96, 27, 27};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -67,11 +76,11 @@ Network buildAlexNet() {
                              .filterWidth(5)
                              .verticalStride(1)
                              .horizontalStride(1)
-                             .noPadding()
+                             .samePadding()
                              .hasBias(true)
-                             .weightsInitializer(uniformRandomInitializer)
-                             .biasInitializer(uniformRandomInitializer)
-                             .activationBuilder(Relu::Builder())
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .activationBuilder(&reluBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -86,7 +95,8 @@ Network buildAlexNet() {
                              .build()
                              .getFeatureOutput();
 
-    assert(latestOutputTensor.getDimensions() == {256, 13, 13});
+    expectedDimensions = {256, 13, 13};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -98,9 +108,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializer(uniformRandomInitializer)
-                             .biasInitializer(uniformRandomInitializer)
-                             .activationBuilder(Relu::Builder())
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .activationBuilder(&reluBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -114,9 +124,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializer(uniformRandomInitializer)
-                             .biasInitializer(uniformRandomInitializer)
-                             .activationBuilder(Relu::Builder())
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .activationBuilder(&reluBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -130,9 +140,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializer(uniformRandomInitializer)
-                             .biasInitializer(uniformRandomInitializer)
-                             .activationBuilder(Relu::Builder())
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .activationBuilder(&reluBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -147,7 +157,8 @@ Network buildAlexNet() {
                              .build()
                              .getFeatureOutput();
 
-    assert(latestOutputTensor.getDimensions() == {256, 6, 6});
+    expectedDimensions = {256, 6, 6};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     // Input tensor is automatically flattened when sent to a fully connected layer.
     latestOutputTensor = FullyConnected::Builder()
@@ -156,10 +167,13 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
 
-    assert(latestOutputTensor.getDimensions() == {4096});
+    expectedDimensions = {4096};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
@@ -167,6 +181,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -175,10 +191,13 @@ Network buildAlexNet() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(1000)
                              .hasBias(true)
+                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
 
-    assert(latestOutputTensor.getDimensions() == {1000});
+    expectedDimensions = {1000};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     Tensor labelsTensor =
         NetworkInput::Builder().network(alexNet).dimensions({1000}).dataType(Tensor::DataType::FP32).build().getFeatureOutput();
@@ -186,18 +205,18 @@ Network buildAlexNet() {
     CategoricalCrossEntropyLoss lossLayer =
         CategoricalCrossEntropyLoss::Builder().network(alexNet).featureInput(latestOutputTensor).labels(labelsTensor).build();
 
-    lossLayer.getFeatureInput(latestOutputTensor);
-    lossLayer.getLabels(labelsTensor);
+    latestOutputTensor = lossLayer.getFeatureInput();
+    labelsTensor = lossLayer.getLabels();
 
-    NetworkOutput networkOutput =
-        NetworkOutput::Builder().network(alexNet).inputTensor(lossLayer->getPredictions()).dataType(Tensor::DataType::FP32).build();
-    NetworkOutput networkOutput =
-        NetworkOutput::Builder().network(alexNet).inputTensor(lossLayer->getLoss()).dataType(Tensor::DataType::FP32).build();
+    NetworkOutput predictions =
+        NetworkOutput::Builder().network(alexNet).inputTensor(lossLayer.getPredictions()).dataType(Tensor::DataType::FP32).build();
+    NetworkOutput loss =
+        NetworkOutput::Builder().network(alexNet).inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP32).build();
 
     return alexNet;
 }
 
-TEST(Network, AlexnetIsProperlyFormed) { Network alexNet = buildAlexnet(); }
+TEST(Network, AlexnetIsProperlyFormed) { Network alexNet = buildAlexNet(); }
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

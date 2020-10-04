@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
@@ -107,6 +108,8 @@ class Network {
     // map<uint64_t, ThorImplementation::Layer *> outputLayer;
     // map<uint64_t, ThorImplementation::Layer *> outputLossLayer;
 
+    vector<shared_ptr<Initializer>> initializers;
+
     void computeFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
     void computeNonFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
     StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
@@ -152,12 +155,14 @@ class Network {
             addSingleLayerToNetwork(layer);
     }
 
+    void addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
+
     class GpuOutOfMemoryError {};
 
     friend void Layer::addToNetwork(Network *network);
+    friend void Initializer::addToNetwork(Network *networ);
     friend class Executor;
 
-   protected:
     bool frozen;
 };
 

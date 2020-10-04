@@ -34,8 +34,7 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
 
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer uniformRandomInitializer;
-    XavierInitializer xavierInitializer;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -52,9 +51,9 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
                                       .horizontalStride(horizontalStride)
                                       .noPadding()
                                       .hasBias(hasBias)
-                                      .weightsInitializer(uniformRandomInitializer)
-                                      .biasInitializer(xavierInitializer)
-                                      .activationBuilder(tanhBuilder)
+                                      .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                                      .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                                      .activationBuilder(&tanhBuilder)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -139,8 +138,7 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
 
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer uniformRandomInitializer;
-    XavierInitializer xavierInitializer;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -158,9 +156,9 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
                                       .verticalPadding(verticalPadding)
                                       .horizontalPadding(horizontalPadding)
                                       .hasBias(hasBias)
-                                      .weightsInitializer(uniformRandomInitializer)
-                                      .biasInitializer(xavierInitializer)
-                                      .activationBuilder(tanhBuilder)
+                                      .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                                      .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                                      .activationBuilder(&tanhBuilder)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -569,8 +567,7 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
 
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer uniformRandomInitializer;
-    XavierInitializer xavierInitializer;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -589,9 +586,9 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
                                       .verticalPadding(verticalPadding)
                                       .horizontalSamePadding()
                                       .hasBias(hasBias)
-                                      .weightsInitializer(uniformRandomInitializer)
-                                      .biasInitializer(xavierInitializer)
-                                      .activationBuilder(tanhBuilder)
+                                      .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
+                                      .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                                      .activationBuilder(&tanhBuilder)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();

@@ -13,15 +13,16 @@ The goals of this project are:
      3. Python
   7. Make the defaults the recommended configurations, so that beginners can quickly succeed.
   8. Keep up to date on the latest research and bring the promising pieces into this framework.
-  9. Educate the users about the different pieces and strategies, tell them for real don't over academia it. Point them to the latest trends and research. Have a newsletter.
+  9. Educate the users about the different pieces and strategies, tell them for real don't over academize it. Point them to the latest trends and research. Have a newsletter.
 
 
-Dependencies
-  1. cuda 11  - can install with apt-get install cuda
-  2. cudnn 8.02 - uses /usr/include/cudnn.h
-  3. clang-format  - can install with apt-get install clang-format
-  4. boost 1.72
+This framework is for Linux, and has been tested on Ubuntu 18.04.
 
+Dependencies, with installation directions for Ubuntu:
+  1. cuda 11  - can install with 'sudo apt-get install cuda'
+  2. cudnn 8.03 - uses /usr/include/cudnn.h, get it here: https://developer.nvidia.com/cudnn
+  3. clang-format  - can install with 'sudo apt-get install clang-format'
+  4. boost 1.72 (later is probably fine.) get it here: https://www.boost.org/users/download/#live
 
 Install:
 

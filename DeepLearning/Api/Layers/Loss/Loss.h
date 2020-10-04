@@ -16,10 +16,11 @@ class Loss : public Layer {
     Loss() {}
     virtual ~Loss() {}
 
-    Tensor getPredictions() const { return featureOutput.get(); }
-    Tensor getLabels() const { return labelsTensor; }
+    // virtual Optional<Tensor> getFeatureInput() const { return Layer::getFeatureInput(); }
+    virtual Tensor getPredictions() const { return predictionsTensor; }
+    virtual Tensor getLabels() const { return labelsTensor; }
 
-    Tensor getLoss() const { return lossTensor; }
+    virtual Tensor getLoss() const { return lossTensor; }
 
     virtual int getConnectionType(Tensor connectingTensor) {
         assert(connectingTensor == getFeatureInput() || connectingTensor == getLabels() || connectingTensor == getPredictions() ||
@@ -37,6 +38,7 @@ class Loss : public Layer {
 
    protected:
     Tensor labelsTensor;
+    Tensor predictionsTensor;
     Tensor lossTensor;
 
    private:

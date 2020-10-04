@@ -611,25 +611,24 @@ TEST(PoolingDefaultPadding, Builds) {
     ASSERT_EQ(actualInput.get().getDataType(), dataType);
     ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
 
+    vector<uint64_t> outputDimensions;
+    uint32_t outputHeight = Pooling::Builder::computeOutputDimension(dimensions[1], verticalStride, windowHeight, 0);
+    uint32_t outputWidth = Pooling::Builder::computeOutputDimension(dimensions[2], horizontalStride, windowWidth, 0);
+    outputDimensions.push_back(dimensions[0]);
+    outputDimensions.push_back(outputHeight);
+    outputDimensions.push_back(outputWidth);
+
     Optional<Tensor> actualOutput = pooling.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
     ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
-    ASSERT_EQ(actualOutput.get().getDimensions()[0], dimensions[0]);
-    for (uint32_t d = 1; d < dimensions.size(); ++d) {
-        uint32_t diff = actualOutput.get().getDimensions()[d] - dimensions[d];
-        ASSERT_GE(diff, 0u);
-        ASSERT_LE(diff, 1u);
-    }
+    ASSERT_EQ(actualOutput.get().getDimensions(), outputDimensions);
 
-    uint32_t verticalPadding = Pooling::Builder::computeSamePadding(dimensions[1], verticalStride, windowHeight);
-    uint32_t horizontalPadding = Pooling::Builder::computeSamePadding(dimensions[2], horizontalStride, windowWidth);
     ASSERT_EQ(pooling.getWindowHeight(), windowHeight);
     ASSERT_EQ(pooling.getWindowWidth(), windowWidth);
     ASSERT_EQ(pooling.getVerticalStride(), verticalStride);
     ASSERT_EQ(pooling.getHorizontalStride(), horizontalStride);
-    ASSERT_EQ(pooling.getVerticalPadding(), verticalPadding);
-    ASSERT_EQ(pooling.getHorizontalPadding(), horizontalPadding);
+    ASSERT_EQ(pooling.getVerticalPadding(), 0u);
+    ASSERT_EQ(pooling.getHorizontalPadding(), 0u);
 
     shared_ptr<Layer> cloneLayer = pooling.clone();
     Pooling *clone = dynamic_cast<Pooling *>(cloneLayer.get());
@@ -645,20 +644,14 @@ TEST(PoolingDefaultPadding, Builds) {
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
-    ASSERT_EQ(cloneOutput.get().getDimensions()[0], dimensions[0]);
-    for (uint32_t d = 1; d < dimensions.size(); ++d) {
-        uint32_t diff = cloneOutput.get().getDimensions()[d] - dimensions[d];
-        ASSERT_GE(diff, 0u);
-        ASSERT_LE(diff, 1u);
-    }
+    ASSERT_EQ(cloneOutput.get().getDimensions(), outputDimensions);
 
     ASSERT_EQ(clone->getWindowHeight(), windowHeight);
     ASSERT_EQ(clone->getWindowWidth(), windowWidth);
     ASSERT_EQ(clone->getVerticalStride(), verticalStride);
     ASSERT_EQ(clone->getHorizontalStride(), horizontalStride);
-    ASSERT_EQ(clone->getVerticalPadding(), verticalPadding);
-    ASSERT_EQ(clone->getHorizontalPadding(), horizontalPadding);
+    ASSERT_EQ(clone->getVerticalPadding(), 0u);
+    ASSERT_EQ(clone->getHorizontalPadding(), 0u);
 
     ASSERT_EQ(pooling.getId(), clone->getId());
     ASSERT_GT(pooling.getId(), 1u);

@@ -46,7 +46,7 @@ class Tensor {
     bool operator<(const Tensor &other) const { return id < other.id; }
     bool operator>(const Tensor &other) const { return id > other.id; }
 
-    static bool dataTypeValid(DataType dataType) { return dataType == DataType::FP32 || dataType == DataType::FP16; }
+    static bool dataTypeValid(DataType dataType) { return dataType >= DataType::FP32 && dataType <= DataType::UINT8; }
 
    private:
     uint64_t id;

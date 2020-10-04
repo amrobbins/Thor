@@ -46,6 +46,8 @@ class Flatten::Builder {
             else
                 outputDimensions.back() *= inputDimensions[i];
         }
+        printf("flattened to %ld dimensions first is %ld\n", outputDimensions.size(), outputDimensions[0]);
+        fflush(stdout);
 
         Flatten flatten;
         flatten.featureInput = _featureInput;
@@ -67,10 +69,10 @@ class Flatten::Builder {
         return *this;
     }
 
-    virtual Flatten::Builder &numOutputDimensions(float numOutputDimensions) {
-        assert(!_numOutputDimensions.isPresent());
-        assert(numOutputDimensions > 0);
-        this->_numOutputDimensions = numOutputDimensions;
+    virtual Flatten::Builder &numOutputDimensions(float _numOutputDimensions) {
+        assert(!this->_numOutputDimensions.isPresent());
+        assert(_numOutputDimensions > 0);
+        this->_numOutputDimensions = _numOutputDimensions;
         return *this;
     }
 

@@ -68,14 +68,14 @@ class Pooling::Builder {
             _verticalStride = 1;
         if (_horizontalStride.isEmpty())
             _horizontalStride = 1;
-        if (_verticalPadding.isEmpty())
-            _computeVerticalSamePadding = true;
-        else if (_computeVerticalSamePadding.isEmpty())
+        if (_computeVerticalSamePadding.isEmpty())
             _computeVerticalSamePadding = false;
-        if (_horizontalPadding.isEmpty())
-            _computeHorizontalSamePadding = true;
-        else if (_computeHorizontalSamePadding.isEmpty())
+        if (_verticalPadding.isEmpty() && !_computeVerticalSamePadding.get())
+            _verticalPadding = 0;
+        if (_computeHorizontalSamePadding.isEmpty())
             _computeHorizontalSamePadding = false;
+        if (_horizontalPadding.isEmpty() && !_computeHorizontalSamePadding.get())
+            _horizontalPadding = 0;
 
         Pooling pooling;
 
