@@ -51,9 +51,9 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
                                       .horizontalStride(horizontalStride)
                                       .noPadding()
                                       .hasBias(hasBias)
-                                      .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                                      .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                                      .activationBuilder(&tanhBuilder)
+                                      .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                                      .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                      .activationBuilder(tanhBuilder)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -133,8 +133,8 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
     uint32_t verticalStride = 1 + (rand() % 10);
     uint32_t horizontalStride = 1 + (rand() % 10);
 
-    uint32_t verticalPadding = rand() % 5;
-    uint32_t horizontalPadding = rand() % 5;
+    uint32_t verticalPadding = rand() % filterHeight;
+    uint32_t horizontalPadding = rand() % filterWidth;
 
     bool hasBias = rand() % 2;
 
@@ -156,9 +156,9 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
                                       .verticalPadding(verticalPadding)
                                       .horizontalPadding(horizontalPadding)
                                       .hasBias(hasBias)
-                                      .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                                      .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                                      .activationBuilder(&tanhBuilder)
+                                      .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                                      .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                      .activationBuilder(tanhBuilder)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -236,8 +236,8 @@ TEST(Convolution2dSingleFeatureInputSamePadding, Builds) {
 
         uint32_t filterHeight = 1 + (rand() % dimensions[1]);
         uint32_t filterWidth = 1 + (rand() % dimensions[2]);
-        uint32_t verticalStride = 1 + (rand() % 10);
-        uint32_t horizontalStride = 1 + (rand() % 10);
+        uint32_t verticalStride = 1;  // due to same padding
+        uint32_t horizontalStride = 1;
 
         bool hasBias = rand() % 2;
 
@@ -344,8 +344,8 @@ TEST(Convolution2dSingleFeatureInputDefaultPadding, Builds) {
 
         uint32_t filterHeight = 1 + (rand() % dimensions[1]);
         uint32_t filterWidth = 1 + (rand() % dimensions[2]);
-        uint32_t verticalStride = 1 + (rand() % 10);
-        uint32_t horizontalStride = 1 + (rand() % 10);
+        uint32_t verticalStride = 1;  // due to same padding
+        uint32_t horizontalStride = 1;
 
         bool hasBias = rand() % 2;
 
@@ -451,8 +451,8 @@ TEST(Convolution2dSingleFeatureInputSamePaddingV2, Builds) {
 
         uint32_t filterHeight = 1 + (rand() % dimensions[1]);
         uint32_t filterWidth = 1 + (rand() % dimensions[2]);
-        uint32_t verticalStride = 1 + (rand() % 10);
-        uint32_t horizontalStride = 1 + (rand() % 10);
+        uint32_t verticalStride = 1;  // due to same padding
+        uint32_t horizontalStride = 1;
 
         bool hasBias = rand() % 2;
 
@@ -561,9 +561,9 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
     uint32_t filterHeight = 1 + (rand() % dimensions[1]);
     uint32_t filterWidth = 1 + (rand() % dimensions[2]);
     uint32_t verticalStride = 1 + (rand() % 10);
-    uint32_t horizontalStride = 1 + (rand() % 10);
+    uint32_t horizontalStride = 1;  // due to same padding
 
-    uint32_t verticalPadding = rand() % 5;
+    uint32_t verticalPadding = rand() % filterHeight;
 
     bool hasBias = rand() % 2;
 
@@ -586,9 +586,9 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
                                       .verticalPadding(verticalPadding)
                                       .horizontalSamePadding()
                                       .hasBias(hasBias)
-                                      .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                                      .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                                      .activationBuilder(&tanhBuilder)
+                                      .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                                      .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                      .activationBuilder(tanhBuilder)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();

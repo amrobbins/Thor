@@ -496,8 +496,8 @@ TEST(PoolingSamePadding, Builds) {
 
         uint32_t windowHeight = 1 + (rand() % dimensions[1]);
         uint32_t windowWidth = 1 + (rand() % dimensions[2]);
-        uint32_t verticalStride = 1 + (rand() % 10);
-        uint32_t horizontalStride = 1 + (rand() % 10);
+        uint32_t verticalStride = 1;  // due to same padding
+        uint32_t horizontalStride = 1;
 
         Tensor featureInput(dataType, dimensions);
         Pooling pooling = Pooling::Builder()
@@ -677,8 +677,8 @@ TEST(PoolingSpecifiedPadding, Builds) {
     uint32_t windowWidth = 1 + (rand() % dimensions[2]);
     uint32_t verticalStride = 1 + (rand() % 10);
     uint32_t horizontalStride = 1 + (rand() % 10);
-    uint32_t verticalPadding = rand() % 5;
-    uint32_t horizontalPadding = rand() % 5;
+    uint32_t verticalPadding = rand() % windowHeight;
+    uint32_t horizontalPadding = rand() % windowWidth;
 
     Tensor featureInput(dataType, dimensions);
     Pooling pooling = Pooling::Builder()

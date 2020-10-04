@@ -24,8 +24,8 @@ void Convolution2d::convertToSingleLayersAndAddToNetwork() {
         .verticalPadding(verticalPadding)
         .horizontalPadding(horizontalPadding)
         .hasBias(hasBias)
-        .weightsInitializerBuilder(weightsInitializerBuilder.get())
-        .biasInitializerBuilder(biasInitializerBuilder.get())
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .noActivation();
 
     vector<Tensor> currentFeatureInputs;

@@ -148,26 +148,42 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &weightsInitializerBuilder(Initializer::Builder *_weightsInitializerBuilder) {
+    virtual FullyConnected::Builder &weightsInitializerBuilder(Initializer::Builder &_weightsInitializerBuilder) {
         assert(this->_weightsInitializerBuilder == nullptr);
-        assert(_weightsInitializerBuilder != nullptr);
-        this->_weightsInitializerBuilder = _weightsInitializerBuilder->clone();
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
         return *this;
     }
 
-    virtual FullyConnected::Builder &biasInitializerBuilder(Initializer::Builder *_biasInitializerBuilder) {
+    virtual FullyConnected::Builder &weightsInitializerBuilder(Initializer::Builder &&_weightsInitializerBuilder) {
+        assert(this->_weightsInitializerBuilder == nullptr);
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &biasInitializerBuilder(Initializer::Builder &_biasInitializerBuilder) {
         assert(this->_biasInitializerBuilder == nullptr);
-        assert(_biasInitializerBuilder != nullptr);
-        this->_biasInitializerBuilder = _biasInitializerBuilder->clone();
+        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &biasInitializerBuilder(Initializer::Builder &&_biasInitializerBuilder) {
+        assert(this->_biasInitializerBuilder == nullptr);
+        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
         return *this;
     }
 
     // Adds an activation layer after this FullyConnected layer
-    virtual FullyConnected::Builder &activationBuilder(Activation::Builder *_activationBuilder) {
+    virtual FullyConnected::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
         assert(this->_activationBuilder == nullptr);
-        assert(_activationBuilder != nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder->clone();
+        this->_activationBuilder = _activationBuilder.clone();
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &activationBuilder(Activation::Builder &&_activationBuilder) {
+        assert(this->_activationBuilder == nullptr);
+        assert(!_activationExplicitlyRemoved);
+        this->_activationBuilder = _activationBuilder.clone();
         return *this;
     }
 

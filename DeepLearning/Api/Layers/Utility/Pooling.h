@@ -85,16 +85,23 @@ class Pooling::Builder {
         pooling.windowWidth = _windowWidth;
         pooling.verticalStride = _verticalStride;
         pooling.horizontalStride = _horizontalStride;
-        if (_computeVerticalSamePadding)
+        if (_computeVerticalSamePadding) {
+            assert(pooling.verticalStride == 1);
             pooling.verticalPadding =
                 computeSamePadding(pooling.featureInput.get().getDimensions()[1], pooling.verticalStride, pooling.windowHeight);
-        else
+        } else {
             pooling.verticalPadding = _verticalPadding;
-        if (_computeHorizontalSamePadding)
+        }
+        if (_computeHorizontalSamePadding) {
+            assert(pooling.horizontalStride == 1);
             pooling.horizontalPadding =
                 computeSamePadding(pooling.featureInput.get().getDimensions()[2], pooling.horizontalStride, pooling.windowWidth);
-        else
+        } else {
             pooling.horizontalPadding = _horizontalPadding;
+        }
+
+        assert(pooling.verticalPadding < pooling.windowHeight);
+        assert(pooling.horizontalPadding < pooling.windowWidth);
 
         uint32_t outputHeight = computeOutputDimension(
             pooling.featureInput.get().getDimensions()[1], pooling.verticalStride, pooling.windowHeight, pooling.verticalPadding);
@@ -139,12 +146,14 @@ class Pooling::Builder {
     }
 
     virtual Pooling::Builder &verticalStride(uint32_t _verticalStride) {
+        assert(_verticalStride != 0);
         assert(!this->_verticalStride.isPresent());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
     virtual Pooling::Builder &horizontalStride(uint32_t _horizontalStride) {
+        assert(_horizontalStride != 0);
         assert(!this->_horizontalStride.isPresent());
         this->_horizontalStride = _horizontalStride;
         return *this;
