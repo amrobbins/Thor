@@ -14,7 +14,7 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalCrossEntropyLoss>(*this); }
 
-    Optional<float> getLossScalingFactor() { return lossScalingFactor; }
+    virtual Optional<float> getLossScalingFactor() { return lossScalingFactor; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -39,11 +39,14 @@ class CategoricalCrossEntropyLoss::Builder {
     virtual CategoricalCrossEntropyLoss build() {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
+        assert(_labels.isPresent());
 
         CategoricalCrossEntropyLoss categoricalCrossEntropyLoss;
         categoricalCrossEntropyLoss.lossScalingFactor = _lossScalingFactor;
         categoricalCrossEntropyLoss.featureInput = _featureInput;
-        categoricalCrossEntropyLoss.featureOutput = _featureInput.get().clone();
+        categoricalCrossEntropyLoss.labelsTensor = _labels;
+        categoricalCrossEntropyLoss.predictionsTensor = _featureInput.get().clone();
+        // Loss is per batch item currently so this is an empty tensor
         categoricalCrossEntropyLoss.lossTensor = Tensor(Tensor::DataType::FP32, vector<uint64_t>());
         categoricalCrossEntropyLoss.initialized = true;
         categoricalCrossEntropyLoss.addToNetwork(_network.get());
@@ -63,7 +66,14 @@ class CategoricalCrossEntropyLoss::Builder {
         return *this;
     }
 
-    CategoricalCrossEntropyLoss::Builder &lossScalingFactor(float lossScalingFactor) {
+    virtual CategoricalCrossEntropyLoss::Builder &labels(Tensor _labels) {
+        assert(!this->_labels.isPresent());
+        assert(!_labels.getDimensions().empty());
+        this->_labels = _labels;
+        return *this;
+    }
+
+    virtual CategoricalCrossEntropyLoss::Builder &lossScalingFactor(float lossScalingFactor) {
         assert(!_lossScalingFactor.isPresent());
         assert(lossScalingFactor > 0.0);
         this->_lossScalingFactor = lossScalingFactor;
@@ -76,6 +86,7 @@ class CategoricalCrossEntropyLoss::Builder {
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
+    Optional<Tensor> _labels;
     Optional<float> _lossScalingFactor;
 };
 

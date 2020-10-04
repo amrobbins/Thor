@@ -525,11 +525,10 @@ TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        Convolution2d::UniformRandomInitializer initializer(0.1, -0.1);
-        convolution2dLayer->initializeWeights(&initializer);
-        if (hasBias) {
-            convolution2dLayer->initializeBiases(&initializer);
-        }
+        UniformRandomInitializer initializer(0.1, -0.1);
+        initializer.initialize(convolution2dLayer, convolution2dLayer->getWeights());
+        if (hasBias)
+            initializer.initialize(convolution2dLayer, convolution2dLayer->getBiases());
 
         Tensor weights = convolution2dLayer->getWeights().clone(cpuPlacement);
         weights.copyFromAsync(convolution2dLayer->getWeights(), stream);

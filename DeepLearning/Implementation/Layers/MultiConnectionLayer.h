@@ -259,14 +259,14 @@ class MultiConnectionLayer : public Layer {
     using Layer::previousLayer;
     using Layer::stream;
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream){};
-    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream){};
-    virtual Optional<Tensor> getFeatureInput() { return featureInput; }
-    virtual Optional<Tensor> getFeatureOutput() { return featureOutput; }
-    virtual Optional<Tensor> getErrorInput() { return errorInput; }
-    virtual Optional<Tensor> getErrorOutput() { return errorOutput; }
-    virtual Optional<Layer *> getNextLayer() { return nextLayer; }
-    virtual Stream getStream() { return stream; }
+    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) { assert(false); }
+    virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) { assert(false); }
+    virtual Optional<Tensor> getFeatureInput() { assert(false); }
+    virtual Optional<Tensor> getFeatureOutput() { assert(false); }
+    virtual Optional<Tensor> getErrorInput() { assert(false); }
+    virtual Optional<Tensor> getErrorOutput() { assert(false); }
+    virtual Optional<Layer *> getNextLayer() { assert(false); }
+    virtual Stream getStream() { assert(false); }
 };
 
 }  // namespace ThorImplementation

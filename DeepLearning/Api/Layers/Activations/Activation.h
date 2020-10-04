@@ -29,7 +29,7 @@ class Activation : public Layer {
 class Activation::Builder {
    public:
     virtual ~Builder() {}
-    virtual void network(Network &network) { assert(false); }
+    virtual void network(Network &_network) { assert(false); }
     virtual void featureInput(Tensor featureInput) { assert(false); }
     virtual shared_ptr<Layer> build() { assert(false); }
     virtual shared_ptr<Builder> clone() { assert(false); }

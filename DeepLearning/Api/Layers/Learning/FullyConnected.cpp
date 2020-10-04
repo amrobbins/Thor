@@ -18,8 +18,8 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     fullyConnectedBuilder.network(*network)
         .numOutputFeatures(numOutputFeatures)
         .hasBias(hasBias)
-        .weightsInitializer(weightsInitializer)
-        .biasInitializer(biasInitializer)
+        .weightsInitializerBuilder(weightsInitializerBuilder.get())
+        .biasInitializerBuilder(biasInitializerBuilder.get())
         .noActivation();
 
     vector<Tensor> currentFeatureInputs;

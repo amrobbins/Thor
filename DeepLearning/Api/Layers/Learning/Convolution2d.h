@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Initializers/UniformRandomInitializer.h"
-#include "DeepLearning/Api/Initializers/XavierInitializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
@@ -44,6 +43,17 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
+
+        weightsInitializerBuilder->network(network);
+        weightsInitializerBuilder->tensorToInitialize(convolution2d->getWeights());
+        weightsInitializerBuilder->build();
+
+        if (convolution2d->getBiases().isPresent()) {
+            biasInitializerBuilder->network(network);
+            biasInitializerBuilder->tensorToInitialize(convolution2d->getBiases().get());
+            biasInitializerBuilder->build();
+        }
+
         return convolution2d;
     }
 
@@ -57,8 +67,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     uint32_t verticalPadding;
     uint32_t horizontalPadding;
     bool hasBias;
-    Initializer weightsInitializer;
-    Initializer biasInitializer;
+    shared_ptr<Initializer::Builder> weightsInitializerBuilder;
+    shared_ptr<Initializer::Builder> biasInitializerBuilder;
     shared_ptr<Activation::Builder> activationBuilder;
 
     float dropProportion;
@@ -94,10 +104,12 @@ class Convolution2d::Builder {
             _computeHorizontalSamePadding = false;
         if (_hasBias.isEmpty())
             _hasBias = false;
-        if (_weightsInitializer.isEmpty())
-            _weightsInitializer = XavierInitializer();
-        if (_biasInitializer.isEmpty())
-            _biasInitializer = UniformRandomInitializer();
+        if (_weightsInitializerBuilder == nullptr)
+            _weightsInitializerBuilder =
+                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+        if (_biasInitializerBuilder == nullptr)
+            _biasInitializerBuilder =
+                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
         if (!_activationBuilder && !_activationExplicitlyRemoved)
             _activationBuilder = make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())
@@ -143,9 +155,10 @@ class Convolution2d::Builder {
         }
 
         convolution2d.hasBias = _hasBias;
-        convolution2d.weightsInitializer = _weightsInitializer;
-        convolution2d.biasInitializer = _biasInitializer;
-        convolution2d.activationBuilder = _activationBuilder;
+        convolution2d.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
+        convolution2d.biasInitializerBuilder = _biasInitializerBuilder->clone();
+        if (_activationBuilder != nullptr)
+            convolution2d.activationBuilder = _activationBuilder->clone();
         convolution2d.dropProportion = _dropProportion;
         convolution2d.useBatchNormalization = _useBatchNormalization;
         convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
@@ -260,31 +273,26 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder &weightsInitializer(Initializer _weightsInitializer) {
-        assert(!this->_weightsInitializer.isPresent());
-        this->_weightsInitializer = _weightsInitializer;
+    virtual Convolution2d::Builder &weightsInitializerBuilder(Initializer::Builder *_weightsInitializerBuilder) {
+        assert(this->_weightsInitializerBuilder == nullptr);
+        assert(_weightsInitializerBuilder != nullptr);
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder->clone();
         return *this;
     }
 
-    virtual Convolution2d::Builder &biasInitializer(Initializer _biasInitializer) {
-        assert(!this->_biasInitializer.isPresent());
-        this->_biasInitializer = _biasInitializer;
+    virtual Convolution2d::Builder &biasInitializerBuilder(Initializer::Builder *_biasInitializerBuilder) {
+        assert(this->_biasInitializerBuilder == nullptr);
+        assert(_biasInitializerBuilder != nullptr);
+        this->_biasInitializerBuilder = _biasInitializerBuilder->clone();
         return *this;
     }
 
     // Adds an activation layer after this Convolution2d layer
-    virtual Convolution2d::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
-        assert(!this->_activationBuilder);
+    virtual Convolution2d::Builder &activationBuilder(Activation::Builder *_activationBuilder) {
+        assert(this->_activationBuilder == nullptr);
+        assert(_activationBuilder != nullptr);
         assert(!_activationExplicitlyRemoved);
-
-        if (dynamic_cast<Relu::Builder *>(&_activationBuilder)) {
-            this->_activationBuilder = make_shared<Relu::Builder>(*dynamic_cast<Relu::Builder *>(&_activationBuilder));
-        } else if (dynamic_cast<Tanh::Builder *>(&_activationBuilder)) {
-            this->_activationBuilder = make_shared<Tanh::Builder>(*dynamic_cast<Tanh::Builder *>(&_activationBuilder));
-        } else {
-            assert(false);
-        }
-
+        this->_activationBuilder = _activationBuilder->clone();
         return *this;
     }
 
@@ -342,8 +350,8 @@ class Convolution2d::Builder {
     Optional<uint32_t> _verticalPadding;
     Optional<uint32_t> _horizontalPadding;
     Optional<bool> _hasBias;
-    Optional<Initializer> _weightsInitializer;
-    Optional<Initializer> _biasInitializer;
+    shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
+    shared_ptr<Initializer::Builder> _biasInitializerBuilder;
     shared_ptr<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 

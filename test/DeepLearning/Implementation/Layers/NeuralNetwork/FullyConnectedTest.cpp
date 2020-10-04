@@ -375,10 +375,10 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        FullyConnected::UniformRandomInitializer initializer(0.1, -0.1);
-        fullyConnectedLayer->initializeWeights(&initializer);
+        UniformRandomInitializer initializer(0.1, -0.1);
+        initializer.initialize(fullyConnectedLayer, fullyConnectedLayer->getWeights());
         if (hasBiases) {
-            fullyConnectedLayer->initializeBiases(&initializer);
+            initializer.initialize(fullyConnectedLayer, fullyConnectedLayer->getBiases());
         }
 
         Tensor weights = fullyConnectedLayer->getWeights().clone(cpuPlacement);

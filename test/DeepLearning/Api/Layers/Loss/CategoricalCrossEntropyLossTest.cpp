@@ -23,12 +23,16 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
     Tensor featureInput(dataType, dimensions);
 
+    vector<uint64_t> firstDimension;
+    firstDimension.push_back(dimensions[0]);
+    Tensor labels(Tensor::DataType::FP32, firstDimension);
+
     Optional<float> lossScalingFactor;
     if (rand() % 2)
         lossScalingFactor = (1 + (rand() % 100)) / 10.0f;
 
     CategoricalCrossEntropyLoss::Builder crossEntropyBuilder =
-        CategoricalCrossEntropyLoss::Builder().network(network).featureInput(featureInput);
+        CategoricalCrossEntropyLoss::Builder().network(network).featureInput(featureInput).labels(labels);
     if (lossScalingFactor.isPresent())
         crossEntropyBuilder.lossScalingFactor(lossScalingFactor);
 
@@ -40,6 +44,11 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     ASSERT_TRUE(actualInput.isPresent());
     ASSERT_EQ(actualInput.get().getDataType(), dataType);
     ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualLabels = crossEntropy.getLabels();
+    ASSERT_TRUE(actualLabels.isPresent());
+    ASSERT_EQ(actualLabels.get().getDataType(), Tensor::DataType::FP32);
+    ASSERT_EQ(actualLabels.get().getDimensions(), firstDimension);
 
     Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
     ASSERT_TRUE(actualPredictions.isPresent());

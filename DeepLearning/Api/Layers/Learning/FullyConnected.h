@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Initializers/UniformRandomInitializer.h"
-#include "DeepLearning/Api/Initializers/XavierInitializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
@@ -42,14 +41,25 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
+
+        weightsInitializerBuilder->network(network);
+        weightsInitializerBuilder->tensorToInitialize(fullyConnected->getWeights());
+        weightsInitializerBuilder->build();
+
+        if (fullyConnected->getBiases().isPresent()) {
+            biasInitializerBuilder->network(network);
+            biasInitializerBuilder->tensorToInitialize(fullyConnected->getBiases().get());
+            biasInitializerBuilder->build();
+        }
+
         return fullyConnected;
     }
 
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
-    Initializer weightsInitializer;
-    Initializer biasInitializer;
+    shared_ptr<Initializer::Builder> weightsInitializerBuilder;
+    shared_ptr<Initializer::Builder> biasInitializerBuilder;
     shared_ptr<Activation::Builder> activationBuilder;
 
     float dropProportion;
@@ -73,10 +83,12 @@ class FullyConnected::Builder {
         assert(_numOutputFeatures.isPresent());
         if (_hasBias.isEmpty())
             _hasBias = false;
-        if (_weightsInitializer.isEmpty())
-            _weightsInitializer = XavierInitializer();
-        if (_biasInitializer.isEmpty())
-            _biasInitializer = UniformRandomInitializer();
+        if (_weightsInitializerBuilder == nullptr)
+            _weightsInitializerBuilder =
+                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+        if (_biasInitializerBuilder == nullptr)
+            _biasInitializerBuilder =
+                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
         if (!_activationBuilder && !_activationExplicitlyRemoved)
             _activationBuilder = make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())
@@ -94,9 +106,10 @@ class FullyConnected::Builder {
             fullyConnected.featureOutputs.push_back(
                 Tensor(fullyConnected.featureInputs[0].getDataType(), {fullyConnected.numOutputFeatures}));
         fullyConnected.hasBias = _hasBias;
-        fullyConnected.weightsInitializer = _weightsInitializer;
-        fullyConnected.biasInitializer = _biasInitializer;
-        fullyConnected.activationBuilder = _activationBuilder;
+        fullyConnected.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
+        fullyConnected.biasInitializerBuilder = _biasInitializerBuilder->clone();
+        if (_activationBuilder != nullptr)
+            fullyConnected.activationBuilder = _activationBuilder->clone();
         fullyConnected.dropProportion = _dropProportion;
         fullyConnected.useBatchNormalization = _useBatchNormalization;
         fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
@@ -114,7 +127,7 @@ class FullyConnected::Builder {
     }
 
     virtual FullyConnected::Builder &featureInput(Tensor _featureInput) {
-        assert(_featureInput.getDimensions().size() == 1);
+        assert(!_featureInput.getDimensions().empty());
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
@@ -135,35 +148,27 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &weightsInitializer(Initializer _weightsInitializer) {
-        assert(!this->_weightsInitializer.isPresent());
-        this->_weightsInitializer = _weightsInitializer;
+    virtual FullyConnected::Builder &weightsInitializerBuilder(Initializer::Builder *_weightsInitializerBuilder) {
+        assert(this->_weightsInitializerBuilder == nullptr);
+        assert(_weightsInitializerBuilder != nullptr);
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder->clone();
         return *this;
     }
 
-    virtual FullyConnected::Builder &biasInitializer(Initializer _biasInitializer) {
-        assert(!this->_biasInitializer.isPresent());
-        this->_biasInitializer = _biasInitializer;
+    virtual FullyConnected::Builder &biasInitializerBuilder(Initializer::Builder *_biasInitializerBuilder) {
+        assert(this->_biasInitializerBuilder == nullptr);
+        assert(_biasInitializerBuilder != nullptr);
+        this->_biasInitializerBuilder = _biasInitializerBuilder->clone();
         return *this;
     }
 
     // Adds an activation layer after this FullyConnected layer
-    virtual FullyConnected::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
-        assert(!this->_activationBuilder);
+    virtual FullyConnected::Builder &activationBuilder(Activation::Builder *_activationBuilder) {
+        assert(this->_activationBuilder == nullptr);
+        assert(_activationBuilder != nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder.clone();
+        this->_activationBuilder = _activationBuilder->clone();
         return *this;
-        /*
-                if (dynamic_cast<Relu::Builder *>(&_activationBuilder)) {
-                    this->_activationBuilder = make_shared<Relu::Builder>(*dynamic_cast<Relu::Builder *>(&_activationBuilder));
-                } else if (dynamic_cast<Tanh::Builder *>(&_activationBuilder)) {
-                    this->_activationBuilder = make_shared<Tanh::Builder>(*dynamic_cast<Tanh::Builder *>(&_activationBuilder));
-                } else {
-                    assert(false);
-                }
-
-                return *this;
-        */
     }
 
     virtual FullyConnected::Builder &noActivation() {
@@ -199,8 +204,8 @@ class FullyConnected::Builder {
     vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputFeatures;
     Optional<bool> _hasBias;
-    Optional<Initializer> _weightsInitializer;
-    Optional<Initializer> _biasInitializer;
+    shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
+    shared_ptr<Initializer::Builder> _biasInitializerBuilder;
     shared_ptr<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 
