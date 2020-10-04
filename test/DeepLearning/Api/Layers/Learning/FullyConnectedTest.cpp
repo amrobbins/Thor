@@ -40,9 +40,9 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
                                         .featureInput(featureInput)
                                         .numOutputFeatures(numOutputFeatures)
                                         .hasBias(hasBias)
-                                        .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                                        .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                                        .activationBuilder(&tanhBuilder)
+                                        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                                        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                        .activationBuilder(tanhBuilder)
                                         .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                         .dropOut(dropProportion)
                                         .build();

@@ -15,13 +15,6 @@ using std::vector;
 
 using namespace Thor;
 
-void printDimensions(vector<uint64_t> actualDimensions) {
-    for (uint32_t i = 0; i < actualDimensions.size(); ++i) {
-        printf("[%ld]", actualDimensions[i]);
-    }
-    printf("\n");
-}
-
 // This version of alexnet is modified from the original paper by stacking the two convolution paths channelwise
 Network buildAlexNet() {
     Network alexNet;
@@ -31,7 +24,6 @@ Network buildAlexNet() {
     vector<uint64_t> expectedDimensions, actualDimensions;
 
     UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
-    Relu::Builder reluBuilder;
 
     latestOutputTensor =
         NetworkInput::Builder().network(alexNet).dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build().getFeatureOutput();
@@ -48,9 +40,9 @@ Network buildAlexNet() {
                              .horizontalStride(4)
                              .noPadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .activationBuilder(&reluBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
 
@@ -78,9 +70,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .activationBuilder(&reluBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
 
@@ -108,9 +100,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .activationBuilder(&reluBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
 
@@ -124,9 +116,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .activationBuilder(&reluBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
 
@@ -140,9 +132,9 @@ Network buildAlexNet() {
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .activationBuilder(&reluBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
 
@@ -167,8 +159,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -181,8 +173,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
 
@@ -191,8 +183,8 @@ Network buildAlexNet() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(1000)
                              .hasBias(true)
-                             .weightsInitializerBuilder(&uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(&uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
 

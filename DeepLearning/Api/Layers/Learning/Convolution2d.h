@@ -127,16 +127,23 @@ class Convolution2d::Builder {
         convolution2d.filterWidth = _filterWidth;
         convolution2d.verticalStride = _verticalStride;
         convolution2d.horizontalStride = _horizontalStride;
-        if (_computeVerticalSamePadding)
+        if (_computeVerticalSamePadding) {
+            assert(convolution2d.verticalStride == 1);
             convolution2d.verticalPadding = computeSamePadding(
                 convolution2d.featureInputs[0].getDimensions()[1], convolution2d.verticalStride, convolution2d.filterHeight);
-        else
+        } else {
             convolution2d.verticalPadding = _verticalPadding;
-        if (_computeHorizontalSamePadding)
+        }
+        if (_computeHorizontalSamePadding) {
+            assert(convolution2d.horizontalStride == 1);
             convolution2d.horizontalPadding = computeSamePadding(
                 convolution2d.featureInputs[0].getDimensions()[2], convolution2d.horizontalStride, convolution2d.filterWidth);
-        else
+        } else {
             convolution2d.horizontalPadding = _horizontalPadding;
+        }
+
+        assert(convolution2d.verticalPadding < convolution2d.filterHeight);
+        assert(convolution2d.horizontalPadding < convolution2d.filterWidth);
 
         uint32_t outputHeight = computeOutputDimension(convolution2d.featureInputs[0].getDimensions()[1],
                                                        convolution2d.verticalStride,
@@ -204,12 +211,14 @@ class Convolution2d::Builder {
     }
 
     virtual Convolution2d::Builder &verticalStride(uint32_t _verticalStride) {
+        assert(_verticalStride != 0);
         assert(!this->_verticalStride.isPresent());
         this->_verticalStride = _verticalStride;
         return *this;
     }
 
     virtual Convolution2d::Builder &horizontalStride(uint32_t _horizontalStride) {
+        assert(_horizontalStride != 0);
         assert(!this->_horizontalStride.isPresent());
         this->_horizontalStride = _horizontalStride;
         return *this;
@@ -273,26 +282,42 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder &weightsInitializerBuilder(Initializer::Builder *_weightsInitializerBuilder) {
+    virtual Convolution2d::Builder &weightsInitializerBuilder(Initializer::Builder &_weightsInitializerBuilder) {
         assert(this->_weightsInitializerBuilder == nullptr);
-        assert(_weightsInitializerBuilder != nullptr);
-        this->_weightsInitializerBuilder = _weightsInitializerBuilder->clone();
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
         return *this;
     }
 
-    virtual Convolution2d::Builder &biasInitializerBuilder(Initializer::Builder *_biasInitializerBuilder) {
+    virtual Convolution2d::Builder &weightsInitializerBuilder(Initializer::Builder &&_weightsInitializerBuilder) {
+        assert(this->_weightsInitializerBuilder == nullptr);
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &biasInitializerBuilder(Initializer::Builder &_biasInitializerBuilder) {
         assert(this->_biasInitializerBuilder == nullptr);
-        assert(_biasInitializerBuilder != nullptr);
-        this->_biasInitializerBuilder = _biasInitializerBuilder->clone();
+        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &biasInitializerBuilder(Initializer::Builder &&_biasInitializerBuilder) {
+        assert(this->_biasInitializerBuilder == nullptr);
+        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
         return *this;
     }
 
     // Adds an activation layer after this Convolution2d layer
-    virtual Convolution2d::Builder &activationBuilder(Activation::Builder *_activationBuilder) {
+    virtual Convolution2d::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
         assert(this->_activationBuilder == nullptr);
-        assert(_activationBuilder != nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder->clone();
+        this->_activationBuilder = _activationBuilder.clone();
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &activationBuilder(Activation::Builder &&_activationBuilder) {
+        assert(this->_activationBuilder == nullptr);
+        assert(!_activationExplicitlyRemoved);
+        this->_activationBuilder = _activationBuilder.clone();
         return *this;
     }
 
