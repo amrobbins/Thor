@@ -27,7 +27,7 @@ using ThorImplementation::TensorPlacement;
  */
 class Stream : private ReferenceCounted {
    public:
-    Stream() : ReferenceCounted() {}
+    Stream() : ReferenceCounted() { isStatic = false; }
 
     enum class Priority { HIGH = 3, REGULAR = 4, LOW = 5 };
 
@@ -127,6 +127,10 @@ class Stream : private ReferenceCounted {
 
     virtual string getObjectName() { return "Stream"; }
 
+    // It is too late to destroy the cuDNN handle when the destructor of a static string is called,
+    // so just don't destroy the cuDNN handle of a static string.
+    void informIsStatic() { isStatic = true; }
+
    private:
     void construct(int gpuNum, Priority priority) {
         ReferenceCounted::initialize();
@@ -167,7 +171,8 @@ class Stream : private ReferenceCounted {
     void destroy() {
         ScopedGpu scopedGpu(gpuNum);
 
-        if (cudnnHandle->isPresent()) {
+        // can't destroy the cudnn handle at the point when the static string is destroyed
+        if (cudnnHandle->isPresent() && !isStatic) {
             cudnnStatus_t cudnnStatus;
             cudnnStatus = cudnnDestroy(*cudnnHandle);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -187,6 +192,8 @@ class Stream : private ReferenceCounted {
     int gpuNum;
     cudaStream_t cudaStream;
     Optional<cudnnHandle_t> *cudnnHandle;
+
+    bool isStatic;
 
     mutex *mtx;
 };

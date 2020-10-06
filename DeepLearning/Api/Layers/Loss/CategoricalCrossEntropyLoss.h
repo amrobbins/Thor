@@ -22,7 +22,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                              Thor::Layer *drivingApiLayer = nullptr,
                                              Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
         assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
+        assert(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
 
         ThorImplementation::CategoricalCrossEntropyLoss *categoricalCrossEntropy =
             new ThorImplementation::CategoricalCrossEntropyLoss(lossScalingFactor);
@@ -54,7 +54,7 @@ class CategoricalCrossEntropyLoss::Builder {
         categoricalCrossEntropyLoss.lossScalingFactor = _lossScalingFactor;
         categoricalCrossEntropyLoss.featureInput = _featureInput;
         categoricalCrossEntropyLoss.labelsTensor = _labels;
-        categoricalCrossEntropyLoss.predictionsTensor = _featureInput.get().clone();
+        categoricalCrossEntropyLoss.predictionsTensor = _featureInput.get().clone(Tensor::DataType::FP32);
         // Loss is per batch item currently so this is an empty tensor
         categoricalCrossEntropyLoss.lossTensor = Tensor(Tensor::DataType::FP32, vector<uint64_t>());
         categoricalCrossEntropyLoss.initialized = true;

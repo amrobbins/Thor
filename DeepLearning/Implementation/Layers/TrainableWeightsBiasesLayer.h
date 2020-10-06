@@ -50,6 +50,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(!compiled);
 
+        printf("before creating weights, incoming featureInput size %ld, dim[0] %ld\n",
+               featureInput.get().getDescriptor().getDimensions().size(),
+               featureInput.get().getDescriptor().getDimensions()[0]);
+
         Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
         if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
             assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
@@ -84,6 +88,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         }
         ensureNoDeviceCrossing();
 
+        printf("before creating weights, featureInput size %ld, dim[0] %ld\n",
+               featureInputs[0].get().getDescriptor().getDimensions().size(),
+               featureInputs[0].get().getDescriptor().getDimensions()[0]);
         createWeightsIfNecessary();
 
         return errorOutputs.back();

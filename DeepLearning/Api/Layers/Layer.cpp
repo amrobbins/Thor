@@ -20,6 +20,8 @@ void Layer::connectTwoLayers(ThorImplementation::Layer *drivingLayer,
     int drivingConnectionType = drivingApiLayer == nullptr ? 0 : drivingApiLayer->getConnectionType(connectingApiTensor);
     int loadingConnectionType = loadingApiLayer == nullptr ? 0 : loadingApiLayer->getConnectionType(connectingApiTensor);
 
+    printf("connecting %d to %d\n", (int)drivingConnectionType, (int)loadingConnectionType);
+
     drivingLayer->connectToNextLayer(loadingLayer, drivingConnectionType, loadingConnectionType);
 }
 

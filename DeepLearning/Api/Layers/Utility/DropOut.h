@@ -10,7 +10,7 @@ namespace Thor {
 class DropOut : public Layer {
    public:
     class Builder;
-    DropOut() {}
+    DropOut() { DropOut::stream.informIsStatic(); }
 
     virtual ~DropOut() {}
 
@@ -32,9 +32,7 @@ class DropOut : public Layer {
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
-        // FIXME: Static streams with cudnn handles seem to cause segfault on destruct,
-        //        don't want to create a new stream each time this is called
-        uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(Stream(0));
+        uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(stream);
         return randomStateSize + getReservedStateSizeInBytes(batchSize);
     }
 
@@ -50,6 +48,8 @@ class DropOut : public Layer {
 
    private:
     float dropProportion;
+
+    static Stream stream;
 };
 
 class DropOut::Builder {
