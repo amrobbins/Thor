@@ -95,7 +95,6 @@ class Loss : public Layer {
         } else if (driverConnectionType == (int)ConnectionType::LOSS) {
             connectToLossOutputLayer(nextLayer, loaderConnectionType);
         } else {
-            printf("driver connection type %d  loader connection type %d\n", (int)driverConnectionType, (int)loaderConnectionType);
             assert(false);
         }
     }

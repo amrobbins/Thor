@@ -33,7 +33,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             weightsDimensions.push_back(featureInputs[0].get().getDescriptor().getDimensions()[1]);
             weightsDimensions.push_back(numOutputFeatures);
             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
-            printf("weightDimensions size %ld  [0] %ld  [1] %ld\n", weightsDimensions.size(), weightsDimensions[0], weightsDimensions[1]);
             weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
             if (!isInferenceOnly())
                 weightsGradient = weights.clone();

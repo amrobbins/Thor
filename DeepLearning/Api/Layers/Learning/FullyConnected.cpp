@@ -54,10 +54,6 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     }
 
     vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
-    printf("featureInput dimensions ");
-    for (uint32_t i = 0; i < dimensions.size(); ++i)
-        printf("[%d] %ld  ", i, dimensions[i]);
-    printf("\n");
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
@@ -80,10 +76,8 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     outputTensorFromInputTensor.clear();
     inputTensorFromOutputTensor.clear();
     featureOutputs = currentFeatureInputs;
-    printf("num feature inputs %ld\n", featureInputs.size());
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
         outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
         inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
-        printf("output tensor map size %ld\n", outputTensorFromInputTensor.size());
     }
 }

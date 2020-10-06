@@ -23,7 +23,6 @@ class Loss : public Layer {
     virtual Tensor getLoss() const { return lossTensor; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
-        printf("called loss getConnectionType\n");
         if (connectingTensor == getFeatureInput())
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
         else if (connectingTensor == getLabels())

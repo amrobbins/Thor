@@ -45,7 +45,6 @@ class Layer {
     bool operator>(const Layer &other) const { return id > other.id; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
-        printf("called layer getConnectionType\n");
         assert(connectingTensor == getFeatureInput() || connectingTensor == getFeatureOutput());
         return 0;
     }
