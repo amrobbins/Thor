@@ -29,6 +29,52 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         setTrainingMode(training);
     }
 
+    BatchNormalization(SharedWeightsPackage sharedWeightsPackage,
+                       bool training,
+                       Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
+                       Optional<double> epsilon = Optional<double>::empty())
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage),
+          exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
+          epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
+        learningRate = 0.001;
+        setTrainingMode(training);
+
+        assert(sharedWeightsPackage.otherSharedMem.size() == 2);
+        resultRunningMean = sharedWeightsPackage.otherSharedMem[0];
+        resultRunningVariance = sharedWeightsPackage.otherSharedMem[1];
+    }
+
+    virtual SharedWeightsPackage getSharedWeightsPackage() {
+        SharedWeightsPackage sharedWeightsPackage = TrainableWeightsBiasesLayer::getSharedWeightsPackage();
+
+        sharedWeightsPackage.otherSharedMem.push_back(resultRunningMean);
+        sharedWeightsPackage.otherSharedMem.push_back(resultRunningVariance);
+
+        return sharedWeightsPackage;
+    }
+
+    virtual void createWeightsIfNecessary() {
+        // Cudnn forces the use of FP32 for the weights currently
+        // https://docs.nvidia.com/deeplearning/cudnn/api/index.html#cudnnDeriveBNTensorDescriptor
+        if (!usingSharedWeights && !weights.isInitialized()) {
+            vector<unsigned long> derivedBnTensorDimensions = {
+                featureInputs.front().get().getDescriptor().getDimensions()[1]};  // numChannels
+
+            weights = Tensor(featureInputs[0].get().getPlacement(),
+                             TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            biases = Tensor(featureInputs[0].get().getPlacement(),
+                            TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            weightsGradient = Tensor(featureInputs[0].get().getPlacement(),
+                                     TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            biasesGradient = Tensor(featureInputs[0].get().getPlacement(),
+                                    TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            resultRunningMean = Tensor(featureInputs[0].get().getPlacement(),
+                                       TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            resultRunningVariance = Tensor(featureInputs[0].get().getPlacement(),
+                                           TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        }
+    }
+
     void setTrainingMode(bool training) {
         assert(running == false);
         assert(isInferenceOnly() == false);
@@ -85,22 +131,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                     height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        vector<unsigned long> derivedBnTensorDimensions = {batchSize, numChannels, height, width};
-
-        // Cudnn forces the use of FP32 for the weights currently
-        // https://docs.nvidia.com/deeplearning/cudnn/api/index.html#cudnnDeriveBNTensorDescriptor
-        weights =
-            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        biases =
-            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        weightsGradient =
-            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        biasesGradient =
-            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        resultRunningMean =
-            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        resultRunningVariance =
-            Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+        vector<unsigned long> derivedBnTensorDimensions = {numChannels};
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i) {
             resultSaveMean.push_back(Tensor(featureInputs[0].get().getPlacement(),

@@ -30,11 +30,11 @@ class Tensor {
         assert(initialized);
         return id;
     }
-    DataType getDataType() {
+    DataType getDataType() const {
         assert(initialized);
         return dataType;
     }
-    vector<uint64_t> getDimensions() {
+    vector<uint64_t> getDimensions() const {
         assert(initialized);
         return dimensions;
     }
@@ -47,6 +47,26 @@ class Tensor {
     bool operator>(const Tensor &other) const { return id > other.id; }
 
     static bool dataTypeValid(DataType dataType) { return dataType >= DataType::FP32 && dataType <= DataType::UINT8; }
+
+    uint64_t getTotalNumElements() const {
+        uint64_t elements = 1;
+        for (uint32_t i = 0; i < dimensions.size(); ++i)
+            elements *= dimensions[i];
+        return elements;
+    }
+
+    uint64_t getTotalSizeInBytes() const {
+        uint32_t bytesPerElement;
+        if (dataType == DataType::FP32)
+            bytesPerElement = 4;
+        else if (dataType == DataType::FP16)
+            bytesPerElement = 2;
+        else if (dataType == DataType::UINT8)
+            bytesPerElement = 1;
+        else
+            assert(false);
+        return bytesPerElement * getTotalNumElements();
+    }
 
    private:
     uint64_t id;

@@ -66,8 +66,13 @@ void Convolution2d::convertToSingleLayersAndAddToNetwork() {
     }
 
     // Replace the outputs on the compound layer to be the outputs of the last stage
+    // i.e. tunnel the actual inputs to actual outputs of the compound layer,
+    // these are not necessarily the outputs of the stand-alone convolution layer.
+    // Network uses single layers, user uses compound layer.
+    outputTensorFromInputTensor.clear();
+    inputTensorFromOutputTensor.clear();
+    featureOutputs = currentFeatureInputs;
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        convolution2d.featureOutputs[i] = currentFeatureInputs[i];
         outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
         inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
     }

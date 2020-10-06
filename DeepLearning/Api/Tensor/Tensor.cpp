@@ -2,4 +2,4 @@
 
 using namespace Thor;
 
-atomic<uint64_t> Tensor::nextId(2);
+atomic<uint64_t> Tensor::nextId(10000);

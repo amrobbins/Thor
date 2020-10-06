@@ -25,6 +25,8 @@ class Stub : public Layer {
         assert(false);
     }
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const { return 0; }
+
    private:
     Tensor getFeatureOutput();
 };

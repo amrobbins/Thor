@@ -93,8 +93,11 @@ class Network {
     Network() : frozen(false) {}
     virtual ~Network() {}
 
-    // Figure this out. Want to add a subnetwork into the larger network, but how to connect subnetwork inputs and outputs?
-    void addSubnetwork(Network subnetwork) { assert(false); }
+    StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
+    void initializeStampedNetwork(
+        ThorImplementation::StampedNetwork
+            &stampedNetwork) { /* FIXME implement: iterate over all initializers in network and invoke them with the stamped tensor */
+    }
 
    protected:
     set<shared_ptr<Layer>> network;
@@ -103,21 +106,14 @@ class Network {
     set<Tensor> allTensors;
     map<Tensor, vector<Layer *>> apiTensorToApiLoadingLayers;
     map<Tensor, Layer *> apiTensorToApiDrivingLayer;
-    // Api layerId to implementation layer:
-    // map<uint64_t, ThorImplementation::Layer *> inputLayer;
-    // map<uint64_t, ThorImplementation::Layer *> outputLayer;
-    // map<uint64_t, ThorImplementation::Layer *> outputLossLayer;
 
     vector<shared_ptr<Initializer>> initializers;
 
-    void computeFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
-    void computeNonFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes);
-    StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
+    uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize);
+    uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize);
 
-    uint64_t firstInstanceFixedBytes;
-    uint64_t firstInstancePerBatchItemBytes;
-    uint64_t nonFirstInstanceFixedBytes;
-    uint64_t nonFirstInstancePerBatchItemBytes;
+    uint64_t firstInstanceBytes;
+    uint64_t nonFirstInstanceBytes;
 
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForFloatingInputs();

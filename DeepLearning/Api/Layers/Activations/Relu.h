@@ -15,11 +15,6 @@ class Relu : public Activation {
     virtual shared_ptr<Layer> clone() const { return make_shared<Relu>(*this); }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
-        assert(initialized);
-        return new ThorImplementation::Relu();
-    }
-
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer = nullptr,
@@ -32,7 +27,10 @@ class Relu : public Activation {
         return relu;
     }
 
-    // friend class Network;
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        // feature out and error out
+        return batchSize * featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes();
+    }
 };
 
 class Relu::Builder : public Activation::Builder {

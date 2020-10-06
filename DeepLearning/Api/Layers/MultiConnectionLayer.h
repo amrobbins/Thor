@@ -27,6 +27,12 @@ class MultiConnectionLayer : public Layer {
 
     // When there is more than one connection, you must use the following version:
     virtual Tensor getFeatureOutput(Tensor inputTensor) const {
+        printf("outputTensorFromInputTensor size %ld\n", outputTensorFromInputTensor.size());
+        for (map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.begin(); it != outputTensorFromInputTensor.end(); ++it) {
+            printf("input %ld -> output %ld\n", it->first.getId(), it->second.getId());
+        }
+        fflush(stdout);
+
         map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
         assert(it != outputTensorFromInputTensor.end());
         return it->second;

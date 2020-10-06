@@ -27,7 +27,10 @@ class Tanh : public Activation {
         return tanh;
     }
 
-    // friend class Network;
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        // feature out and error out
+        return batchSize * featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes();
+    }
 };
 
 class Tanh::Builder : public Activation::Builder {

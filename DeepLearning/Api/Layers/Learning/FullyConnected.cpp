@@ -55,8 +55,8 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
-    FullyConnected fullyConnected = fullyConnectedBuilder.build();
-    currentFeatureInputs = fullyConnected.getFeatureOutputs();
+    FullyConnected standAloneFullyConnected = fullyConnectedBuilder.build();
+    currentFeatureInputs = standAloneFullyConnected.getFeatureOutputs();
 
     if (activationBuilder) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
@@ -68,9 +68,16 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     }
 
     // Replace the outputs on the compound layer to be the outputs of the last stage
+    // i.e. tunnel the actual inputs to actual outputs of the compound layer,
+    // these are not necessarily the outputs of the stand-alone fully connected layer.
+    // Network uses single layers, user uses compound layer.
+    outputTensorFromInputTensor.clear();
+    inputTensorFromOutputTensor.clear();
+    featureOutputs = currentFeatureInputs;
+    printf("num feature inputs %ld\n", featureInputs.size());
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        fullyConnected.featureOutputs[i] = currentFeatureInputs[i];
         outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
         inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
+        printf("output tensor map size %ld\n", outputTensorFromInputTensor.size());
     }
 }

@@ -136,6 +136,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Initializers/Initializer.o \
                    build/DeepLearning/Api/Layers/Learning/FullyConnected.o \
                    build/DeepLearning/Api/Layers/Learning/Convolution2d.o \
+                   build/DeepLearning/Api/Layers/Utility/DropOut.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
@@ -376,7 +377,7 @@ build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/Loc
 
 build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h DeepLearning/Api/Network/Network.cpp
 	mkdir -p build/DeepLearning/Api/Network
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
 
 build/DeepLearning/Api/Tensor/Tensor.o: DeepLearning/Api/Tensor/Tensor.h DeepLearning/Api/Tensor/Tensor.cpp
 	mkdir -p build/DeepLearning/Api/Tensor
@@ -390,13 +391,17 @@ build/DeepLearning/Api/Initializers/Initializer.o: DeepLearning/Api/Initializers
 	mkdir -p build/DeepLearning/Api/Initializers
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Initializers/Initializer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Initializers/Initializer.o
 
-build/DeepLearning/Api/Layers/Learning/FullyConnected.o: DeepLearning/Api/Layers/Learning/FullyConnected.h
+build/DeepLearning/Api/Layers/Learning/FullyConnected.o: DeepLearning/Api/Layers/Learning/FullyConnected.h DeepLearning/Api/Layers/Learning/FullyConnected.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Learning
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/FullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/FullyConnected.o
 
-build/DeepLearning/Api/Layers/Learning/Convolution2d.o: DeepLearning/Api/Layers/Learning/Convolution2d.h
+build/DeepLearning/Api/Layers/Learning/Convolution2d.o: DeepLearning/Api/Layers/Learning/Convolution2d.h DeepLearning/Api/Layers/Learning/Convolution2d.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Learning
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Convolution2d.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Convolution2d.o
+
+build/DeepLearning/Api/Layers/Utility/DropOut.o: DeepLearning/Api/Layers/Utility/DropOut.h DeepLearning/Api/Layers/Utility/DropOut.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Utility
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Utility/DropOut.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Utility/DropOut.o
 
 
 

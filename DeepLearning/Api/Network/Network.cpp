@@ -9,19 +9,22 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
         if (status != StatusCode::SUCCESS)
             return status;
         topologicalSort();
-        computeFirstInstanceMemRequirements(firstInstanceFixedBytes, firstInstancePerBatchItemBytes);
-        computeNonFirstInstanceMemRequirements(nonFirstInstanceFixedBytes, nonFirstInstancePerBatchItemBytes);
+        firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize);
+        nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize);
         frozen = true;
     }
 
     // Leave 100MB of headroom
     // FIXME: need to determine if this is the not the first instance and use shared weights and shared weights mem requirements
-    if (MachineEvaluator::instance().getFreeMemBytes(gpuNum) <
-        firstInstanceFixedBytes + firstInstancePerBatchItemBytes * batchSize + 100000000)
+    printf("Allocating %ld bytes to stamp network   batchSize %d\n", firstInstanceBytes, batchSize);
+    fflush(stdout);
+    if (MachineEvaluator::instance().getFreeMemBytes(gpuNum) < firstInstanceBytes + 100000000)
         return StatusCode::GPU_OUT_OF_MEMORY;
 
     stampedNetwork.clear();
     try {
+        // FIXME: need to throw GPU_OUT_OF_MEMORY when stamping and run out of memory
+
         for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
             Optional<Tensor> inputTensor = it->first;
             Layer *layer = it->second;
@@ -48,21 +51,31 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 
         // All layers are connected, so now they can all be compiled
         for (uint32_t i = 0; i < stampedNetwork.inputs.size(); ++i) {
+            printf("A");
+            fflush(stdout);
             stampedNetwork.inputs[i]->parentCompile();
             stampedNetwork.inputs[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.outputs.size(); ++i) {
+            printf("B");
+            fflush(stdout);
             stampedNetwork.outputs[i]->parentCompile();
             stampedNetwork.outputs[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
+            printf("C");
+            fflush(stdout);
             stampedNetwork.trainableLayers[i]->parentCompile();
             stampedNetwork.trainableLayers[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
+            printf("D");
+            fflush(stdout);
             stampedNetwork.otherLayers[i]->parentCompile();
             stampedNetwork.otherLayers[i]->compile();
         }
+        printf("E\n");
+        fflush(stdout);
 
     } catch (GpuOutOfMemoryError ex) {
         stampedNetwork.clear();
@@ -89,6 +102,9 @@ Network::StatusCode Network::evaluateGraph() {
             allTensors.insert(outputTensor);
             assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = networkInput;
+            printf("associated tensor %ld with its driving layer %ld\n",
+                   outputTensor.getId(),
+                   apiTensorToApiDrivingLayer[outputTensor]->getId());
             continue;
         }
 
@@ -170,8 +186,14 @@ Network::StatusCode Network::evaluateGraph() {
 Network::StatusCode Network::checkForFloatingInputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiLoadingLayers.count(tensor) == 0)
-            return StatusCode::FLOATING_INPUT;
+        if (apiTensorToApiLoadingLayers.count(tensor) == 0) {
+            printf("Dangling tensor %ld\n", tensor.getId());
+            // FIXME:
+            //            return StatusCode::FLOATING_INPUT;
+        } else {
+            assert(apiTensorToApiLoadingLayers[tensor].size() == 1);
+            printf("layer %ld loads tensor %ld\n", apiTensorToApiLoadingLayers[tensor][0]->getId(), tensor.getId());
+        }
     }
     return StatusCode::SUCCESS;
 }
@@ -179,8 +201,13 @@ Network::StatusCode Network::checkForFloatingInputs() {
 Network::StatusCode Network::checkForDanglingOutputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiDrivingLayer.count(tensor) == 0)
-            return StatusCode::DANGLING_OUTPUT;
+        if (apiTensorToApiDrivingLayer.count(tensor) == 0) {
+            printf("Floating tensor %ld\n", tensor.getId());
+            // FIXME:
+            //            return StatusCode::DANGLING_OUTPUT;
+        } else {
+            printf("layer %ld drives tensor %ld\n", apiTensorToApiDrivingLayer[tensor]->getId(), tensor.getId());
+        }
     }
     return StatusCode::SUCCESS;
 }
@@ -189,7 +216,6 @@ Network::StatusCode Network::checkForDanglingOutputs() {
 //        (in that case the output tensor dimensions are only known after all of the input tensors are connected).
 void Network::topologicalSort() {
     deque<pair<Optional<Tensor>, Layer *>> workQueue;
-    map<uint64_t, Layer *> layerIndex;
 
     orderedNetwork.clear();
 
@@ -201,8 +227,7 @@ void Network::topologicalSort() {
         if (networkInput) {
             workQueue.push_back(make_pair(layer->getFeatureOutput(), layer));
             orderedNetwork.push_back(make_pair(Optional<Tensor>::empty(), layer));
-        } else {
-            layerIndex[layer->getId()] = layer;
+            printf("put input layer %ld in work queue\n", networkInput->getId());
         }
     }
 
@@ -225,6 +250,7 @@ void Network::topologicalSort() {
             outputTensors.push_back(lossLayer->getLoss());
         } else if (multiConnectionLayer) {
             assert(inputTensor.isPresent());  // in the future this may not be required
+            printf("want output for input tensor %ld of layer %ld\n", inputTensor.get().getId(), multiConnectionLayer->getId());
             outputTensors.push_back(multiConnectionLayer->getFeatureOutput(inputTensor));
         } else {
             outputTensors.push_back(layer->getFeatureOutput());
@@ -243,20 +269,25 @@ void Network::topologicalSort() {
 }
 
 // TODO: create a slice of a network that uses at most N bytes, given a specified batch size. return both network slices.
-void Network::computeFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes) {
+uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize) {
+    uint64_t bytes = 0;
+
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
-        firstInstanceFixedBytes += layer->getFirstInstanceFixedMemRequirementInBytes();
-        firstInstancePerBatchItemBytes += layer->getFirstInstancePerBatchItemMemRequirementInBytes();
+        printf("%ld  layer %ld\n", layer->getFirstInstanceMemRequirementInBytes(batchSize), layer->getId());
+        bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize);
     }
+    return bytes;
 }
 
-void Network::computeNonFirstInstanceMemRequirements(uint64_t &fixedBytes, uint64_t &perBatchItemBytes) {
+uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize) {
+    uint64_t bytes = 0;
+
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
-        nonFirstInstanceFixedBytes += layer->getNonFirstInstanceFixedMemRequirementInBytes();
-        nonFirstInstancePerBatchItemBytes += layer->getNonFirstInstancePerBatchItemMemRequirementInBytes();
+        bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize);
     }
+    return bytes;
 }
 
 void Network::createBatchDimensions(vector<uint64_t> &batchDimensions, vector<uint64_t> tensorDimensions, uint32_t batchSize) {

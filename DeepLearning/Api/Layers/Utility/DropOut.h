@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
 namespace Thor {
 
@@ -30,10 +31,25 @@ class DropOut : public Layer {
         return dropOut;
     }
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        // FIXME: Static streams with cudnn handles seem to cause segfault on destruct,
+        //        don't want to create a new stream each time this is called
+        uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(Stream(0));
+        return randomStateSize + getReservedStateSizeInBytes(batchSize);
+    }
+
+   protected:
+    virtual uint64_t getReservedStateSizeInBytes(uint32_t batchSize) const {
+        ThorImplementation::TensorDescriptor::DataType dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
+        vector<uint64_t> featureInputDimensionsWithBatchSize;
+        featureInputDimensionsWithBatchSize.push_back(batchSize);
+        for (uint32_t i = 0; i < featureInput.get().getDimensions().size(); ++i)
+            featureInputDimensionsWithBatchSize.push_back(featureInput.get().getDimensions()[i]);
+        return ThorImplementation::DropOut::getReservedSpaceSizeInBytes(featureInputDimensionsWithBatchSize, dataType);
+    }
+
    private:
     float dropProportion;
-
-    // friend class Network;
 };
 
 class DropOut::Builder {

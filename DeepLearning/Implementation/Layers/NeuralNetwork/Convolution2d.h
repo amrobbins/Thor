@@ -40,6 +40,29 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
           topAndBottomPadHeight(topAndBottomPadHeight),
           numOutputChannels(sharedWeightsPackage.weights.getDescriptor().getDimensions()[0]) {}
 
+    virtual void createWeightsIfNecessary() {
+        if (!usingSharedWeights && !weights.isInitialized()) {
+            // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
+            // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter
+            // rows, S = filter columns
+            vector<unsigned long> weightsDimensions;
+            weightsDimensions.push_back(numOutputChannels);
+            weightsDimensions.push_back(featureInputs[0].get().getDescriptor().getDimensions()[1]);
+            weightsDimensions.push_back(filterHeight);
+            weightsDimensions.push_back(filterWidth);
+            TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
+            if (!isInferenceOnly())
+                weightsGradient = weights.clone();
+            if (hasBias) {
+                biases = Tensor(featureInputs.front().get().getPlacement(),
+                                TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
+                if (!isInferenceOnly())
+                    biasesGradient = biases.get().clone();
+            }
+        }
+    }
+
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(!featureInputs.empty());
         assert(featureInputs.back().isPresent());
@@ -101,27 +124,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
         GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, streams[0]);
         GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, streams[0]);
-
-        if (!usingSharedWeights) {
-            // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
-            // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter
-            // rows, S = filter columns
-            vector<unsigned long> weightsDimensions;
-            weightsDimensions.push_back(numOutputChannels);
-            weightsDimensions.push_back(numInputChannels);
-            weightsDimensions.push_back(filterHeight);
-            weightsDimensions.push_back(filterWidth);
-            TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
-            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-            if (!isInferenceOnly())
-                weightsGradient = weights.clone();
-            if (hasBias) {
-                biases = Tensor(featureInputs.front().get().getPlacement(),
-                                TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
-                if (!isInferenceOnly())
-                    biasesGradient = biases.get().clone();
-            }
-        }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available

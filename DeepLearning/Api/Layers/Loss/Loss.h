@@ -41,6 +41,24 @@ class Loss : public Layer {
     Tensor predictionsTensor;
     Tensor lossTensor;
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint32_t fixedMem = 4;  // loss scaling factor, FP32
+
+        // Predictions
+        uint64_t predictionsOutputBytes = featureOutput.get().getTotalSizeInBytes();
+
+        // Labels
+        uint64_t labelsBytes = featureInput.get().getTotalNumElements() * 4;  // FP32, 1 per class (soft labels supported)
+
+        // Error Output
+        uint64_t errorOutputBytes = featureInput.get().getTotalSizeInBytes();  // FIXME this is not present for inference only
+
+        // Loss
+        uint64_t lossBytes = 4;  // FP32 per batch item
+
+        return fixedMem + batchSize * (predictionsOutputBytes + labelsBytes + errorOutputBytes + lossBytes);
+    }
+
    private:
     Tensor getFeatureOutput() { assert(false); }
 };

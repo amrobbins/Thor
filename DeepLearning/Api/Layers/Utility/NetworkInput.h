@@ -48,6 +48,22 @@ class NetworkInput : public Layer {
         assert(false);
     }
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t elements = featureInput.get().getTotalNumElements();
+
+        uint32_t bytesPerElement;
+        if (dataType == Tensor::DataType::FP32)
+            bytesPerElement = 6;  // original + converted
+        else if (dataType == Tensor::DataType::FP16)
+            bytesPerElement = 2;
+        else if (dataType == Tensor::DataType::UINT8)
+            bytesPerElement = 3;  // original + converted
+        else
+            assert(false);
+
+        return batchSize * elements * bytesPerElement;
+    }
+
    private:
     vector<uint64_t> dimensions;
     Tensor::DataType dataType;
