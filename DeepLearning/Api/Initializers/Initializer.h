@@ -11,9 +11,9 @@ using std::make_shared;
 
 namespace Thor {
 
-using std::shared_ptr;
+struct StampedNetwork;
 
-class Network;
+using std::shared_ptr;
 
 class Initializer {
    public:
@@ -25,54 +25,37 @@ class Initializer {
 
     virtual shared_ptr<Initializer> clone() const = 0;
 
-    virtual void addToNetwork(Network *network);
-
     // Referring to the initializer object, not the tensor that gets initialized:
     bool isInitialized() { return initialized; }
 
+    virtual void initialize() {
+        assert(tensorToInitialize.isPresent());
+        assert(layerThatOwnsTensor != nullptr);
+        implementationInitializer->initialize(layerThatOwnsTensor, tensorToInitialize);
+    }
+
    protected:
     shared_ptr<ThorImplementation::Initializer> implementationInitializer;
-    Optional<Tensor> apiTensorToInitialize;
     Optional<ThorImplementation::Tensor> tensorToInitialize;
+    ThorImplementation::Layer *layerThatOwnsTensor;
 
-    virtual bool usingApiTensor() { return !tensorToInitialize.isPresent(); }
-
-    virtual Tensor getApiTensor() {
-        assert(apiTensorToInitialize.isPresent());
-        return apiTensorToInitialize;
+    // If you want to initialize a tensor that is not owned by a layer, use this version:
+    virtual void initializeSynchronous(Stream stream) {
+        assert(tensorToInitialize.isPresent());
+        implementationInitializer->initializeSynchronous(stream, tensorToInitialize);
     }
 
-    virtual void initialize(ThorImplementation::Layer *layer, Optional<ThorImplementation::Tensor> implementationTensorToInitialize) {
-        if (implementationTensorToInitialize.isEmpty())
-            assert(tensorToInitialize.isPresent());
-
-        ThorImplementation::Tensor targetTensor =
-            implementationTensorToInitialize.isPresent() ? implementationTensorToInitialize.get() : tensorToInitialize.get();
-        implementationInitializer->initialize(layer, targetTensor);
-    }
-
-    virtual void initializeSynchronous(Stream stream, Optional<ThorImplementation::Tensor> implementationTensorToInitialize) {
-        if (implementationTensorToInitialize.isEmpty())
-            assert(tensorToInitialize.isPresent());
-
-        ThorImplementation::Tensor targetTensor =
-            implementationTensorToInitialize.isPresent() ? implementationTensorToInitialize.get() : tensorToInitialize.get();
-        implementationInitializer->initializeSynchronous(stream, targetTensor);
-    }
-
-    friend class Network;
-
-   protected:
     // Referring to the initializer object, not the tensor that gets initialized:
     bool initialized;
+
+    friend struct StampedNetwork;
 };
 
 class Initializer::Builder {
    public:
     virtual ~Builder() {}
-    virtual void network(Network &_network) = 0;
-    virtual void tensorToInitialize(Tensor _tensorToInitialize) = 0;
     virtual void tensorToInitialize(ThorImplementation::Tensor _tensorToInitialize) = 0;
+    virtual void layerThatOwnsTensor(ThorImplementation::Layer *_layerThatOwnsTensor) = 0;
     virtual shared_ptr<Initializer> build() = 0;
     virtual shared_ptr<Builder> clone() = 0;
 };

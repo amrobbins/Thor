@@ -286,7 +286,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
     Tensor outputTensor = networkInput->getFeatureOutput();
 
     // Stamp network input
-    ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize);
+    ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize, stampedNetwork.initializers);
     stampedNetwork.inputs.push_back(implementationNetworkInput);
     outputLayer = implementationNetworkInput;
 
@@ -336,7 +336,7 @@ void Network::stampLayer(
         implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer];
         Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
     } else {
-        implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor);
+        implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers);
         stampedNetwork.apiLayerToPhysicalLayer[layer] = implementationLayer;
     }
 
@@ -394,7 +394,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
 
     // Stamp the network output
     ThorImplementation::NetworkOutput *implementationNetworkOutput = dynamic_cast<ThorImplementation::NetworkOutput *>(
-        ((Layer *)networkOutput)->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor));
+        ((Layer *)networkOutput)->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers));
     assert(implementationNetworkOutput != nullptr);
     stampedNetwork.outputs.push_back(implementationNetworkOutput);
 }

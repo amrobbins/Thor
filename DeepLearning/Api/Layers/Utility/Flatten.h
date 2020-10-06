@@ -18,8 +18,9 @@ class Flatten : public Layer {
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer = nullptr,
-                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+                                             Thor::Layer *drivingApiLayer,
+                                             Thor::Tensor connectingApiTensor,
+                                             vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 

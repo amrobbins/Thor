@@ -34,22 +34,23 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer = nullptr,
-                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+                                             Thor::Layer *drivingApiLayer,
+                                             Thor::Tensor connectingApiTensor,
+                                             vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
 
-        weightsInitializerBuilder->network(*network);
         weightsInitializerBuilder->tensorToInitialize(fullyConnected->getWeights());
-        weightsInitializerBuilder->build();
+        weightsInitializerBuilder->layerThatOwnsTensor(fullyConnected);
+        initializers.push_back(weightsInitializerBuilder->build());
 
         if (fullyConnected->getBiases().isPresent()) {
-            biasInitializerBuilder->network(*network);
             biasInitializerBuilder->tensorToInitialize(fullyConnected->getBiases().get());
-            biasInitializerBuilder->build();
+            biasInitializerBuilder->layerThatOwnsTensor(fullyConnected);
+            initializers.push_back(biasInitializerBuilder->build());
         }
 
         return fullyConnected;

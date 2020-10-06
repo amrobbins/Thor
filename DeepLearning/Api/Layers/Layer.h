@@ -19,6 +19,7 @@ using std::unique_ptr;
 namespace Thor {
 
 class Network;
+class Initializer;
 
 class Layer {
    public:
@@ -62,8 +63,9 @@ class Layer {
     //       that are direct replacements for API layers.
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer = nullptr,
-                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const = 0;
+                                             Thor::Layer *drivingApiLayer,
+                                             Thor::Tensor connectingApiTensor,
+                                             vector<shared_ptr<Initializer>> &initializers) const = 0;
 
     virtual bool isMultiLayer() const { return false; }
     virtual void convertToSingleLayersAndAddToNetwork() { assert(false); }
