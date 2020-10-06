@@ -20,32 +20,5 @@ void Layer::connectTwoLayers(ThorImplementation::Layer *drivingLayer,
     int drivingConnectionType = drivingApiLayer == nullptr ? 0 : drivingApiLayer->getConnectionType(connectingApiTensor);
     int loadingConnectionType = loadingApiLayer == nullptr ? 0 : loadingApiLayer->getConnectionType(connectingApiTensor);
 
-    printf("connecting %d to %d\n", (int)drivingConnectionType, (int)loadingConnectionType);
-
     drivingLayer->connectToNextLayer(loadingLayer, drivingConnectionType, loadingConnectionType);
 }
-
-/* FIXME: delete:
-
-    int drivingConnectionType = 0;
-    const Thor::Loss *lossLoader = dynamic_cast<const Thor::Loss *>(drivingApiLayer);
-    if (lossDriver) {
-        if(lossDriver->getFeatureOutput().get() == connectingApiTensor) {
-            drivingConnectionType = (int)ThorImplementation::Loss::ConnectionType::PREDICTIONS;
-        } else {
-            assert(lossDriver->getLossOutput() == connectingTensor);
-            drivingConnectionType = (int)ThorImplementation::Loss::ConnectionType::LOSS;
-        }
-    }
-
-    int loadingConnectionType = 0;
-    const Thor::Loss *lossLoader = dynamic_cast<const Thor::Loss *>(loadingApiLayer);
-    if(lossLoader) {
-        if(lossLoader->getFeatureInput() == connectingApiTensor) {
-            loadingConnectionType = (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
-        } else {
-            assert(lossLoader->getLabels() == connectingApiTensor);
-            loadingConnectionType = (int)ThorImplementation::Loss::ConnectionType::LABELS;
-        }
-    }
-*/

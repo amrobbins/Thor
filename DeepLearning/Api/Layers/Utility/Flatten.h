@@ -50,11 +50,6 @@ class Flatten::Builder {
             else
                 outputDimensions.back() *= inputDimensions[i];
         }
-        printf("flattened to %ld dimensions first is %ld  numDimensions %ld\n",
-               outputDimensions.size(),
-               outputDimensions[0],
-               outputDimensions.size());
-        fflush(stdout);
 
         Flatten flatten;
         flatten.featureInput = _featureInput;

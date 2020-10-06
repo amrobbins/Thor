@@ -286,7 +286,9 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ThorImplementation::StampedNetwork stampedNetwork;
 
     Network alexNet = buildAlexNet();
-    Network::StatusCode statusCode = alexNet.stampNetwork(0, 32, stampedNetwork);
+    int gpuNum = 0;
+    int batchSize = 32;
+    Network::StatusCode statusCode = alexNet.stampNetwork(gpuNum, batchSize, stampedNetwork);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     // FIXME: Verify

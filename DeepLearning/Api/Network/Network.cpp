@@ -16,8 +16,6 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 
     // Leave 100MB of headroom
     // FIXME: need to determine if this is the not the first instance and use shared weights and shared weights mem requirements
-    printf("Allocating %ld bytes to stamp network   batchSize %d\n", firstInstanceBytes, batchSize);
-    fflush(stdout);
     if (MachineEvaluator::instance().getFreeMemBytes(gpuNum) < firstInstanceBytes + 100000000)
         return StatusCode::GPU_OUT_OF_MEMORY;
 
@@ -51,31 +49,21 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 
         // All layers are connected, so now they can all be compiled
         for (uint32_t i = 0; i < stampedNetwork.inputs.size(); ++i) {
-            printf("A");
-            fflush(stdout);
             stampedNetwork.inputs[i]->parentCompile();
             stampedNetwork.inputs[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.outputs.size(); ++i) {
-            printf("B");
-            fflush(stdout);
             stampedNetwork.outputs[i]->parentCompile();
             stampedNetwork.outputs[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
-            printf("C");
-            fflush(stdout);
             stampedNetwork.trainableLayers[i]->parentCompile();
             stampedNetwork.trainableLayers[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
-            printf("D");
-            fflush(stdout);
             stampedNetwork.otherLayers[i]->parentCompile();
             stampedNetwork.otherLayers[i]->compile();
         }
-        printf("E\n");
-        fflush(stdout);
 
     } catch (GpuOutOfMemoryError ex) {
         stampedNetwork.clear();
@@ -102,9 +90,6 @@ Network::StatusCode Network::evaluateGraph() {
             allTensors.insert(outputTensor);
             assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = networkInput;
-            printf("associated tensor %ld with its driving layer %ld\n",
-                   outputTensor.getId(),
-                   apiTensorToApiDrivingLayer[outputTensor]->getId());
             continue;
         }
 
@@ -186,14 +171,8 @@ Network::StatusCode Network::evaluateGraph() {
 Network::StatusCode Network::checkForFloatingInputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiLoadingLayers.count(tensor) == 0) {
-            printf("Dangling tensor %ld\n", tensor.getId());
-            // FIXME:
-            //            return StatusCode::FLOATING_INPUT;
-        } else {
-            assert(apiTensorToApiLoadingLayers[tensor].size() == 1);
-            printf("layer %ld loads tensor %ld\n", apiTensorToApiLoadingLayers[tensor][0]->getId(), tensor.getId());
-        }
+        if (apiTensorToApiLoadingLayers.count(tensor) == 0)
+            return StatusCode::FLOATING_INPUT;
     }
     return StatusCode::SUCCESS;
 }
@@ -201,13 +180,8 @@ Network::StatusCode Network::checkForFloatingInputs() {
 Network::StatusCode Network::checkForDanglingOutputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiDrivingLayer.count(tensor) == 0) {
-            printf("Floating tensor %ld\n", tensor.getId());
-            // FIXME:
-            //            return StatusCode::DANGLING_OUTPUT;
-        } else {
-            printf("layer %ld drives tensor %ld\n", apiTensorToApiDrivingLayer[tensor]->getId(), tensor.getId());
-        }
+        if (apiTensorToApiDrivingLayer.count(tensor) == 0)
+            return StatusCode::DANGLING_OUTPUT;
     }
     return StatusCode::SUCCESS;
 }
@@ -227,7 +201,6 @@ void Network::topologicalSort() {
         if (networkInput) {
             workQueue.push_back(make_pair(layer->getFeatureOutput(), layer));
             orderedNetwork.push_back(make_pair(Optional<Tensor>::empty(), layer));
-            printf("put input layer %ld in work queue\n", networkInput->getId());
         }
     }
 
@@ -252,7 +225,6 @@ void Network::topologicalSort() {
             }
         } else if (multiConnectionLayer) {
             assert(inputTensor.isPresent());  // in the future this may not be required
-            printf("want output for input tensor %ld of layer %ld\n", inputTensor.get().getId(), multiConnectionLayer->getId());
             outputTensors.push_back(multiConnectionLayer->getFeatureOutput(inputTensor));
         } else {
             outputTensors.push_back(layer->getFeatureOutput());
@@ -276,7 +248,6 @@ uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize) {
 
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
-        printf("%ld  layer %ld\n", layer->getFirstInstanceMemRequirementInBytes(batchSize), layer->getId());
         bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize);
     }
     return bytes;
@@ -392,7 +363,6 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     ThorImplementation::Layer *physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
     Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
-    printf("apiDrivingLayer 1   %p\n", apiDrivingLayer);
 
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
@@ -407,7 +377,6 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         stampedNetwork.otherLayers.push_back(implementationTensorFanout);
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
-        printf("stamped fanout\n");
     }
 
     // Stamp type converter if needed
