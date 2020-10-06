@@ -53,6 +53,12 @@ void FullyConnected::convertToSingleLayersAndAddToNetwork() {
         }
     }
 
+    vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
+    printf("featureInput dimensions ");
+    for (uint32_t i = 0; i < dimensions.size(); ++i)
+        printf("[%d] %ld  ", i, dimensions[i]);
+    printf("\n");
+
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
     FullyConnected standAloneFullyConnected = fullyConnectedBuilder.build();

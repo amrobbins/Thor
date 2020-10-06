@@ -22,9 +22,8 @@ class Loss : public Layer {
 
     virtual Tensor getLoss() const { return lossTensor; }
 
-    virtual int getConnectionType(Tensor connectingTensor) {
-        assert(connectingTensor == getFeatureInput() || connectingTensor == getLabels() || connectingTensor == getPredictions() ||
-               connectingTensor == getLoss());
+    virtual int getConnectionType(Tensor connectingTensor) const {
+        printf("called loss getConnectionType\n");
         if (connectingTensor == getFeatureInput())
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
         else if (connectingTensor == getLabels())
@@ -36,6 +35,8 @@ class Loss : public Layer {
         assert(false);
     }
 
+    virtual vector<Tensor> getAllOutputTensors() const { return {getPredictions(), getLoss()}; }
+
    protected:
     Tensor labelsTensor;
     Tensor predictionsTensor;
@@ -44,17 +45,17 @@ class Loss : public Layer {
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
         uint32_t fixedMem = 4;  // loss scaling factor, FP32
 
-        // Predictions
-        uint64_t predictionsOutputBytes = featureOutput.get().getTotalSizeInBytes();
-
         // Labels
-        uint64_t labelsBytes = featureInput.get().getTotalNumElements() * 4;  // FP32, 1 per class (soft labels supported)
+        uint64_t labelsBytes = labelsTensor.getTotalSizeInBytes();
 
         // Error Output
         uint64_t errorOutputBytes = featureInput.get().getTotalSizeInBytes();  // FIXME this is not present for inference only
 
+        // Predictions
+        uint64_t predictionsOutputBytes = predictionsTensor.getTotalSizeInBytes();
+
         // Loss
-        uint64_t lossBytes = 4;  // FP32 per batch item
+        uint64_t lossBytes = lossTensor.getTotalSizeInBytes();
 
         return fixedMem + batchSize * (predictionsOutputBytes + labelsBytes + errorOutputBytes + lossBytes);
     }

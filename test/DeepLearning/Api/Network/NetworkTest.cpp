@@ -249,7 +249,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
 
     latestOutputTensor =
-        NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::FP16).build().getFeatureOutput();
+        NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::UINT8).build().getFeatureOutput();
     latestOutputTensor = FullyConnected::Builder()
                              .network(network)
                              .featureInput(latestOutputTensor)
@@ -267,7 +267,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     Tensor networkOutputTensor = NetworkOutput::Builder()
                                      .network(network)
                                      .inputTensor(latestOutputTensor)
-                                     .dataType(Tensor::DataType::FP16)
+                                     .dataType(Tensor::DataType::UINT8)
                                      .build()
                                      .getFeatureOutput();
 
@@ -282,9 +282,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     stampedNetwork.clear();
 }
 
-/*
 TEST(Network, AlexnetIsProperlyFormed) {
-
     ThorImplementation::StampedNetwork stampedNetwork;
 
     Network alexNet = buildAlexNet();
@@ -295,7 +293,6 @@ TEST(Network, AlexnetIsProperlyFormed) {
 
     stampedNetwork.clear();
 }
-*/
 
 // FIXME: Create a network with branches, multiple inputs and multiple outputs
 

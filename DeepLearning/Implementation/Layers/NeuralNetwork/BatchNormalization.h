@@ -128,7 +128,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus = cudnnDeriveBNTensorDescriptor(derivedBnDescriptor,
                                                     featureInputDescriptor,
-                                                    height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION);
+                                                    inputDimensions.size() == 2 ? CUDNN_BATCHNORM_PER_ACTIVATION : CUDNN_BATCHNORM_SPATIAL);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         vector<unsigned long> derivedBnTensorDimensions = {numChannels};

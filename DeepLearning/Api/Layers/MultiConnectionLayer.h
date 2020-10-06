@@ -56,8 +56,8 @@ class MultiConnectionLayer : public Layer {
     map<Tensor, Tensor> inputTensorFromOutputTensor;
 
    private:
-    Tensor featureInput;
-    Tensor featureOutput;
+    using Layer::featureInput;
+    using Layer::featureOutput;
 };
 
 }  // namespace Thor

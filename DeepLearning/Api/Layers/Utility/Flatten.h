@@ -23,7 +23,8 @@ class Flatten : public Layer {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
-        ThorImplementation::Flatten *flatten = new ThorImplementation::Flatten(getFeatureOutput().get().getDimensions().size());
+        // Implemenattion has 1 extra dimension due to having the batchSize dimension
+        ThorImplementation::Flatten *flatten = new ThorImplementation::Flatten(getFeatureOutput().get().getDimensions().size() + 1);
         Thor::Layer::connectTwoLayers(drivingLayer, flatten, drivingApiLayer, this, connectingApiTensor);
         return flatten;
     }
@@ -49,7 +50,10 @@ class Flatten::Builder {
             else
                 outputDimensions.back() *= inputDimensions[i];
         }
-        printf("flattened to %ld dimensions first is %ld\n", outputDimensions.size(), outputDimensions[0]);
+        printf("flattened to %ld dimensions first is %ld  numDimensions %ld\n",
+               outputDimensions.size(),
+               outputDimensions[0],
+               outputDimensions.size());
         fflush(stdout);
 
         Flatten flatten;

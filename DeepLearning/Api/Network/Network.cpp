@@ -233,8 +233,8 @@ void Network::topologicalSort() {
 
     while (!workQueue.empty()) {
         // Visit a node, connect the output tensor that corresponds to this input tensor by adding the loading layer and its input tensor to
-        // orderedNetwork After connecting an output tensor to its loading layer, add that loading layer and its input tensor to the work
-        // queue.
+        // orderedNetwork
+        // After connecting an output tensor to its loading layer, add that loading layer and its input tensor to the work queue.
         pair<Optional<Tensor>, Layer *> workNode = workQueue.front();
         workQueue.pop_front();
         Optional<Tensor> inputTensor = workNode.first;
@@ -246,8 +246,10 @@ void Network::topologicalSort() {
         const MultiConnectionLayer *multiConnectionLayer = dynamic_cast<const MultiConnectionLayer *>(layer);
         // Input layers are just layers. Output layers and stubs have no output tensors.
         if (lossLayer) {
-            outputTensors.push_back(lossLayer->getPredictions());
-            outputTensors.push_back(lossLayer->getLoss());
+            if (lossLayer->getConnectionType(inputTensor) == (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD) {
+                outputTensors.push_back(lossLayer->getPredictions());
+                outputTensors.push_back(lossLayer->getLoss());
+            }
         } else if (multiConnectionLayer) {
             assert(inputTensor.isPresent());  // in the future this may not be required
             printf("want output for input tensor %ld of layer %ld\n", inputTensor.get().getId(), multiConnectionLayer->getId());
@@ -310,6 +312,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
                                 ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     ThorImplementation::Layer *outputLayer;
+    Tensor outputTensor = networkInput->getFeatureOutput();
 
     // Stamp network input
     ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize);
@@ -318,23 +321,25 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
 
     // Stamp type converter if needed
     ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
-    if (networkInput->getDataType() != Tensor::DataType::FP16) {
+    if (outputTensor.getDataType() != Tensor::DataType::FP16) {
         implementationTypeConversion = new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP16);
         implementationNetworkInput->connectToNextLayer(implementationTypeConversion);
         outputLayer = implementationTypeConversion;
 
         stampedNetwork.otherLayers.push_back(implementationTypeConversion);
+
+        outputTensor.setDataType(Tensor::DataType::FP16);
     }
 
     // Map the api tensor to its physical driving layer
-    stampedNetwork.apiTensorToPhysicalDrivingLayer[networkInput->getFeatureOutput()] = outputLayer;
+    stampedNetwork.apiTensorToPhysicalDrivingLayer[outputTensor] = outputLayer;
 }
 
 void Network::stampLayer(
     Tensor inputTensor, const Thor::Layer *layer, uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     ThorImplementation::Layer *physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
-    Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer[inputTensor] ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
+    Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
@@ -354,21 +359,28 @@ void Network::stampLayer(
     // Stamp the layer
     // Unless it was previously stamped on a prior pass, if so just connect the tensor.
     ThorImplementation::Layer *implementationLayer = nullptr;
+    bool layerPreviouslyStamped = false;
     if (stampedNetwork.apiLayerToPhysicalLayer.count(layer) == 1) {
+        layerPreviouslyStamped = true;
         implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer];
         Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
     } else {
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor);
         stampedNetwork.apiLayerToPhysicalLayer[layer] = implementationLayer;
     }
-    stampedNetwork.apiTensorToPhysicalDrivingLayer[layer->getFeatureOutput()] = implementationLayer;
 
-    ThorImplementation::TrainableWeightsBiasesLayer *implementationTrainableLayer =
-        dynamic_cast<ThorImplementation::TrainableWeightsBiasesLayer *>(implementationLayer);
-    if (implementationTrainableLayer != nullptr) {
-        stampedNetwork.trainableLayers.push_back(implementationTrainableLayer);
-    } else {
-        stampedNetwork.otherLayers.push_back(implementationLayer);
+    vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
+    for (uint32_t i = 0; i < apiOutputTensors.size(); ++i)
+        stampedNetwork.apiTensorToPhysicalDrivingLayer[apiOutputTensors[i]] = implementationLayer;
+
+    if (!layerPreviouslyStamped) {
+        ThorImplementation::TrainableWeightsBiasesLayer *implementationTrainableLayer =
+            dynamic_cast<ThorImplementation::TrainableWeightsBiasesLayer *>(implementationLayer);
+        if (implementationTrainableLayer != nullptr) {
+            stampedNetwork.trainableLayers.push_back(implementationTrainableLayer);
+        } else {
+            stampedNetwork.otherLayers.push_back(implementationLayer);
+        }
     }
 }
 
@@ -379,7 +391,8 @@ void Network::stampNetworkOutput(Tensor inputTensor,
                                  ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     ThorImplementation::Layer *physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
-    Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer[inputTensor] ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
+    Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
+    printf("apiDrivingLayer 1   %p\n", apiDrivingLayer);
 
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
@@ -394,16 +407,18 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         stampedNetwork.otherLayers.push_back(implementationTensorFanout);
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
+        printf("stamped fanout\n");
     }
 
     // Stamp type converter if needed
-    if (networkOutput->getDataType() != Tensor::DataType::FP16) {
+    if (networkOutput->getDataType() != inputTensor.getDataType()) {
         ThorImplementation::TypeConversion *implementationTypeConversion =
-            new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP32);
+            new ThorImplementation::TypeConversion(Tensor::convertToImplementationDataType(networkOutput->getDataType()));
         Thor::Layer::connectTwoLayers(physicalDrivingLayer, implementationTypeConversion, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTypeConversion;
+        inputTensor.setDataType(networkOutput->getDataType());
 
-        stampedNetwork.otherLayers.push_back(implementationTensorFanout);
+        stampedNetwork.otherLayers.push_back(implementationTypeConversion);
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
     }

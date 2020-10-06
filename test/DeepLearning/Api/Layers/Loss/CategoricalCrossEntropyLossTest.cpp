@@ -52,7 +52,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
 
     Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
     ASSERT_TRUE(actualPredictions.isPresent());
-    ASSERT_EQ(actualPredictions.get().getDataType(), dataType);
+    ASSERT_EQ(actualPredictions.get().getDataType(), Tensor::DataType::FP32);
     ASSERT_EQ(actualPredictions.get().getDimensions(), dimensions);
 
     Optional<Tensor> actualLoss = crossEntropy.getLoss();
@@ -78,7 +78,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
 
     Optional<Tensor> clonePredictions = clone->getPredictions();
     ASSERT_TRUE(clonePredictions.isPresent());
-    ASSERT_EQ(clonePredictions.get().getDataType(), dataType);
+    ASSERT_EQ(clonePredictions.get().getDataType(), Tensor::DataType::FP32);
     ASSERT_EQ(clonePredictions.get().getDimensions(), dimensions);
 
     Optional<Tensor> cloneLoss = clone->getLoss();

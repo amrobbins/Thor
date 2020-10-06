@@ -17,6 +17,7 @@ class TypeConversion : public Layer {
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
+        printf("input dataType %d output data type %d\n", (int)featureInput.get().getDescriptor().getDataType(), (int)dataType);
         assert(featureInput.get().getDescriptor().getDataType() != dataType);
         return featureInput.get().clone(dataType);
     }
