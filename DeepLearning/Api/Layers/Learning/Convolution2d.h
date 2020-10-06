@@ -35,8 +35,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer = nullptr,
-                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const {
+                                             Thor::Layer *drivingApiLayer,
+                                             Thor::Tensor connectingApiTensor,
+                                             vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -44,14 +45,14 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
 
-        weightsInitializerBuilder->network(*network);
         weightsInitializerBuilder->tensorToInitialize(convolution2d->getWeights());
-        weightsInitializerBuilder->build();
+        weightsInitializerBuilder->layerThatOwnsTensor(convolution2d);
+        initializers.push_back(weightsInitializerBuilder->build());
 
         if (convolution2d->getBiases().isPresent()) {
-            biasInitializerBuilder->network(*network);
             biasInitializerBuilder->tensorToInitialize(convolution2d->getBiases().get());
-            biasInitializerBuilder->build();
+            biasInitializerBuilder->layerThatOwnsTensor(convolution2d);
+            initializers.push_back(biasInitializerBuilder->build());
         }
 
         return convolution2d;

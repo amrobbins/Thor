@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
-#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Initializers/UniformRandomInitializer.h"
 
 #include <assert.h>
@@ -19,39 +18,30 @@ class UniformRandomInitializer : public Initializer {
 
 class UniformRandomInitializer::Builder : public Initializer::Builder {
    public:
-    virtual ~Builder() {}
+    virtual ~Builder() { _layerThatOwnsTensor = nullptr; }
 
     virtual shared_ptr<Initializer> build() {
-        assert(_network.isPresent());
-        assert(_tensorToInitialize.isPresent() || _apiTensorToInitialize.isPresent());
-        assert(!(_tensorToInitialize.isPresent() && _apiTensorToInitialize.isPresent()));
+        assert(_tensorToInitialize.isPresent());
 
         UniformRandomInitializer uniformRandomInitializer;
-        if (_tensorToInitialize.isPresent())
-            uniformRandomInitializer.tensorToInitialize = _tensorToInitialize;
-        else
-            uniformRandomInitializer.apiTensorToInitialize = _apiTensorToInitialize;
+        uniformRandomInitializer.tensorToInitialize = _tensorToInitialize;
         uniformRandomInitializer.implementationInitializer =
             ThorImplementation::UniformRandomInitializer(_maxValue.get(), _minValue.get()).clone();
+        uniformRandomInitializer.layerThatOwnsTensor = _layerThatOwnsTensor;
         uniformRandomInitializer.initialized = true;
-        uniformRandomInitializer.addToNetwork(_network.get());
         return uniformRandomInitializer.clone();
-    }
-
-    virtual void network(Network &_network) { this->_network = &_network; }
-
-    virtual void tensorToInitialize(Tensor _apiTensorToInitialize) {
-        assert(!_apiTensorToInitialize.getDimensions().empty());
-        assert(this->_apiTensorToInitialize.isEmpty());
-        assert(this->_tensorToInitialize.isEmpty());
-        this->_apiTensorToInitialize = _apiTensorToInitialize;
     }
 
     virtual void tensorToInitialize(ThorImplementation::Tensor _tensorToInitialize) {
         assert(!_tensorToInitialize.getDescriptor().getDimensions().empty());
-        assert(this->_apiTensorToInitialize.isEmpty());
         assert(this->_tensorToInitialize.isEmpty());
         this->_tensorToInitialize = _tensorToInitialize;
+    }
+
+    virtual void layerThatOwnsTensor(ThorImplementation::Layer *_layerThatOwnsTensor) {
+        assert(_layerThatOwnsTensor != nullptr);
+        assert(this->_layerThatOwnsTensor == nullptr);
+        this->_layerThatOwnsTensor = _layerThatOwnsTensor;
     }
 
     virtual UniformRandomInitializer::Builder &minValue(double _minValue) {
@@ -73,9 +63,8 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
     virtual shared_ptr<Initializer::Builder> clone() { return make_shared<UniformRandomInitializer::Builder>(*this); }
 
    protected:
-    Optional<Network *> _network;
-    Optional<Tensor> _apiTensorToInitialize;
     Optional<ThorImplementation::Tensor> _tensorToInitialize;
+    ThorImplementation::Layer *_layerThatOwnsTensor;
     Optional<double> _minValue;
     Optional<double> _maxValue;
 };

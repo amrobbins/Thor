@@ -237,6 +237,7 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     int batchSize = 32;
     Network::StatusCode statusCode = network.stampNetwork(gpuNum, batchSize, stampedNetwork);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    stampedNetwork.initialize();
 
     // FIXME: Verify
 
@@ -276,6 +277,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     int batchSize = 32;
     Network::StatusCode statusCode = network.stampNetwork(gpuNum, batchSize, stampedNetwork);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    stampedNetwork.initialize();
 
     // FIXME: Verify
 
@@ -290,6 +292,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     int batchSize = 32;
     Network::StatusCode statusCode = alexNet.stampNetwork(gpuNum, batchSize, stampedNetwork);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    stampedNetwork.initialize();
 
     // FIXME: Verify
 

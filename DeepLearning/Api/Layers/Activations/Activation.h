@@ -17,14 +17,6 @@ class Activation : public Layer {
 
     Activation() {}
     virtual ~Activation() {}
-
-    virtual shared_ptr<Layer> clone() const = 0;
-
-   protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer = nullptr,
-                                             Thor::Tensor connectingApiTensor = Thor::Tensor()) const = 0;
 };
 
 class Activation::Builder {

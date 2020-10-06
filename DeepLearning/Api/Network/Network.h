@@ -41,9 +41,16 @@ class StampedNetwork {
     vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
     vector<ThorImplementation::Layer *> otherLayers;
 
+    vector<shared_ptr<Thor::Initializer>> initializers;
+
     map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
     map<const Thor::Layer *, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
     map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
+
+    void initialize() {
+        for (uint32_t i = 0; i < initializers.size(); ++i)
+            initializers[i]->initialize();
+    }
 
     void clear() {
         for (uint32_t i = 0; i < inputs.size(); ++i) {
@@ -94,10 +101,6 @@ class Network {
     virtual ~Network() {}
 
     StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
-    void initializeStampedNetwork(
-        ThorImplementation::StampedNetwork
-            &stampedNetwork) { /* FIXME implement: iterate over all initializers in network and invoke them with the stamped tensor */
-    }
 
    protected:
     set<shared_ptr<Layer>> network;
@@ -156,7 +159,6 @@ class Network {
     class GpuOutOfMemoryError {};
 
     friend void Layer::addToNetwork(Network *network);
-    friend void Initializer::addToNetwork(Network *networ);
     friend class Executor;
 
     bool frozen;
