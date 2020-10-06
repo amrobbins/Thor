@@ -27,6 +27,9 @@ class Flatten : public Layer {
         Thor::Layer::connectTwoLayers(drivingLayer, flatten, drivingApiLayer, this, connectingApiTensor);
         return flatten;
     }
+
+    // Flatten only changes the descriptor, no tensor is allocated
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const { return 0; }
 };
 
 class Flatten::Builder {

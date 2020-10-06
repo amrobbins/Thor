@@ -32,13 +32,11 @@ class Layer {
 
     bool isInitialized() { return initialized; }
 
-    virtual uint64_t getFirstInstanceFixedMemRequirementInBytes() const { assert(false); }
-    virtual uint64_t getFirstInstancePerBatchItemMemRequirementInBytes() const { assert(false); }
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const = 0;
     // Layers with weights that share the weights mem with other instances of the same layer on the same gpu will have less non first
     // instance fixed mem requirements.
-    virtual uint64_t getNonFirstInstanceFixedMemRequirementInBytes() const { return getFirstInstanceFixedMemRequirementInBytes(); }
-    virtual uint64_t getNonFirstInstancePerBatchItemMemRequirementInBytes() const {
-        return getFirstInstancePerBatchItemMemRequirementInBytes();
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        return getFirstInstanceMemRequirementInBytes(batchSize);
     }
 
     bool operator==(const Layer &other) const { return id == other.id; }

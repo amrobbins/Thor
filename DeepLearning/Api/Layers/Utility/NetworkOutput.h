@@ -31,6 +31,8 @@ class NetworkOutput : public Layer {
         return networkOutput;
     }
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const { return 0; }
+
    private:
     Tensor::DataType dataType;
 };

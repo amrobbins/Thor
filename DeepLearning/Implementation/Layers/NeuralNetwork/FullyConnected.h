@@ -27,6 +27,24 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                           TensorDescriptor::DataType::FP16, featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures));
     }
 
+    virtual void createWeightsIfNecessary() {
+        if (!usingSharedWeights && !weights.isInitialized()) {
+            vector<unsigned long> weightsDimensions;
+            weightsDimensions.push_back(featureInputs[0].get().getDescriptor().getDimensions()[1]);
+            weightsDimensions.push_back(numOutputFeatures);
+            TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
+            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
+            if (!isInferenceOnly())
+                weightsGradient = weights.clone();
+            if (hasBias) {
+                biases = Tensor(featureInputs.front().get().getPlacement(),
+                                TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
+                if (!isInferenceOnly())
+                    biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
+            }
+        }
+    }
+
     virtual void compile() {
         int gpuNum;
         assert(!featureInputs.empty());
@@ -41,22 +59,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
         CublasMatrixMultiply::instance().chooseOptimalKernel(
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
-
-        if (!usingSharedWeights) {
-            vector<unsigned long> weightsDimensions;
-            weightsDimensions.push_back(numInputFeatures);
-            weightsDimensions.push_back(numOutputFeatures);
-            TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
-            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-            if (!isInferenceOnly())
-                weightsGradient = weights.clone();
-            if (hasBias) {
-                biases = Tensor(featureInputs.front().get().getPlacement(),
-                                TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
-                if (!isInferenceOnly())
-                    biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
-            }
-        }
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available

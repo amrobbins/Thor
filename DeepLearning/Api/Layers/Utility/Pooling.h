@@ -41,6 +41,10 @@ class Pooling : public Layer {
         return pooling;
     }
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        return batchSize * featureOutput.get().getTotalSizeInBytes();
+    }
+
    private:
     Type type;
     uint32_t windowHeight;

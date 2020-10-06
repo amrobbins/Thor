@@ -23,10 +23,14 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
 
     virtual shared_ptr<Initializer> build() {
         assert(_network.isPresent());
-        assert(_tensorToInitialize.isPresent());
+        assert(_tensorToInitialize.isPresent() || _apiTensorToInitialize.isPresent());
+        assert(!(_tensorToInitialize.isPresent() && _apiTensorToInitialize.isPresent()));
 
         UniformRandomInitializer uniformRandomInitializer;
-        uniformRandomInitializer.tensorToInitialize = _tensorToInitialize;
+        if (_tensorToInitialize.isPresent())
+            uniformRandomInitializer.tensorToInitialize = _tensorToInitialize;
+        else
+            uniformRandomInitializer.apiTensorToInitialize = _apiTensorToInitialize;
         uniformRandomInitializer.implementationInitializer =
             ThorImplementation::UniformRandomInitializer(_maxValue.get(), _minValue.get()).clone();
         uniformRandomInitializer.initialized = true;
@@ -36,8 +40,17 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
 
     virtual void network(Network &_network) { this->_network = &_network; }
 
-    virtual void tensorToInitialize(Tensor _tensorToInitialize) {
-        assert(!_tensorToInitialize.getDimensions().empty());
+    virtual void tensorToInitialize(Tensor _apiTensorToInitialize) {
+        assert(!_apiTensorToInitialize.getDimensions().empty());
+        assert(this->_apiTensorToInitialize.isEmpty());
+        assert(this->_tensorToInitialize.isEmpty());
+        this->_apiTensorToInitialize = _apiTensorToInitialize;
+    }
+
+    virtual void tensorToInitialize(ThorImplementation::Tensor _tensorToInitialize) {
+        assert(!_tensorToInitialize.getDescriptor().getDimensions().empty());
+        assert(this->_apiTensorToInitialize.isEmpty());
+        assert(this->_tensorToInitialize.isEmpty());
         this->_tensorToInitialize = _tensorToInitialize;
     }
 
@@ -59,9 +72,10 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
 
     virtual shared_ptr<Initializer::Builder> clone() { return make_shared<UniformRandomInitializer::Builder>(*this); }
 
-   private:
+   protected:
     Optional<Network *> _network;
-    Optional<Tensor> _tensorToInitialize;
+    Optional<Tensor> _apiTensorToInitialize;
+    Optional<ThorImplementation::Tensor> _tensorToInitialize;
     Optional<double> _minValue;
     Optional<double> _maxValue;
 };

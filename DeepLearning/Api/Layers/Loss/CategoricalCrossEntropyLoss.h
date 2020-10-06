@@ -30,6 +30,15 @@ class CategoricalCrossEntropyLoss : public Loss {
         return categoricalCrossEntropy;
     }
 
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize);
+
+        uint64_t lossWorkspaceBytes = featureInput.get().getTotalNumElements() * 4;
+        uint64_t inverseSumOfExponentials = 4;  // 1 per batch item, FP32
+
+        return standardLossBytes + batchSize * (lossWorkspaceBytes + inverseSumOfExponentials);
+    }
+
    private:
     Optional<float> lossScalingFactor;
 };

@@ -27,6 +27,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         Optional<Tensor> biasesGradient;
 
         Optional<Stream> gradientUpdateStream;
+
+        vector<Tensor> otherSharedMem;
     };
 
     TrainableWeightsBiasesLayer(SharedWeightsPackage sharedWeightsPackage)
@@ -40,6 +42,51 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         biasesGradient = sharedWeightsPackage.biasesGradient;
 
         gradientUpdateStream = sharedWeightsPackage.gradientUpdateStream;
+    }
+
+    virtual void createWeightsIfNecessary() = 0;
+
+    virtual Optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
+        assert(!compiled);
+
+        Optional<Tensor> previouslyConnectedFeatureInput = getFirstPresentTensor(featureInputs);
+        if (previouslyConnectedFeatureInput.isPresent() && featureInput.isPresent()) {
+            assert(featureInput.get().getDescriptor() == previouslyConnectedFeatureInput.get().getDescriptor());
+            assert(featureInput.get().getPlacement() == previouslyConnectedFeatureInput.get().getPlacement());
+        }
+
+        streams.push_back(stream);
+
+        previousLayers.push_back(previousLayer);
+        featureInputs.emplace_back(featureInput);
+        // backPropagateError allows the previous layer to specify that it does not support back propagation,
+        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
+        if (backPropagateError && !isInferenceOnly())
+            errorOutputs.emplace_back(featureInput.get().clone());
+        else
+            errorOutputs.emplace_back(Optional<Tensor>::empty());
+
+        Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
+        Optional<Tensor> firstFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> lastErrorOutput = getLastPresentTensor(errorOutputs);
+        if (firstFeatureInput.isPresent()) {
+            assert(lastFeatureInput.get().getDescriptor() == firstFeatureInput.get().getDescriptor());
+            assert(lastFeatureInput.get().getPlacement() == firstFeatureInput.get().getPlacement());
+            if (lastErrorOutput.isPresent()) {
+                assert(lastFeatureInput.get().getDescriptor() == lastErrorOutput.get().getDescriptor());
+                assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+            }
+        } else if (lastErrorOutput.isPresent()) {
+            Optional<Tensor> firstErrorOutput = getFirstPresentTensor(errorOutputs);
+            assert(lastErrorOutput.get().getDescriptor() == firstErrorOutput.get().getDescriptor());
+            assert(lastErrorOutput.get().getPlacement() == firstErrorOutput.get().getPlacement());
+        }
+        ensureNoDeviceCrossing();
+
+        createWeightsIfNecessary();
+
+        return errorOutputs.back();
     }
 
     Event updateWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {

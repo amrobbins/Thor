@@ -208,7 +208,96 @@ Network buildAlexNet() {
     return alexNet;
 }
 
-TEST(Network, AlexnetIsProperlyFormed) { Network alexNet = buildAlexNet(); }
+TEST(Network, SimplestNetworkProperlyFormed) {
+    Network network;
+    Tensor latestOutputTensor;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+
+    latestOutputTensor =
+        NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::FP16).build().getFeatureOutput();
+    latestOutputTensor = FullyConnected::Builder()
+                             .network(network)
+                             .featureInput(latestOutputTensor)
+                             .numOutputFeatures(500)
+                             .hasBias(true)
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .noActivation()
+                             .build()
+                             .getFeatureOutput();
+    Tensor networkOutputTensor = NetworkOutput::Builder()
+                                     .network(network)
+                                     .inputTensor(latestOutputTensor)
+                                     .dataType(Tensor::DataType::FP16)
+                                     .build()
+                                     .getFeatureOutput();
+
+    ThorImplementation::StampedNetwork stampedNetwork;
+    int gpuNum = 0;
+    int batchSize = 32;
+    Network::StatusCode statusCode = network.stampNetwork(gpuNum, batchSize, stampedNetwork);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+
+    // FIXME: Verify
+
+    stampedNetwork.clear();
+}
+
+TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
+    Network network;
+    Tensor latestOutputTensor;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+
+    latestOutputTensor =
+        NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::FP16).build().getFeatureOutput();
+    latestOutputTensor = FullyConnected::Builder()
+                             .network(network)
+                             .featureInput(latestOutputTensor)
+                             .numOutputFeatures(500)
+                             .hasBias(true)
+                             .activationBuilder(Relu::Builder())
+                             .dropOut(0.5)
+                             .batchNormalization()
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .build()
+                             .getFeatureOutput();
+    latestOutputTensor =
+        DropOut::Builder().network(network).featureInput(latestOutputTensor).dropProportion(0.25).build().getFeatureOutput();
+    Tensor networkOutputTensor = NetworkOutput::Builder()
+                                     .network(network)
+                                     .inputTensor(latestOutputTensor)
+                                     .dataType(Tensor::DataType::FP16)
+                                     .build()
+                                     .getFeatureOutput();
+
+    ThorImplementation::StampedNetwork stampedNetwork;
+    int gpuNum = 0;
+    int batchSize = 32;
+    Network::StatusCode statusCode = network.stampNetwork(gpuNum, batchSize, stampedNetwork);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+
+    // FIXME: Verify
+
+    stampedNetwork.clear();
+}
+
+/*
+TEST(Network, AlexnetIsProperlyFormed) {
+
+    ThorImplementation::StampedNetwork stampedNetwork;
+
+    Network alexNet = buildAlexNet();
+    Network::StatusCode statusCode = alexNet.stampNetwork(0, 32, stampedNetwork);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+
+    // FIXME: Verify
+
+    stampedNetwork.clear();
+}
+*/
+
+// FIXME: Create a network with branches, multiple inputs and multiple outputs
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

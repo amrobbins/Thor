@@ -42,17 +42,37 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
 
-        weightsInitializerBuilder->network(network);
+        weightsInitializerBuilder->network(*network);
         weightsInitializerBuilder->tensorToInitialize(fullyConnected->getWeights());
         weightsInitializerBuilder->build();
 
         if (fullyConnected->getBiases().isPresent()) {
-            biasInitializerBuilder->network(network);
+            biasInitializerBuilder->network(*network);
             biasInitializerBuilder->tensorToInitialize(fullyConnected->getBiases().get());
             biasInitializerBuilder->build();
         }
 
         return fullyConnected;
+    }
+
+    // mem requirements are the weights
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        // FIXME: workspace? Or do I assume no workspace at first and can add one later if have extra mem?
+        uint64_t numInputFeatures = featureInputs[0].getDimensions()[0];
+        uint64_t numWeights = numInputFeatures * numOutputFeatures;
+        uint64_t numBiases = numOutputFeatures;
+        // have weights and gradient accumulators, as FP16 elements
+        uint64_t fixedMem = 2 * (numWeights + numBiases) * 2;
+        uint64_t batchSizeDependentMem =
+            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+
+        return fixedMem + batchSizeDependentMem;
+    }
+
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t batchSizeDependentMem =
+            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+        return batchSizeDependentMem;
     }
 
    private:
@@ -102,9 +122,13 @@ class FullyConnected::Builder {
         fullyConnected.network = _network;
         fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
-        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i)
+        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
             fullyConnected.featureOutputs.push_back(
                 Tensor(fullyConnected.featureInputs[0].getDataType(), {fullyConnected.numOutputFeatures}));
+            fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
+            fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
+        }
+
         fullyConnected.hasBias = _hasBias;
         fullyConnected.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
         fullyConnected.biasInitializerBuilder = _biasInitializerBuilder->clone();

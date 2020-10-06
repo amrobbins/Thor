@@ -44,17 +44,37 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
 
-        weightsInitializerBuilder->network(network);
+        weightsInitializerBuilder->network(*network);
         weightsInitializerBuilder->tensorToInitialize(convolution2d->getWeights());
         weightsInitializerBuilder->build();
 
         if (convolution2d->getBiases().isPresent()) {
-            biasInitializerBuilder->network(network);
+            biasInitializerBuilder->network(*network);
             biasInitializerBuilder->tensorToInitialize(convolution2d->getBiases().get());
             biasInitializerBuilder->build();
         }
 
         return convolution2d;
+    }
+
+    // mem requirements are the weights
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        // FIXME: workspace size?
+        uint64_t numInputChannels = featureInputs[0].getDimensions()[0];
+        uint64_t numWeights = filterHeight * filterWidth * numInputChannels * numOutputChannels;
+        uint64_t numBiases = numOutputChannels;
+        // have weights and gradient accumulators, as FP16 elements
+        uint64_t fixedMem = 2 * (numWeights + numBiases) * 2;
+        uint64_t batchSizeDependentMem =
+            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+
+        return fixedMem + batchSizeDependentMem;
+    }
+
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t batchSizeDependentMem =
+            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+        return batchSizeDependentMem;
     }
 
    private:

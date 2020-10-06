@@ -31,37 +31,22 @@ class DropOut : public Layer {
         this->training = training;
     }
 
-    virtual void compile() {
-        cudnnStatus_t cudnnStatus;
+    static cudnnTensorDescriptor_t createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
+                                                               TensorDescriptor::DataType dataType) {
+        cudnnTensorDescriptor_t descriptor;
 
-        // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),
-        // so this dropout layer can only be used for 1 input/output pair.
-        assert(featureInput.isPresent());
-
-        ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
-
-        vector<unsigned long> randomStateDimensions;
-        cudnnStatus = cudnnDropoutGetStatesSize(stream.getCudnnHandle(), &randomStateBytes);
+        cudnnStatus_t cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        randomStateDimensions.push_back(randomStateBytes);
-        randomState = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, randomStateDimensions));
-
-        cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-
-        cudnnStatus = cudnnCreateTensorDescriptor(&cudnnTensorDescriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        vector<unsigned long> tensorDimensions = featureInput.get().getDescriptor().getDimensions();
         // Tensors must have at least 4 dimensions and not more than CUDNN_DIM_MAX, per cudnn.
         // Unused dimensions will be set to size 1.
         // https://docs.nvidia.com/deeplearning/sdk/cudnn-api/index.html#cudnnSetTensorNdDescriptor
-        assert(tensorDimensions.size() <= CUDNN_DIM_MAX);
+        assert(featureInputDimensions.size() <= CUDNN_DIM_MAX);
         vector<int> dimensionsMin4;
         vector<int> noGapsStride;
-        for (unsigned int i = 0; i < tensorDimensions.size(); ++i) {
-            dimensionsMin4.push_back(tensorDimensions[i]);
+        for (unsigned int i = 0; i < featureInputDimensions.size(); ++i) {
+            dimensionsMin4.push_back(featureInputDimensions[i]);
             // no overflow:
-            assert(dimensionsMin4.back() == (long)tensorDimensions[i]);
+            assert(dimensionsMin4.back() == (long)featureInputDimensions[i]);
             noGapsStride.push_back(1);
         }
 
@@ -74,12 +59,48 @@ class DropOut : public Layer {
             noGapsStride[i] = noGapsStride[i + 1] * dimensionsMin4[i + 1];
         }
 
-        cudnnStatus = cudnnSetTensorNdDescriptor(cudnnTensorDescriptor,
-                                                 CudnnHelper::getCudnnDataType(featureInput.get().getDescriptor().getDataType()),
-                                                 dimensionsMin4.size(),
-                                                 dimensionsMin4.data(),
-                                                 noGapsStride.data());
+        cudnnStatus = cudnnSetTensorNdDescriptor(
+            descriptor, CudnnHelper::getCudnnDataType(dataType), dimensionsMin4.size(), dimensionsMin4.data(), noGapsStride.data());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+
+        return descriptor;
+    }
+
+    static size_t getReservedSpaceSizeInBytes(vector<unsigned long> featureInputDimensions, TensorDescriptor::DataType dataType) {
+        size_t numBytes;
+        cudnnStatus_t cudnnStatus =
+            cudnnDropoutGetReserveSpaceSize(createCudnnTensorDescriptor(featureInputDimensions, dataType), &numBytes);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        return numBytes;
+    }
+
+    static size_t getRandomStateSizeInBytes(Stream stream) {
+        size_t numBytes;
+        cudnnStatus_t cudnnStatus = cudnnDropoutGetStatesSize(stream.getCudnnHandle(), &numBytes);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        return numBytes;
+    }
+
+    virtual void compile() {
+        cudnnStatus_t cudnnStatus;
+
+        // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),
+        // so this dropout layer can only be used for 1 input/output pair.
+        assert(featureInput.isPresent());
+
+        ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
+
+        randomStateBytes = getRandomStateSizeInBytes(stream);
+        randomState = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
+
+        cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+
+        cudnnTensorDescriptor = createCudnnTensorDescriptor(featureInput.get().getDescriptor().getDimensions(),
+                                                            featureInput.get().getDescriptor().getDataType());
+        reserveSpaceBytes = getReservedSpaceSizeInBytes(featureInput.get().getDescriptor().getDimensions(),
+                                                        featureInput.get().getDescriptor().getDataType());
+        reserveSpace = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
 
         mtx.lock();
 
@@ -95,13 +116,6 @@ class DropOut : public Layer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         mtx.unlock();
-
-        vector<unsigned long> reserveSpaceDimensions;
-        cudnnStatus = cudnnDropoutGetReserveSpaceSize(cudnnTensorDescriptor, &reserveSpaceBytes);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        reserveSpaceDimensions.push_back(reserveSpaceBytes);
-        reserveSpace =
-            Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, reserveSpaceDimensions));
     }
 
     void cleanup() {

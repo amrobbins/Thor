@@ -30,11 +30,34 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         return batchNormalization;
     }
 
+    // mem requirements are the weights
+    virtual uint64_t getFirstInstanceFixedMemRequirementInBytes() const { return 0; }
+
+    // mem requirements are the input output tensors
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t numChannels = featureInputs[0].getDimensions()[0];
+        uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16
+        uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;       // FP16
+
+        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();  // FP16
+        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();      // FP16
+
+        return perInstanceWeights + perInputState + batchSize * (featureOutputSize + errorOutputSize);
+    }
+
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t numChannels = featureInputs[0].getDimensions()[0];
+        uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;  // FP16
+
+        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();  // FP16
+        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();      // FP16
+
+        return perInputState + batchSize * (featureOutputSize + errorOutputSize);
+    }
+
    private:
     Optional<double> exponentialRunningAverageFactor;
     Optional<double> epsilon;
-
-    // friend class Network;
 };
 
 class BatchNormalization::Builder {
