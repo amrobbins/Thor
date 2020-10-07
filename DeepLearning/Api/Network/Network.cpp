@@ -199,7 +199,12 @@ void Network::topologicalSort() {
 
         const NetworkInput *networkInput = dynamic_cast<const NetworkInput *>(layer);
         if (networkInput) {
-            workQueue.push_back(make_pair(layer->getFeatureOutput(), layer));
+            Tensor outputTensor = layer->getFeatureOutput();
+            vector<Layer *> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
+            for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
+                workQueue.push_back(make_pair(outputTensor, loadingLayers[i]));
+            }
+
             orderedNetwork.push_back(make_pair(Optional<Tensor>::empty(), layer));
         }
     }
@@ -213,23 +218,7 @@ void Network::topologicalSort() {
         Optional<Tensor> inputTensor = workNode.first;
         Layer *layer = workNode.second;
 
-        vector<Tensor> outputTensors;
-
-        const Loss *lossLayer = dynamic_cast<const Loss *>(layer);
-        const MultiConnectionLayer *multiConnectionLayer = dynamic_cast<const MultiConnectionLayer *>(layer);
-        // Input layers are just layers. Output layers and stubs have no output tensors.
-        if (lossLayer) {
-            if (lossLayer->getConnectionType(inputTensor) == (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD) {
-                outputTensors.push_back(lossLayer->getPredictions());
-                outputTensors.push_back(lossLayer->getLoss());
-            }
-        } else if (multiConnectionLayer) {
-            assert(inputTensor.isPresent());  // in the future this may not be required
-            outputTensors.push_back(multiConnectionLayer->getFeatureOutput(inputTensor));
-        } else {
-            outputTensors.push_back(layer->getFeatureOutput());
-        }
-
+        vector<Tensor> outputTensors = layer->getOutputsFromInput(inputTensor);
         for (uint32_t t = 0; t < outputTensors.size(); ++t) {
             Tensor outputTensor = outputTensors[t];
             vector<Layer *> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
@@ -289,6 +278,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
     ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize, stampedNetwork.initializers);
     stampedNetwork.inputs.push_back(implementationNetworkInput);
     outputLayer = implementationNetworkInput;
+    stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput;
 
     // Stamp type converter if needed
     ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
@@ -331,13 +321,13 @@ void Network::stampLayer(
     // Unless it was previously stamped on a prior pass, if so just connect the tensor.
     ThorImplementation::Layer *implementationLayer = nullptr;
     bool layerPreviouslyStamped = false;
-    if (stampedNetwork.apiLayerToPhysicalLayer.count(layer) == 1) {
+    if (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1) {
         layerPreviouslyStamped = true;
-        implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer];
+        implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer->getId()];
         Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
     } else {
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers);
-        stampedNetwork.apiLayerToPhysicalLayer[layer] = implementationLayer;
+        stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer;
     }
 
     vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
@@ -393,8 +383,15 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     }
 
     // Stamp the network output
-    ThorImplementation::NetworkOutput *implementationNetworkOutput = dynamic_cast<ThorImplementation::NetworkOutput *>(
-        ((Layer *)networkOutput)->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers));
+    ThorImplementation::NetworkOutput *implementationNetworkOutput =
+        dynamic_cast<ThorImplementation::NetworkOutput *>(((Layer *)networkOutput)
+                                                              ->stamp(ThorImplementation::TensorPlacement::MemDevices::CPU,
+                                                                      physicalDrivingLayer,
+                                                                      apiDrivingLayer,
+                                                                      inputTensor,
+                                                                      stampedNetwork.initializers));
     assert(implementationNetworkOutput != nullptr);
     stampedNetwork.outputs.push_back(implementationNetworkOutput);
+
+    stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput;
 }

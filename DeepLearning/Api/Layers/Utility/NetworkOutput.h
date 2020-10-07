@@ -32,7 +32,12 @@ class NetworkOutput : public Layer {
         return networkOutput;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const { return 0; }
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+        uint64_t totalBytes = 0;
+        if (featureInput.get().getDataType() != dataType)
+            totalBytes += featureInput.get().clone(dataType).getTotalSizeInBytes();
+        return totalBytes;
+    }
 
    private:
     Tensor::DataType dataType;

@@ -31,6 +31,11 @@ class Layer {
     virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
 
+    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+        assert(inputTensor == featureInput.get());
+        return {featureOutput};
+    }
+
     bool isInitialized() { return initialized; }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const = 0;

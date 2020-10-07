@@ -19,6 +19,8 @@ class NetworkInput : public Layer {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<NetworkInput>(*this); }
 
+    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {featureOutput}; }
+
    protected:
     virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement,
                                                     uint32_t batchSize,

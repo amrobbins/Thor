@@ -208,29 +208,33 @@ Network buildAlexNet() {
     return alexNet;
 }
 
+void checkSimplyConnectedNetwork(vector<Layer> network, ThorImplementation::StampedNetwork stampedNetwork) {
+    for (uint32_t i = 0; i < network.size(); ++i) {
+    }
+}
+
 TEST(Network, SimplestNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
     UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
 
-    latestOutputTensor =
-        NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::FP16).build().getFeatureOutput();
-    latestOutputTensor = FullyConnected::Builder()
-                             .network(network)
-                             .featureInput(latestOutputTensor)
-                             .numOutputFeatures(500)
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .noActivation()
-                             .build()
-                             .getFeatureOutput();
-    Tensor networkOutputTensor = NetworkOutput::Builder()
-                                     .network(network)
-                                     .inputTensor(latestOutputTensor)
-                                     .dataType(Tensor::DataType::FP16)
-                                     .build()
-                                     .getFeatureOutput();
+    NetworkInput networkInput = NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+    latestOutputTensor = networkInput.getFeatureOutput();
+
+    FullyConnected fullyConnected = FullyConnected::Builder()
+                                        .network(network)
+                                        .featureInput(latestOutputTensor)
+                                        .numOutputFeatures(500)
+                                        .hasBias(true)
+                                        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                                        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                        .noActivation()
+                                        .build();
+    latestOutputTensor = fullyConnected.getFeatureOutput();
+
+    NetworkOutput networkOutput =
+        NetworkOutput::Builder().network(network).inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
+    Tensor networkOutputTensor = networkOutput.getFeatureOutput();
 
     ThorImplementation::StampedNetwork stampedNetwork;
     int gpuNum = 0;
@@ -239,7 +243,23 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     stampedNetwork.initialize();
 
-    // FIXME: Verify
+    ASSERT_EQ(stampedNetwork.inputs.size(), 1u);
+    ASSERT_EQ(stampedNetwork.inputs[0]->getFeatureOutput().get(),
+              stampedNetwork.apiLayerToPhysicalLayer[networkInput.getId()]->getFeatureOutput().get());
+    ASSERT_EQ(stampedNetwork.trainableLayers.size(), 1u);
+    ThorImplementation::FullyConnected *fc =
+        dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.apiLayerToPhysicalLayer[fullyConnected.getId()]);
+    ASSERT_NE(fc, nullptr);
+    ASSERT_EQ(stampedNetwork.inputs[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
+    ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureInputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+    ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureOutputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
+    ASSERT_EQ(stampedNetwork.outputs.size(), 1u);
+    ASSERT_EQ(fc->getFeatureOutputs()[0].get(), stampedNetwork.outputs[0]->getFeatureInput().get());
+    ASSERT_EQ(stampedNetwork.outputs[0]->getFeatureInput().get(),
+              stampedNetwork.apiLayerToPhysicalLayer[networkOutput.getId()]->getFeatureInput().get());
+    ASSERT_EQ(stampedNetwork.otherLayers.size(), 0u);
 
     stampedNetwork.clear();
 }
