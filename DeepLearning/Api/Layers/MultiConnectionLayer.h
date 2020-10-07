@@ -38,6 +38,10 @@ class MultiConnectionLayer : public Layer {
         return it->second;
     }
 
+    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {getFeatureOutput(inputTensor)}; }
+
+    virtual vector<Tensor> getAllOutputTensors() const { return featureOutputs; }
+
     // Inputs and outputs are stored in the vector in the same order as they are added to the builder.
     virtual vector<Tensor> getFeatureOutputs() const { return featureOutputs; }
     virtual vector<Tensor> getFeatureInputs() const { return featureInputs; }

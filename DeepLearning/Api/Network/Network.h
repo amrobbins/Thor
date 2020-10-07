@@ -44,7 +44,7 @@ class StampedNetwork {
     vector<shared_ptr<Thor::Initializer>> initializers;
 
     map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
-    map<const Thor::Layer *, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
+    map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
     map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
 
     void initialize() {

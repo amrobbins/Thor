@@ -34,6 +34,15 @@ class Loss : public Layer {
         assert(false);
     }
 
+    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+        if (inputTensor == featureInput)
+            return {predictionsTensor, lossTensor};
+        else if (inputTensor == labelsTensor)
+            return vector<Tensor>();
+        else
+            assert(false);
+    }
+
     virtual vector<Tensor> getAllOutputTensors() const { return {getPredictions(), getLoss()}; }
 
    protected:
