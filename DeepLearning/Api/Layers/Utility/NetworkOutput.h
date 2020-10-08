@@ -8,11 +8,13 @@ namespace Thor {
 
 class NetworkOutput : public Layer {
    public:
+    class Builder;
+
     NetworkOutput() {}
 
     virtual ~NetworkOutput() {}
 
-    class Builder;
+    string getName() { return name; }
 
     virtual shared_ptr<Layer> clone() const { return make_shared<NetworkOutput>(*this); }
 
@@ -28,6 +30,7 @@ class NetworkOutput : public Layer {
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::NetworkOutput *networkOutput = new ThorImplementation::NetworkOutput(placement);
+        networkOutput->setName(name);
         Thor::Layer::connectTwoLayers(drivingLayer, networkOutput, drivingApiLayer, this, connectingApiTensor);
         return networkOutput;
     }
@@ -40,6 +43,7 @@ class NetworkOutput : public Layer {
     }
 
    private:
+    string name;
     Tensor::DataType dataType;
 };
 
@@ -52,6 +56,10 @@ class NetworkOutput::Builder {
             _dataType = Tensor::DataType::FP32;
 
         NetworkOutput networkOutput;
+        if (_name.isPresent())
+            networkOutput.name = _name;
+        else
+            networkOutput.name = string("NetworkOutput") + to_string(networkOutput.getId());
         networkOutput.dataType = _dataType;
         networkOutput.featureInput = _inputTensor;
         networkOutput.featureOutput = Tensor(_dataType, _inputTensor.get().getDimensions());
@@ -63,6 +71,13 @@ class NetworkOutput::Builder {
     virtual NetworkOutput::Builder &network(Network &_network) {
         assert(!this->_network.isPresent());
         this->_network = &_network;
+        return *this;
+    }
+
+    virtual NetworkOutput::Builder &name(string _name) {
+        assert(!_name.empty());
+        assert(this->_name.isEmpty());
+        this->_name = _name;
         return *this;
     }
 
@@ -79,6 +94,7 @@ class NetworkOutput::Builder {
     }
 
    private:
+    Optional<string> _name;
     Optional<Network *> _network;
     Optional<Tensor> _inputTensor;
     Optional<Tensor::DataType> _dataType;

@@ -41,6 +41,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 
             const Stub *stub = dynamic_cast<const Stub *>(layer);
             if (stub) {
+                // FIXME: Stub should cause all dangling tensors to be optimized away.
+                //        currently when forward is called for a layer that is a stub, output tensor will not have been allocated
+                //        and can cause memory out of bounds. Since stub is a future feature it is not being fixed yet.
                 continue;
             }
 
@@ -282,7 +285,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
 
     // Stamp type converter if needed
     ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
-    if (outputTensor.getDataType() != Tensor::DataType::FP16) {
+    if (networkInput->getDataType() != Tensor::DataType::FP16) {
         implementationTypeConversion = new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP16);
         implementationNetworkInput->connectToNextLayer(implementationTypeConversion);
         outputLayer = implementationTypeConversion;
@@ -307,7 +310,7 @@ void Network::stampLayer(
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
     assert(numLoadingLayers > 0);
     ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
-    if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout != nullptr) {
+    if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
         implementationTensorFanout = new ThorImplementation::TensorFanout();
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTensorFanout;
@@ -359,7 +362,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
     ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
     assert(numLoadingLayers > 0);
-    if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout != nullptr) {
+    if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
         implementationTensorFanout = new ThorImplementation::TensorFanout();
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTensorFanout;
@@ -378,6 +381,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         inputTensor.setDataType(networkOutput->getDataType());
 
         stampedNetwork.otherLayers.push_back(implementationTypeConversion);
+
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
     }

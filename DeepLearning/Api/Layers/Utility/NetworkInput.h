@@ -4,6 +4,11 @@
 
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 
+#include <string>
+
+using std::string;
+using std::to_string;
+
 namespace Thor {
 
 class NetworkInput : public Layer {
@@ -14,6 +19,7 @@ class NetworkInput : public Layer {
 
     virtual ~NetworkInput() {}
 
+    string getName() { return name; }
     vector<uint64_t> getDimensions() const { return dimensions; }
     Tensor::DataType getDataType() const { return dataType; }
 
@@ -42,7 +48,11 @@ class NetworkInput : public Layer {
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             batchDimensions.push_back(dimensions[i]);
 
-        return new ThorImplementation::NetworkInput(placement, implementationDataType, batchDimensions);
+        ThorImplementation::NetworkInput *networkInput =
+            new ThorImplementation::NetworkInput(placement, implementationDataType, batchDimensions);
+        networkInput->setName(name);
+
+        return networkInput;
     }
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -70,6 +80,7 @@ class NetworkInput : public Layer {
     }
 
    private:
+    string name;
     vector<uint64_t> dimensions;
     Tensor::DataType dataType;
 
@@ -84,6 +95,10 @@ class NetworkInput::Builder {
         assert(_dataType.isPresent());
 
         NetworkInput networkInput;
+        if (_name.isPresent())
+            networkInput.name = _name;
+        else
+            networkInput.name = string("NetworkInput") + to_string(networkInput.getId());
         networkInput.dimensions = _dimensions;
         networkInput.dataType = _dataType;
         networkInput.featureInput = Tensor(_dataType, _dimensions);
@@ -96,6 +111,13 @@ class NetworkInput::Builder {
     virtual NetworkInput::Builder &network(Network &_network) {
         assert(!this->_network.isPresent());
         this->_network = &_network;
+        return *this;
+    }
+
+    virtual NetworkInput::Builder &name(string _name) {
+        assert(!_name.empty());
+        assert(this->_name.isEmpty());
+        this->_name = _name;
         return *this;
     }
 
@@ -113,6 +135,7 @@ class NetworkInput::Builder {
     }
 
    private:
+    Optional<string> _name;
     Optional<Network *> _network;
     Optional<vector<uint64_t>> _dimensions;
     Optional<Tensor::DataType> _dataType;

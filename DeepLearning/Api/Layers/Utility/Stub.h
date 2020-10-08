@@ -7,11 +7,13 @@ namespace Thor {
 
 class Stub : public Layer {
    public:
+    class Builder;
+
     Stub() {}
 
     virtual ~Stub() {}
 
-    class Builder;
+    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return vector<Tensor>(); }
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Stub>(*this); }
 

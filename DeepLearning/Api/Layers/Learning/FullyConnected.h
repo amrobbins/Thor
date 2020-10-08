@@ -38,7 +38,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                              Thor::Tensor connectingApiTensor,
                                              vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
+        assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
