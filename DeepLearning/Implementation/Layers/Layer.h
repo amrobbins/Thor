@@ -92,6 +92,13 @@ class Layer {
 
     virtual ~Layer() {}
 
+    virtual void setName(string name) {
+        assert(this->name.empty());
+        this->name = name;
+    }
+
+    virtual string getName() const { return name; }
+
     // initialize weights using the configured initializer. In general set any initial values.
     virtual void initialize() {}
 
@@ -250,6 +257,8 @@ class Layer {
 
     bool running;
     bool compiled;
+
+    string name;
 
     mutex mtx;
 

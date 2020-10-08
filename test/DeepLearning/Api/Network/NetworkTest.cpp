@@ -25,8 +25,13 @@ Network buildAlexNet() {
 
     UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
 
-    latestOutputTensor =
-        NetworkInput::Builder().network(alexNet).dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build().getFeatureOutput();
+    latestOutputTensor = NetworkInput::Builder()
+                             .network(alexNet)
+                             .name("images")
+                             .dimensions({3, 224, 224})
+                             .dataType(Tensor::DataType::UINT8)
+                             .build()
+                             .getFeatureOutput();
 
     // For Convolution and FullyConnected layers, batchNormalization, dropOut and activation may be applied,
     // this is specified using builder parameters.
@@ -185,14 +190,20 @@ Network buildAlexNet() {
                              .hasBias(true)
                              .weightsInitializerBuilder(uniformRandomInitializerBuilder)
                              .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .noActivation()
                              .build()
                              .getFeatureOutput();
 
     expectedDimensions = {1000};
     assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
-    Tensor labelsTensor =
-        NetworkInput::Builder().network(alexNet).dimensions({1000}).dataType(Tensor::DataType::FP32).build().getFeatureOutput();
+    Tensor labelsTensor = NetworkInput::Builder()
+                              .network(alexNet)
+                              .name("labels")
+                              .dimensions({1000})
+                              .dataType(Tensor::DataType::FP16)
+                              .build()
+                              .getFeatureOutput();
 
     CategoricalCrossEntropyLoss lossLayer =
         CategoricalCrossEntropyLoss::Builder().network(alexNet).featureInput(latestOutputTensor).labels(labelsTensor).build();
@@ -200,17 +211,16 @@ Network buildAlexNet() {
     latestOutputTensor = lossLayer.getFeatureInput();
     labelsTensor = lossLayer.getLabels();
 
-    NetworkOutput predictions =
-        NetworkOutput::Builder().network(alexNet).inputTensor(lossLayer.getPredictions()).dataType(Tensor::DataType::FP32).build();
+    NetworkOutput predictions = NetworkOutput::Builder()
+                                    .network(alexNet)
+                                    .name("predictions")
+                                    .inputTensor(lossLayer.getPredictions())
+                                    .dataType(Tensor::DataType::FP32)
+                                    .build();
     NetworkOutput loss =
-        NetworkOutput::Builder().network(alexNet).inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP32).build();
+        NetworkOutput::Builder().network(alexNet).name("loss").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP32).build();
 
     return alexNet;
-}
-
-void checkSimplyConnectedNetwork(vector<Layer> network, ThorImplementation::StampedNetwork stampedNetwork) {
-    for (uint32_t i = 0; i < network.size(); ++i) {
-    }
 }
 
 TEST(Network, SimplestNetworkProperlyFormed) {
@@ -218,7 +228,8 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     Tensor latestOutputTensor;
     UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
 
-    NetworkInput networkInput = NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
     latestOutputTensor = networkInput.getFeatureOutput();
 
     FullyConnected fullyConnected = FullyConnected::Builder()
@@ -233,7 +244,7 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     latestOutputTensor = fullyConnected.getFeatureOutput();
 
     NetworkOutput networkOutput =
-        NetworkOutput::Builder().network(network).inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
+        NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
     Tensor networkOutputTensor = networkOutput.getFeatureOutput();
 
     ThorImplementation::StampedNetwork stampedNetwork;
@@ -243,6 +254,7 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     stampedNetwork.initialize();
 
+    // Check network structure
     ASSERT_EQ(stampedNetwork.inputs.size(), 1u);
     ASSERT_EQ(stampedNetwork.inputs[0]->getFeatureOutput().get(),
               stampedNetwork.apiLayerToPhysicalLayer[networkInput.getId()]->getFeatureOutput().get());
@@ -250,6 +262,7 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     ThorImplementation::FullyConnected *fc =
         dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.apiLayerToPhysicalLayer[fullyConnected.getId()]);
     ASSERT_NE(fc, nullptr);
+    ASSERT_EQ(stampedNetwork.inputs[0]->getName(), "input");
     ASSERT_EQ(stampedNetwork.inputs[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
     ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
@@ -257,9 +270,26 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     ASSERT_EQ(stampedNetwork.trainableLayers[0]->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedNetwork.outputs.size(), 1u);
     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), stampedNetwork.outputs[0]->getFeatureInput().get());
+    ASSERT_EQ(stampedNetwork.outputs[0]->getName(), "output");
     ASSERT_EQ(stampedNetwork.outputs[0]->getFeatureInput().get(),
               stampedNetwork.apiLayerToPhysicalLayer[networkOutput.getId()]->getFeatureInput().get());
     ASSERT_EQ(stampedNetwork.otherLayers.size(), 0u);
+
+    // Check weights initialization
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    half *weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    half *biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
 
     stampedNetwork.clear();
 }
@@ -267,28 +297,33 @@ TEST(Network, SimplestNetworkProperlyFormed) {
 TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(2).maxValue(3);
 
-    latestOutputTensor =
-        NetworkInput::Builder().network(network).dimensions({1024}).dataType(Tensor::DataType::UINT8).build().getFeatureOutput();
+    latestOutputTensor = NetworkInput::Builder()
+                             .network(network)
+                             .name("features")
+                             .dimensions({500})
+                             .dataType(Tensor::DataType::UINT8)
+                             .build()
+                             .getFeatureOutput();
     latestOutputTensor = FullyConnected::Builder()
                              .network(network)
                              .featureInput(latestOutputTensor)
-                             .numOutputFeatures(500)
-                             .hasBias(true)
+                             .numOutputFeatures(800)
+                             .hasBias(false)
                              .activationBuilder(Relu::Builder())
                              .dropOut(0.5)
                              .batchNormalization()
                              .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
                              .build()
                              .getFeatureOutput();
     latestOutputTensor =
         DropOut::Builder().network(network).featureInput(latestOutputTensor).dropProportion(0.25).build().getFeatureOutput();
     Tensor networkOutputTensor = NetworkOutput::Builder()
                                      .network(network)
+                                     .name("output")
                                      .inputTensor(latestOutputTensor)
-                                     .dataType(Tensor::DataType::UINT8)
+                                     .dataType(Tensor::DataType::FP32)
                                      .build()
                                      .getFeatureOutput();
 
@@ -299,7 +334,225 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     stampedNetwork.initialize();
 
-    // FIXME: Verify
+    // Check network structure
+    ASSERT_EQ(stampedNetwork.inputs.size(), 1u);
+    ASSERT_EQ(stampedNetwork.outputs.size(), 1u);
+    ASSERT_EQ(stampedNetwork.trainableLayers.size(), 2u);
+    ASSERT_EQ(stampedNetwork.otherLayers.size(), 5u);
+
+    ThorImplementation::NetworkInput *input = stampedNetwork.inputs[0];
+    ASSERT_EQ(input->getName(), "features");
+
+    ThorImplementation::NetworkOutput *output = stampedNetwork.outputs[0];
+    ASSERT_EQ(output->getName(), "output");
+
+    ThorImplementation::BatchNormalization *bn = dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.trainableLayers[0]);
+    assert(bn != nullptr);
+    ThorImplementation::FullyConnected *fc = dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.trainableLayers[1]);
+    assert(fc != nullptr);
+
+    ThorImplementation::TypeConversion *tc8_16 = dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[0]);
+    ASSERT_NE(tc8_16, nullptr);
+    ThorImplementation::DropOut *dropout = dynamic_cast<ThorImplementation::DropOut *>(stampedNetwork.otherLayers[1]);
+    ASSERT_NE(dropout, nullptr);
+    ThorImplementation::Relu *relu = dynamic_cast<ThorImplementation::Relu *>(stampedNetwork.otherLayers[2]);
+    ASSERT_NE(relu, nullptr);
+    ThorImplementation::DropOut *dropout2 = dynamic_cast<ThorImplementation::DropOut *>(stampedNetwork.otherLayers[3]);
+    ASSERT_NE(dropout2, nullptr);
+    ThorImplementation::TypeConversion *tc16_32 = dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[4]);
+    ASSERT_NE(tc16_32, nullptr);
+
+    ASSERT_EQ(input->getFeatureOutput().get(), tc8_16->getFeatureInput().get());
+    ASSERT_EQ(tc8_16->getFeatureOutput().get(), bn->getFeatureInputs()[0].get());
+    ASSERT_EQ(bn->getFeatureOutputs()[0].get(), dropout->getFeatureInput().get());
+    ASSERT_EQ(dropout->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
+    ASSERT_EQ(fc->getFeatureOutputs()[0].get(), relu->getFeatureInput().get());
+    ASSERT_EQ(relu->getFeatureOutput().get(), dropout2->getFeatureInput().get());
+    ASSERT_EQ(dropout2->getFeatureOutput().get(), tc16_32->getFeatureInput().get());
+    ASSERT_EQ(tc16_32->getFeatureOutput().get(), output->getFeatureInput().get());
+
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    half *weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 500 * 800; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= 2 && weightsMem[i] <= 3);
+    }
+
+    stampedNetwork.clear();
+}
+
+TEST(Network, BranchedNetworkProperlyFormed) {
+    Network network;
+    Tensor latestOutputTensor;
+    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+
+    FullyConnected::Builder fc0Builder = FullyConnected::Builder()
+                                             .network(network)
+                                             .featureInput(networkInput.getFeatureOutput())
+                                             .numOutputFeatures(800)
+                                             .hasBias(true)
+                                             .activationBuilder(Relu::Builder())
+                                             .dropOut(0.5)
+                                             .batchNormalization()
+                                             .weightsInitializerBuilder(uniformRandomInitializerBuilder);
+    FullyConnected fc0 = fc0Builder.build();
+    FullyConnected fc1 = fc0Builder.build();
+
+    FullyConnected fc2 = FullyConnected::Builder()
+                             .network(network)
+                             .featureInput(fc0.getFeatureOutput())
+                             .featureInput(fc1.getFeatureOutput())
+                             .numOutputFeatures(200)
+                             .hasBias(true)
+                             .activationBuilder(Relu::Builder())
+                             .dropOut(0.5)
+                             .batchNormalization()
+                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .build();
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(network)
+                                      .name("output")
+                                      .inputTensor(fc2.getFeatureOutputs()[0])
+                                      .dataType(Tensor::DataType::FP16)
+                                      .build();
+    Stub stub = Stub::Builder().network(network).inputTensor(fc2.getFeatureOutputs()[1]).build();
+
+    ThorImplementation::StampedNetwork stampedNetwork;
+    int gpuNum = 0;
+    int batchSize = 32;
+    Network::StatusCode statusCode = network.stampNetwork(gpuNum, batchSize, stampedNetwork);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    stampedNetwork.initialize();
+
+    // Check network structure
+    ASSERT_EQ(stampedNetwork.inputs.size(), 1u);
+    ASSERT_EQ(stampedNetwork.outputs.size(), 1u);
+    ASSERT_EQ(stampedNetwork.trainableLayers.size(), 6u);
+    ASSERT_EQ(stampedNetwork.otherLayers.size(), 9u);
+
+    ASSERT_EQ(stampedNetwork.inputs[0]->getName(), "input");
+    ASSERT_EQ(stampedNetwork.outputs[0]->getName(), "output");
+
+    vector<ThorImplementation::FullyConnected *> fcv;
+    vector<ThorImplementation::BatchNormalization *> bn;
+    vector<ThorImplementation::Relu *> r;
+    vector<ThorImplementation::TensorFanout *> f;
+    vector<ThorImplementation::DropOut *> d;
+
+    for (int i = 0; i < 6; ++i) {
+        if (dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.trainableLayers[i]) != nullptr)
+            fcv.push_back(dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.trainableLayers[i]));
+        else if (dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.trainableLayers[i]) != nullptr)
+            bn.push_back(dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.trainableLayers[i]));
+        else {
+            ASSERT_EQ(dynamic_cast<ThorImplementation::Convolution2d *>(stampedNetwork.trainableLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::TrainableWeightsBiasesLayer *>(stampedNetwork.trainableLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::MultiConnectionLayer *>(stampedNetwork.trainableLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::Layer *>(stampedNetwork.trainableLayers[i]), nullptr);
+            ASSERT_TRUE(false);
+        }
+    }
+
+    for (int i = 0; i < 9; ++i) {
+        if (dynamic_cast<ThorImplementation::Relu *>(stampedNetwork.otherLayers[i]) != nullptr)
+            r.push_back(dynamic_cast<ThorImplementation::Relu *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]) != nullptr)
+            f.push_back(dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::DropOut *>(stampedNetwork.otherLayers[i]) != nullptr)
+            d.push_back(dynamic_cast<ThorImplementation::DropOut *>(stampedNetwork.otherLayers[i]));
+        else {
+            ASSERT_EQ(dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::Tanh *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::MultiConnectionLayer *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::Layer *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_TRUE(false);
+        }
+    }
+
+    ASSERT_EQ(f.size(), 1u);
+    ASSERT_EQ(bn.size(), 3u);
+    ASSERT_EQ(d.size(), 4u);
+    ASSERT_EQ(r.size(), 4u);
+    ASSERT_EQ(fcv.size(), 3u);
+
+    ASSERT_EQ(stampedNetwork.inputs[0]->getFeatureOutput().get(), f[0]->getFeatureInputs()[0].get());
+
+    ASSERT_EQ(f[0]->getFeatureOutputs()[0].get(), bn[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(bn[0]->getFeatureOutputs()[0].get(), d[0]->getFeatureInput().get());
+    ASSERT_EQ(d[0]->getFeatureOutput().get(), fcv[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fcv[0]->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
+    ASSERT_EQ(r[0]->getFeatureOutput().get(), bn[2]->getFeatureInputs()[0].get());
+
+    ASSERT_EQ(f[0]->getFeatureOutputs()[0].get(), bn[1]->getFeatureInputs()[0].get());
+    ASSERT_EQ(bn[1]->getFeatureOutputs()[0].get(), d[1]->getFeatureInput().get());
+    ASSERT_EQ(d[1]->getFeatureOutput().get(), fcv[1]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fcv[1]->getFeatureOutputs()[0].get(), r[1]->getFeatureInput().get());
+    ASSERT_EQ(r[1]->getFeatureOutput().get(), bn[2]->getFeatureInputs()[1].get());
+
+    ASSERT_EQ(bn[2]->getFeatureOutputs()[0].get(), d[2]->getFeatureInput().get());
+    ASSERT_EQ(d[2]->getFeatureOutput().get(), fcv[2]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fcv[2]->getFeatureOutputs()[0].get(), r[2]->getFeatureInput().get());
+    ASSERT_TRUE(r[2]->getFeatureOutput().isEmpty());
+
+    ASSERT_EQ(bn[2]->getFeatureOutputs()[1].get(), d[3]->getFeatureInput().get());
+    ASSERT_EQ(d[3]->getFeatureOutput().get(), fcv[2]->getFeatureInputs()[1].get());
+    ASSERT_EQ(fcv[2]->getFeatureOutputs()[1].get(), r[3]->getFeatureInput().get());
+    ASSERT_EQ(r[3]->getFeatureOutput().get(), stampedNetwork.outputs[0]->getFeatureInput().get());
+
+    // Check weights initialization
+    ThorImplementation::FullyConnected *fc = fcv[0];
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    half *weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 1024 * 800; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    half *biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 800; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    fc = fcv[1];
+    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 1024 * 800; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 800; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    fc = fcv[2];
+    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 800 * 200; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 200; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
 
     stampedNetwork.clear();
 }
@@ -309,17 +562,259 @@ TEST(Network, AlexnetIsProperlyFormed) {
 
     Network alexNet = buildAlexNet();
     int gpuNum = 0;
-    int batchSize = 32;
+    int batchSize = 256;
     Network::StatusCode statusCode = alexNet.stampNetwork(gpuNum, batchSize, stampedNetwork);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     stampedNetwork.initialize();
 
-    // FIXME: Verify
+    // Check network structure
+    ASSERT_EQ(stampedNetwork.inputs.size(), 2u);
+    ASSERT_EQ(stampedNetwork.outputs.size(), 2u);
+    ASSERT_EQ(stampedNetwork.trainableLayers.size(), 8u);
+    ASSERT_EQ(stampedNetwork.otherLayers.size(), 15u);
+
+    ThorImplementation::NetworkInput *images;
+    ThorImplementation::NetworkInput *labels;
+    if (stampedNetwork.inputs[0]->getName() == "images") {
+        images = stampedNetwork.inputs[0];
+        ASSERT_EQ(images->getName(), "images");
+        labels = stampedNetwork.inputs[1];
+        ASSERT_EQ(labels->getName(), "labels");
+    } else {
+        labels = stampedNetwork.inputs[0];
+        ASSERT_EQ(labels->getName(), "labels");
+        images = stampedNetwork.inputs[1];
+        ASSERT_EQ(images->getName(), "images");
+    }
+
+    ThorImplementation::NetworkOutput *predictions;
+    ThorImplementation::NetworkOutput *loss;
+    if (stampedNetwork.outputs[0]->getName() == "predictions") {
+        predictions = stampedNetwork.outputs[0];
+        ASSERT_EQ(predictions->getName(), "predictions");
+        loss = stampedNetwork.outputs[1];
+        ASSERT_EQ(loss->getName(), "loss");
+    } else {
+        loss = stampedNetwork.outputs[0];
+        ASSERT_EQ(loss->getName(), "loss");
+        predictions = stampedNetwork.outputs[1];
+        ASSERT_EQ(predictions->getName(), "predictions");
+    }
+
+    ThorImplementation::Convolution2d *conv0 = dynamic_cast<ThorImplementation::Convolution2d *>(stampedNetwork.trainableLayers[0]);
+    assert(conv0 != nullptr);
+    ThorImplementation::Convolution2d *conv1 = dynamic_cast<ThorImplementation::Convolution2d *>(stampedNetwork.trainableLayers[1]);
+    assert(conv1 != nullptr);
+    ThorImplementation::Convolution2d *conv2 = dynamic_cast<ThorImplementation::Convolution2d *>(stampedNetwork.trainableLayers[2]);
+    assert(conv2 != nullptr);
+    ThorImplementation::Convolution2d *conv3 = dynamic_cast<ThorImplementation::Convolution2d *>(stampedNetwork.trainableLayers[3]);
+    assert(conv3 != nullptr);
+    ThorImplementation::Convolution2d *conv4 = dynamic_cast<ThorImplementation::Convolution2d *>(stampedNetwork.trainableLayers[4]);
+    assert(conv4 != nullptr);
+    ThorImplementation::FullyConnected *fc0 = dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.trainableLayers[5]);
+    assert(fc0 != nullptr);
+    ThorImplementation::FullyConnected *fc1 = dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.trainableLayers[6]);
+    assert(fc1 != nullptr);
+    ThorImplementation::FullyConnected *fc2 = dynamic_cast<ThorImplementation::FullyConnected *>(stampedNetwork.trainableLayers[7]);
+    assert(fc2 != nullptr);
+
+    vector<ThorImplementation::TypeConversion *> tc;
+    vector<ThorImplementation::Relu *> r;
+    vector<ThorImplementation::Pooling *> p;
+    vector<ThorImplementation::Flatten *> f;
+    vector<ThorImplementation::DropOut *> d;
+    vector<ThorImplementation::CategoricalCrossEntropyLoss *> ccl;
+
+    for (int i = 0; i < 15; ++i) {
+        if (dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[i]) != nullptr)
+            tc.push_back(dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::Relu *>(stampedNetwork.otherLayers[i]) != nullptr)
+            r.push_back(dynamic_cast<ThorImplementation::Relu *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::Pooling *>(stampedNetwork.otherLayers[i]) != nullptr)
+            p.push_back(dynamic_cast<ThorImplementation::Pooling *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::Flatten *>(stampedNetwork.otherLayers[i]) != nullptr)
+            f.push_back(dynamic_cast<ThorImplementation::Flatten *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::DropOut *>(stampedNetwork.otherLayers[i]) != nullptr)
+            d.push_back(dynamic_cast<ThorImplementation::DropOut *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::CategoricalCrossEntropyLoss *>(stampedNetwork.otherLayers[i]) != nullptr)
+            ccl.push_back(dynamic_cast<ThorImplementation::CategoricalCrossEntropyLoss *>(stampedNetwork.otherLayers[i]));
+        else {
+            ASSERT_EQ(dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::Tanh *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::MultiConnectionLayer *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_EQ(dynamic_cast<ThorImplementation::Layer *>(stampedNetwork.otherLayers[i]), nullptr);
+            ASSERT_TRUE(false);
+        }
+    }
+
+    ASSERT_EQ(tc.size(), 1u);
+    ASSERT_EQ(r.size(), 7u);
+    ASSERT_EQ(p.size(), 3u);
+    ASSERT_EQ(f.size(), 1u);
+    ASSERT_EQ(d.size(), 2u);
+    ASSERT_EQ(ccl.size(), 1u);
+
+    ASSERT_EQ(images->getFeatureOutput().get(), tc[0]->getFeatureInput().get());
+    ASSERT_EQ(tc[0]->getFeatureOutput().get(), conv0->getFeatureInputs()[0].get());
+    ASSERT_EQ(conv0->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
+    ASSERT_EQ(r[0]->getFeatureOutput().get(), p[0]->getFeatureInput().get());
+    ASSERT_EQ(p[0]->getFeatureOutput().get(), conv1->getFeatureInputs()[0].get());
+    ASSERT_EQ(conv1->getFeatureOutputs()[0].get(), r[1]->getFeatureInput().get());
+    ASSERT_EQ(r[1]->getFeatureOutput().get(), p[1]->getFeatureInput().get());
+    ASSERT_EQ(p[1]->getFeatureOutput().get(), conv2->getFeatureInputs()[0].get());
+
+    ASSERT_EQ(conv2->getFeatureOutputs()[0].get(), r[2]->getFeatureInput().get());
+    ASSERT_EQ(r[2]->getFeatureOutput().get(), conv3->getFeatureInputs()[0].get());
+    ASSERT_EQ(conv3->getFeatureOutputs()[0].get(), r[3]->getFeatureInput().get());
+    ASSERT_EQ(r[3]->getFeatureOutput().get(), conv4->getFeatureInputs()[0].get());
+    ASSERT_EQ(conv4->getFeatureOutputs()[0].get(), r[4]->getFeatureInput().get());
+    ASSERT_EQ(r[4]->getFeatureOutput().get(), p[2]->getFeatureInput().get());
+    ASSERT_EQ(p[2]->getFeatureOutput().get(), f[0]->getFeatureInput().get());
+    ASSERT_EQ(f[0]->getFeatureOutput().get(), d[0]->getFeatureInput().get());
+    ASSERT_EQ(d[0]->getFeatureOutput().get(), fc0->getFeatureInputs()[0].get());
+    ASSERT_EQ(fc0->getFeatureOutputs()[0].get(), r[5]->getFeatureInput().get());
+    ASSERT_EQ(r[5]->getFeatureOutput().get(), d[1]->getFeatureInput().get());
+    ASSERT_EQ(d[1]->getFeatureOutput().get(), fc1->getFeatureInputs()[0].get());
+    ASSERT_EQ(fc1->getFeatureOutputs()[0].get(), r[6]->getFeatureInput().get());
+    ASSERT_EQ(r[6]->getFeatureOutput().get(), fc2->getFeatureInputs()[0].get());
+    ASSERT_EQ(fc2->getFeatureOutputs()[0].get(), ccl[0]->getFeatureInput().get());
+
+    ASSERT_EQ(labels->getFeatureOutput().get(), ccl[0]->getLabelsInput().get());
+    ASSERT_EQ(ccl[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
+    ASSERT_EQ(ccl[0]->getLossOutput().get(), loss->getFeatureInput().get());
+
+    // Check weights initialization
+    ThorImplementation::Convolution2d *conv = conv0;
+    ThorImplementation::Tensor convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    half *weightsMem = (half *)convWeights.getMemPtr();
+    for (uint32_t i = 0; i < 11 * 11 * 3 * 96; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    ThorImplementation::Tensor convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    half *biasesMem = (half *)convBiases.getMemPtr();
+    for (uint32_t i = 0; i < 96; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    conv = conv1;
+    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    weightsMem = (half *)convWeights.getMemPtr();
+    for (uint32_t i = 0; i < 5 * 5 * 96 * 256; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    biasesMem = (half *)convBiases.getMemPtr();
+    for (uint32_t i = 0; i < 256; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    conv = conv2;
+    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    weightsMem = (half *)convWeights.getMemPtr();
+    for (uint32_t i = 0; i < 3 * 3 * 256 * 384; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    biasesMem = (half *)convBiases.getMemPtr();
+    for (uint32_t i = 0; i < 384; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    conv = conv3;
+    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    weightsMem = (half *)convWeights.getMemPtr();
+    for (uint32_t i = 0; i < 3 * 3 * 384 * 384; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    biasesMem = (half *)convBiases.getMemPtr();
+    for (uint32_t i = 0; i < 384; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    conv = conv4;
+    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    weightsMem = (half *)convWeights.getMemPtr();
+    for (uint32_t i = 0; i < 3 * 3 * 384 * 256; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
+    conv->getStreams()[0].synchronize();
+    biasesMem = (half *)convBiases.getMemPtr();
+    for (uint32_t i = 0; i < 256; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    ThorImplementation::FullyConnected *fc = fc0;
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 9216 * 4096; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 4096; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    fc = fc1;
+    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 4096 * 4096; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 4096; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
+
+    fc = fc2;
+    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    weightsMem = (half *)fcWeights.getMemPtr();
+    for (uint32_t i = 0; i < 4096 * 1000; ++i) {
+        ASSERT_TRUE(weightsMem[i] >= -0.1 && weightsMem[i] <= 0.1);
+    }
+    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    biasesMem = (half *)fcBiases.getMemPtr();
+    for (uint32_t i = 0; i < 1000; ++i) {
+        ASSERT_TRUE(biasesMem[i] >= -0.1 && biasesMem[i] <= 0.1);
+    }
 
     stampedNetwork.clear();
 }
-
-// FIXME: Create a network with branches, multiple inputs and multiple outputs
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

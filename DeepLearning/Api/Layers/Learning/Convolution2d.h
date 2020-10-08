@@ -39,7 +39,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                              Thor::Tensor connectingApiTensor,
                                              vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
-        assert(connectingApiTensor == getFeatureInput());
+        assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);

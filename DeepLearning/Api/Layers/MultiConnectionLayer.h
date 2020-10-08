@@ -38,6 +38,18 @@ class MultiConnectionLayer : public Layer {
         return it->second;
     }
 
+    virtual int getConnectionType(Tensor connectingTensor) const {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (connectingTensor == featureInputs[i])
+                return 0;
+        }
+        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+            if (connectingTensor == featureOutputs[i])
+                return 0;
+        }
+        assert(false);
+    }
+
     virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {getFeatureOutput(inputTensor)}; }
 
     virtual vector<Tensor> getAllOutputTensors() const { return featureOutputs; }

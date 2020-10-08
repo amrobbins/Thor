@@ -26,6 +26,7 @@ class TensorFanout : public MultiConnectionLayer {
         assert(streams.empty());
         assert(previousLayers.empty());
         featureInputs.push_back(featureInput);
+        featureOutputs.push_back(featureInput);
         if (backPropagateError)
             errorOutputs.push_back(featureInput.get().clone());
         else
@@ -36,7 +37,7 @@ class TensorFanout : public MultiConnectionLayer {
         return errorOutputs[0];
     }
 
-    virtual Optional<Tensor> createFeatureOutputTensor() { return Tensor(); }
+    virtual Optional<Tensor> createFeatureOutputTensor() { return Optional<Tensor>::empty(); }
 
     // allocate anything needed for execution, choose optimal kernels, etc.
     virtual void compile() {
