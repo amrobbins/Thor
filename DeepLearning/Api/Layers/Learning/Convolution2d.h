@@ -10,6 +10,8 @@
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
+#include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
+#include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 namespace Thor {
 
@@ -33,6 +35,31 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder; }
     virtual void convertToSingleLayersAndAddToNetwork();
 
+    virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
+        vector<uint64_t> inputDimensions = inputTensor.getDimensions();
+        assert(inputDimensions.size() == 3);
+
+        uint32_t numInputChannels = inputDimensions[0];
+        uint32_t numInputRows = inputDimensions[1];
+        uint32_t numInputColumns = inputDimensions[2];
+        string gpuType = MachineEvaluator::instance().getGpuType(stream.getGpuNum());
+        ConvolutionKernelRequirement convolutionKernelRequirement(gpuType,
+                                                                  filterWidth,
+                                                                  filterHeight,
+                                                                  horizontalStride,
+                                                                  verticalStride,
+                                                                  horizontalPadding,
+                                                                  verticalPadding,
+                                                                  numInputChannels,
+                                                                  numOutputChannels,
+                                                                  batchSize,
+                                                                  numInputColumns,
+                                                                  numInputRows);
+
+        ThorImplementation::GpuConvolution::instance().chooseOptimalKernelForward(convolutionKernelRequirement, stream);
+        ThorImplementation::GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, stream);
+    }
+
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
@@ -45,20 +72,21 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
 
-        weightsInitializerBuilder->tensorToInitialize(convolution2d->getWeights());
-        weightsInitializerBuilder->layerThatOwnsTensor(convolution2d);
-        initializers.push_back(weightsInitializerBuilder->build());
+        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
+        weightsInitializerBuilderClone->tensorToInitialize(convolution2d->getWeights());
+        weightsInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
+        initializers.push_back(weightsInitializerBuilderClone->build());
 
         if (convolution2d->getBiases().isPresent()) {
-            biasInitializerBuilder->tensorToInitialize(convolution2d->getBiases().get());
-            biasInitializerBuilder->layerThatOwnsTensor(convolution2d);
-            initializers.push_back(biasInitializerBuilder->build());
+            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
+            biasInitializerBuilderClone->tensorToInitialize(convolution2d->getBiases().get());
+            biasInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
+            initializers.push_back(biasInitializerBuilderClone->build());
         }
 
         return convolution2d;
     }
 
-    // mem requirements are the weights
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
         // FIXME: workspace size?
         uint64_t numInputChannels = featureInputs[0].getDimensions()[0];
@@ -67,14 +95,14 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         // have weights and gradient accumulators, as FP16 elements
         uint64_t fixedMem = 2 * (numWeights + numBiases) * 2;
         uint64_t batchSizeDependentMem =
-            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
 
         return fixedMem + batchSizeDependentMem;
     }
 
     virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
         uint64_t batchSizeDependentMem =
-            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;
     }
 

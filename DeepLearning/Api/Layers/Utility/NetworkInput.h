@@ -19,7 +19,7 @@ class NetworkInput : public Layer {
 
     virtual ~NetworkInput() {}
 
-    string getName() { return name; }
+    virtual string getName() const { return name; }
     vector<uint64_t> getDimensions() const { return dimensions; }
     Tensor::DataType getDataType() const { return dataType; }
 

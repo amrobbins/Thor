@@ -74,11 +74,16 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
     TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
     Tensor weights(gpuPlacement, weightsDescriptor);
 
+    // uint64_t maxWorkspaceSizeInBytes = dataInput.getDescriptor().getArraySizeInBytes() +
+    // dataOutput.getDescriptor().getArraySizeInBytes();
+
     for (int i = 0; i < returnedAlgoCount; ++i) {
         if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
             continue;
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
         Optional<Tensor> workspace;
+        // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
+        //    continue;
         if (workspaceSizeInBytes > 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
 
@@ -184,10 +189,16 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
     TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
     Tensor weights(gpuPlacement, weightsDescriptor);
 
+    // uint64_t maxWorkspaceSizeInBytes = errorOutput.getDescriptor().getArraySizeInBytes() +
+    // errorInput.getDescriptor().getArraySizeInBytes();
+
     for (int i = 0; i < returnedAlgoCount; ++i) {
         if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
             continue;
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
+        // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
+        //    continue;
+
         Optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
@@ -288,16 +299,21 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
     TensorDescriptor weightsDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
     Tensor weightsGradient(gpuPlacement, weightsDescriptor);
 
+    // uint64_t maxWorkspaceSizeInBytes = dataInput.getDescriptor().getArraySizeInBytes() +
+    // errorInput.getDescriptor().getArraySizeInBytes();
+
     for (int i = 0; i < returnedAlgoCount; ++i) {
         if (perfResults[i].status != CUDNN_STATUS_SUCCESS)
             continue;
 
         // FIXME: I'm seeing that the nondeterministic algorithms often give very wrong results, not sure why, problem with atomics?
         // FIXME: For now I am not using them, I should check later to see if they start to work better.
-        if (perfResults[i].determinism == 0)
-            continue;
+        // if (perfResults[i].determinism == 0)
+        //    continue;
 
         uint64_t workspaceSizeInBytes = perfResults[i].memory;
+        // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
+        //    continue;
         Optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
             workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));

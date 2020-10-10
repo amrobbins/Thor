@@ -34,7 +34,11 @@ class DropOut : public Layer {
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
         uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(stream);
-        return randomStateSize + getReservedStateSizeInBytes(batchSize);
+
+        uint64_t featureOutputSize = featureOutput.get().getTotalSizeInBytes();
+        uint64_t errorOutputSize = featureInput.get().getTotalSizeInBytes();
+
+        return randomStateSize + getReservedStateSizeInBytes(batchSize) + batchSize * (featureOutputSize + errorOutputSize);
     }
 
    protected:

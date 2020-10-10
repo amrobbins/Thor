@@ -47,9 +47,58 @@ class StampedNetwork {
     map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
     map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
 
+    map<string, ThorImplementation::NetworkInput *> inputNamed;
+    map<string, ThorImplementation::NetworkOutput *> outputNamed;
+
+    uint64_t bytesRequired;
+    uint64_t batchSize;
+
     void initialize() {
         for (uint32_t i = 0; i < initializers.size(); ++i)
             initializers[i]->initialize();
+
+        for (uint32_t i = 0; i < inputs.size(); ++i) {
+            inputs[i]->parentInitialize();
+            inputs[i]->initialize();
+        }
+        for (uint32_t i = 0; i < outputs.size(); ++i) {
+            outputs[i]->parentInitialize();
+            outputs[i]->initialize();
+        }
+        for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+            trainableLayers[i]->parentInitialize();
+            trainableLayers[i]->initialize();
+        }
+        for (uint32_t i = 0; i < otherLayers.size(); ++i) {
+            otherLayers[i]->parentInitialize();
+            otherLayers[i]->initialize();
+        }
+    }
+
+    void sendBatch(map<string, Tensor> batchInputs, map<string, Tensor> &batchOutputs) {
+        assert(batchInputs.size() == inputs.size());
+
+        for (uint32_t i = 0; i < inputs.size(); ++i) {
+            auto it = batchInputs.find(inputs[i]->getName());
+            assert(it != batchInputs.end());
+            Tensor inputTensor = it->second;
+            inputs[i]->forward(inputTensor);
+        }
+
+        for (uint32_t i = 0; i < outputs.size(); ++i) {
+            batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput();
+            for (uint j = 0; j < inputs.size(); ++j) {
+                inputs[j]->getStream().waitEvent(outputs[i]->getStream().putEvent());
+            }
+        }
+
+        for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+            trainableLayers[i]->updateWeightsAndBiasesWithScaledGradient();
+            for (uint j = 0; j < inputs.size(); ++j) {
+                assert(trainableLayers[i]->getGradientUpdateStream().isPresent());
+                inputs[j]->getStream().waitEvent(trainableLayers[i]->getGradientUpdateStream().get().putEvent());
+            }
+        }
     }
 
     void clear() {
@@ -95,12 +144,20 @@ class Executor;
 
 class Network {
    public:
-    enum class StatusCode { SUCCESS = 0, FLOATING_INPUT, DANGLING_OUTPUT, GPU_OUT_OF_MEMORY };
+    enum class StatusCode {
+        SUCCESS = 0,
+        FLOATING_INPUT,
+        DANGLING_OUTPUT,
+        GPU_OUT_OF_MEMORY,
+        DUPLICATE_NAMED_NETWORK_INPUT,
+        DUPLICATE_NAMED_NETWORK_OUTPUT
+    };
 
     Network() : frozen(false) {}
     virtual ~Network() {}
 
-    StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
+    virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
+    virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
 
    protected:
     set<shared_ptr<Layer>> network;
@@ -119,6 +176,7 @@ class Network {
     uint64_t nonFirstInstanceBytes;
 
     virtual StatusCode evaluateGraph();
+    virtual StatusCode checkForDuplicateInOutPortNames();
     virtual StatusCode checkForFloatingInputs();
     virtual StatusCode checkForDanglingOutputs();
     virtual void topologicalSort();

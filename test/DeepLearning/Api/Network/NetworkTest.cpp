@@ -15,214 +15,6 @@ using std::vector;
 
 using namespace Thor;
 
-// This version of alexnet is modified from the original paper by stacking the two convolution paths channelwise
-Network buildAlexNet() {
-    Network alexNet;
-
-    Tensor latestOutputTensor;
-
-    vector<uint64_t> expectedDimensions, actualDimensions;
-
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
-
-    latestOutputTensor = NetworkInput::Builder()
-                             .network(alexNet)
-                             .name("images")
-                             .dimensions({3, 224, 224})
-                             .dataType(Tensor::DataType::UINT8)
-                             .build()
-                             .getFeatureOutput();
-
-    // For Convolution and FullyConnected layers, batchNormalization, dropOut and activation may be applied,
-    // this is specified using builder parameters.
-    latestOutputTensor = Convolution2d::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputChannels(96)
-                             .filterHeight(11)
-                             .filterWidth(11)
-                             .verticalStride(4)
-                             .horizontalStride(4)
-                             .noPadding()
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .activationBuilder(Relu::Builder())
-                             .build()
-                             .getFeatureOutput();
-
-    latestOutputTensor = Pooling::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .type(Pooling::Type::MAX)
-                             .windowHeight(2)
-                             .windowWidth(2)
-                             .verticalStride(2)
-                             .horizontalStride(2)
-                             .build()
-                             .getFeatureOutput();
-
-    expectedDimensions = {96, 27, 27};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
-
-    latestOutputTensor = Convolution2d::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputChannels(256)
-                             .filterHeight(5)
-                             .filterWidth(5)
-                             .verticalStride(1)
-                             .horizontalStride(1)
-                             .samePadding()
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .activationBuilder(Relu::Builder())
-                             .build()
-                             .getFeatureOutput();
-
-    latestOutputTensor = Pooling::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .type(Pooling::Type::MAX)
-                             .windowHeight(2)
-                             .windowWidth(2)
-                             .verticalStride(2)
-                             .horizontalStride(2)
-                             .build()
-                             .getFeatureOutput();
-
-    expectedDimensions = {256, 13, 13};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
-
-    latestOutputTensor = Convolution2d::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputChannels(384)
-                             .filterHeight(3)
-                             .filterWidth(3)
-                             .verticalStride(1)
-                             .horizontalStride(1)
-                             .samePadding()
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .activationBuilder(Relu::Builder())
-                             .build()
-                             .getFeatureOutput();
-
-    latestOutputTensor = Convolution2d::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputChannels(384)
-                             .filterHeight(3)
-                             .filterWidth(3)
-                             .verticalStride(1)
-                             .horizontalStride(1)
-                             .samePadding()
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .activationBuilder(Relu::Builder())
-                             .build()
-                             .getFeatureOutput();
-
-    latestOutputTensor = Convolution2d::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputChannels(256)
-                             .filterHeight(3)
-                             .filterWidth(3)
-                             .verticalStride(1)
-                             .horizontalStride(1)
-                             .samePadding()
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .activationBuilder(Relu::Builder())
-                             .build()
-                             .getFeatureOutput();
-
-    latestOutputTensor = Pooling::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .type(Pooling::Type::MAX)
-                             .windowHeight(2)
-                             .windowWidth(2)
-                             .verticalStride(2)
-                             .horizontalStride(2)
-                             .build()
-                             .getFeatureOutput();
-
-    expectedDimensions = {256, 6, 6};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
-
-    // Input tensor is automatically flattened when sent to a fully connected layer.
-    latestOutputTensor = FullyConnected::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputFeatures(4096)
-                             .hasBias(true)
-                             .dropOut(0.5)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .build()
-                             .getFeatureOutput();
-
-    expectedDimensions = {4096};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
-
-    latestOutputTensor = FullyConnected::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputFeatures(4096)
-                             .hasBias(true)
-                             .dropOut(0.5)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .build()
-                             .getFeatureOutput();
-
-    latestOutputTensor = FullyConnected::Builder()
-                             .network(alexNet)
-                             .featureInput(latestOutputTensor)
-                             .numOutputFeatures(1000)
-                             .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
-                             .noActivation()
-                             .build()
-                             .getFeatureOutput();
-
-    expectedDimensions = {1000};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
-
-    Tensor labelsTensor = NetworkInput::Builder()
-                              .network(alexNet)
-                              .name("labels")
-                              .dimensions({1000})
-                              .dataType(Tensor::DataType::FP16)
-                              .build()
-                              .getFeatureOutput();
-
-    CategoricalCrossEntropyLoss lossLayer =
-        CategoricalCrossEntropyLoss::Builder().network(alexNet).featureInput(latestOutputTensor).labels(labelsTensor).build();
-
-    latestOutputTensor = lossLayer.getFeatureInput();
-    labelsTensor = lossLayer.getLabels();
-
-    NetworkOutput predictions = NetworkOutput::Builder()
-                                    .network(alexNet)
-                                    .name("predictions")
-                                    .inputTensor(lossLayer.getPredictions())
-                                    .dataType(Tensor::DataType::FP32)
-                                    .build();
-    NetworkOutput loss =
-        NetworkOutput::Builder().network(alexNet).name("loss").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP32).build();
-
-    return alexNet;
-}
-
 TEST(Network, SimplestNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
@@ -498,12 +290,17 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     ASSERT_EQ(bn[2]->getFeatureOutputs()[0].get(), d[2]->getFeatureInput().get());
     ASSERT_EQ(d[2]->getFeatureOutput().get(), fcv[2]->getFeatureInputs()[0].get());
     ASSERT_EQ(fcv[2]->getFeatureOutputs()[0].get(), r[2]->getFeatureInput().get());
-    ASSERT_TRUE(r[2]->getFeatureOutput().isEmpty());
 
     ASSERT_EQ(bn[2]->getFeatureOutputs()[1].get(), d[3]->getFeatureInput().get());
     ASSERT_EQ(d[3]->getFeatureOutput().get(), fcv[2]->getFeatureInputs()[1].get());
     ASSERT_EQ(fcv[2]->getFeatureOutputs()[1].get(), r[3]->getFeatureInput().get());
-    ASSERT_EQ(r[3]->getFeatureOutput().get(), stampedNetwork.outputs[0]->getFeatureInput().get());
+
+    if (r[2]->getFeatureOutput().isEmpty()) {
+        ASSERT_EQ(r[3]->getFeatureOutput().get(), stampedNetwork.outputs[0]->getFeatureInput().get());
+    } else {
+        ASSERT_TRUE(r[3]->getFeatureOutput().isEmpty());
+        ASSERT_EQ(r[2]->getFeatureOutput().get(), stampedNetwork.outputs[0]->getFeatureInput().get());
+    }
 
     // Check weights initialization
     ThorImplementation::FullyConnected *fc = fcv[0];
@@ -655,6 +452,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(d.size(), 2u);
     ASSERT_EQ(ccl.size(), 1u);
 
+    // Forward
     ASSERT_EQ(images->getFeatureOutput().get(), tc[0]->getFeatureInput().get());
     ASSERT_EQ(tc[0]->getFeatureOutput().get(), conv0->getFeatureInputs()[0].get());
     ASSERT_EQ(conv0->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
@@ -683,6 +481,33 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(labels->getFeatureOutput().get(), ccl[0]->getLabelsInput().get());
     ASSERT_EQ(ccl[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
     ASSERT_EQ(ccl[0]->getLossOutput().get(), loss->getFeatureInput().get());
+
+    // Backward
+    ASSERT_TRUE(tc[0]->getErrorOutput().isEmpty());
+    ASSERT_TRUE(tc[0]->getErrorInput().isEmpty());
+    ASSERT_TRUE(conv0->getErrorOutputs()[0].isEmpty());
+    ASSERT_EQ(conv0->getErrorInputs()[0].get(), r[0]->getErrorOutput().get());
+    ASSERT_EQ(r[0]->getErrorInput().get(), p[0]->getErrorOutput().get());
+    ASSERT_EQ(p[0]->getErrorInput().get(), conv1->getErrorOutputs()[0].get());
+    ASSERT_EQ(conv1->getErrorInputs()[0].get(), r[1]->getErrorOutput().get());
+    ASSERT_EQ(r[1]->getErrorInput().get(), p[1]->getErrorOutput().get());
+    ASSERT_EQ(p[1]->getErrorInput().get(), conv2->getErrorOutputs()[0].get());
+
+    ASSERT_EQ(conv2->getErrorInputs()[0].get(), r[2]->getErrorOutput().get());
+    ASSERT_EQ(r[2]->getErrorInput().get(), conv3->getErrorOutputs()[0].get());
+    ASSERT_EQ(conv3->getErrorInputs()[0].get(), r[3]->getErrorOutput().get());
+    ASSERT_EQ(r[3]->getErrorInput().get(), conv4->getErrorOutputs()[0].get());
+    ASSERT_EQ(conv4->getErrorInputs()[0].get(), r[4]->getErrorOutput().get());
+    ASSERT_EQ(r[4]->getErrorInput().get(), p[2]->getErrorOutput().get());
+    ASSERT_EQ(p[2]->getErrorInput().get(), f[0]->getErrorOutput().get());
+    ASSERT_EQ(f[0]->getErrorInput().get(), d[0]->getErrorOutput().get());
+    ASSERT_EQ(d[0]->getErrorInput().get(), fc0->getErrorOutputs()[0].get());
+    ASSERT_EQ(fc0->getErrorInputs()[0].get(), r[5]->getErrorOutput().get());
+    ASSERT_EQ(r[5]->getErrorInput().get(), d[1]->getErrorOutput().get());
+    ASSERT_EQ(d[1]->getErrorInput().get(), fc1->getErrorOutputs()[0].get());
+    ASSERT_EQ(fc1->getErrorInputs()[0].get(), r[6]->getErrorOutput().get());
+    ASSERT_EQ(r[6]->getErrorInput().get(), fc2->getErrorOutputs()[0].get());
+    ASSERT_EQ(fc2->getErrorInputs()[0].get(), ccl[0]->getErrorOutput().get());
 
     // Check weights initialization
     ThorImplementation::Convolution2d *conv = conv0;

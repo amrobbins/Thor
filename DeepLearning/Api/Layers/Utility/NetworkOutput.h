@@ -14,7 +14,7 @@ class NetworkOutput : public Layer {
 
     virtual ~NetworkOutput() {}
 
-    string getName() { return name; }
+    virtual string getName() const { return name; }
 
     virtual shared_ptr<Layer> clone() const { return make_shared<NetworkOutput>(*this); }
 

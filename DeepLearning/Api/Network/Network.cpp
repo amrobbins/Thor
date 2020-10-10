@@ -2,17 +2,36 @@
 
 using namespace Thor;
 
-// Returns 0 on success, returns an error code (i.e. out of memory) on failure
-Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
+Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
     if (!frozen) {
         StatusCode status = evaluateGraph();
         if (status != StatusCode::SUCCESS)
             return status;
         topologicalSort();
-        firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize);
-        nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize);
         frozen = true;
     }
+
+    for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
+        Optional<Tensor> inputTensor = it->first;
+        Layer *layer = it->second;
+
+        if (inputTensor.isPresent()) {
+            layer->preOptimize(inputTensor.get(), batchSize, MachineEvaluator::instance().getCopyStreamFromCpu(gpuNum));
+        }
+    }
+
+    return StatusCode::SUCCESS;
+}
+
+// Returns 0 on success, returns an error code (i.e. out of memory) on failure
+Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
+    preOptimize(gpuNum, batchSize);
+
+    // FIXME: check for non-first instance to use shared weights
+    firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize);
+    nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize);
+    stampedNetwork.bytesRequired = firstInstanceBytes;
+    stampedNetwork.batchSize = batchSize;
 
     // Leave 100MB of headroom
     // FIXME: need to determine if this is the not the first instance and use shared weights and shared weights mem requirements
@@ -51,6 +70,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
         }
 
         // All layers are connected, so now they can all be compiled
+        for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
+            stampedNetwork.trainableLayers[i]->parentCompile();
+            stampedNetwork.trainableLayers[i]->compile();
+        }
         for (uint32_t i = 0; i < stampedNetwork.inputs.size(); ++i) {
             stampedNetwork.inputs[i]->parentCompile();
             stampedNetwork.inputs[i]->compile();
@@ -58,10 +81,6 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
         for (uint32_t i = 0; i < stampedNetwork.outputs.size(); ++i) {
             stampedNetwork.outputs[i]->parentCompile();
             stampedNetwork.outputs[i]->compile();
-        }
-        for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
-            stampedNetwork.trainableLayers[i]->parentCompile();
-            stampedNetwork.trainableLayers[i]->compile();
         }
         for (uint32_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
             stampedNetwork.otherLayers[i]->parentCompile();
@@ -160,6 +179,10 @@ Network::StatusCode Network::evaluateGraph() {
     }
 
     StatusCode status;
+    status = checkForDuplicateInOutPortNames();
+    if (status != StatusCode::SUCCESS)
+        return status;
+
     status = checkForFloatingInputs();
     if (status != StatusCode::SUCCESS)
         return status;
@@ -169,6 +192,38 @@ Network::StatusCode Network::evaluateGraph() {
         return status;
 
     return StatusCode::SUCCESS;
+}
+
+Network::StatusCode Network::checkForDuplicateInOutPortNames() {
+    StatusCode status = StatusCode::SUCCESS;
+
+    set<string> inputNames;
+    for (auto it = network.begin(); it != network.end(); ++it) {
+        Layer *layer = it->get();
+        const NetworkInput *networkInput = dynamic_cast<const NetworkInput *>(layer);
+        if (networkInput != nullptr) {
+            if (inputNames.count(networkInput->getName()) != 0) {
+                printf("Duplicate network input name used: %s\n", networkInput->getName().c_str());
+                status = StatusCode::DUPLICATE_NAMED_NETWORK_INPUT;
+            }
+            inputNames.insert(networkInput->getName());
+        }
+    }
+
+    set<string> outputNames;
+    for (auto it = network.begin(); it != network.end(); ++it) {
+        Layer *layer = it->get();
+        const NetworkOutput *networkOutput = dynamic_cast<const NetworkOutput *>(layer);
+        if (networkOutput != nullptr) {
+            if (outputNames.count(networkOutput->getName()) != 0) {
+                printf("Duplicate network output name used: %s\n", networkOutput->getName().c_str());
+                status = StatusCode::DUPLICATE_NAMED_NETWORK_OUTPUT;
+            }
+            outputNames.insert(networkOutput->getName());
+        }
+    }
+
+    return status;
 }
 
 Network::StatusCode Network::checkForFloatingInputs() {
@@ -280,6 +335,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
     // Stamp network input
     ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize, stampedNetwork.initializers);
     stampedNetwork.inputs.push_back(implementationNetworkInput);
+    stampedNetwork.inputNamed[implementationNetworkInput->getName()] = implementationNetworkInput;
     outputLayer = implementationNetworkInput;
     stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput;
 
@@ -396,6 +452,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
                                                                       stampedNetwork.initializers));
     assert(implementationNetworkOutput != nullptr);
     stampedNetwork.outputs.push_back(implementationNetworkOutput);
+    stampedNetwork.outputNamed[implementationNetworkOutput->getName()] = implementationNetworkOutput;
 
     stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput;
 }
