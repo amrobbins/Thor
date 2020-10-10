@@ -30,7 +30,7 @@ class Tanh : public Activation {
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
         // feature out and error out
-        return batchSize * featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes();
+        return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 };
 

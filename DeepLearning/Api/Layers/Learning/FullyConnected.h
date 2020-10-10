@@ -12,6 +12,8 @@
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <assert.h>
 
@@ -32,6 +34,38 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual void convertToSingleLayersAndAddToNetwork();
 
+    virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
+        vector<uint64_t> inputDimensions = inputTensor.getDimensions();
+        int gpuNum = stream.getGpuNum();
+        assert(!inputDimensions.empty());
+        uint64_t numInputFeatures = inputDimensions[0];
+
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
+                                                                                 batchSize,
+                                                                                 numInputFeatures,
+                                                                                 numInputFeatures,
+                                                                                 numOutputFeatures,
+                                                                                 false,
+                                                                                 false,
+                                                                                 ThorImplementation::TensorDescriptor::DataType::FP16);
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
+                                                                                 batchSize,
+                                                                                 numOutputFeatures,
+                                                                                 numInputFeatures,
+                                                                                 numOutputFeatures,
+                                                                                 false,
+                                                                                 true,
+                                                                                 ThorImplementation::TensorDescriptor::DataType::FP16);
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
+                                                                                 batchSize,
+                                                                                 numInputFeatures,
+                                                                                 batchSize,
+                                                                                 numOutputFeatures,
+                                                                                 true,
+                                                                                 false,
+                                                                                 ThorImplementation::TensorDescriptor::DataType::FP16);
+    }
+
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
@@ -43,14 +77,16 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
 
-        weightsInitializerBuilder->tensorToInitialize(fullyConnected->getWeights());
-        weightsInitializerBuilder->layerThatOwnsTensor(fullyConnected);
-        initializers.push_back(weightsInitializerBuilder->build());
+        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
+        weightsInitializerBuilderClone->tensorToInitialize(fullyConnected->getWeights());
+        weightsInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
+        initializers.push_back(weightsInitializerBuilderClone->build());
 
         if (fullyConnected->getBiases().isPresent()) {
-            biasInitializerBuilder->tensorToInitialize(fullyConnected->getBiases().get());
-            biasInitializerBuilder->layerThatOwnsTensor(fullyConnected);
-            initializers.push_back(biasInitializerBuilder->build());
+            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
+            biasInitializerBuilderClone->tensorToInitialize(fullyConnected->getBiases().get());
+            biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
+            initializers.push_back(biasInitializerBuilderClone->build());
         }
 
         return fullyConnected;
@@ -65,14 +101,14 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         // have weights and gradient accumulators, as FP16 elements
         uint64_t fixedMem = 2 * (numWeights + numBiases) * 2;
         uint64_t batchSizeDependentMem =
-            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
 
         return fixedMem + batchSizeDependentMem;
     }
 
     virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
         uint64_t batchSizeDependentMem =
-            featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
+            2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;
     }
 

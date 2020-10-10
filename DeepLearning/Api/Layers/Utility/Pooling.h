@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.h"
 
 namespace Thor {
 

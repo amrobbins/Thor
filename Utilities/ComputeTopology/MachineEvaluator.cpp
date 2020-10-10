@@ -214,6 +214,12 @@ void MachineEvaluator::createCopyStreams() {
         copyStreamFromCpu.emplace(gpuNum, gpuNum);
         copyStreamToCpu.emplace(gpuNum, gpuNum);
         copyStreamLocal.emplace(gpuNum, gpuNum);
+
+        copyStreamFromLower[gpuNum].informIsStatic();
+        copyStreamFromHigher[gpuNum].informIsStatic();
+        copyStreamFromCpu[gpuNum].informIsStatic();
+        copyStreamToCpu[gpuNum].informIsStatic();
+        copyStreamLocal[gpuNum].informIsStatic();
     }
 
     // CPU local stream. (Associated with GPU 0, since it needs to be associated with a GPU)

@@ -159,7 +159,8 @@ class Layer {
         else
             featureOutput = Optional<Tensor>::empty();
 
-        errorInput = nextLayer->connectToPreviousLayer(this, featureOutput, stream, shouldConnectToBackPropErrorIn(), loaderConnectionType);
+        errorInput = nextLayer->connectToPreviousLayer(
+            this, featureOutput, stream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
         if (errorInput.isPresent() && featureOutput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
