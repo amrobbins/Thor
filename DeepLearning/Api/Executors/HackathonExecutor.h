@@ -44,9 +44,11 @@ class HackathonExecutor {
         map<string, ThorImplementation::Tensor> batchOutput;
         batchInput["images"] = inputTensor;
         batchInput["labels"] = labelsTensor;
+        omp_set_num_threads(numStamps);
         startEvent = stampedNetworks[0].outputs[0]->getStream().putEvent(true, true);
-        for (uint32_t i = 0; i < numBatches; ++i) {
-            for (uint32_t j = 0; j < numStamps; ++j) {
+#pragma omp parallel for schedule(static, 1)
+        for (uint32_t j = 0; j < numStamps; ++j) {
+            for (uint32_t i = 0; i < numBatches; ++i) {
                 stampedNetworks[j].sendBatch(batchInput, batchOutput);
             }
         }
@@ -57,7 +59,7 @@ class HackathonExecutor {
         double milliseconds = endEvent.synchronizeAndReportElapsedTimeInMilliseconds(startEvent);
         printf("Done training\n");
 
-        printf("%ld batchItems per hour\n", uint64_t((numStamps * batchSize * numBatches * 3600L) / (milliseconds / 1000.0)));
+        printf("%lf batchItems per second\n", (numStamps * batchSize * numBatches) / (milliseconds / 1000.0));
         fflush(stdout);
 
         for (uint32_t i = 0; i < numStamps; ++i)

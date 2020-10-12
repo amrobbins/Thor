@@ -138,6 +138,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Learning/FullyConnected.o \
                    build/DeepLearning/Api/Layers/Learning/Convolution2d.o \
                    build/DeepLearning/Api/Layers/Utility/DropOut.o \
+                   build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
@@ -405,6 +406,10 @@ build/DeepLearning/Api/Layers/Utility/DropOut.o: DeepLearning/Api/Layers/Utility
 	mkdir -p build/DeepLearning/Api/Layers/Utility
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Utility/DropOut.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Utility/DropOut.o
 
+build/DeepLearning/Api/Layers/Learning/Inception.o: DeepLearning/Api/Layers/Learning/Inception.h DeepLearning/Api/Layers/Learning/Inception.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Learning
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Inception.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Inception.o
+
 build/DeepLearning/Api/ExampleNetworks/AlexNet.o: DeepLearning/Api/ExampleNetworks/AlexNet.h DeepLearning/Api/ExampleNetworks/AlexNet.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/AlexNet.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/AlexNet.o
@@ -544,7 +549,7 @@ build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest: build/test/google
 	mkdir -p build/test/DeepLearning/Api/Layers/Learning
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest test/DeepLearning/Api/Layers/Learning/Convolution2dTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest: DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest.cpp $(THOR)
+build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest: DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest.cpp DeepLearning/Api/Executors/HackathonExecutor.h $(THOR)
 	mkdir -p build/DeepLearning/Api/ExampleNetworks/PerformanceTests
 	$(Gpp) $(DEBUG) DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest.cpp -O3 -std=c++11 -pthread $(THOR_LIBS) $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest
 
