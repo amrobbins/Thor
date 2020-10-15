@@ -50,6 +50,7 @@ class CategoricalCrossEntropyLoss::Builder {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
         assert(_labels.isPresent());
+        assert(_featureInput.get() != _labels.get());
 
         CategoricalCrossEntropyLoss categoricalCrossEntropyLoss;
         categoricalCrossEntropyLoss.lossScalingFactor = _lossScalingFactor;

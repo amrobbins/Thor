@@ -36,6 +36,9 @@ class Layer {
         return {featureOutput};
     }
 
+    virtual bool mustConnectAllInputsToDriveOutput() { return false; }
+    virtual void informThatInputConnectionMade(Tensor inputTensor) {}
+
     bool isInitialized() { return initialized; }
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {}

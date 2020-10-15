@@ -4,6 +4,8 @@
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
 
+// FIXME: Optimize concatenate to rewrite its input tensors memory locations, so that concatenate is a no op.
+
 namespace ThorImplementation {
 
 /**
@@ -169,17 +171,18 @@ class Concatenate : public MultiConnectionLayer {
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
 
     virtual void backward(Optional<Tensor> errorInput) {
-        assert(errorInput.isPresent());
-        launchSplit(splitTensorErrorOutputMemoriesArray_d,
-                    (half *)errorInput.get().getMemPtr(),
-                    errorInput.get().getDescriptor().getTotalNumElements(),
-                    errorInput.get().getDescriptor().getDimensions().size(),
-                    numPresentTensors(errorOutputs),
-                    axis,
-                    axisElementsPerSplitTensor_d,
-                    stridePerPackedTensorDimension_d,
-                    stridePerSplitTensorDimension_d,
-                    streams[0]);
+        if (errorInput.isPresent()) {
+            launchSplit(splitTensorErrorOutputMemoriesArray_d,
+                        (half *)errorInput.get().getMemPtr(),
+                        errorInput.get().getDescriptor().getTotalNumElements(),
+                        errorInput.get().getDescriptor().getDimensions().size(),
+                        numPresentTensors(errorOutputs),
+                        axis,
+                        axisElementsPerSplitTensor_d,
+                        stridePerPackedTensorDimension_d,
+                        stridePerSplitTensorDimension_d,
+                        streams[0]);
+        }
 
         Event readyEvent = streams[0].putEvent();
         previousLayers[0].get()->backward(errorOutputs[0]);
@@ -240,14 +243,15 @@ class Concatenate : public MultiConnectionLayer {
         nextLayers.push_back(nextLayer);
         featureOutputs.emplace_back(createFeatureOutputTensor());
         errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
-            this, featureOutputs.back(), streams[0], shouldConnectToBackPropErrorIn(), loaderConnectionType));
+            this, featureOutputs.back(), streams[0], shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
 
-        assert(errorInputs.back().isPresent());
         assert(featureOutputs.back().isPresent());
-        assert(errorInputs.back().get().getDescriptor() == errorInputs.front().get().getDescriptor());
-        assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
-        assert(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
-        assert(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
+        if (errorInputs.back().isPresent()) {
+            assert(errorInputs.back().get().getDescriptor() == errorInputs.front().get().getDescriptor());
+            assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
+            assert(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
+            assert(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
+        }
         ensureNoDeviceCrossing();
     }
 

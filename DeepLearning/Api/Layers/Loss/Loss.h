@@ -13,8 +13,14 @@ namespace Thor {
 
 class Loss : public Layer {
    public:
-    Loss() {}
+    Loss() { numInputConnectionsMade = 0; }
     virtual ~Loss() {}
+
+    virtual bool mustConnectAllInputsToDriveOutput() { return true; }
+    virtual void informThatInputConnectionMade(Tensor inputTensor) {
+        numInputConnectionsMade += 1;
+        assert(numInputConnectionsMade < 3);
+    }
 
     // virtual Optional<Tensor> getFeatureInput() const { return Layer::getFeatureInput(); }
     virtual Tensor getPredictions() const { return predictionsTensor; }
@@ -35,12 +41,10 @@ class Loss : public Layer {
     }
 
     virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
-        if (inputTensor == featureInput)
-            return {predictionsTensor, lossTensor};
-        else if (inputTensor == labelsTensor)
-            return vector<Tensor>();
+        if (numInputConnectionsMade == 2)
+            return {lossTensor, predictionsTensor};
         else
-            assert(false);
+            return vector<Tensor>();
     }
 
     virtual vector<Tensor> getAllOutputTensors() const { return {getPredictions(), getLoss()}; }
@@ -70,6 +74,8 @@ class Loss : public Layer {
 
    private:
     Tensor getFeatureOutput() { assert(false); }
+
+    uint32_t numInputConnectionsMade = 0;
 };
 
 }  // namespace Thor

@@ -45,6 +45,7 @@ class StampedNetwork {
 
     map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
     map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
+    map<ThorImplementation::Layer *, uint64_t> physicalLayerToApiLayer;
     map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
 
     map<string, ThorImplementation::NetworkInput *> inputNamed;
@@ -150,7 +151,8 @@ class Network {
         DANGLING_OUTPUT,
         GPU_OUT_OF_MEMORY,
         DUPLICATE_NAMED_NETWORK_INPUT,
-        DUPLICATE_NAMED_NETWORK_OUTPUT
+        DUPLICATE_NAMED_NETWORK_OUTPUT,
+        DEADLOCK_CYCLE
     };
 
     Network() : frozen(false) {}
@@ -166,6 +168,8 @@ class Network {
     set<Tensor> allTensors;
     map<Tensor, vector<Layer *>> apiTensorToApiLoadingLayers;
     map<Tensor, Layer *> apiTensorToApiDrivingLayer;
+    map<Layer *, vector<Tensor>> apiLayerToApiOutputTensors;
+    map<Layer *, vector<Tensor>> apiLayerToApiInputTensors;
 
     vector<shared_ptr<Initializer>> initializers;
 
@@ -179,6 +183,7 @@ class Network {
     virtual StatusCode checkForDuplicateInOutPortNames();
     virtual StatusCode checkForFloatingInputs();
     virtual StatusCode checkForDanglingOutputs();
+    virtual StatusCode checkForDeadlockCycles();
     virtual void topologicalSort();
 
     virtual void stampNetworkInput(const Thor::NetworkInput *networkInput,
@@ -213,6 +218,11 @@ class Network {
     }
 
     void addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
+
+    // void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork);
+    // void reorderLayers(StampedNetwork &stampedNetwork, vector<Layer*> &layersToReoder, vector<Layer*> &destinationStorage);
+
+    bool terminatesWithoutHitting(Tensor tensor, Layer *layer);
 
     class GpuOutOfMemoryError {};
 

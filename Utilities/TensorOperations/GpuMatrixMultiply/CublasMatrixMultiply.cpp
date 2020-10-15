@@ -743,14 +743,16 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         // Prune all but initialContestantCount provably working kernels
         prunedKernels.reserve(initialContestantCount * 2);
 
+        constexpr float TARGET_WAVES = 1.0f;
+
         // Want the kernels nearest to 1 wave.
         std::sort(kernels.begin(), kernels.end(), [gpuNum](const CublasKernel &lhs, const CublasKernel &rhs) {
-            return abs(1.0f - lhs.getWavesCount(gpuNum)) < abs(1.0f - rhs.getWavesCount(gpuNum));
+            return abs(TARGET_WAVES - lhs.getWavesCount(gpuNum)) < abs(TARGET_WAVES - rhs.getWavesCount(gpuNum));
         });
 
         // Keep all kernels that are as good as the kernelsToKeep'th best kernel.
-        float maxWavesDiff = abs(1.0f - kernels[initialContestantCount - 1].getWavesCount(gpuNum));
-        for (unsigned int i = 0; i < kernels.size() && (abs(1.0f - kernels[i].getWavesCount(gpuNum)) <= maxWavesDiff ||
+        float maxWavesDiff = abs(TARGET_WAVES - kernels[initialContestantCount - 1].getWavesCount(gpuNum));
+        for (unsigned int i = 0; i < kernels.size() && (abs(TARGET_WAVES - kernels[i].getWavesCount(gpuNum)) <= maxWavesDiff ||
                                                         prunedKernels.size() < initialContestantCount);
              ++i) {
             cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, stream);

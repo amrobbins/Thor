@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Learning/Inception.h"
 
 // FIXME: build this raw in implementation layer as a performance optimization (no need for concatenate layer and associated memory)
+// FIXME: Instead of that, optimize concatenate to rewrite its input tensors memory locations, so that concatenate is a no op.
 
 using namespace Thor;
 
