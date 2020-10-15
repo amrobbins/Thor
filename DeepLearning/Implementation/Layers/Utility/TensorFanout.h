@@ -13,7 +13,7 @@ class TensorFanout : public MultiConnectionLayer {
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         streams.emplace_back(streams[0].getGpuNum());
         errorInputs.push_back(nextLayer->connectToPreviousLayer(
-            this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn(), loaderConnectionType));
+            this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
         nextLayers.push_back(nextLayer);
     }
 
@@ -95,6 +95,9 @@ class TensorFanout : public MultiConnectionLayer {
     }
 
     virtual void backward(Optional<Tensor> errorInput) {
+        if (errorOutputs[0].isEmpty())
+            return;
+
         if (errorInputs.size() > 1) {
             // Locked section
             unique_lock<mutex> lck(mtx);

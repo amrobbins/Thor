@@ -72,7 +72,7 @@ class TensorDescriptor;
  */
 class Layer {
    public:
-    Layer() {
+    Layer() : id(nextId.fetch_add(1)) {
         compiled = false;
         running = false;
         inferenceOnly = false;
@@ -243,6 +243,8 @@ class Layer {
         launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
+    uint64_t getId() { return id; }
+
    protected:
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;
@@ -266,6 +268,9 @@ class Layer {
    private:
     bool inferenceOnly;
     bool connectToBackPropErrorIn;
+
+    uint64_t id;
+    static atomic<uint64_t> nextId;
 };
 
 }  // namespace ThorImplementation

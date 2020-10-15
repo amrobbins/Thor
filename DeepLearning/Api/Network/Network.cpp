@@ -1,5 +1,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 
+// TEMP:
+#include "DeepLearning/Api/Layers/Utility/Concatenate.h"
+
 using namespace Thor;
 
 Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
@@ -69,6 +72,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
             stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
         }
 
+        // reorderStampedNetworkForTestability(stampedNetwork);
+
         // All layers are connected, so now they can all be compiled
         for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
             stampedNetwork.trainableLayers[i]->parentCompile();
@@ -95,12 +100,38 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
     return StatusCode::SUCCESS;
 }
 
+/*
+void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork) {
+    StampedNetwork initialStampedNework = stampedNetwork;
+    stampedNetwork.inputs.clear();
+    stampedNetwork.outputs.clear();
+    stampedNetwork.trainableLayers.clear();
+    stampedNetwork.otherLayers.clear();
+
+    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.inputs);
+    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.outputs);
+    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.trainableLayers);
+    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.otherLayers);
+}
+
+void reorderLayers(StampedNetwork &stampedNetwork, vector<Layer*> &layersToReoder, vector<Layer*> &destinationStorage) {
+    put api layers in one vector, non api layers in another vector
+    sort impl layers based on their corresponding api id, will need to use a lambda comparison function
+
+    for(uint32_t i = 0; i < layersToReorder.size(); ++i) {
+
+    }
+}
+*/
+
 // Determine the graph structure
 // Tensors are the edges that connect the Layers which are nodes.
 Network::StatusCode Network::evaluateGraph() {
     allTensors.clear();
     apiTensorToApiLoadingLayers.clear();
     apiTensorToApiDrivingLayer.clear();
+    apiLayerToApiInputTensors.clear();
+    apiLayerToApiOutputTensors.clear();
 
     for (auto it = network.begin(); it != network.end(); ++it) {
         Layer *layer = it->get();
@@ -112,6 +143,7 @@ Network::StatusCode Network::evaluateGraph() {
             allTensors.insert(outputTensor);
             assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = networkInput;
+            apiLayerToApiOutputTensors[networkInput].push_back(outputTensor);
             continue;
         }
 
@@ -120,6 +152,7 @@ Network::StatusCode Network::evaluateGraph() {
             Tensor inputTensor = networkOutput->getFeatureInput();
             allTensors.insert(inputTensor);
             apiTensorToApiLoadingLayers[inputTensor].push_back(networkOutput);
+            apiLayerToApiInputTensors[networkOutput].push_back(inputTensor);
             continue;
         }
 
@@ -128,6 +161,7 @@ Network::StatusCode Network::evaluateGraph() {
             Tensor inputTensor = stub->getFeatureInput();
             allTensors.insert(inputTensor);
             apiTensorToApiLoadingLayers[inputTensor].push_back(stub);
+            apiLayerToApiInputTensors[stub].push_back(inputTensor);
             continue;
         }
 
@@ -143,10 +177,14 @@ Network::StatusCode Network::evaluateGraph() {
             allTensors.insert(lossTensor);
             apiTensorToApiLoadingLayers[inputTensor].push_back(loss);
             apiTensorToApiLoadingLayers[labelsTensor].push_back(loss);
+            apiLayerToApiInputTensors[loss].push_back(inputTensor);
+            apiLayerToApiInputTensors[loss].push_back(labelsTensor);
             assert(apiTensorToApiDrivingLayer.count(predictionsTensor) == 0);
             apiTensorToApiDrivingLayer[predictionsTensor] = loss;
             assert(apiTensorToApiDrivingLayer.count(lossTensor) == 0);
             apiTensorToApiDrivingLayer[lossTensor] = loss;
+            apiLayerToApiOutputTensors[loss].push_back(predictionsTensor);
+            apiLayerToApiOutputTensors[loss].push_back(lossTensor);
             continue;
         }
 
@@ -159,11 +197,13 @@ Network::StatusCode Network::evaluateGraph() {
             for (uint32_t i = 0; i < inputTensors.size(); ++i) {
                 allTensors.insert(inputTensors[i]);
                 apiTensorToApiLoadingLayers[inputTensors[i]].push_back(multiConnectionLayer);
+                apiLayerToApiInputTensors[multiConnectionLayer].push_back(inputTensors[i]);
             }
             for (uint32_t i = 0; i < outputTensors.size(); ++i) {
                 allTensors.insert(outputTensors[i]);
                 assert(apiTensorToApiDrivingLayer.count(outputTensors[i]) == 0);
                 apiTensorToApiDrivingLayer[outputTensors[i]] = multiConnectionLayer;
+                apiLayerToApiOutputTensors[multiConnectionLayer].push_back(outputTensors[i]);
             }
             continue;
         }
@@ -176,6 +216,8 @@ Network::StatusCode Network::evaluateGraph() {
         assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
         apiTensorToApiDrivingLayer[outputTensor] = layer;
         apiTensorToApiLoadingLayers[inputTensor].push_back(layer);
+        apiLayerToApiInputTensors[layer].push_back(inputTensor);
+        apiLayerToApiOutputTensors[layer].push_back(outputTensor);
     }
 
     StatusCode status;
@@ -188,6 +230,10 @@ Network::StatusCode Network::evaluateGraph() {
         return status;
 
     status = checkForDanglingOutputs();
+    if (status != StatusCode::SUCCESS)
+        return status;
+
+    status = checkForDeadlockCycles();
     if (status != StatusCode::SUCCESS)
         return status;
 
@@ -244,8 +290,40 @@ Network::StatusCode Network::checkForDanglingOutputs() {
     return StatusCode::SUCCESS;
 }
 
-// FIXME: Support will be needed for layers like concatenate
-//        (in that case the output tensor dimensions are only known after all of the input tensors are connected).
+// An deadlock cycle occurs when a layer that requires all of its input to arrive before it drives its output
+// is connected in a way where there is a path from its output to its input.
+Network::StatusCode Network::checkForDeadlockCycles() {
+    for (auto it = network.begin(); it != network.end(); ++it) {
+        Layer *layer = it->get();
+        if (layer->mustConnectAllInputsToDriveOutput()) {
+            vector<Tensor> outputs = apiLayerToApiOutputTensors[layer];
+            for (uint32_t i = 0; i < outputs.size(); ++i) {
+                if (terminatesWithoutHitting(outputs[i], layer) == false)
+                    return StatusCode::DEADLOCK_CYCLE;
+            }
+        }
+    }
+    return StatusCode::SUCCESS;
+}
+
+bool Network::terminatesWithoutHitting(Tensor tensor, Layer *layer) {
+    vector<Layer *> tensorLoadingLayers = apiTensorToApiLoadingLayers[tensor];
+    for (uint32_t i = 0; i < tensorLoadingLayers.size(); ++i) {
+        Layer *loadingLayer = tensorLoadingLayers[i];
+        if (loadingLayer == layer) {
+            return false;
+        } else {
+            vector<Tensor> layerOutputTensors = apiLayerToApiOutputTensors[loadingLayer];
+            for (uint32_t j = 0; j < layerOutputTensors.size(); ++j) {
+                Tensor outputTensor = layerOutputTensors[j];
+                if (terminatesWithoutHitting(outputTensor, layer) == false)
+                    return false;
+            }
+        }
+    }
+    return true;
+}
+
 void Network::topologicalSort() {
     deque<pair<Optional<Tensor>, Layer *>> workQueue;
 
@@ -271,10 +349,13 @@ void Network::topologicalSort() {
         // Visit a node, connect the output tensor that corresponds to this input tensor by adding the loading layer and its input tensor to
         // orderedNetwork
         // After connecting an output tensor to its loading layer, add that loading layer and its input tensor to the work queue.
-        pair<Optional<Tensor>, Layer *> workNode = workQueue.front();
-        workQueue.pop_front();
+        pair<Optional<Tensor>, Layer *> workNode = workQueue.back();
+        workQueue.pop_back();
         Optional<Tensor> inputTensor = workNode.first;
         Layer *layer = workNode.second;
+
+        // For layers, such as concatenate, that need all inputs to be connected before creating the output
+        layer->informThatInputConnectionMade(inputTensor);
 
         vector<Tensor> outputTensors = layer->getOutputsFromInput(inputTensor);
         for (uint32_t t = 0; t < outputTensors.size(); ++t) {
@@ -338,6 +419,7 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
     stampedNetwork.inputNamed[implementationNetworkInput->getName()] = implementationNetworkInput;
     outputLayer = implementationNetworkInput;
     stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput;
+    stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput] = networkInput->getId();
 
     // Stamp type converter if needed
     ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
@@ -387,6 +469,7 @@ void Network::stampLayer(
     } else {
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers);
         stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer;
+        stampedNetwork.physicalLayerToApiLayer[implementationLayer] = layer->getId();
     }
 
     vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
@@ -455,4 +538,5 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     stampedNetwork.outputNamed[implementationNetworkOutput->getName()] = implementationNetworkOutput;
 
     stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput;
+    stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput] = networkOutput->getId();
 }

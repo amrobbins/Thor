@@ -104,8 +104,8 @@ class Split : public MultiConnectionLayer {
         assert(cudaStatus == cudaSuccess);
         half **splitTensorErrorInputMemoriesArray = new half *[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i) {
-            assert(errorInputs[i].isPresent());
-            splitTensorErrorInputMemoriesArray[i] = (half *)errorInputs[i].get().getMemPtr();
+            // FIXME: do not allocate memory when error inputs are not present
+            splitTensorErrorInputMemoriesArray[i] = (half *)featureOutputs[i].get().getMemPtr();
         }
         cudaStatus = cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
                                 splitTensorErrorInputMemoriesArray,
@@ -253,12 +253,13 @@ class Split : public MultiConnectionLayer {
         if (connection != 0)
             streams.emplace_back(placement.getDeviceNum());
         errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
-            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn(), loaderConnectionType));
+            this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
 
-        assert(errorInputs.back().isPresent());
-        assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
-        assert(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
-        assert(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
+        if (errorInputs.back().isPresent()) {
+            assert(errorInputs.back().get().getDescriptor() == featureOutputs.back().get().getDescriptor());
+            assert(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
+            assert(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
+        }
         ensureNoDeviceCrossing();
     }
 
