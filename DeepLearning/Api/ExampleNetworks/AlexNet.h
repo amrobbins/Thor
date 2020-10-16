@@ -9,4 +9,3 @@
 #include "DeepLearning/Api/Network/Network.h"
 
 Thor::Network buildAlexNet();
-Thor::Network buildAlexNetSimplified();

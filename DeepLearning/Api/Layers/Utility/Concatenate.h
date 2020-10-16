@@ -75,7 +75,7 @@ class Concatenate : public TrainableWeightsBiasesLayer {
         return concatenate;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         // featureOutput and errorInput
         return (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
     }

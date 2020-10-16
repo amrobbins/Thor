@@ -51,6 +51,8 @@ class StampedNetwork {
     map<string, ThorImplementation::NetworkInput *> inputNamed;
     map<string, ThorImplementation::NetworkOutput *> outputNamed;
 
+    uint32_t gpuNum;
+
     uint64_t bytesRequired;
     uint64_t batchSize;
 
@@ -173,8 +175,8 @@ class Network {
 
     vector<shared_ptr<Initializer>> initializers;
 
-    uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize);
-    uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize);
+    uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement);
+    uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement);
 
     uint64_t firstInstanceBytes;
     uint64_t nonFirstInstanceBytes;

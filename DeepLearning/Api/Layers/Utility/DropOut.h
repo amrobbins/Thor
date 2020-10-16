@@ -4,14 +4,13 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/Common/CudnnHelper.h"
 
 namespace Thor {
 
 class DropOut : public Layer {
    public:
     class Builder;
-    DropOut() { DropOut::stream.informIsStatic(); }
-
     virtual ~DropOut() {}
 
     virtual shared_ptr<Layer> clone() const { return make_shared<DropOut>(*this); }
@@ -32,8 +31,11 @@ class DropOut : public Layer {
         return dropOut;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
-        uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(stream);
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+        assert(tensorPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+        uint32_t gpuNum = tensorPlacement.getDeviceNum();
+        cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
+        uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
 
         uint64_t featureOutputSize = featureOutput.get().getTotalSizeInBytes();
         uint64_t errorOutputSize = featureInput.get().getTotalSizeInBytes();
@@ -53,8 +55,6 @@ class DropOut : public Layer {
 
    private:
     float dropProportion;
-
-    static Stream stream;
 };
 
 class DropOut::Builder {

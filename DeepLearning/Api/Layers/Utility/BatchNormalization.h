@@ -35,7 +35,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual uint64_t getFirstInstanceFixedMemRequirementInBytes() const { return 0; }
 
     // mem requirements are the input output tensors
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
         uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16
         uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;       // FP16
@@ -46,7 +46,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         return perInstanceWeights + perInputState + batchSize * (featureOutputSize + errorOutputSize);
     }
 
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
         uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;  // FP16
 

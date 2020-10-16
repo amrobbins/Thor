@@ -43,11 +43,11 @@ class Layer {
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {}
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const = 0;
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const = 0;
     // Layers with weights that share the weights mem with other instances of the same layer on the same gpu will have less non first
     // instance fixed mem requirements.
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
-        return getFirstInstanceMemRequirementInBytes(batchSize);
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+        return getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
 
     bool operator==(const Layer &other) const { return id == other.id; }

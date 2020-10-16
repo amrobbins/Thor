@@ -31,7 +31,7 @@ class Flatten : public Layer {
     }
 
     // Flatten only changes the descriptor, no tensor is allocated
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const { return 0; }
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const { return 0; }
 };
 
 class Flatten::Builder {

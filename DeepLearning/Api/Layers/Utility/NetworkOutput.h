@@ -35,7 +35,7 @@ class NetworkOutput : public Layer {
         return networkOutput;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint64_t totalBytes = 0;
         if (featureInput.get().getDataType() != dataType)
             totalBytes += featureInput.get().clone(dataType).getTotalSizeInBytes();

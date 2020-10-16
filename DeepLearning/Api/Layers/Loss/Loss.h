@@ -54,7 +54,7 @@ class Loss : public Layer {
     Tensor predictionsTensor;
     Tensor lossTensor;
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint32_t fixedMem = 4;  // loss scaling factor, FP32
 
         // Labels

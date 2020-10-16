@@ -63,7 +63,7 @@ class NetworkInput : public Layer {
         assert(false);
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint64_t elements = featureInput.get().getTotalNumElements();
 
         uint32_t bytesPerElement;
