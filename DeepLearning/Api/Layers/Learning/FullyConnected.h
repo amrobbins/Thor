@@ -93,7 +93,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     }
 
     // mem requirements are the weights
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         // FIXME: workspace? Or do I assume no workspace at first and can add one later if have extra mem?
         uint64_t numInputFeatures = featureInputs[0].getDimensions()[0];
         uint64_t numWeights = numInputFeatures * numOutputFeatures;
@@ -106,7 +106,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         return fixedMem + batchSizeDependentMem;
     }
 
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint64_t batchSizeDependentMem =
             2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;

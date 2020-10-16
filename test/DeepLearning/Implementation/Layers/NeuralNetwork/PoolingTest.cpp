@@ -558,7 +558,7 @@ TEST(Pooling, AveragePoolingWorks) {
         stream.synchronize();
         half *errorOutputCpuMem = (half *)errorOutputCpu.getMemPtr();
         half *errorOutputGpuMem_h = (half *)errorOutputGpu_h.getMemPtr();
-        maxDiff = (windowWidth * windowHeight) * 0.0015;
+        maxDiff = (windowWidth * windowHeight) * 0.002;
         for (int i = 0; i < featureInSize; ++i) {
             float diff = abs((float)errorOutputCpuMem[i] - (float)errorOutputGpuMem_h[i]);
             if (diff >= maxDiff) {

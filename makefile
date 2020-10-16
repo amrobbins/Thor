@@ -95,6 +95,7 @@ ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
             build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
             build/test/DeepLearning/Implementation/SimpleNetworkTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
+            build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
 
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
@@ -120,6 +121,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
                    build/Utilities/Common/ReferenceCounted.o \
+                   build/Utilities/Common/CudnnHelper.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
                    build/Utilities/ComputeTopology/MachineEvaluator.o \
                    build/DeepLearning/Implementation/Tensor/Tensor.o \
@@ -140,6 +142,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Utility/DropOut.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
+                   build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
@@ -358,6 +361,10 @@ build/Utilities/Common/ReferenceCounted.o: Utilities/Common/ReferenceCounted.h U
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -O3 -std=c++11 Utilities/Common/ReferenceCounted.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/ReferenceCounted.o
 
+build/Utilities/Common/CudnnHelper.o: Utilities/Common/CudnnHelper.h Utilities/Common/CudnnHelper.cpp
+	mkdir -p build/Utilities/Common
+	$(Gpp) -c -O3 -std=c++11 Utilities/Common/CudnnHelper.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/CudnnHelper.o
+
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
 	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o
@@ -408,12 +415,15 @@ build/DeepLearning/Api/Layers/Utility/DropOut.o: DeepLearning/Api/Layers/Utility
 
 build/DeepLearning/Api/Layers/Learning/Inception.o: DeepLearning/Api/Layers/Learning/Inception.h DeepLearning/Api/Layers/Learning/Inception.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Learning
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Inception.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Inception.o
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Inception.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Inception.o
 
 build/DeepLearning/Api/ExampleNetworks/AlexNet.o: DeepLearning/Api/ExampleNetworks/AlexNet.h DeepLearning/Api/ExampleNetworks/AlexNet.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/AlexNet.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/AlexNet.o
 
+build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNetworks/InceptionV3.h DeepLearning/Api/ExampleNetworks/InceptionV3.cpp
+	mkdir -p build/DeepLearning/Api/ExampleNetworks
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
 
 
 # Test Framework
@@ -551,8 +561,11 @@ build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest: build/test/google
 
 build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest: DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest.cpp DeepLearning/Api/Executors/HackathonExecutor.h $(THOR)
 	mkdir -p build/DeepLearning/Api/ExampleNetworks/PerformanceTests
-	$(Gpp) $(DEBUG) DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest.cpp -O3 -std=c++11 -pthread $(THOR_LIBS) $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest
+	$(Gpp) DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest.cpp -O3 -std=c++11 -pthread $(THOR_LIBS) $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest
 
+build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest: DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest.cpp DeepLearning/Api/Executors/HackathonExecutor.h $(THOR)
+	mkdir -p build/DeepLearning/Api/ExampleNetworks/PerformanceTests
+	$(Gpp) $(DEBUG) DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest.cpp -O3 -std=c++11 -pthread $(THOR_LIBS) $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest
 
 
 

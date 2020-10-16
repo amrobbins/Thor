@@ -28,11 +28,14 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
 Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
+    stampedNetwork.gpuNum = 0;  // FIXME
+
     preOptimize(gpuNum, batchSize);
 
     // FIXME: check for non-first instance to use shared weights
-    firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize);
-    nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize);
+    // FIXME: support other gpus
+    firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
     stampedNetwork.bytesRequired = firstInstanceBytes;
     stampedNetwork.batchSize = batchSize;
 
@@ -371,22 +374,22 @@ void Network::topologicalSort() {
 }
 
 // TODO: create a slice of a network that uses at most N bytes, given a specified batch size. return both network slices.
-uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize) {
+uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement) {
     uint64_t bytes = 0;
 
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
-        bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize);
+        bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
     return bytes;
 }
 
-uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize) {
+uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement) {
     uint64_t bytes = 0;
 
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
-        bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize);
+        bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
     return bytes;
 }

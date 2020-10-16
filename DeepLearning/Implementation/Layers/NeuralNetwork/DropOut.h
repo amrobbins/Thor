@@ -74,9 +74,9 @@ class DropOut : public Layer {
         return numBytes;
     }
 
-    static size_t getRandomStateSizeInBytes(Stream stream) {
+    static size_t getRandomStateSizeInBytes(cudnnHandle_t cudnnHandle) {
         size_t numBytes;
-        cudnnStatus_t cudnnStatus = cudnnDropoutGetStatesSize(stream.getCudnnHandle(), &numBytes);
+        cudnnStatus_t cudnnStatus = cudnnDropoutGetStatesSize(cudnnHandle, &numBytes);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         return numBytes;
     }
@@ -90,7 +90,8 @@ class DropOut : public Layer {
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
-        randomStateBytes = getRandomStateSizeInBytes(stream);
+        cudnnHandle_t cudnnHandle = CudnnHelper::getCudnnHandle(stream.getGpuNum());
+        randomStateBytes = getRandomStateSizeInBytes(cudnnHandle);
         randomState = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
 
         cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);

@@ -87,7 +87,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return convolution2d;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         // FIXME: workspace size?
         uint64_t numInputChannels = featureInputs[0].getDimensions()[0];
         uint64_t numWeights = filterHeight * filterWidth * numInputChannels * numOutputChannels;
@@ -100,7 +100,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return fixedMem + batchSizeDependentMem;
     }
 
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         uint64_t batchSizeDependentMem =
             2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;

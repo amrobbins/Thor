@@ -21,6 +21,7 @@ class Inception : public TrainableWeightsBiasesLayer {
     virtual shared_ptr<Layer> clone() const { return make_shared<Inception>(*this); }
 
    protected:
+    virtual bool isMultiLayer() const { return true; }
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -34,7 +35,7 @@ class Inception : public TrainableWeightsBiasesLayer {
         assert(false);
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         // Inception is purely a compound layer consisting of other layers, each which stamp themselves.
         // So when an inception layer converts itself to single layers, none of those layers is an inception layer
         // so it will never be added to the network as a stampable layer, and so getFirstInstanceMemRequirementInBytes
@@ -50,6 +51,9 @@ class Inception : public TrainableWeightsBiasesLayer {
     uint32_t inputChannels5x5;
     uint32_t outputChannels5x5;
     uint32_t outputChannelsPooling;
+
+    shared_ptr<Initializer::Builder> weightsInitializerBuilder;
+    shared_ptr<Initializer::Builder> biasInitializerBuilder;
 };
 
 class Inception::Builder {
@@ -64,6 +68,13 @@ class Inception::Builder {
         assert(_outputChannels5x5.isPresent());
         assert(_outputChannelsPooling.isPresent());
 
+        if (_weightsInitializerBuilder == nullptr)
+            _weightsInitializerBuilder =
+                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+        if (_biasInitializerBuilder == nullptr)
+            _biasInitializerBuilder =
+                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+
         Inception inception;
         inception.network = _network;
         inception.featureInputs = _featureInputs;
@@ -74,14 +85,8 @@ class Inception::Builder {
         inception.outputChannels5x5 = _outputChannels5x5;
         inception.outputChannelsPooling = _outputChannelsPooling;
 
-        /* FIXME: delete
-        uint64_t numOutputChannels = inception.outputChannels1x1 + inception.outputChannels3x3 + inception.outputChannels5x5 +
-        inception.outputChannelsPooling; for (uint32_t i = 0; i < inception.featureInputs.size(); ++i) { inception.featureOutputs.push_back(
-                Tensor(inception.featureInputs[0].getDataType(), {numOutputChannels, featureInputs[0].getDimensions()[1],
-        featureInputs[0].getDimensions()[2]})); inception.outputTensorFromInputTensor[inception.featureInputs[i]] =
-        inception.featureOutputs[i]; inception.inputTensorFromOutputTensor[inception.featureOutputs[i]] = inception.featureInputs[i];
-        }
-        */
+        inception.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
+        inception.biasInitializerBuilder = _biasInitializerBuilder->clone();
 
         inception.initialized = true;
         inception.addToNetwork(_network.get());
@@ -146,6 +151,30 @@ class Inception::Builder {
         return *this;
     }
 
+    virtual Inception::Builder &weightsInitializerBuilder(Initializer::Builder &_weightsInitializerBuilder) {
+        assert(this->_weightsInitializerBuilder == nullptr);
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual Inception::Builder &weightsInitializerBuilder(Initializer::Builder &&_weightsInitializerBuilder) {
+        assert(this->_weightsInitializerBuilder == nullptr);
+        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual Inception::Builder &biasInitializerBuilder(Initializer::Builder &_biasInitializerBuilder) {
+        assert(this->_biasInitializerBuilder == nullptr);
+        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+        return *this;
+    }
+
+    virtual Inception::Builder &biasInitializerBuilder(Initializer::Builder &&_biasInitializerBuilder) {
+        assert(this->_biasInitializerBuilder == nullptr);
+        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+        return *this;
+    }
+
    private:
     Optional<Network *> _network;
     vector<Tensor> _featureInputs;
@@ -155,6 +184,9 @@ class Inception::Builder {
     Optional<uint32_t> _inputChannels5x5;
     Optional<uint32_t> _outputChannels5x5;
     Optional<uint32_t> _outputChannelsPooling;
+
+    shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
+    shared_ptr<Initializer::Builder> _biasInitializerBuilder;
 };
 
 }  // namespace Thor

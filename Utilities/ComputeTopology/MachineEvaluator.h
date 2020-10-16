@@ -23,6 +23,8 @@ using std::set;
 using std::string;
 using std::vector;
 
+class Stream;
+
 struct GpuConnectionRanking {
     int peerGpuNum;
     bool isPeerToPeerSupported;

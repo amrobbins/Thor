@@ -8,8 +8,6 @@ using namespace Thor;
 void Inception::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
-
     Convolution2d::Builder convolution1x1Builder;
     convolution1x1Builder.network(*network)
         .numOutputChannels(outputChannels1x1)
@@ -19,8 +17,8 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .activationBuilder(Relu::Builder());
 
     Convolution2d::Builder convolution3x3ReduceBuilder;
@@ -32,8 +30,8 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .activationBuilder(Relu::Builder());
     Convolution2d::Builder convolution3x3Builder;
     convolution3x3Builder.network(*network)
@@ -44,8 +42,8 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .activationBuilder(Relu::Builder());
 
     Convolution2d::Builder convolution5x5ReduceBuilder;
@@ -57,8 +55,8 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .activationBuilder(Relu::Builder());
     Convolution2d::Builder convolution5x5Builder;
     convolution5x5Builder.network(*network)
@@ -69,8 +67,8 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .activationBuilder(Relu::Builder());
 
     Convolution2d::Builder convolutionPoolingReduceBuilder;
@@ -82,12 +80,12 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+        .weightsInitializerBuilder(*weightsInitializerBuilder)
+        .biasInitializerBuilder(*biasInitializerBuilder)
         .activationBuilder(Relu::Builder());
 
     Concatenate::Builder concatenateBuilder;
-    concatenateBuilder.network(*network).concatenationAxis(1);
+    concatenateBuilder.network(*network).concatenationAxis(0);
 
     vector<Pooling> poolingLayers;
 
@@ -140,7 +138,7 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
     outputTensorFromInputTensor.clear();
     inputTensorFromOutputTensor.clear();
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        featureOutputs[i] = concatenateLayers[i].getFeatureOutput();
+        featureOutputs.push_back(concatenateLayers[i].getFeatureOutput());
         outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
         inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
     }

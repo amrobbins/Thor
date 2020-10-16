@@ -43,7 +43,7 @@ class Pooling : public Layer {
         return pooling;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         return batchSize * featureOutput.get().getTotalSizeInBytes();
     }
 
