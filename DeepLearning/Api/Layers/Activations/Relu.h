@@ -19,8 +19,7 @@ class Relu : public Activation {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers,
-                                             StreamPackage gradientUpdateStreamPackage = StreamPackage()) const {
+                                             vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 

@@ -134,6 +134,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o \
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
+                   build/Utilities/Common/Stream.o \
                    build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
                    build/DeepLearning/Api/Initializers/Initializer.o \
@@ -388,6 +389,10 @@ build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/Loc
 build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h DeepLearning/Api/Network/Network.cpp
 	mkdir -p build/DeepLearning/Api/Network
 	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
+
+build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
+	mkdir -p build/Utilities/Common
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
 
 build/DeepLearning/Api/Tensor/Tensor.o: DeepLearning/Api/Tensor/Tensor.h DeepLearning/Api/Tensor/Tensor.cpp
 	mkdir -p build/DeepLearning/Api/Tensor

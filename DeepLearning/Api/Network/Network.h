@@ -20,8 +20,6 @@
 #include "DeepLearning/Implementation/Layers/Utility/TypeConversion.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
-#include "Utilities/Common/StreamPackage.h"
-
 #include <assert.h>
 #include <deque>
 #include <set>
@@ -57,9 +55,6 @@ class StampedNetwork {
 
     uint64_t bytesRequired;
     uint64_t batchSize;
-
-    StreamPackage fanoutStreamPackage;
-    StreamPackage gradientUpdateStreamPackage;
 
     void initialize() {
         for (uint32_t i = 0; i < initializers.size(); ++i)
