@@ -6,7 +6,6 @@
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Api/Layers/Utility/Pooling.h"
 #include "DeepLearning/Api/Network/Network.h"
-#include "DeepLearning/Implementation/Layers/NeuralNetwork/Inception.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
 namespace Thor {

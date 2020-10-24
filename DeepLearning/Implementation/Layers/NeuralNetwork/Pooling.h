@@ -55,6 +55,9 @@ class Pooling : public Layer {
         outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
         outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
+        // Ensure that cudnnHandle is preallocated
+        stream.getCudnnHandle();
+
         vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
         assert(outputDimensions.size() == 4);
         assert(outputDimensions[0] == (uint32_t)batchSize);
