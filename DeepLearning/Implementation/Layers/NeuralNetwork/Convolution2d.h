@@ -107,7 +107,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         numInputColumns = featureInputs[0].get().getDescriptor().getDimensions()[3];
 
         // ensure that the cudnnHandle is preallocated for all streams
-        for(uint32_t i = 0; i < streams.size(); ++i) {
+        for (uint32_t i = 0; i < streams.size(); ++i) {
             streams[i].getCudnnHandle();
         }
 

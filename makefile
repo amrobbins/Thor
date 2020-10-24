@@ -105,6 +105,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Tanh.o \
                    build/Utilities/TensorOperations/Arithmetic/Relu.o \
                    build/Utilities/TensorOperations/Arithmetic/Sum.o \
+                   build/Utilities/TensorOperations/DeepLearning/Add1dBias.o \
                    build/Utilities/TensorOperations/Arithmetic/SumScale.o \
                    build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o \
                    build/Utilities/TensorOperations/Arithmetic/Exponentiation.o \
@@ -274,6 +275,10 @@ build/Utilities/TensorOperations/Arithmetic/Sum.o: Utilities/TensorOperations/Ar
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Sum.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Sum.cu
 
+build/Utilities/TensorOperations/DeepLearning/Add1dBias.o: Utilities/TensorOperations/DeepLearning/Add1dBias.h Utilities/TensorOperations/DeepLearning/Add1dBias.cu
+	mkdir -p build/Utilities/TensorOperations/DeepLearning
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/DeepLearning/Add1dBias.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/DeepLearning/Add1dBias.cu
+
 build/Utilities/TensorOperations/Arithmetic/SumScale.o: Utilities/TensorOperations/Arithmetic/SumScale.h Utilities/TensorOperations/Arithmetic/SumScale.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SumScale.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SumScale.cu
@@ -388,11 +393,11 @@ build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/Loc
 
 build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h DeepLearning/Api/Network/Network.cpp
 	mkdir -p build/DeepLearning/Api/Network
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
 
 build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
 	mkdir -p build/Utilities/Common
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
+	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
 
 build/DeepLearning/Api/Tensor/Tensor.o: DeepLearning/Api/Tensor/Tensor.h DeepLearning/Api/Tensor/Tensor.cpp
 	mkdir -p build/DeepLearning/Api/Tensor
@@ -420,7 +425,7 @@ build/DeepLearning/Api/Layers/Utility/DropOut.o: DeepLearning/Api/Layers/Utility
 
 build/DeepLearning/Api/Layers/Learning/Inception.o: DeepLearning/Api/Layers/Learning/Inception.h DeepLearning/Api/Layers/Learning/Inception.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Learning
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Inception.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Inception.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Learning/Inception.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Inception.o
 
 build/DeepLearning/Api/ExampleNetworks/AlexNet.o: DeepLearning/Api/ExampleNetworks/AlexNet.h DeepLearning/Api/ExampleNetworks/AlexNet.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
@@ -428,7 +433,7 @@ build/DeepLearning/Api/ExampleNetworks/AlexNet.o: DeepLearning/Api/ExampleNetwor
 
 build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNetworks/InceptionV3.h DeepLearning/Api/ExampleNetworks/InceptionV3.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
 
 
 # Test Framework
