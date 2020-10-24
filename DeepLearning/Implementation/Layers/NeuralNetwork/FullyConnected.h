@@ -4,8 +4,6 @@
 #include "Utilities/TensorOperations/DeepLearning/Add1dBias.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
-#include <thread>
-
 namespace ThorImplementation {
 
 class FullyConnected : public TrainableWeightsBiasesLayer {
