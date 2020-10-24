@@ -8,13 +8,13 @@ class Reshape : public Layer {
    public:
     virtual ~Reshape() {}
 
-    Reshape(vector<unsigned long> newDimensions) : newDimensions(newDimensions) {}
+    Reshape(vector<unsigned long> outputDimensions) : outputDimensions(outputDimensions) {}
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
         // They share the same memory that stores the elements but their elements are organized into different dimensions
         Tensor outputTensor = featureInput;
-        outputTensor.reshape(newDimensions);
+        outputTensor.reshape(outputDimensions);
         return outputTensor;
     }
 
@@ -27,7 +27,7 @@ class Reshape : public Layer {
     }
 
    private:
-    vector<unsigned long> newDimensions;
+    vector<unsigned long> outputDimensions;
 };
 
 }  // namespace ThorImplementation

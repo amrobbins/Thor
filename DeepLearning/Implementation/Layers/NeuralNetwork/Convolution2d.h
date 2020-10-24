@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
-#include "Utilities/Common/StreamPackage.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 namespace ThorImplementation {
@@ -17,9 +16,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                   const int leftAndRightPadWidth,
                   const int topAndBottomPadHeight,
                   const int numOutputChannels,
-                  const bool hasBias,
-                  StreamPackage gradientUpdateStreamPackage = StreamPackage())
-        : TrainableWeightsBiasesLayer(hasBias, gradientUpdateStreamPackage),
+                  const bool hasBias)
+        : TrainableWeightsBiasesLayer(hasBias),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
           filterHorizontalStride(filterHorizontalStride),

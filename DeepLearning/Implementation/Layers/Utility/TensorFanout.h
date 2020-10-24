@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/Common/StreamPackage.h"
 
 namespace ThorImplementation {
 
@@ -9,17 +8,14 @@ namespace ThorImplementation {
 // New streams are created for outputs 1+
 class TensorFanout : public MultiConnectionLayer {
    public:
-    TensorFanout(StreamPackage streamPackage = StreamPackage()) { this->streamPackage = streamPackage; }
+    TensorFanout() {}
 
     virtual ~TensorFanout() {}
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         // If this is not the first connection
         if (errorInputs.size() == streams.size()) {
-            if (streamPackage.isInitialized())
-                streams.push_back(streamPackage.getStream());
-            else
-                streams.emplace_back(streams[0].getGpuNum());
+            streams.emplace_back(streams[0].getGpuNum());
         }
         errorInputs.push_back(nextLayer->connectToPreviousLayer(
             this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
@@ -143,8 +139,6 @@ class TensorFanout : public MultiConnectionLayer {
 
    protected:
     half **errorInputArray_d;
-
-    StreamPackage streamPackage;
 };
 
 }  // namespace ThorImplementation

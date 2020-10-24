@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
-#include "Utilities/Common/StreamPackage.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <thread>
@@ -12,8 +11,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     virtual ~FullyConnected() {}
 
-    FullyConnected(const uint32_t numOutputFeatures, const bool hasBias, StreamPackage gradientUpdateStreamPackage = StreamPackage())
-        : TrainableWeightsBiasesLayer(hasBias, gradientUpdateStreamPackage), numOutputFeatures(numOutputFeatures) {}
+    FullyConnected(const uint32_t numOutputFeatures, const bool hasBias)
+        : TrainableWeightsBiasesLayer(hasBias), numOutputFeatures(numOutputFeatures) {}
 
     FullyConnected(SharedWeightsPackage sharedWeightsPackage)
         : TrainableWeightsBiasesLayer(sharedWeightsPackage),
