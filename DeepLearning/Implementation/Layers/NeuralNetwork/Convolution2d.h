@@ -106,6 +106,11 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         numInputRows = featureInputs[0].get().getDescriptor().getDimensions()[2];
         numInputColumns = featureInputs[0].get().getDescriptor().getDimensions()[3];
 
+        // ensure that the cudnnHandle is preallocated for all streams
+        for(uint32_t i = 0; i < streams.size(); ++i) {
+            streams[i].getCudnnHandle();
+        }
+
         string gpuType = MachineEvaluator::instance().getGpuType(streams.front().getGpuNum());
         convolutionKernelRequirement = ConvolutionKernelRequirement(gpuType,
                                                                     filterWidth,

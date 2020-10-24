@@ -90,8 +90,7 @@ class DropOut : public Layer {
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
-        cudnnHandle_t cudnnHandle = CudnnHelper::getCudnnHandle(stream.getGpuNum());
-        randomStateBytes = getRandomStateSizeInBytes(cudnnHandle);
+        randomStateBytes = getRandomStateSizeInBytes(stream.getCudnnHandle());
         randomState = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
 
         cudnnStatus = cudnnCreateDropoutDescriptor(&dropoutDescriptor);
