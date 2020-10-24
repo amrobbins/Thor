@@ -64,12 +64,20 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             vector<shared_ptr<Initializer>> &initializers,
+                                             StreamPackage gradientUpdateStreamPackage = StreamPackage()) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-        ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
-            filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
+        ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(filterWidth,
+                                                                                                 filterHeight,
+                                                                                                 horizontalStride,
+                                                                                                 verticalStride,
+                                                                                                 horizontalPadding,
+                                                                                                 verticalPadding,
+                                                                                                 numOutputChannels,
+                                                                                                 hasBias,
+                                                                                                 gradientUpdateStreamPackage);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();

@@ -39,8 +39,12 @@ __global__ void sumManyToOne(
     if (threadIdx.x % 32 == 0)
         sharedBuffer[threadIdx.x / 32] = sum;
     __syncthreads();
-    if (threadIdx.x < 32)
-        sum = smtn_warpReduceBottom8(sharedBuffer[threadIdx.x]);
+    if (threadIdx.x < 32) {
+        float val = 0.0f;
+        if (threadIdx.x < 8)
+            val = sharedBuffer[threadIdx.x];
+        sum = smtn_warpReduceBottom8(val);
+    }
     if (threadIdx.x == 0) {
         if (invert)
             sum = 1.0f / sum;

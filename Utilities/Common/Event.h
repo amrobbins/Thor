@@ -61,6 +61,10 @@ class Event : private ReferenceCounted {
 
         cudaError_t cudaStatus;
         cudaStatus = cudaEventSynchronize(*this);
+        if (cudaStatus != cudaSuccess) {
+            printf("cudaStatus %d\n", cudaStatus);
+            fflush(stdout);
+        }
         assert(cudaStatus == cudaSuccess);
     }
 

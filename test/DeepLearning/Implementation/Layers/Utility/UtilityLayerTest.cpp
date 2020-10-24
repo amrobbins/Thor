@@ -486,7 +486,8 @@ TEST(TensorFanout, CreatesFanout) {
 
     vector<Layer *> layers;
     layers.push_back(new NetworkInput(sourceGpu));
-    layers.push_back(new TensorFanout());
+    TensorFanout *tensorFanout = new TensorFanout();
+    layers.push_back(tensorFanout);
     layers.push_back(new NetworkOutput(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
@@ -523,6 +524,8 @@ TEST(TensorFanout, CreatesFanout) {
     for (int i = 0; i < numElements; ++i) {
         ASSERT_EQ(destMem[i], sourceMem[i]);
     }
+
+    ASSERT_EQ(tensorFanout->getStreams().size(), 2U);
 
     LayerTestHelper::tearDownNetwork(layers);
 }

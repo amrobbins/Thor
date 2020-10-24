@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "Utilities/Common/StreamPackage.h"
 
 namespace ThorImplementation {
 
@@ -8,10 +9,18 @@ namespace ThorImplementation {
 // New streams are created for outputs 1+
 class TensorFanout : public MultiConnectionLayer {
    public:
+    TensorFanout(StreamPackage streamPackage = StreamPackage()) { this->streamPackage = streamPackage; }
+
     virtual ~TensorFanout() {}
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        streams.emplace_back(streams[0].getGpuNum());
+        // If this is not the first connection
+        if (errorInputs.size() == streams.size()) {
+            if (streamPackage.isInitialized())
+                streams.push_back(streamPackage.getStream());
+            else
+                streams.emplace_back(streams[0].getGpuNum());
+        }
         errorInputs.push_back(nextLayer->connectToPreviousLayer(
             this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
         nextLayers.push_back(nextLayer);
@@ -47,17 +56,20 @@ class TensorFanout : public MultiConnectionLayer {
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
         cudaError_t cudaStatus;
-        cudaStatus = cudaMalloc(&errorInputArray_d, errorInputs.size() * sizeof(half *));
+        cudaStatus = cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(half *));
         assert(cudaStatus == cudaSuccess);
 
         half **errorInputArray = new half *[numPresentTensors(errorInputs)];
+        uint32_t j = 0;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
             if (errorInputs[i].isPresent()) {
-                errorInputArray[i] = (half *)errorInputs[i].get().getMemPtr();
+                errorInputArray[j] = (half *)errorInputs[i].get().getMemPtr();
                 allErrorInputTensorIds.insert(errorInputs[i].get().getTensorId());
+                ++j;
             }
         }
-        cudaStatus = cudaMemcpy(errorInputArray_d, errorInputArray, errorInputs.size() * sizeof(half *), cudaMemcpyHostToDevice);
+        cudaStatus =
+            cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
         assert(cudaStatus == cudaSuccess);
         delete[] errorInputArray;
     }
@@ -121,8 +133,8 @@ class TensorFanout : public MultiConnectionLayer {
 
         sum((half *)errorOutputs[0].get().getMemPtr(),
             errorInputArray_d,
-            errorInputs.size(),
-            (int)errorOutputs[0].get().getDescriptor().getTotalNumElements(),
+            numPresentTensors(errorInputs),
+            (uint64_t)errorOutputs[0].get().getDescriptor().getTotalNumElements(),
             streams[0]);
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
@@ -131,6 +143,8 @@ class TensorFanout : public MultiConnectionLayer {
 
    protected:
     half **errorInputArray_d;
+
+    StreamPackage streamPackage;
 };
 
 }  // namespace ThorImplementation

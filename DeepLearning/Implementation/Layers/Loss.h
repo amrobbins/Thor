@@ -112,7 +112,7 @@ class Loss : public Layer {
         // outputs. Backpropagation does require lables to compute. So when labelsStream is present, use it so that offloading predictions
         // does not delay backpropagation, otherwise use the data stream.
         predictionsOutputLayer->connectToPreviousLayer(
-            this, featureOutput, labelsStream.isPresent() ? labelsStream.get() : stream, false, loaderConnectionType);
+            this, featureOutput, labelsStream.isInitialized() ? labelsStream : stream, false, loaderConnectionType);
 
         ensureNoDeviceCrossing();
     }
@@ -143,13 +143,12 @@ class Loss : public Layer {
     virtual void forward(Optional<Tensor> inputTensor) {
         assert(running);
         if (!isInferenceOnly()) {
-            assert(labelsStream.isPresent());
+            assert(labelsStream.isInitialized());
             assert(labelsInput.isPresent());
             assert(errorOutput.isPresent());
             assert(errorOutput.get().isInitialized());
         }
-        if (labelsStream.isPresent()) {
-            assert(labelsStream.get().isInitialized());
+        if (labelsStream.isInitialized()) {
             assert(labelsInput.get().isInitialized());
         }
         assert(featureOutput.isPresent());
@@ -188,8 +187,7 @@ class Loss : public Layer {
         assert(labelsInput.get().isInitialized());
         assert(errorOutput.isPresent());
         assert(errorOutput.get().isInitialized());
-        assert(labelsStream.isPresent());
-        assert(labelsStream.get().isInitialized());
+        assert(labelsStream.isInitialized());
         assert(errorInput.isEmpty());
 
         if (errorOutput.isPresent())
@@ -229,7 +227,7 @@ class Loss : public Layer {
 
     float lossScalingFactor;
     Tensor lossScalingFactorTensor;
-    Optional<Stream> labelsStream;
+    Stream labelsStream;
 
     bool featureInputReceived;
     bool labelsReceived;
@@ -241,9 +239,9 @@ class Loss : public Layer {
 
             // DataStream waits for labels to arrive,
             // Labels stream waits for infer to finish
-            if (labelsStream.isPresent() && stream != labelsStream.get()) {
-                stream.waitEvent(labelsStream.get().putEvent());
-                labelsStream.get().waitEvent(stream.putEvent());
+            if (labelsStream.isInitialized() && stream != labelsStream) {
+                stream.waitEvent(labelsStream.putEvent());
+                labelsStream.waitEvent(stream.putEvent());
             }
 
             // Compute loss, for forward direction

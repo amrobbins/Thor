@@ -70,11 +70,13 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             vector<shared_ptr<Initializer>> &initializers,
+                                             StreamPackage gradientUpdateStreamPackage = StreamPackage()) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
-        ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
+        ThorImplementation::FullyConnected *fullyConnected =
+            new ThorImplementation::FullyConnected(numOutputFeatures, hasBias, gradientUpdateStreamPackage);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();

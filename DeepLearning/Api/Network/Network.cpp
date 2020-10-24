@@ -3,6 +3,9 @@
 // TEMP:
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 
+// TEMP
+int Stream::numCudnnHandles = 0;
+
 using namespace Thor;
 
 Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
@@ -28,14 +31,16 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
 Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
-    stampedNetwork.gpuNum = 0;  // FIXME
+    stampedNetwork.gpuNum = gpuNum;
+    // stampedNetwork.fanoutStreamPackage = StreamPackage(stampedNetwork.gpuNum, 4);
+    // stampedNetwork.gradientUpdateStreamPackage = StreamPackage(stampedNetwork.gpuNum, 3, Stream::Priority::LOW);
 
     preOptimize(gpuNum, batchSize);
 
     // FIXME: check for non-first instance to use shared weights
     // FIXME: support other gpus
-    firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
-    nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize, TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+    firstInstanceBytes = computeFirstInstanceMemRequirements(batchSize, TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum));
+    nonFirstInstanceBytes = computeNonFirstInstanceMemRequirements(batchSize, TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum));
     stampedNetwork.bytesRequired = firstInstanceBytes;
     stampedNetwork.batchSize = batchSize;
 
@@ -452,7 +457,7 @@ void Network::stampLayer(
     assert(numLoadingLayers > 0);
     ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
     if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
-        implementationTensorFanout = new ThorImplementation::TensorFanout();
+        implementationTensorFanout = new ThorImplementation::TensorFanout(/*stampedNetwork.fanoutStreamPackage*/);
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTensorFanout;
 
@@ -470,7 +475,11 @@ void Network::stampLayer(
         implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer->getId()];
         Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
     } else {
-        implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers);
+        implementationLayer = layer->stamp(placement,
+                                           physicalDrivingLayer,
+                                           apiDrivingLayer,
+                                           inputTensor,
+                                           stampedNetwork.initializers /*, stampedNetwork.gradientUpdateStreamPackage*/);
         stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer;
         stampedNetwork.physicalLayerToApiLayer[implementationLayer] = layer->getId();
     }
@@ -505,7 +514,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
     assert(numLoadingLayers > 0);
     if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
-        implementationTensorFanout = new ThorImplementation::TensorFanout();
+        implementationTensorFanout = new ThorImplementation::TensorFanout(/*stampedNetwork.fanoutStreamPackage*/);
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTensorFanout;
 

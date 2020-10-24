@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/Common/StreamPackage.h"
 
 namespace ThorImplementation {
 
@@ -17,8 +18,12 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    public:
     virtual ~TrainableWeightsBiasesLayer() {}
 
-    TrainableWeightsBiasesLayer(bool hasBias)
-        : hasBias(hasBias), usingSharedWeights(false), weightUpdateCallback(nullptr), clearGradientAccumulator(true) {}
+    TrainableWeightsBiasesLayer(bool hasBias, StreamPackage streamPackage = StreamPackage())
+        : hasBias(hasBias),
+          usingSharedWeights(false),
+          weightUpdateCallback(nullptr),
+          clearGradientAccumulator(true),
+          streamPackage(streamPackage) {}
 
     struct SharedWeightsPackage {
         Tensor weights;
@@ -26,7 +31,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         Optional<Tensor> biases;
         Optional<Tensor> biasesGradient;
 
-        Optional<Stream> gradientUpdateStream;
+        Stream gradientUpdateStream;
 
         vector<Tensor> otherSharedMem;
     };
@@ -108,13 +113,13 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     }
 
     Event updateWeightsAndBiasesWithScaledGradient() {
-        assert(gradientUpdateStream.isPresent());
+        assert(gradientUpdateStream.isInitialized());
         applyGradients(gradientUpdateStream, weights, weightsGradient, biases, biasesGradient);
-        Event gradientAppliedEvent = gradientUpdateStream.get().putEvent();
+        Event gradientAppliedEvent = gradientUpdateStream.putEvent();
         return gradientAppliedEvent;
     }
 
-    virtual Optional<Stream> getGradientUpdateStream() { return gradientUpdateStream; }
+    virtual Stream getGradientUpdateStream() { return gradientUpdateStream; }
 
     virtual SharedWeightsPackage getSharedWeightsPackage() {
         SharedWeightsPackage sharedWeightsPackage;
@@ -184,8 +189,12 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         if (!isInferenceOnly()) {
             assert(!featureInputs.empty());
             if (!usingSharedWeights) {
-                // gradient upate streams have low priority so that this type of parallel work tends to build up
-                gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);
+                if (streamPackage.isInitialized()) {
+                    gradientUpdateStream = streamPackage.getStream();
+                } else {
+                    // gradient upate streams have low priority so that this type of parallel work tends to build up
+                    gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);
+                }
             }
         }
     }
@@ -282,7 +291,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> biases;
     Optional<Tensor> biasesGradient;
 
-    Optional<Stream> gradientUpdateStream;
+    Stream gradientUpdateStream;
 
     void (*weightUpdateCallback)(
         Event readyEvent, Optional<Tensor> weights, Optional<Tensor> gradients, Optional<Tensor> biases, Optional<Tensor> biasesGradient);
@@ -291,7 +300,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
                           Stream gradientStream,
-                          Optional<Stream> dataStream,
+                          Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) = 0;
 
@@ -300,6 +309,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    private:
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
+
+    StreamPackage streamPackage;
 };
 
 }  // namespace ThorImplementation

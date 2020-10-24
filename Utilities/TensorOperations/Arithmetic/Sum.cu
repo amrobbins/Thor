@@ -30,6 +30,8 @@ __global__ void sum(DATA_TYPE *dest, DATA_TYPE *source[], uint32_t numInstances,
 // source_d_pd[] is a device memory array of pointers to device memory
 template <typename DATA_TYPE>
 void launchSum(DATA_TYPE *dest_d, DATA_TYPE *source_d_pd[], uint32_t numInstances, uint64_t numElements, Stream stream) {
+    assert(numElements > 0);
+    assert(numInstances > 0);
     dim3 blockSize(256);
     dim3 gridSize((numElements + 511) / 512);
     ScopedGpu scopedGpu(stream.getGpuNum());
