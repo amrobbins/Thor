@@ -254,7 +254,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
                           Stream gradientStream,
-                          Optional<Stream> dataStream,
+                          Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
         if (errorOut.isEmpty())

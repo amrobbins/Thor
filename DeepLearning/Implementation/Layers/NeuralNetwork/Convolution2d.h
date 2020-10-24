@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "Utilities/Common/StreamPackage.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 namespace ThorImplementation {
@@ -16,8 +17,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                   const int leftAndRightPadWidth,
                   const int topAndBottomPadHeight,
                   const int numOutputChannels,
-                  const bool hasBias)
-        : TrainableWeightsBiasesLayer(hasBias),
+                  const bool hasBias,
+                  StreamPackage gradientUpdateStreamPackage = StreamPackage())
+        : TrainableWeightsBiasesLayer(hasBias, gradientUpdateStreamPackage),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
           filterHorizontalStride(filterHorizontalStride),
@@ -178,7 +180,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
                           Stream gradientStream,
-                          Optional<Stream> dataStream,
+                          Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
         assert(convolutionKernelRequirement.isPresent());
@@ -187,7 +189,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         if (errorOut.isPresent()) {
-            assert(dataStream.isPresent());
+            assert(dataStream.isInitialized());
             GpuConvolution::instance().convolutionBackwardData(
                 convolutionKernelRequirement, errorIn, weights, errorOut, workspaceBackwardData, dataStream);
         }

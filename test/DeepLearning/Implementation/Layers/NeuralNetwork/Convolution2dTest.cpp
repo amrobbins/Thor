@@ -142,7 +142,7 @@ TEST(Convolution2d, Convolution2dWorks) {
             ASSERT_TRUE(convolution2dLayer->getErrorOutputs()[0].isEmpty());
             ASSERT_TRUE(convolution2dLayer->getWeightsGradient().isEmpty());
             ASSERT_TRUE(convolution2dLayer->getBiasesGradient().isEmpty());
-            ASSERT_TRUE(convolution2dLayer->getGradientUpdateStream().isEmpty());
+            ASSERT_FALSE(convolution2dLayer->getGradientUpdateStream().isInitialized());
         }
 
         if (!hasBias) {
@@ -236,7 +236,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         }
         Event weightsUpdateEvent = convolution2dLayer->updateWeightsAndBiases(weightsCpu, biasesCpu, stream.putEvent());
         stream.waitEvent(weightsUpdateEvent);
-        convolution2dLayer->getGradientUpdateStream().get().waitEvent(weightsUpdateEvent);
+        convolution2dLayer->getGradientUpdateStream().waitEvent(weightsUpdateEvent);
 
         backwardPass(convolution2dLayer,
                      numOutputElements,
@@ -404,8 +404,8 @@ void backwardPass(Convolution2d *convolution2dLayer,
     ConvolutionTestHelper::cpuConvolutionBackwardFilter(
         featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, accumulate);
     Tensor weightsGradientGpu_h = Tensor(cpuPlacement, weightsGradientGpu.getDescriptor());
-    weightsGradientGpu_h.copyFromAsync(weightsGradientGpu, convolution2dLayer->getGradientUpdateStream().get());
-    convolution2dLayer->getGradientUpdateStream().get().synchronize();
+    weightsGradientGpu_h.copyFromAsync(weightsGradientGpu, convolution2dLayer->getGradientUpdateStream());
+    convolution2dLayer->getGradientUpdateStream().synchronize();
 
     // printf("cpu after %f gpu after %f\n", (float)*(half*)weightsGradientCpu.getElement({0, 0, 0, 0}),
     // (float)*(half*)weightsGradientGpu_h.getElement({0, 0, 0, 0}));
@@ -461,8 +461,8 @@ void backwardPass(Convolution2d *convolution2dLayer,
         ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
 
         Tensor biasesGradientGpu_h = Tensor(cpuPlacement, biasesGradientGpu.get().getDescriptor());
-        biasesGradientGpu_h.copyFromAsync(biasesGradientGpu, convolution2dLayer->getGradientUpdateStream().get());
-        convolution2dLayer->getGradientUpdateStream().get().synchronize();
+        biasesGradientGpu_h.copyFromAsync(biasesGradientGpu, convolution2dLayer->getGradientUpdateStream());
+        convolution2dLayer->getGradientUpdateStream().synchronize();
 
         for (int i = 0; i < numOutputChannels; ++i) {
             float cpuGradient = *(half *)biasesGradientCpu.get().getElement({(uint64_t)i});

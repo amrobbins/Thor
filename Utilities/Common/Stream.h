@@ -106,9 +106,14 @@ class Stream : private ReferenceCounted {
             cudnnHandle_t handle;
             cudnnStatus = cudnnCreate(&handle);
             if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
-                printf("cudnnStatus %d : %s   gpu:%d\n", cudnnStatus, cudnnGetErrorString(cudnnStatus), gpuNum);
+                printf("cudnnStatus %d : %s   gpu:%d   numCudnnHandles %d\n",
+                       cudnnStatus,
+                       cudnnGetErrorString(cudnnStatus),
+                       gpuNum,
+                       numCudnnHandles);
                 fflush(stdout);
             }
+            numCudnnHandles += 1;
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
             cudnnStatus = cudnnSetStream(handle, cudaStream);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -173,6 +178,8 @@ class Stream : private ReferenceCounted {
 
         // can't destroy the cudnn handle at the point when the static string is destroyed
         if (cudnnHandle->isPresent() && !isStatic) {
+            numCudnnHandles -= 1;
+
             cudnnStatus_t cudnnStatus;
             cudnnStatus = cudnnDestroy(*cudnnHandle);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -194,6 +201,8 @@ class Stream : private ReferenceCounted {
     Optional<cudnnHandle_t> *cudnnHandle;
 
     bool isStatic;
+
+    static int numCudnnHandles;
 
     mutex *mtx;
 };

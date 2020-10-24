@@ -80,7 +80,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
             ASSERT_TRUE(fullyConnectedLayer->getErrorOutputs()[0].isEmpty());
             ASSERT_TRUE(fullyConnectedLayer->getWeightsGradient().isEmpty());
             ASSERT_TRUE(fullyConnectedLayer->getBiasesGradient().isEmpty());
-            ASSERT_TRUE(fullyConnectedLayer->getGradientUpdateStream().isEmpty());
+            ASSERT_FALSE(fullyConnectedLayer->getGradientUpdateStream().isInitialized());
         }
 
         if (!hasBiases) {
@@ -93,7 +93,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         Event weightsUpdatedEvent = fullyConnectedLayer->updateWeightsAndBiases(weights, biases, dataStream.putEvent());
         dataStream.waitEvent(weightsUpdatedEvent);
         if (!inferenceOnly)
-            fullyConnectedLayer->getGradientUpdateStream().get().waitEvent(weightsUpdatedEvent);
+            fullyConnectedLayer->getGradientUpdateStream().waitEvent(weightsUpdatedEvent);
 
         // Network is runnable here
         layers[0]->forward(featureIn);
@@ -158,7 +158,7 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accu
     assert(accumulate == false);  // FIXME
 
     Stream dataStream = fullyConnectedLayer->getStreams()[0];
-    Stream gradientUpdateStream = fullyConnectedLayer->getGradientUpdateStream().get();
+    Stream gradientUpdateStream = fullyConnectedLayer->getGradientUpdateStream();
 
     Tensor errorInput = fullyConnectedLayer->getErrorInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
 

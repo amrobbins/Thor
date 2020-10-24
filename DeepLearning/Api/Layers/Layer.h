@@ -5,6 +5,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/StreamPackage.h"
 
 #include <assert.h>
 #include <atomic>
@@ -75,7 +76,8 @@ class Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const = 0;
+                                             vector<shared_ptr<Initializer>> &initializers,
+                                             StreamPackage gradientUpdateStreamPackage = StreamPackage()) const = 0;
 
     virtual bool isMultiLayer() const { return false; }
     virtual void convertToSingleLayersAndAddToNetwork() { assert(false); }

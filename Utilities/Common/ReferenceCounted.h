@@ -89,6 +89,8 @@ class ReferenceCounted {
         *this = other;  // implemented using operator=
     }
 
+    long getReferenceCountedId() { return id; }
+
     ReferenceCounted &operator=(const ReferenceCounted &other) {
         atomic<long> *otherReferenceCount = other.referenceCount;
 

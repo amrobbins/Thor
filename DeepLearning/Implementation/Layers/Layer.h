@@ -227,8 +227,8 @@ class Layer {
         launchAverage(result_d, sources_d, numSources, numElements, stream);
     }
 
-    void sum(half result_d[], half *sources_d[], int numElements, int numSources, Stream stream) {
-        launchSum(result_d, sources_d, numSources, numElements, stream);
+    void sum(half result_d[], half *sources_d[], uint32_t numSources, uint64_t numElements, Stream stream) {
+        launchSum<half>(result_d, sources_d, numSources, numElements, stream);
     }
 
     void sumScale(half result_d[], half nonScaledSource_d[], half scaledSource_d[], float scale, int numElements, Stream stream) {

@@ -16,6 +16,7 @@ class MultiConnectionLayer : public Layer {
     virtual void parentCompile() {
         Layer::parentCompile();
 
+        numEmptyErrorInputConnections = 0;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
             if (errorInputs[i].isPresent())
                 allErrorInputTensorIds.insert(errorInputs[i].get().getTensorId());
