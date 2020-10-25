@@ -1,14 +1,14 @@
 #pragma once
 
+#include <boost/multiprecision/cpp_int.hpp>
 #include <chrono>
 #include <cmath>
-#include <boost/multiprecision/cpp_int.hpp>
 
 using boost::multiprecision::uint128_t;
 
 /**
- *  Gets each number from 0 to period - 1 in some pseudo random sequences, where the order depends on the seed value.
- *  To iterate over the same numbers another time, first call reseedUsingClock, and then iterate over all of them.
+ *  Gets each number from 0 to period - 1 in a pseudo random sequence, where the sequence order depends on the seed value.
+ *  To iterate over the same numbers another time in another order, first call reseedUsingClock, and then get period random numbers.
  *
  *  getRandomNumber() will need to be synchronized externally if more than one thread will be getting random numbers.
  *
