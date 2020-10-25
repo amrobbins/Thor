@@ -86,8 +86,6 @@ void AsyncQueue<DataType>::open() {
     assert(queueOpen == false);
     assert(queueSize > 0);
 
-    storage.reserve(queueSize);
-
     queueOpen = true;
 }
 
@@ -96,7 +94,6 @@ void AsyncQueue<DataType>::close() {
     std::unique_lock<std::mutex> lck(mtx);
 
     queueOpen = false;
-    storage.reserve(0);
     storage.clear();
 
     notFull.notify_all();
