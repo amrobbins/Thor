@@ -51,6 +51,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
                 build/test/Utilities/Common/OptionalTest && \
+                build/test/Utilities/Random/FullPeriodRandomTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest && \
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
@@ -67,7 +68,8 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
-ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
+ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
+            build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest \
             build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest \
             build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
@@ -500,6 +502,10 @@ build/test/Utilities/ComputeTopology/machineEvaluatorTest: build/test/googletest
 build/test/Utilities/Common/OptionalTest: build/test/googletest/libgtest.a test/Utilities/Common/OptionalTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/Common
 	$(Gpp) $(DEBUG) -o build/test/Utilities/Common/OptionalTest test/Utilities/Common/OptionalTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/Random/FullPeriodRandomTest: build/test/googletest/libgtest.a test/Utilities/Random/FullPeriodRandomTest.cpp $(THOR)
+	mkdir -p build/test/Utilities/Random
+	$(Gpp) $(DEBUG) -o build/test/Utilities/Random/FullPeriodRandomTest test/Utilities/Random/FullPeriodRandomTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Tensor/tensorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Tensor/tensorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Tensor
