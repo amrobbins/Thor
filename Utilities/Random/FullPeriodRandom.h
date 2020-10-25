@@ -2,7 +2,18 @@
 
 #include <chrono>
 #include <cmath>
+#include <boost/multiprecision/cpp_int.hpp>
 
+using boost::multiprecision::uint128_t;
+
+/**
+ *  Gets each number from 0 to period - 1 in some pseudo random sequences, where the order depends on the seed value.
+ *  To iterate over the same numbers another time, first call reseedUsingClock, and then iterate over all of them.
+ *
+ *  getRandomNumber() will need to be synchronized externally if more than one thread will be getting random numbers.
+ *
+ *  none of the functions have internal synchronization and all would need to be synchronized externally for the multithreaded case.
+ */
 class FullPeriodRandom {
    public:
     FullPeriodRandom(uint64_t period, uint64_t *seed = nullptr) : period(period) {
