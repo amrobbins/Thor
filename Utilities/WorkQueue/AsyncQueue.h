@@ -94,7 +94,7 @@ void AsyncQueue<DataType>::close() {
     std::unique_lock<std::mutex> lck(mtx);
 
     queueOpen = false;
-    storage.clear();
+    storage.resize(0);
 
     notFull.notify_all();
     notEmpty.notify_all();

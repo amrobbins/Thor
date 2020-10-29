@@ -179,6 +179,12 @@ all: $(ML_DEV)
 	@echo "Build Succeeded"
 	@echo ""
 
+build: $(ML_DEV)
+	@echo ""
+	@echo ""
+	@echo "Build Succeeded, no tests run"
+	@echo ""
+
 clean:
 	rm -rf build
 	rm -f libThor.a

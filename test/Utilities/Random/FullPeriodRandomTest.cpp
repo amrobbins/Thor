@@ -23,26 +23,29 @@ bool PRINT = false;
 TEST(FullPeriodRandom, createsAFullPeriodCycle) {
     srand(time(nullptr));
 
-    for (int test = 0; test < 50; ++test) {
+    for (int test = 0; test < 100; ++test) {
         uint32_t period = rand() % 10000 + 1;
 
         FullPeriodRandom fullPeriodRandom(period);
 
-        set<uint64_t> observedNumbers;
-        for (uint32_t i = 0; i < period; ++i) {
-            uint64_t number = fullPeriodRandom.getRandomNumber();
-            ASSERT_LT(number, period);
-            observedNumbers.insert(number);
+        for (uint32_t j = 0; j < 3; ++j) {
+            set<uint64_t> observedNumbers;
+            for (uint32_t i = 0; i < period; ++i) {
+                uint64_t number = fullPeriodRandom.getRandomNumber();
+                ASSERT_LT(number, period);
+                observedNumbers.insert(number);
+            }
+            ASSERT_EQ(observedNumbers.size(), period);
         }
-        ASSERT_EQ(observedNumbers.size(), period);
 
         if (PRINT) {
-            for (uint32_t j = 0; j < 2; ++j) {
+            for (uint32_t j = 0; j < 3; ++j) {
                 for (uint32_t i = 0; i < period; ++i) {
                     printf("%ld\n", fullPeriodRandom.getRandomNumber());
                 }
-                printf("\n");
+                printf("\n\n");
             }
+            printf("------------------------\n\n");
         }
     }
 }
