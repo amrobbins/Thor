@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <mutex>
 #include <thread>
 
 using std::thread;
@@ -14,37 +15,46 @@ using std::thread;
  *  Gets each number from 0 to period - 1 in a pseudo random sequence, where the sequence order depends on the seed value derived from the
  * clock. After sending all numbers from 0 to period - 1 exactly once, it reseeds itself using a new seed derived from the clock.
  *
- *  FullPeriodRandom supports multiple threads and handles synchronization internally.
+ *  If a FullPeriodRandom object will be accessed by multiple threads, its constructor parameter synchronized must be set to true.
  */
 
 class FullPeriodRandom {
    public:
-    FullPeriodRandom(uint64_t period) : period(period), periodCount(0), randomNumberQueue(period < 1000000 ? 128 : 4096) {
+    FullPeriodRandom(uint64_t period, bool synchronized = false) : period(period), periodCount(0), synchronized(synchronized) {
         assert(period != 0);
         if (period == 1) {
             return;
         }
 
+        implementationPeriod = period;
         getFactors(period, periodFactors, periodNonFactors);
         createBaseAMinusOne();
         ensureThereIsRoomToRandomizeC();
 
         reseed();
-
-        startReadAheadThread();
     }
 
     FullPeriodRandom(const FullPeriodRandom &) = delete;
     FullPeriodRandom &operator=(const FullPeriodRandom &) = delete;
 
-    virtual ~FullPeriodRandom() { killReadAheadThread(); }
-
     uint64_t getRandomNumber() {
-        uint64_t randomNumber = 0;
-        bool succeeded = randomNumberQueue.pop(randomNumber);
-        assert(succeeded);
+        if (period == 1)
+            return 0;
 
-        return randomNumber;
+        if (synchronized)
+            std::unique_lock<std::mutex> lck(mtx);
+
+        if (periodCount == period) {
+            periodCount = 0;
+            reseed();
+        }
+
+        do {
+            X = (a * X + c) % implementationPeriod;
+        } while (X >= period);
+
+        periodCount += 1;
+        return X;
     }
 
    private:
@@ -62,8 +72,8 @@ class FullPeriodRandom {
     vector<uint64_t> periodFactors;
     vector<uint64_t> periodNonFactors;
 
-    thread readAheadThread;
-    AsyncQueue<uint64_t> randomNumberQueue;
+    const bool synchronized;
+    mutex mtx;
 
     void reseed(Optional<uint64_t> seed = Optional<uint64_t>::empty()) {
         if (period == 1)
@@ -79,6 +89,11 @@ class FullPeriodRandom {
         // period and c share no prime factors
         // c < period
         c = periodNonFactors[rand() % periodNonFactors.size()];
+        for (uint64_t i = 0; i < 3; ++i) {
+            uint64_t selectdNonFactor = periodNonFactors[rand() % periodNonFactors.size()];
+            if (c * selectdNonFactor < implementationPeriod)
+                c *= selectdNonFactor;
+        }
         while (rand() % 5 != 0) {
             uint64_t selectdNonFactor = periodNonFactors[rand() % periodNonFactors.size()];
             if (c * selectdNonFactor < implementationPeriod)
@@ -166,6 +181,8 @@ class FullPeriodRandom {
     }
 
     void createBaseAMinusOne() {
+        constexpr uint64_t MIN_A_MULTIPLE = 5;
+
         // a - 1 is divisible by all factors of period
         // a - 1 is divisible by 4 if period is divisible by 4
         // a < period
@@ -173,45 +190,37 @@ class FullPeriodRandom {
         for (uint64_t i = 0; i < periodFactors.size(); ++i) {
             baseAMinusOne *= periodFactors[i];
         }
-
-        // If period has no repeated prime factors, then the 'a' constraints cannot be satisfied
-        // in that case increase the period such that the constraints can be satisfied
-        implementationPeriod = period;
-        if (baseAMinusOne + 1 >= period / 5) {
-            bool hasFactor5 = false;
-            bool hasFactor7 = false;
-            for (uint64_t i = 0; i < 4 && i < periodFactors.size(); ++i) {
-                if (periodFactors[i] == 5)
-                    hasFactor5 = true;
-                if (periodFactors[i] == 7)
-                    hasFactor7 = true;
-            }
-            if (hasFactor5) {
-                implementationPeriod *= 5;
-            } else if (hasFactor7) {
-                implementationPeriod *= 7;
-            } else {
-                baseAMinusOne *= 3;
-                implementationPeriod *= 9;
-            }
-
-            getFactors(implementationPeriod, periodFactors, periodNonFactors);
-        }
-        // Now a = baseAMinusOne + 1 is guaranteed to satisfy all constraints,
-        // this is possible because implemenationPeriod is guaranteed to have a repeated prime factor
         uint64_t a = baseAMinusOne + 1;
-        assert(a < implementationPeriod);
         maxBaseAMinusOneMultiple = implementationPeriod / a;
         if (implementationPeriod % a == 0) {
             // Don't think this case is possible, but easier to do than to prove it is not possible.
             maxBaseAMinusOneMultiple -= 1;
         }
+
+        while (maxBaseAMinusOneMultiple < MIN_A_MULTIPLE) {
+            implementationPeriod += 1;
+            getFactors(implementationPeriod, periodFactors, periodNonFactors);
+            baseAMinusOne = 1;
+            for (uint64_t i = 0; i < periodFactors.size(); ++i) {
+                baseAMinusOne *= periodFactors[i];
+            }
+            a = baseAMinusOne + 1;
+            maxBaseAMinusOneMultiple = implementationPeriod / a;
+            if (implementationPeriod % a == 0) {
+                // Don't think this case is possible, but easier to do than to prove it is not possible.
+                maxBaseAMinusOneMultiple -= 1;
+            }
+        }
+
+        // Now a = baseAMinusOne + 1 is guaranteed to satisfy all constraints,
+        // this is possible because implemenationPeriod is guaranteed to have a repeated prime factor
+        assert(a < implementationPeriod);
         assert(maxBaseAMinusOneMultiple * a < implementationPeriod);
-        assert(maxBaseAMinusOneMultiple >= 2);
+        assert(maxBaseAMinusOneMultiple >= MIN_A_MULTIPLE);
     }
 
     void ensureThereIsRoomToRandomizeC() {
-        while (periodNonFactors.size() < 5) {
+        while (periodNonFactors.size() < 10) {
             implementationPeriod *= 2;
             getFactors(implementationPeriod, periodFactors, periodNonFactors);
             if (implementationPeriod % 4 == 0 && baseAMinusOne % 4 != 0)
@@ -219,40 +228,7 @@ class FullPeriodRandom {
             else if (implementationPeriod % 2 == 0 && baseAMinusOne % 2 != 0)
                 baseAMinusOne *= 2;
             maxBaseAMinusOneMultiple = implementationPeriod / (baseAMinusOne + 1);
-            assert(maxBaseAMinusOneMultiple >= 2);
+            assert(maxBaseAMinusOneMultiple >= 1);
         }
-    }
-
-    void startReadAheadThread() {
-        randomNumberQueue.open();
-        readAheadThread = thread(&FullPeriodRandom::fetchNumbers, this);
-    }
-
-    void fetchNumbers() {
-        while (randomNumberQueue.isOpen()) {
-            randomNumberQueue.push(getNextRandomNumber());
-        }
-    }
-
-    void killReadAheadThread() {
-        randomNumberQueue.close();
-        readAheadThread.join();
-    }
-
-    uint64_t getNextRandomNumber() {
-        if (period == 1)
-            return 0;
-
-        if (periodCount == period) {
-            periodCount = 0;
-            reseed();
-        }
-
-        do {
-            X = (a * X + c) % implementationPeriod;
-        } while (X >= period);
-
-        periodCount += 1;
-        return X;
     }
 };

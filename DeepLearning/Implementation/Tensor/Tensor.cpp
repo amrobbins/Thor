@@ -36,6 +36,11 @@ bool Tensor::operator!=(const Tensor &other) const {
     return instanceId != other.instanceId;
 }
 
+bool Tensor::operator<(const Tensor &other) const {
+    assert(!uninitialized());
+    return instanceId < other.instanceId;
+}
+
 void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
     ReferenceCounted::initialize();
 

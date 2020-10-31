@@ -53,6 +53,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/Common/OptionalTest && \
                 build/test/Utilities/Random/FullPeriodRandomTest && \
                 build/test/Utilities/WorkQueue/AsyncQueueTest && \
+                build/test/Utilities/WorkQueue/AsyncTensorQueueTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest && \
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
@@ -71,6 +72,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
 
 ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/WorkQueue/AsyncQueueTest \
+            build/test/Utilities/WorkQueue/AsyncTensorQueueTest \
             build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest \
             build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest \
@@ -140,6 +142,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
                    build/Utilities/Common/Stream.o \
+                   build/Utilities/WorkQueue/AsyncTensorQueue.o \
                    build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
                    build/DeepLearning/Api/Initializers/Initializer.o \
@@ -409,6 +412,10 @@ build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stre
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
 
+build/Utilities/WorkQueue/AsyncTensorQueue.o: Utilities/WorkQueue/AsyncTensorQueue.h Utilities/WorkQueue/AsyncTensorQueue.cpp
+	mkdir -p build/Utilities/WorkQueue
+	$(Gpp) -c -O3 -std=c++11 Utilities/WorkQueue/AsyncTensorQueue.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/WorkQueue/AsyncTensorQueue.o
+
 build/DeepLearning/Api/Tensor/Tensor.o: DeepLearning/Api/Tensor/Tensor.h DeepLearning/Api/Tensor/Tensor.cpp
 	mkdir -p build/DeepLearning/Api/Tensor
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Tensor/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Tensor/Tensor.o
@@ -518,6 +525,10 @@ build/test/Utilities/Random/FullPeriodRandomTest: build/test/googletest/libgtest
 build/test/Utilities/WorkQueue/AsyncQueueTest: test/Utilities/WorkQueue/AsyncQueueTest.cpp build/test/googletest/libgtest.a $(THOR)
 	mkdir -p build/test/Utilities/WorkQueue
 	$(Gpp) $(DEBUG) -o build/test/Utilities/WorkQueue/AsyncQueueTest test/Utilities/WorkQueue/AsyncQueueTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/WorkQueue/AsyncTensorQueueTest: test/Utilities/WorkQueue/AsyncTensorQueueTest.cpp build/test/googletest/libgtest.a $(THOR)
+	mkdir -p build/test/Utilities/WorkQueue
+	$(Gpp) $(DEBUG) -o build/test/Utilities/WorkQueue/AsyncTensorQueueTest test/Utilities/WorkQueue/AsyncTensorQueueTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Tensor/tensorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Tensor/tensorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Tensor

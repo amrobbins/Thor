@@ -101,14 +101,14 @@ TEST(AsyncQueue, nonBlockingApiWorks) {
                         assert(val < numIters);
                 }
 
-                do {
-                    status = queue.tryPop(val);
-                } while (status != true);
-                assert(status == true);
-                assert(val < numIters);
-                mtx.lock();
-                observedNumbers.insert(val);
-                mtx.unlock();
+                status = queue.tryPop(val);
+                if (status == true) {
+                    assert(status == true);
+                    assert(val < numIters);
+                    mtx.lock();
+                    observedNumbers.insert(val);
+                    mtx.unlock();
+                }
             }
         }
 

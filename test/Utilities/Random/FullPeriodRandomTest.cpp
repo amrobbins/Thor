@@ -26,7 +26,7 @@ TEST(FullPeriodRandom, createsAFullPeriodCycle) {
     for (int test = 0; test < 100; ++test) {
         uint32_t period = rand() % 10000 + 1;
 
-        FullPeriodRandom fullPeriodRandom(period);
+        FullPeriodRandom fullPeriodRandom(period, rand() % 2 ? true : false);
 
         for (uint32_t j = 0; j < 3; ++j) {
             set<uint64_t> observedNumbers;
