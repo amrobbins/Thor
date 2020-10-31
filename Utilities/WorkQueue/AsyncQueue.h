@@ -1,21 +1,5 @@
 #pragma once
 
-/**
- * This queue opens when open() is called and creates a threadpool of the number of threads specified.
- * This queue runs the executor (that is passed in) on the input that are passed in and stored in the input queue.
- * After the executor processes an input it returns an output and places it out the output queue.
- * Once finished, the executor takes another input from the input queue and repeats as long as the input queue is not
- * empty. Each of the N threads performs an executor process in parallel with the other threads, but using a different
- * input. If the input queue empties then all executor threads wait until the queue is nonEmpty and then resume
- * executing once input becomes available again. All resources are released (input/output queues and executor) when
- * close is called. The queue cannot be reused again until open is called again.
- *
- * This is an unordered queue, so the order that the output queue is filled depends on which executors finish first.
- * This can lead to efficiencies above that of the ordered queue in some cases, at the cost of unordered output.
- * The user would need to pass information from the input to the output so that reading the output can give the proper
- * order (or just identify what it is). This would be implemented in the executor function.
- */
-
 #include <assert.h>
 #include <stdio.h>
 #include <chrono>
@@ -29,10 +13,13 @@
 template <class DataType>
 class AsyncQueue {
    public:
+    AsyncQueue();
     AsyncQueue(uint32_t queueSize);
     virtual ~AsyncQueue();
     AsyncQueue(const AsyncQueue &) = delete;
     AsyncQueue &operator=(const AsyncQueue &) = delete;
+
+    void resize(uint32_t resize);
 
     // Blocking.
     void open();
@@ -69,6 +56,12 @@ class AsyncQueue {
 };
 
 template <class DataType>
+AsyncQueue<DataType>::AsyncQueue() {
+    queueOpen = false;
+    this->queueSize = 0;
+}
+
+template <class DataType>
 AsyncQueue<DataType>::AsyncQueue(uint32_t queueSize) {
     queueOpen = false;
     this->queueSize = queueSize;
@@ -77,6 +70,13 @@ AsyncQueue<DataType>::AsyncQueue(uint32_t queueSize) {
 template <class DataType>
 AsyncQueue<DataType>::~AsyncQueue() {
     close();
+}
+
+template <class DataType>
+void AsyncQueue<DataType>::resize(uint32_t queueSize) {
+    std::unique_lock<std::mutex> lck(mtx);
+    assert(queueOpen == false);
+    this->queueSize = queueSize;
 }
 
 // By default the queue opens with num hardware threads - 1, and 4x this number of output buffers

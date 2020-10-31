@@ -92,6 +92,7 @@ class Tensor : private ReferenceCounted {
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
+    bool operator<(const Tensor &other) const;
 
     using ReferenceCounted::getReferenceCount;
 
