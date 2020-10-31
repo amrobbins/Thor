@@ -267,18 +267,30 @@ TEST(DistributedTensor, InstanceToInstanceCopyWithTypeConversion) {
     TensorPlacement gpu0Placement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement gpu1Placement(TensorPlacement::MemDevices::GPU, 1);
 
+    Stream stream0(0);
+    Stream stream1(1);
+
     vector<Tensor> instances;
+    vector<Stream> destStreams;
     instances.emplace_back(cpuPlacement, descriptorFp16);
+    destStreams.push_back(stream0);
     instances.emplace_back(gpu0Placement, descriptorFp16);
+    destStreams.push_back(stream0);
     // upconvert gpu -> gpu
     instances.emplace_back(gpu1Placement, descriptorFp32);
+    destStreams.push_back(stream1);
     instances.emplace_back(cpuPlacement, descriptorFp32);
+    destStreams.push_back(stream1);
     instances.emplace_back(cpuPlacement, descriptorFp16);
+    destStreams.push_back(stream0);
     // upconvert cpu -> gpu
     instances.emplace_back(gpu1Placement, descriptorFp32);
+    destStreams.push_back(stream1);
     instances.emplace_back(gpu1Placement, descriptorFp16);
+    destStreams.push_back(stream1);
     // upconvert gpu -> cpu
     instances.emplace_back(cpuPlacement, descriptorFp32);
+    destStreams.push_back(stream1);
 
     half *memIn = (half *)instances.front().getMemPtr();
     float *memOut = (float *)instances.back().getMemPtr();
@@ -289,13 +301,12 @@ TEST(DistributedTensor, InstanceToInstanceCopyWithTypeConversion) {
         }
     }
 
-    Stream stream(0);
+    for (unsigned int i = 1; i < instances.size(); ++i) {
+        destStreams[i].waitEvent(destStreams[i - 1].putEvent());
+        instances[i].copyFromAsync(instances[i - 1], destStreams[i]);
+    }
 
-    for (unsigned int i = 1; i < instances.size(); ++i)
-        instances[i].copyFromAsync(instances[i - 1], stream);
-
-    cudaError_t cudaStatus = cudaStreamSynchronize(stream.getStream());
-    ASSERT_EQ(cudaStatus, cudaSuccess);
+    destStreams[instances.size() - 1].synchronize();
 
     for (int i = 0; i < dim0; ++i) {
         for (int j = 0; j < dim1; ++j) {
@@ -329,24 +340,38 @@ TEST(DistributedTensor, InstanceToInstanceMoveWithTypeConversion) {
     TensorPlacement gpu0Placement(TensorPlacement::MemDevices::GPU, 0);
     TensorPlacement gpu1Placement(TensorPlacement::MemDevices::GPU, 1);
 
+    Stream stream0(0);
+    Stream stream1(1);
+
     vector<Tensor> instances;
+    vector<Stream> destStreams;
 
     instances.emplace_back(cpuPlacement, descriptorFp16);
+    destStreams.push_back(stream0);
     instances.emplace_back(gpu0Placement, descriptorFp16);
+    destStreams.push_back(stream0);
     // upconvert gpu -> gpu
     instances.emplace_back(gpu1Placement, descriptorFp32);
+    destStreams.push_back(stream1);
     // downconvert gpu -> gpu
     instances.emplace_back(gpu0Placement, descriptorFp16);
+    destStreams.push_back(stream0);
     // upconvert gpu -> cpu
     instances.emplace_back(cpuPlacement, descriptorFp32);
+    destStreams.push_back(stream0);
     // downconvert cpu -> gpu
     instances.emplace_back(gpu1Placement, descriptorFp16);
+    destStreams.push_back(stream1);
     instances.emplace_back(gpu0Placement, descriptorFp32);
+    destStreams.push_back(stream0);
     // downconvert gpu -> cpu
     instances.emplace_back(cpuPlacement, descriptorFp16);
+    destStreams.push_back(stream0);
     // upconvert cpu -> gpu
     instances.emplace_back(gpu0Placement, descriptorFp32);
+    destStreams.push_back(stream0);
     instances.emplace_back(cpuPlacement, descriptorFp32);
+    destStreams.push_back(stream0);
 
     half *memIn = (half *)instances.front().getMemPtr();
     float *memOut = (float *)instances.back().getMemPtr();
@@ -357,13 +382,12 @@ TEST(DistributedTensor, InstanceToInstanceMoveWithTypeConversion) {
         }
     }
 
-    Stream stream(0);
+    for (unsigned int i = 1; i < instances.size(); ++i) {
+        destStreams[i].waitEvent(destStreams[i - 1].putEvent());
+        instances[i].moveFromAsync(instances[i - 1], destStreams[i]);
+    }
 
-    for (unsigned int i = 1; i < instances.size(); ++i)
-        instances[i].moveFromAsync(instances[i - 1], stream);
-
-    cudaError_t cudaStatus = cudaStreamSynchronize(stream.getStream());
-    ASSERT_EQ(cudaStatus, cudaSuccess);
+    destStreams[instances.size() - 1].synchronize();
 
     for (int i = 0; i < dim0; ++i) {
         for (int j = 0; j < dim1; ++j) {
