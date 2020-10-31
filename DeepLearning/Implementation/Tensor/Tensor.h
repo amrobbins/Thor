@@ -51,11 +51,13 @@ class Tensor : private ReferenceCounted {
    public:
     Tensor();
     Tensor(TensorPlacement placement, TensorDescriptor descriptor);
+    Tensor(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
     Tensor(const Tensor &tensorInstance);
     Tensor &operator=(const Tensor &tensorInstance);
     virtual ~Tensor();
 
     bool isInitialized() { return !uninitialized(); }
+    bool isUsingExternallyManagedMemory();
 
     Tensor clone() { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
     Tensor clone(TensorPlacement newPlacement) { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
@@ -109,6 +111,8 @@ class Tensor : private ReferenceCounted {
 
     TensorDescriptor descriptor;
 
+    bool usingExternallyManagedMemory;
+
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden;
     TensorDescriptor overriddenDescriptor;
@@ -121,7 +125,7 @@ class Tensor : private ReferenceCounted {
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();
 
-    void construct(TensorPlacement placement, TensorDescriptor descriptor);
+    void construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
     void copyObject(const Tensor &other);
     void destroy();
 
