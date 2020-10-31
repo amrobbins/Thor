@@ -6,9 +6,13 @@ using namespace ThorImplementation;
 
 atomic<unsigned long> Tensor::nextInstanceId(1);
 
-Tensor::Tensor() : ReferenceCounted() {}
+Tensor::Tensor() : ReferenceCounted() { usingExternallyManagedMemory = false; }
 
-Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) { construct(placement, descriptor); }
+Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) { construct(placement, descriptor, nullptr); }
+
+Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory) {
+    construct(placement, descriptor, externallyManagedMemory);
+}
 
 Tensor::Tensor(const Tensor &tensorInstance) {
     // implemented using operator=
@@ -41,7 +45,7 @@ bool Tensor::operator<(const Tensor &other) const {
     return instanceId < other.instanceId;
 }
 
-void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
+void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory) {
     ReferenceCounted::initialize();
 
     cudaError_t cudaStatus;
@@ -57,6 +61,11 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
     this->descriptor = descriptor;
     descriptorOverridden = false;
 
+    if (externallyManagedMemory == nullptr)
+        usingExternallyManagedMemory = false;
+    else
+        usingExternallyManagedMemory = true;
+
     instanceId = nextInstanceId.fetch_add(1);
 
     unsigned long numElements = descriptor.getTotalNumElements();
@@ -65,12 +74,13 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor) {
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
 
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+    if (usingExternallyManagedMemory) {
+        mem = externallyManagedMemory;
+    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
         assert(cudaStatus == cudaSuccess);
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
-
         cudaStatus = cudaMalloc(&mem, memBytes);
         assert(cudaStatus == cudaSuccess);
     } else {
@@ -92,22 +102,23 @@ void Tensor::copyObject(const Tensor &other) {
 }
 
 void Tensor::destroy() {
-    cudaError_t cudaStatus;
-
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        cudaStatus = cudaFreeHost(mem);
+    if (usingExternallyManagedMemory) {
+        // NOP
+    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        cudaError_t cudaStatus = cudaFreeHost(mem);
         assert(cudaStatus == cudaSuccess);
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
-
-        cudaStatus = cudaFree(mem);
+        cudaError_t cudaStatus = cudaFree(mem);
         assert(cudaStatus == cudaSuccess);
-        mem = NULL;
     } else {
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
+    mem = nullptr;
 }
+
+bool Tensor::isUsingExternallyManagedMemory() { return usingExternallyManagedMemory; }
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
 void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
