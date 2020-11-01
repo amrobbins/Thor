@@ -24,20 +24,25 @@ class DeviceCrossing : public Layer {
         return Tensor(outputPlacement, featureInput.get().getDescriptor());
     }
 
+    // Crosses from source device to dest device
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
         assert(!uninitialized);
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
-        Event finishedCopyEvent = outputTensor.get().copyFromAsync(inputTensor, stream.putEvent());
+        outputTensor.get().copyFromAsync(inputTensor, stream);
 
         // Tell the stream on the dest gpu to wait for the copy from source gpu to finish
+        Event finishedCopyEvent = stream.putEvent();
         otherDeviceStream.waitEvent(finishedCopyEvent);
     }
 
+    // Crosses from dest device to source device
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
         assert(!uninitialized);
-        if (errorOut.isPresent())
-            errorOut.get().copyFromAsync(errorIn, stream.putEvent());
+        if (errorOut.isPresent()) {
+            stream.waitEvent(otherDeviceStream.putEvent());
+            errorOut.get().copyFromAsync(errorIn, stream);
+        }
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
@@ -48,7 +53,7 @@ class DeviceCrossing : public Layer {
         otherDeviceStream = Stream(outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU ? inputPlacement.getDeviceNum()
                                                                                                       : outputPlacement.getDeviceNum());
         errorInput = nextLayer->connectToPreviousLayer(
-            this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn(), loaderConnectionType);
+            this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
         if (errorInput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());

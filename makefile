@@ -132,7 +132,6 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
                    build/Utilities/ComputeTopology/MachineEvaluator.o \
                    build/DeepLearning/Implementation/Tensor/Tensor.o \
-                   build/DeepLearning/Implementation/Tensor/DistributedTensor.o \
                    build/DeepLearning/Implementation/Layers/Layer.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
@@ -348,13 +347,9 @@ build/Utilities/ComputeTopology/MachineEvaluator.o: Utilities/ComputeTopology/Ma
 	mkdir -p build/Utilities/ComputeTopology
 	$(Gpp) -c -O3 -std=c++11 Utilities/ComputeTopology/MachineEvaluator.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/ComputeTopology/MachineEvaluator.o
 
-build/DeepLearning/Implementation/Tensor/Tensor.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/DistributedTensor.h DeepLearning/Implementation/Tensor/Tensor.cpp DeepLearning/Implementation/Tensor/TensorDescriptor.h DeepLearning/Implementation/Tensor/TensorPlacement.h
+build/DeepLearning/Implementation/Tensor/Tensor.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/Tensor.cpp DeepLearning/Implementation/Tensor/TensorDescriptor.h DeepLearning/Implementation/Tensor/TensorPlacement.h
 	mkdir -p build/DeepLearning/Implementation/Tensor
 	$(Gpp) -c -O3 -I./ -std=c++11 DeepLearning/Implementation/Tensor/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Tensor/Tensor.o
-
-build/DeepLearning/Implementation/Tensor/DistributedTensor.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/DistributedTensor.h DeepLearning/Implementation/Tensor/DistributedTensor.cpp DeepLearning/Implementation/Tensor/TensorDescriptor.h DeepLearning/Implementation/Tensor/TensorPlacement.h
-	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Gpp) -c -O3 -I./ -std=c++11 DeepLearning/Implementation/Tensor/DistributedTensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Tensor/DistributedTensor.o
 
 build/DeepLearning/Implementation/Layers/Layer.o:  DeepLearning/Implementation/Layers/Layer.h DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h
 	mkdir -p build/DeepLearning/Implementation/Layers/Layer

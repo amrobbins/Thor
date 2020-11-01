@@ -37,8 +37,6 @@ using std::unique_lock;
 
 namespace ThorImplementation {
 
-class DistributedTensor;
-
 /**
  * A multidimensional array that is allocated in either cpu or device mem.
  *
@@ -75,18 +73,8 @@ class Tensor : private ReferenceCounted {
     unsigned long getTensorId() { return instanceId; }
 
     void copyFromAsync(Tensor source, Stream stream);
-    void copyFromAsync(DistributedTensor source, Stream stream);
 
     void moveFromAsync(Tensor source, Stream stream);
-    void moveFromAsync(DistributedTensor source, Stream stream);
-
-    // The following function variants return an event that indicates that the copying is finished when
-    // cudaStreamWaitEvent() is called on this event.
-    Event copyFromAsync(Tensor source, Event startEvent);
-    Event copyFromAsync(DistributedTensor source, Event startEvent);
-
-    Event moveFromAsync(Tensor source, Event startEvent);
-    Event moveFromAsync(DistributedTensor source, Event startEvent);
 
     void reshape(vector<unsigned long> dimensions);
     void concatenateFrom(vector<Tensor> sources);
@@ -99,10 +87,7 @@ class Tensor : private ReferenceCounted {
     using ReferenceCounted::getReferenceCount;
 
    private:
-    void copyFromAsync(Tensor source, Stream stream, bool mustPreserveSourceValue);
-    void copyFromAsync(DistributedTensor source, Stream stream, bool mustPreserveSourceValue);
-    Event copyFromAsync(Tensor source, Event startEvent, bool mustPreserveSourceValue);
-    Event copyFromAsync(DistributedTensor source, Event startEvent, bool mustPreserveSourceValue);
+    void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);
 
     TensorPlacement placement;
     void *mem;
@@ -128,8 +113,6 @@ class Tensor : private ReferenceCounted {
     void construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
     void copyObject(const Tensor &other);
     void destroy();
-
-    friend class DistributedTensor;
 };
 
 }  // namespace ThorImplementation

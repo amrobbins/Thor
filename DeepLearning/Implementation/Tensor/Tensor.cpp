@@ -123,42 +123,31 @@ bool Tensor::isUsingExternallyManagedMemory() { return usingExternallyManagedMem
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
 void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
 
+// Stream is on either the source or dest device
 void Tensor::copyFromAsync(Tensor source, Stream stream) {
     assert(!uninitialized());
-    copyFromAsync(source, stream, true);
-}
-void Tensor::copyFromAsync(DistributedTensor source, Stream stream) {
-    assert(!uninitialized());
+    vector<int> devicesInvolved;
+    if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        devicesInvolved.push_back(source.getPlacement().getDeviceNum());
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        devicesInvolved.push_back(getPlacement().getDeviceNum());
+    if (!devicesInvolved.empty())
+        assert(stream.getGpuNum() == devicesInvolved[0] || (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsync(source, stream, true);
 }
 
+// If the tensor changes datatypes such that the size changes, then stream must be on the device with the larger tensor size.
+// Otherwise stream may be on either device
 void Tensor::moveFromAsync(Tensor source, Stream stream) {
     assert(!uninitialized());
+    vector<int> devicesInvolved;
+    if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        devicesInvolved.push_back(source.getPlacement().getDeviceNum());
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        devicesInvolved.push_back(getPlacement().getDeviceNum());
+    if (!devicesInvolved.empty())
+        assert(stream.getGpuNum() == devicesInvolved[0] || (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsync(source, stream, false);
-}
-void Tensor::moveFromAsync(DistributedTensor source, Stream stream) {
-    assert(!uninitialized());
-    copyFromAsync(source, stream, false);
-}
-
-// The following function variants return an event that indicates that the copying is finished when
-// cudaStreamWaitEvent() is called on this event.
-Event Tensor::copyFromAsync(Tensor source, Event startEvent) {
-    assert(!uninitialized());
-    return copyFromAsync(source, startEvent, true);
-}
-Event Tensor::copyFromAsync(DistributedTensor source, Event startEvent) {
-    assert(!uninitialized());
-    return copyFromAsync(source, startEvent, true);
-}
-
-Event Tensor::moveFromAsync(Tensor source, Event startEvent) {
-    assert(!uninitialized());
-    return copyFromAsync(source, startEvent, false);
-}
-Event Tensor::moveFromAsync(DistributedTensor source, Event startEvent) {
-    assert(!uninitialized());
-    return copyFromAsync(source, startEvent, false);
 }
 
 TensorDescriptor Tensor::getDescriptor() {
@@ -188,193 +177,16 @@ void *Tensor::getElement(vector<unsigned long> dimensionIndex) {
     return getDescriptor().getChunkAddress(dimensionIndex, mem);
 }
 
-// Note: startEvent is on the source device, finished event is on the dest device, copyStream is on the dest device
-Event Tensor::copyFromAsync(Tensor source, Event startEvent, bool mustPreserveSourceValue) {
-    assert(!uninitialized());
-
-    cudaError_t cudaStatus;
-    Stream copyStream;
-    Event finishedEvent;
-
-    if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
-        return startEvent;
-    }
-
-    // must have the same number of elements
-    TensorDescriptor sourceDescriptor = source.getDescriptor();
-    TensorDescriptor destDescriptor = getDescriptor();
-    assert(sourceDescriptor.getTotalNumElements() == destDescriptor.getTotalNumElements());
-
-    int sourceDeviceNum = source.placement.getDeviceNum();
-    int destDeviceNum = placement.getDeviceNum();
-
-    // Handle across device conversions:
-    //
-    // If the destination data type is larger than the source data type, then this is always supported.
-    //      - The data is copied to the dest device and then up converted in place.
-    //
-    // If the destination data type is smaller then the source data type, then this is only supported when mustPreserveSourceValue is false.
-    //      - In this case an inplace down conversion is performed in source memory and the converted mem is copied to the dest device.
-    if (sourceDescriptor.getDataType() != destDescriptor.getDataType() && source.placement != placement) {
-        if (sourceDescriptor.getArraySizeInBytes() <= destDescriptor.getArraySizeInBytes()) {
-            Tensor meWithSourceDataType = *this;
-            meWithSourceDataType.overrideDescriptor(sourceDescriptor);
-            Event finishedCopyingEvent = meWithSourceDataType.copyFromAsync(source, startEvent, mustPreserveSourceValue);
-
-            if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
-                copyStream = MachineEvaluator::instance().getCopyStreamLocal(MachineEvaluator::CPU_DEVICE_NUM);
-            else
-                copyStream = MachineEvaluator::instance().getCopyStreamLocal(destDeviceNum);
-
-            copyStream.waitEvent(finishedCopyingEvent);
-            TypeConverter::convertType(
-                mem,
-                mem,
-                sourceDescriptor.getDataType(),
-                destDescriptor.getDataType(),
-                sourceDescriptor.getTotalNumElements(),
-                copyStream,
-                placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? MachineEvaluator::CPU_DEVICE_NUM : destDeviceNum);
-
-            return copyStream.putEvent();
-        } else {
-            assert(!mustPreserveSourceValue);
-
-            if (source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
-                copyStream = MachineEvaluator::instance().getCopyStreamLocal(MachineEvaluator::CPU_DEVICE_NUM);
-            else
-                copyStream = MachineEvaluator::instance().getCopyStreamLocal(sourceDeviceNum);
-
-            copyStream.waitEvent(startEvent);
-            TypeConverter::convertType(
-                source.mem,
-                source.mem,
-                sourceDescriptor.getDataType(),
-                destDescriptor.getDataType(),
-                sourceDescriptor.getTotalNumElements(),
-                copyStream,
-                source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? MachineEvaluator::CPU_DEVICE_NUM : sourceDeviceNum);
-            Event finishedConversionEvent = copyStream.putEvent();
-
-            Tensor sourceWithMyDataType = source;
-            sourceWithMyDataType.overrideDescriptor(destDescriptor);
-
-            return copyFromAsync(sourceWithMyDataType, finishedConversionEvent, mustPreserveSourceValue);
-        }
-    }
-
-    if (source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU &&
-        placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        ScopedGpu scopedGpu(0);  // CPU local stream belongs to gpu 0
-
-        copyStream = MachineEvaluator::instance().getCopyStreamLocal(MachineEvaluator::CPU_DEVICE_NUM);
-        copyStream.waitEvent(startEvent);
-
-        if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
-            cudaStatus =
-                cudaMemcpyAsync(mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToHost, copyStream.getStream());
-            assert(cudaStatus == cudaSuccess);
-        } else {
-            // Convert between data types on cpu.
-            // Note that this may be an in-place conversion
-            TypeConverter::convertType(source.mem,
-                                       mem,
-                                       sourceDescriptor.getDataType(),
-                                       destDescriptor.getDataType(),
-                                       destDescriptor.getTotalNumElements(),
-                                       copyStream,
-                                       MachineEvaluator::CPU_DEVICE_NUM);
-        }
-
-        finishedEvent = copyStream.putEvent();
-    } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU &&
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(destDeviceNum);
-
-        copyStream = MachineEvaluator::instance().getCopyStreamFromCpu(destDeviceNum);
-        copyStream.waitEvent(startEvent);
-
-        cudaStatus =
-            cudaMemcpyAsync(mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyHostToDevice, copyStream.getStream());
-        assert(cudaStatus == cudaSuccess);
-
-        finishedEvent = copyStream.putEvent();
-    } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
-               placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        ScopedGpu scopedGpu(sourceDeviceNum);
-
-        copyStream = MachineEvaluator::instance().getCopyStreamToCpu(sourceDeviceNum);
-        copyStream.waitEvent(startEvent);
-
-        cudaStatus =
-            cudaMemcpyAsync(mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToHost, copyStream.getStream());
-        assert(cudaStatus == cudaSuccess);
-
-        finishedEvent = copyStream.putEvent();
-    } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU &&
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        int destBusId = MachineEvaluator::instance().getGpuPciBusId(destDeviceNum);
-        int sourceBusId = MachineEvaluator::instance().getGpuPciBusId(sourceDeviceNum);
-        if (sourceBusId < destBusId) {
-            copyStream = MachineEvaluator::instance().getCopyStreamFromLower(destDeviceNum);
-        } else if (sourceBusId > destBusId) {
-            copyStream = MachineEvaluator::instance().getCopyStreamFromHigher(destDeviceNum);
-        } else {
-            // source and dest is the same gpu:
-            copyStream = MachineEvaluator::instance().getCopyStreamLocal(destDeviceNum);
-        }
-        copyStream.waitEvent(startEvent);
-
-        if (destDeviceNum == sourceDeviceNum) {
-            // Local copy
-            ScopedGpu scopedGpu(destDeviceNum);
-
-            if (sourceDescriptor.getDataType() == destDescriptor.getDataType()) {
-                cudaStatus = cudaMemcpyAsync(
-                    mem, source.mem, sourceDescriptor.getArraySizeInBytes(), cudaMemcpyDeviceToDevice, copyStream.getStream());
-                assert(cudaStatus == cudaSuccess);
-            } else {
-                // Convert between data types on device.
-                // Note that this may be an in-place conversion
-                TypeConverter::convertType(source.mem,
-                                           mem,
-                                           sourceDescriptor.getDataType(),
-                                           destDescriptor.getDataType(),
-                                           sourceDescriptor.getTotalNumElements(),
-                                           copyStream,
-                                           sourceDeviceNum);
-            }
-
-            finishedEvent = copyStream.putEvent();
-        } else {
-            // Cross device copy
-            ScopedGpu scopedGpu(destDeviceNum);
-
-            cudaStatus = cudaMemcpyPeerAsync(
-                mem, destDeviceNum, source.mem, sourceDeviceNum, sourceDescriptor.getArraySizeInBytes(), copyStream.getStream());
-            assert(cudaStatus == cudaSuccess);
-
-            finishedEvent = copyStream.putEvent();
-        }
-    } else {
-        assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-               source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    }
-
-    return finishedEvent;
-}
-
 void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue) {
     assert(!uninitialized());
-
-    cudaError_t cudaStatus;
 
     if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
         return;
     }
 
+    cudaError_t cudaStatus;
+    assert(copyStream.isInitialized());
+
     // must have the same number of elements
     TensorDescriptor sourceDescriptor = source.getDescriptor();
     TensorDescriptor destDescriptor = getDescriptor();
@@ -392,6 +204,9 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     //      - In this case an inplace down conversion is performed in source memory and the converted mem is copied to the dest device.
     if (sourceDescriptor.getDataType() != destDescriptor.getDataType() && source.placement != placement) {
         if (sourceDescriptor.getArraySizeInBytes() <= destDescriptor.getArraySizeInBytes()) {
+            if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
+                assert(placement.getDeviceNum() == copyStream.getGpuNum());
+
             Tensor meWithSourceDataType = *this;
             meWithSourceDataType.overrideDescriptor(sourceDescriptor);
             meWithSourceDataType.copyFromAsync(source, copyStream, mustPreserveSourceValue);
@@ -409,13 +224,8 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         } else {
             assert(!mustPreserveSourceValue);
 
-            // FIXME: get rid of these preallocated shared streams. move requires a stream on source gpu, copy can use a stream on either
-            // gpu, figure this out.
-            Stream moveStream;
-            if (source.placement.getMemDevice() != TensorPlacement::MemDevices::CPU && copyStream.getGpuNum() != sourceDeviceNum)
-                moveStream = MachineEvaluator::instance().getCopyStreamLocal(sourceDeviceNum);
-            else
-                moveStream = copyStream;
+            if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
+                assert(source.placement.getDeviceNum() == copyStream.getGpuNum());
 
             TypeConverter::convertType(
                 source.mem,
@@ -423,15 +233,15 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
                 sourceDescriptor.getDataType(),
                 destDescriptor.getDataType(),
                 sourceDescriptor.getTotalNumElements(),
-                moveStream,
+                copyStream,
                 source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? MachineEvaluator::CPU_DEVICE_NUM : sourceDeviceNum);
 
             Tensor sourceWithMyDataType = source;
             sourceWithMyDataType.overrideDescriptor(destDescriptor);
-            copyFromAsync(sourceWithMyDataType, moveStream, mustPreserveSourceValue);
+            copyFromAsync(sourceWithMyDataType, copyStream, mustPreserveSourceValue);
 
             if (source.placement.getMemDevice() != TensorPlacement::MemDevices::CPU && copyStream.getGpuNum() != sourceDeviceNum)
-                copyStream.waitEvent(moveStream.putEvent());
+                copyStream.waitEvent(copyStream.putEvent());
 
             return;
         }
@@ -505,17 +315,4 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         assert(source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
                source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
-}
-
-void Tensor::copyFromAsync(DistributedTensor source, Stream stream, bool mustPreserveSourceValue) {
-    assert(!uninitialized());
-    copyFromAsync(source.getNearestInstance(*this), stream, mustPreserveSourceValue);
-}
-
-Event Tensor::copyFromAsync(DistributedTensor source, Event startEvent, bool mustPreserveSourceValue) {
-    assert(!uninitialized());
-
-    assert(source.getNumInstances() > 0);
-
-    return copyFromAsync(source.getNearestInstance(*this), startEvent, mustPreserveSourceValue);
 }

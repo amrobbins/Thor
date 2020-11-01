@@ -1,6 +1,5 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Tensor/DistributedTensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
