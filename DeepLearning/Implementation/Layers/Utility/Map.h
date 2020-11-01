@@ -21,21 +21,18 @@ class Map : public Layer {
     // Note: if more than one instance of a mapping is wanted, all instances after the first need to be called as:
     // Map(mappingOfSourceTensorIntoDestTensor, sourceDimensions, existingInstance.getReverseMapping()) {
     // This is because creating the backward pass mapping is a very heavy weight operation that only needs to be done once.
-    Map(DistributedTensor mappingOfSourceTensorIntoDestTensor, vector<unsigned long> sourceDimensions) {
+    Map(Tensor mappingOfSourceTensorIntoDestTensor, vector<unsigned long> sourceDimensions) {
         setup(mappingOfSourceTensorIntoDestTensor, sourceDimensions);
         createBackwardPassMapping(mappingOfSourceTensorIntoDestTensor);
     }
 
-    Map(DistributedTensor mappingOfSourceTensorIntoDestTensor,
+    Map(Tensor mappingOfSourceTensorIntoDestTensor,
         vector<unsigned long> sourceDimensions,
-        map<unsigned int, DistributedTensor> backwardPassMapping) {
+        map<unsigned int, Tensor> backwardPassMappingHost,
+        map<unsigned int, Tensor> backwardPassMappingDevice) {
         setup(mappingOfSourceTensorIntoDestTensor, sourceDimensions);
-        backwardPassMappingOfNTo1 = backwardPassMapping;
-    }
-
-    map<unsigned int, DistributedTensor> getReverseMapping() {
-        assert(!uninitialized);
-        return backwardPassMappingOfNTo1;
+        backwardPassMappingOfNTo1Host = backwardPassMappingHost;
+        backwardPassMappingOfNTo1Device = backwardPassMappingDevice;
     }
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
@@ -51,24 +48,20 @@ class Map : public Layer {
         assert(featureInput.isPresent());
         assert(featureInput.get().getDescriptor().getDimensions() == sourceDimensions);
 
-        mappingOfSourceTensorIntoDestTensor.lock();
-        if (!mappingOfSourceTensorIntoDestTensor.hasInstance(featureInput.get().getPlacement())) {
-            assert(mappingOfSourceTensorIntoDestTensor.getNumInstances() > 0);
-            Tensor sourceToDestMapping = mappingOfSourceTensorIntoDestTensor.addInstance(featureInput.get().getPlacement());
-            sourceToDestMapping.copyFromAsync(mappingOfSourceTensorIntoDestTensor, stream);
-
-            assert(!backwardPassMappingOfNTo1.empty());
-            DistributedTensor mappingOfSomeNTo1 = backwardPassMappingOfNTo1.begin()->second;
-            if (!mappingOfSomeNTo1.hasInstance(featureInput.get().getPlacement())) {
-                for (auto it = backwardPassMappingOfNTo1.begin(); it != backwardPassMappingOfNTo1.end(); ++it) {
-                    DistributedTensor currentMapping = it->second;
-                    assert(currentMapping.getNumInstances() > 0);
-                    Tensor localMapping = currentMapping.addInstance(featureInput.get().getPlacement());
-                    localMapping.copyFromAsync(currentMapping, stream);
-                }
+        assert(mappingOfSourceTensorIntoDestTensor.getPlacement() == featureInput.get().getPlacement());
+        assert(featureOutput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
+        if (errorInput.isPresent())
+            assert(errorInput.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
+        if (errorOutput.isPresent() && backwardPassMappingOfNTo1Device.empty()) {
+            assert(!backwardPassMappingOfNTo1Host.empty());
+            for (auto it = backwardPassMappingOfNTo1Host.begin(); it != backwardPassMappingOfNTo1Host.end(); ++it) {
+                uint64_t N = it->first;
+                Tensor mappingTensorHost = it->second;
+                backwardPassMappingOfNTo1Device[N] = mappingTensorHost.clone(featureInput.get().getPlacement());
+                backwardPassMappingOfNTo1Device[N].copyFromAsync(featureInput, stream);
             }
+            stream.synchronize();
         }
-        mappingOfSourceTensorIntoDestTensor.unlock();
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
@@ -76,19 +69,11 @@ class Map : public Layer {
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
 
-        TensorPlacement inputTensorPlacement = inputTensor.get().getPlacement();
-        assert(mappingOfSourceTensorIntoDestTensor.hasInstance(inputTensorPlacement));
-        Tensor mappingTensor = mappingOfSourceTensorIntoDestTensor.getInstance(inputTensorPlacement);
-
-        assert(outputTensor.get().getDescriptor().getDimensions() == mappingTensor.getDescriptor().getDimensions());
-
-        assert(inputTensorPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        ScopedGpu scopedGpu(inputTensorPlacement.getDeviceNum());
-
+        ScopedGpu scopedGpu(inputTensor.get().getPlacement().getDeviceNum());
         launchMap<INDEX_TYPE>((half *)outputTensor.get().getMemPtr(),
                               (half *)inputTensor.get().getMemPtr(),
-                              (INDEX_TYPE *)mappingTensor.getMemPtr(),
-                              (INDEX_TYPE)mappingTensor.getDescriptor().getTotalNumElements(),
+                              (INDEX_TYPE *)mappingOfSourceTensorIntoDestTensor.getMemPtr(),
+                              (INDEX_TYPE)mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements(),
                               stream);
     }
 
@@ -97,15 +82,12 @@ class Map : public Layer {
         if (errorOut.isEmpty())
             return;
         assert(errorIn.isPresent());
-        assert(errorIn.get().getDescriptor().getDimensions() == mappingOfSourceTensorIntoDestTensor.getDescriptor().getDimensions());
 
         ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
 
-        for (auto it = backwardPassMappingOfNTo1.begin(); it != backwardPassMappingOfNTo1.end(); ++it) {
+        for (auto it = backwardPassMappingOfNTo1Device.begin(); it != backwardPassMappingOfNTo1Device.end(); ++it) {
             int N = it->first;
-            DistributedTensor nMapping = it->second;
-            assert(nMapping.hasInstance(errorOut.get().getPlacement()));
-            Tensor nMappingTensor = nMapping.getInstance(errorOut.get().getPlacement());
+            Tensor nMappingTensor = it->second;
             assert(nMappingTensor.getDescriptor().getTotalNumElements() % (N + 1) == 0);
             launchMapNInto1<INDEX_TYPE>(N,
                                         (half *)errorOut.get().getMemPtr(),
@@ -116,20 +98,26 @@ class Map : public Layer {
         }
     }
 
-    map<unsigned int, DistributedTensor> getBackwardPassMapping() {
+    map<unsigned int, Tensor> getBackwardPassMappingOnHost() {
         assert(!uninitialized);
-        return backwardPassMappingOfNTo1;
+        return backwardPassMappingOfNTo1Host;
+    }
+
+    map<unsigned int, Tensor> getBackwardPassMappingOnDevice() {
+        assert(!uninitialized);
+        return backwardPassMappingOfNTo1Device;
     }
 
    private:
     bool uninitialized;
 
-    DistributedTensor mappingOfSourceTensorIntoDestTensor;
-    map<unsigned int, DistributedTensor> backwardPassMappingOfNTo1;
+    Tensor mappingOfSourceTensorIntoDestTensor;
+    map<unsigned int, Tensor> backwardPassMappingOfNTo1Host;
+    map<unsigned int, Tensor> backwardPassMappingOfNTo1Device;
 
     vector<unsigned long> sourceDimensions;
 
-    void setup(DistributedTensor mappingOfSourceTensorIntoDestTensor, vector<unsigned long> sourceDimensions) {
+    void setup(Tensor mappingOfSourceTensorIntoDestTensor, vector<unsigned long> sourceDimensions) {
         assert(std::is_integral<INDEX_TYPE>());
         assert(!std::is_signed<INDEX_TYPE>());
         if (sizeof(INDEX_TYPE) < sizeof(uint64_t)) {
@@ -141,7 +129,6 @@ class Map : public Layer {
         }
 
         uninitialized = false;
-        assert(mappingOfSourceTensorIntoDestTensor.getNumInstances() > 0);
         this->mappingOfSourceTensorIntoDestTensor = mappingOfSourceTensorIntoDestTensor;
         this->sourceDimensions = sourceDimensions;
     }
@@ -149,19 +136,14 @@ class Map : public Layer {
     // To reverse the mapping, in general, the number of errorInputs that map to each errorOutput is noted,
     // then all errorInputs that map to a given errorOutput are summed and passed as the value of the errorOutput.
     // When there are 0 errorInputs that map to a given errorOutput, a 0 is back propagated as the value of that errorOutput.
-    void createBackwardPassMapping(DistributedTensor mappingOfSourceTensorIntoDestTensor) {
+    void createBackwardPassMapping(Tensor mappingOfSourceTensorIntoDestTensor) {
         assert(!uninitialized);
 
         Stream stream(0);
 
-        Tensor cpuMappingTensor;
-        if (!mappingOfSourceTensorIntoDestTensor.hasInstance(TensorPlacement::MemDevices::CPU)) {
-            cpuMappingTensor = mappingOfSourceTensorIntoDestTensor.addInstance(TensorPlacement::MemDevices::CPU);
-            assert(mappingOfSourceTensorIntoDestTensor.getNumInstances() > 1);
-            cpuMappingTensor.copyFromAsync(mappingOfSourceTensorIntoDestTensor.getNearestInstance(cpuMappingTensor), stream);
-        } else {
-            cpuMappingTensor = mappingOfSourceTensorIntoDestTensor.getInstance(TensorPlacement::MemDevices::CPU);
-        }
+        Tensor cpuMappingTensor = mappingOfSourceTensorIntoDestTensor.clone(TensorPlacement::MemDevices::CPU);
+        cpuMappingTensor.copyFromAsync(mappingOfSourceTensorIntoDestTensor, stream);
+        stream.synchronize();
         INDEX_TYPE *cpuMappingTensorMem = (INDEX_TYPE *)cpuMappingTensor.getMemPtr();
 
         // For each input feature element, get the list of output feature elements it maps to.
@@ -209,23 +191,25 @@ class Map : public Layer {
             //   errorOutputIndex_mappingsOfSizeN, {errorInputIndex1, ..., errorInputIndexN} }
             flatDimension.push_back((N + 1) * mappingsOfSizeN);
 
-            backwardPassMappingOfNTo1[N] = DistributedTensor(TensorDescriptor(TensorDescriptor::DataType::UINT64, flatDimension));
-            Tensor mappingTensor = backwardPassMappingOfNTo1[N].addInstance(TensorPlacement::MemDevices::CPU);
-            INDEX_TYPE *mappingMem = (INDEX_TYPE *)mappingTensor.getMemPtr();
+            Tensor backwardMappingTensor =
+                Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::UINT64, flatDimension));
+            INDEX_TYPE *backwardMappingMem = (INDEX_TYPE *)backwardMappingTensor.getMemPtr();
 
             INDEX_TYPE i = 0;
             for (auto mappingIt = nMapping.begin(); mappingIt != nMapping.end(); ++mappingIt) {
                 INDEX_TYPE destinationErrorOutput = mappingIt->first;
                 priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>> &mappedErrorInputs = mappingIt->second;
 
-                mappingMem[i] = destinationErrorOutput;
+                backwardMappingMem[i] = destinationErrorOutput;
                 i += 1;
                 while (!mappedErrorInputs.empty()) {
-                    mappingMem[i] = mappedErrorInputs.top();
+                    backwardMappingMem[i] = mappedErrorInputs.top();
                     mappedErrorInputs.pop();
                     i += 1;
                 }
             }
+
+            backwardPassMappingOfNTo1Host[N] = backwardMappingTensor;
         }
         // Now I have a mapping constructed for every N grouping that exists in the mapping, these will be directly consumed, 1 per kernel
         // launch.

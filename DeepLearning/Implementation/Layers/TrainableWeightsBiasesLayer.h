@@ -91,11 +91,17 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     Event updateWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
         clearGradientAccumulator = true;
-        Event weightsUpdatedEvent = weights.copyFromAsync(newWeights, dataReadyEvent);
+        Stream stream = gradientUpdateStream;
+        if (!stream.isInitialized())
+            stream = streams[0];
+        stream.waitEvent(dataReadyEvent);
+        weights.copyFromAsync(newWeights, stream);
+        Event weightsUpdatedEvent = stream.putEvent();
         Optional<Event> biasesUpdatedEvent;
         if (hasBias) {
             assert(newBiases.isPresent());
-            biasesUpdatedEvent = biases.get().copyFromAsync(newBiases, dataReadyEvent);
+            biases.get().copyFromAsync(newBiases, stream);
+            biasesUpdatedEvent = stream.putEvent();
         }
         for (unsigned int i = 0; i < streams.size(); ++i) {
             streams[i].waitEvent(weightsUpdatedEvent);

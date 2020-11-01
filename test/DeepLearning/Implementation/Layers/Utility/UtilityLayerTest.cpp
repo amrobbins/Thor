@@ -99,8 +99,8 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
         int cols = dimensions[1];
         int numElements = rows * cols;
         TensorDescriptor mappingDescriptor(TensorDescriptor::DataType::UINT32, dimensions);
-        DistributedTensor mapping(mappingDescriptor);
-        Tensor mappingCpu = mapping.addInstance(cpuPlacement);
+        Tensor mappingCpu = Tensor(cpuPlacement, mappingDescriptor);
+        Tensor mappingGpu = mappingCpu.clone(gpuPlacement);
 
         TensorDescriptor sourceDestDescriptor(TensorDescriptor::DataType::FP16, dimensions);
         Tensor sourceCpu(cpuPlacement, sourceDestDescriptor);
@@ -120,11 +120,14 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
 
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(sourceGpu));
-        layers.push_back(new Map<unsigned int>(mapping, sourceGpu.getDescriptor().getDimensions()));
-        layers.push_back(new NetworkOutput(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
         sourceGpu.copyFromAsync(sourceCpu, stream);
+        mappingGpu.copyFromAsync(mappingCpu, stream);
+        stream.synchronize();
+
+        layers.push_back(new Map<unsigned int>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
+        layers.push_back(new NetworkOutput(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -170,8 +173,8 @@ TEST(Map, MapsCorrectlyToFewerElements) {
     Tensor sourceGpu(gpuPlacement, sourceDescriptor);
 
     TensorDescriptor mappingDescriptor(TensorDescriptor::DataType::UINT8, destDimensions);
-    DistributedTensor mapping(mappingDescriptor);
-    Tensor mappingCpu = mapping.addInstance(cpuPlacement);
+    Tensor mappingCpu = Tensor(cpuPlacement, mappingDescriptor);
+    Tensor mappingGpu = mappingCpu.clone(gpuPlacement);
 
     TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, destDimensions);
     Tensor destCpu(cpuPlacement, destDescriptor);
@@ -188,11 +191,14 @@ TEST(Map, MapsCorrectlyToFewerElements) {
 
     vector<Layer *> layers;
     layers.push_back(new NetworkInput(sourceGpu));
-    layers.push_back(new Map<uint8_t>(mapping, sourceGpu.getDescriptor().getDimensions()));
-    layers.push_back(new NetworkOutput(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
     sourceGpu.copyFromAsync(sourceCpu, stream);
+    mappingGpu.copyFromAsync(mappingCpu, stream);
+    stream.synchronize();
+
+    layers.push_back(new Map<uint8_t>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
+    layers.push_back(new NetworkOutput(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -236,8 +242,8 @@ TEST(Map, MapsCorrectlyToMoreElements) {
     Tensor sourceGpu(gpuPlacement, sourceDescriptor);
 
     TensorDescriptor mappingDescriptor(TensorDescriptor::DataType::UINT64, destDimensions);
-    DistributedTensor mapping(mappingDescriptor);
-    Tensor mappingCpu = mapping.addInstance(cpuPlacement);
+    Tensor mappingCpu = Tensor(cpuPlacement, mappingDescriptor);
+    Tensor mappingGpu = mappingCpu.clone(gpuPlacement);
 
     TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, destDimensions);
     Tensor destCpu(cpuPlacement, destDescriptor);
@@ -254,11 +260,14 @@ TEST(Map, MapsCorrectlyToMoreElements) {
 
     vector<Layer *> layers;
     layers.push_back(new NetworkInput(sourceGpu));
-    layers.push_back(new Map<unsigned long>(mapping, sourceGpu.getDescriptor().getDimensions()));
-    layers.push_back(new NetworkOutput(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
     sourceGpu.copyFromAsync(sourceCpu, stream);
+    mappingGpu.copyFromAsync(mappingCpu, stream);
+    stream.synchronize();
+
+    layers.push_back(new Map<unsigned long>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
+    layers.push_back(new NetworkOutput(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -841,7 +850,8 @@ TEST(DeviceCrossing, Crosses) {
     vector<Layer *> layers;
     layers.push_back(new NetworkInput(sourceGpu0));
     layers.push_back(new DeviceCrossing(gpu0Placement, gpu1Placement));
-    layers.push_back(new NetworkOutput(gpu1Placement));
+    NetworkOutput *networkOutput = new NetworkOutput(gpu1Placement);
+    layers.push_back(networkOutput);
     Stream stream = layers.front()->getStream();
 
     sourceGpu0.copyFromAsync(sourceCpu, stream);
@@ -852,9 +862,9 @@ TEST(DeviceCrossing, Crosses) {
 
     // Network is runnable here
     layers[0]->forward(sourceGpu0);
-    Event finishedCopyEvent = destCpu.copyFromAsync(outputGpu, ((NetworkOutput *)layers.back())->getOutputReadyEvent());
-    cudaError_t cudaStatus = cudaEventSynchronize(finishedCopyEvent.getEvent());
-    assert(cudaStatus == cudaSuccess);
+    Stream outputStream = networkOutput->getStream();
+    destCpu.copyFromAsync(outputGpu, outputStream);
+    outputStream.synchronize();
 
     ASSERT_TRUE(outputGpu.getPlacement() == gpu1Placement);
 
