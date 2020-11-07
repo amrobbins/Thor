@@ -1,5 +1,5 @@
 CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include
-CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn
+CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /usr/local/lib/libboost_filesystem.a
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
 COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_53,code=compute_53 -gencode=arch=compute_53,code=sm_53 \
                                       -gencode=arch=compute_62,code=compute_62 -gencode=arch=compute_62,code=sm_62 \
@@ -56,6 +56,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/WorkQueue/AsyncTensorQueueTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest && \
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
+                build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
                 build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest && \
                 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest && \
@@ -83,6 +84,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
             build/test/Utilities/TensorOperations/Misc/MiscTest \
+            build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest \
             build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest \
             build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest \
@@ -141,6 +143,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
                    build/Utilities/Common/Stream.o \
+                   build/Utilities/Loaders/ShardedRawDatasetCreator.o \
                    build/Utilities/WorkQueue/AsyncTensorQueue.o \
                    build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
@@ -407,6 +410,10 @@ build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stre
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
 
+build/Utilities/Loaders/ShardedRawDatasetCreator.o: Utilities/Loaders/ShardedRawDatasetCreator.h Utilities/Loaders/ShardedRawDatasetCreator.cpp
+	mkdir -p build/Utilities/Loaders
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ShardedRawDatasetCreator.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ShardedRawDatasetCreator.o
+
 build/Utilities/WorkQueue/AsyncTensorQueue.o: Utilities/WorkQueue/AsyncTensorQueue.h Utilities/WorkQueue/AsyncTensorQueue.cpp
 	mkdir -p build/Utilities/WorkQueue
 	$(Gpp) -c -O3 -std=c++11 Utilities/WorkQueue/AsyncTensorQueue.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/WorkQueue/AsyncTensorQueue.o
@@ -540,6 +547,10 @@ build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest: build/test/goog
 build/test/Utilities/TensorOperations/Misc/MiscTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/MiscTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/Misc/
 	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/MiscTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/MiscTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest: build/test/googletest/libgtest.a test/Utilities/Loaders/ShardedRawDatasetCreatorTest.cpp $(THOR)
+	mkdir -p build/test/Utilities/Loaders/
+	$(Gpp) $(DEBUG) -o build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest -O3 -std=c++11 -pthread test/Utilities/Loaders/ShardedRawDatasetCreatorTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Utility
