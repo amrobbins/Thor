@@ -24,6 +24,10 @@ ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceD
     this->destDirectories = destDirectories;
     this->baseDatasetFileName = baseDatasetFileName;
 
+    destShardTrain = 0;
+    destShardValidate = 0;
+    destShardTest = 0;
+
     numOutputShards = destDirectories.size();
     uint64_t i = 0;
     for (auto it = destDirectories.begin(); it != destDirectories.end(); ++it) {
@@ -64,7 +68,7 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
 
     // start numDestDisks threads, each pops a processed training example and writes it to the end of the memMappedFile that it is told too
     std::vector<thread> writerThreads;
-    for (uint32_t i = 0; i < numOutputShards * 2; ++i) {
+    for (uint32_t i = 0; i < numOutputShards; ++i) {
         writerThreads.emplace_back(&ShardedRawDatasetCreator::writeDataToShard, this, &workQueue);
     }
 
@@ -124,8 +128,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64
 
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= exampleType;
-            printf("%s\n", datasetDirectory.native().c_str());
-            fflush(stdout);
+            // printf("%s\n", datasetDirectory.native().c_str());
             assert(is_directory(datasetDirectory));
             uint32_t thread = 0;
             for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
@@ -178,9 +181,6 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
 #pragma omp parallel for schedule(static, 1)
     for (uint32_t i = 0; i < numSourceDirectories; ++i) {
         string datasetDirectoryString = sourceDirectoriesVector[i];
-        uint64_t destShardTrain = 0;
-        uint64_t destShardValidate = 0;
-        uint64_t destShardTest = 0;
 
         for (int rawType = (int)ExampleType::TRAIN; rawType <= (int)ExampleType::TEST; ++rawType) {
             ExampleType type = (ExampleType)rawType;
@@ -223,18 +223,7 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
                                 rawDataElement.numDataBytes = fileSizeInBytes;
                                 rawDataElement.exampleType = type;
                                 rawDataElement.className = className;
-                                if (type == ExampleType::TRAIN) {
-                                    rawDataElement.destShard = destShardTrain;
-                                    destShardTrain = (destShardTrain + 1) % numOutputShards;
-                                } else if (type == ExampleType::VALIDATE) {
-                                    rawDataElement.destShard = destShardValidate;
-                                    destShardValidate = (destShardValidate + 1) % numOutputShards;
-                                } else {
-                                    rawDataElement.destShard = destShardTest;
-                                    destShardTest = (destShardTest + 1) % numOutputShards;
-                                }
-
-                                printf("pushing %s to %d\n", rawDataElement.className.c_str(), rawDataElement.destShard);
+                                rawDataElement.fileName = examplePath.filename().native();
 
                                 bool success = workQueue.push(rawDataElement);
                                 assert(success);
@@ -253,13 +242,22 @@ void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, 
     bool queueOpen = true;
     DataElement processedDataElement;
     string type;
+    uint64_t destShard;
     while (queueOpen) {
         queueOpen = workQueue->pop(processedDataElement);
-        type = processedDataElement.exampleType == ExampleType::TRAIN
-                   ? "train"
-                   : (processedDataElement.exampleType == ExampleType::VALIDATE ? "validate" : "test");
-        printf("writing %s class %s to shard %d\n", type.c_str(), processedDataElement.className.c_str(), processedDataElement.destShard);
-        shards[processedDataElement.destShard].writeExample(processedDataElement.data.get(), processedDataElement.exampleType);
+        if (processedDataElement.exampleType == ExampleType::TRAIN) {
+            destShard = destShardTrain.fetch_add(1) % numOutputShards;
+            type = "train";
+        } else if (processedDataElement.exampleType == ExampleType::VALIDATE) {
+            destShard = destShardValidate.fetch_add(1) % numOutputShards;
+            type = "validate";
+        } else {
+            destShard = destShardTest.fetch_add(1) % numOutputShards;
+            type = "test";
+        }
+
+        // printf("writing %s class %s to shard %ld\n", type.c_str(), processedDataElement.className.c_str(), destShard);
+        shards[destShard].writeExample(processedDataElement.data.get(), processedDataElement.exampleType);
     }
-    printf("queue closed\n");
+    // printf("queue closed\n");
 }
