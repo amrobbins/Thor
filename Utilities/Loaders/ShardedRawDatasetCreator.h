@@ -41,7 +41,7 @@ enum class ExampleType { TRAIN = 3, VALIDATE, TEST };
 struct DataElement {
     ExampleType exampleType;
     string className;
-    uint32_t destShard;
+    string fileName;
 
     uint64_t numDataBytes;
     std::shared_ptr<uint8_t> data;
@@ -226,4 +226,8 @@ class ShardedRawDatasetCreator {
     void getNumExamples(uint64_t &numTrainExamples, uint64_t &numValidateExamples, uint64_t &numTestExamples);
     void loadExamples(WorkQueueUnordered<DataElement, DataElement> &workQueue);
     void writeDataToShard(WorkQueueUnordered<DataElement, DataElement> *workQueue);
+
+    atomic<uint64_t> destShardTrain;
+    atomic<uint64_t> destShardValidate;
+    atomic<uint64_t> destShardTest;
 };
