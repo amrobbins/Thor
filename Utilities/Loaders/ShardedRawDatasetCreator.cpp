@@ -1,6 +1,7 @@
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 
 using namespace boost::filesystem;
+using namespace boost::interprocess;
 
 using std::make_pair;
 using std::map;
@@ -11,7 +12,6 @@ using std::string;
 using std::unique_ptr;
 using std::unordered_map;
 using std::unordered_set;
-using std::vector;
 
 ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceDirectories,
                                                    unordered_set<string> destDirectories,
@@ -36,9 +36,12 @@ ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceD
 
 bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataProcessor) {
     uint32_t numOutputShards = destDirectories.size();
-    uint64_t totalNumExamples = getNumExamples();
-    uint64_t maxNumExamplesPerShard = (totalNumExamples / numOutputShards) + numOutputShards;
-    uint64_t shardSizeInBytes = maxNumExamplesPerShard * dataProcessor->outputTensorSizeInBytes() + 1000000;
+    uint64_t numTrainExamples, numValidateExamples, numTestExamples;
+    getNumExamples(numTrainExamples, numValidateExamples, numTestExamples);
+    uint64_t numTrainExamplesPerShard = (numTrainExamples / numOutputShards) + numOutputShards;
+    uint64_t numValidateExamplesPerShard = (numValidateExamples / numOutputShards) + numOutputShards;
+    uint64_t numTestExamplesPerShard = (numTestExamples / numOutputShards) + numOutputShards;
+    outputTensorSizeInBytes = dataProcessor->outputTensorSizeInBytes();
 
     // set up work queue
     uint32_t numProcessors = omp_get_num_procs();
@@ -50,12 +53,18 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
     workQueue.open(workQueueExecutor, numProcessors, 32, 32);
 
     // Create the output mem-mapped file shards
-    // FIXME
-    printf("shardSizeInBytes %ld\n", shardSizeInBytes);
+    for (uint32_t i = 0; i < destShardFiles.size(); ++i) {
+        shards.emplace_back();
+        shards.back().createShard(destShardFiles[i].native(),
+                                  numTrainExamplesPerShard,
+                                  numValidateExamplesPerShard,
+                                  numTestExamplesPerShard,
+                                  outputTensorSizeInBytes);
+    }
 
     // start numDestDisks threads, each pops a processed training example and writes it to the end of the memMappedFile that it is told too
-    vector<thread> writerThreads;
-    for (uint32_t i = 0; i < numOutputShards; ++i) {
+    std::vector<thread> writerThreads;
+    for (uint32_t i = 0; i < numOutputShards * 2; ++i) {
         writerThreads.emplace_back(&ShardedRawDatasetCreator::writeDataToShard, this, &workQueue);
     }
 
@@ -69,16 +78,26 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
     workQueue.close();
 
     // join each writer thread
+    // mutex is used to ensure each writer thread has finished, before shrinking the shard.
+    mutex mtx;
+    mtx.lock();
     while (!writerThreads.empty()) {
         writerThreads.back().join();
         writerThreads.pop_back();
+    }
+    mtx.unlock();
+
+    for (uint32_t i = 0; i < shards.size(); ++i) {
+        shards[i].shrinkToFit();
     }
 
     return true;
 }
 
-uint64_t ShardedRawDatasetCreator::getNumExamples() {
-    uint64_t totalNumExamples = 0;
+void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64_t& numValidateExamples, uint64_t& numTestExamples) {
+    numTrainExamples = 0;
+    numValidateExamples = 0;
+    numTestExamples = 0;
 
     for (auto it = sourceDirectories.begin(); it != sourceDirectories.end(); ++it) {
         string datasetDirectoryString = *it;
@@ -101,7 +120,7 @@ uint64_t ShardedRawDatasetCreator::getNumExamples() {
                 numProcessors -= 1;
 
             omp_set_num_threads(numProcessors);
-            vector<vector<path>> classesPerThread(numProcessors);
+            std::vector<std::vector<path>> classesPerThread(numProcessors);
 
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= exampleType;
@@ -138,23 +157,30 @@ uint64_t ShardedRawDatasetCreator::getNumExamples() {
                     }
                 }
             }
-            totalNumExamples += numExamples;
+
+            if (type == ExampleType::TRAIN)
+                numTrainExamples += numExamples;
+            else if (type == ExampleType::VALIDATE)
+                numValidateExamples += numExamples;
+            else if (type == ExampleType::TEST)
+                numTestExamples += numExamples;
         }
     }
-    return totalNumExamples;
 }
 
 void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, DataElement>& workQueue) {
     assert(!sourceDirectories.empty());
     omp_set_num_threads(sourceDirectories.size());
 
-    vector<string> sourceDirectoriesVector(sourceDirectories.begin(), sourceDirectories.end());
+    std::vector<string> sourceDirectoriesVector(sourceDirectories.begin(), sourceDirectories.end());
     uint32_t numSourceDirectories = sourceDirectoriesVector.size();
 
 #pragma omp parallel for schedule(static, 1)
     for (uint32_t i = 0; i < numSourceDirectories; ++i) {
         string datasetDirectoryString = sourceDirectoriesVector[i];
-        uint64_t destShard = 0;
+        uint64_t destShardTrain = 0;
+        uint64_t destShardValidate = 0;
+        uint64_t destShardTest = 0;
 
         for (int rawType = (int)ExampleType::TRAIN; rawType <= (int)ExampleType::TEST; ++rawType) {
             ExampleType type = (ExampleType)rawType;
@@ -178,7 +204,7 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
                 if (is_directory(classDirectoryPath) && !classDirectoryPath.filename_is_dot() &&
                     !classDirectoryPath.filename_is_dot_dot()) {
                     string className = classDirectoryPath.filename().native();
-                    vector<path> examples;
+                    std::vector<path> examples;
                     if (classes.count(className) == 0)
                         continue;
 
@@ -190,17 +216,25 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
 
                             // read file
                             file.seekg(0, std::ios::beg);
-                            unique_ptr<char> buffer(new char[fileSizeInBytes]);
-                            if (file.read(buffer.get(), fileSizeInBytes)) {
+                            unique_ptr<uint8_t> buffer(new uint8_t[fileSizeInBytes]);
+                            if (file.read((char*)buffer.get(), fileSizeInBytes)) {
                                 DataElement rawDataElement;
-                                rawDataElement.data.reset(buffer.release());
+                                rawDataElement.data = std::shared_ptr<uint8_t>((uint8_t*)buffer.release());
                                 rawDataElement.numDataBytes = fileSizeInBytes;
                                 rawDataElement.exampleType = type;
                                 rawDataElement.className = className;
-                                rawDataElement.destShard = destShardFiles[destShard];
-                                destShard = (destShard + 1) % numOutputShards;
+                                if (type == ExampleType::TRAIN) {
+                                    rawDataElement.destShard = destShardTrain;
+                                    destShardTrain = (destShardTrain + 1) % numOutputShards;
+                                } else if (type == ExampleType::VALIDATE) {
+                                    rawDataElement.destShard = destShardValidate;
+                                    destShardValidate = (destShardValidate + 1) % numOutputShards;
+                                } else {
+                                    rawDataElement.destShard = destShardTest;
+                                    destShardTest = (destShardTest + 1) % numOutputShards;
+                                }
 
-                                printf("pushing %s to %s\n", rawDataElement.className.c_str(), rawDataElement.destShard.native().c_str());
+                                printf("pushing %s to %d\n", rawDataElement.className.c_str(), rawDataElement.destShard);
 
                                 bool success = workQueue.push(rawDataElement);
                                 assert(success);
@@ -216,17 +250,16 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
 }
 
 void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, DataElement>* workQueue) {
-    // FIXME
     bool queueOpen = true;
-    DataElement rawDataElement;
+    DataElement processedDataElement;
     string type;
     while (queueOpen) {
-        queueOpen = workQueue->pop(rawDataElement);
-        type = rawDataElement.exampleType == ExampleType::TRAIN
+        queueOpen = workQueue->pop(processedDataElement);
+        type = processedDataElement.exampleType == ExampleType::TRAIN
                    ? "train"
-                   : (rawDataElement.exampleType == ExampleType::VALIDATE ? "validate" : "test");
-        printf(
-            "writing %s class %s to shard %s\n", type.c_str(), rawDataElement.className.c_str(), rawDataElement.destShard.native().c_str());
+                   : (processedDataElement.exampleType == ExampleType::VALIDATE ? "validate" : "test");
+        printf("writing %s class %s to shard %d\n", type.c_str(), processedDataElement.className.c_str(), processedDataElement.destShard);
+        shards[processedDataElement.destShard].writeExample(processedDataElement.data.get(), processedDataElement.exampleType);
     }
     printf("queue closed\n");
 }
