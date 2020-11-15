@@ -20,10 +20,13 @@ COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_75,code=compute_7
 
 BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl
 
+GRAPHICS_MAGICK_INCLUDE_DIR = -I /usr/local/include/GraphicsMagick/
+GRAPHICS_MAGICK = `GraphicsMagick++-config --cppflags --cxxflags --ldflags --libs`
+
 THOR_LIBS = $(CUDA) -I./ -L./ -lThor
 
 INCLUDE_HOME_DIR = -I ./
-INCLUDE_DIRS = $(INCLUDE_HOME_DIR) $(CUDA_INCLUDE_DIRS) $(BOOST_INCLUDE_DIR)
+INCLUDE_DIRS = $(INCLUDE_HOME_DIR) $(CUDA_INCLUDE_DIRS) $(BOOST_INCLUDE_DIR) $(GRAPHICS_MAGICK_INCLUDE_DIR)
 
 INCLUDE_DIRS_TEST = $(INCLUDE_DIRS) -I build/test/googletest/include
 LIB_DIRS_TEST = -L build/test/googletest
@@ -144,6 +147,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Network/Network.o \
                    build/Utilities/Common/Stream.o \
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
+                   build/Utilities/Loaders/ImageLoader.o \
                    build/Utilities/WorkQueue/AsyncTensorQueue.o \
                    build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
@@ -412,7 +416,11 @@ build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stre
 
 build/Utilities/Loaders/ShardedRawDatasetCreator.o: Utilities/Loaders/ShardedRawDatasetCreator.h Utilities/Loaders/ShardedRawDatasetCreator.cpp
 	mkdir -p build/Utilities/Loaders
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ShardedRawDatasetCreator.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ShardedRawDatasetCreator.o
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ShardedRawDatasetCreator.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ShardedRawDatasetCreator.o $(GRAPHICS_MAGICK)
+
+build/Utilities/Loaders/ImageLoader.o: Utilities/Loaders/ImageLoader.h Utilities/Loaders/ImageLoader.cpp
+	mkdir -p build/Utilities/Loaders
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ImageLoader.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageLoader.o
 
 build/Utilities/WorkQueue/AsyncTensorQueue.o: Utilities/WorkQueue/AsyncTensorQueue.h Utilities/WorkQueue/AsyncTensorQueue.cpp
 	mkdir -p build/Utilities/WorkQueue
