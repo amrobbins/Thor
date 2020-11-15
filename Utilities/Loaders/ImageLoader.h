@@ -15,16 +15,17 @@ class ImageLoader {
     // Load image from the raw contents of a file loaded into memory:
     static bool loadImage(void *rawImageData, uint64_t rawImageDataSizeInBytes, Magick::Image &image);
 
-    static bool resizeImage(double minAspectRatio,
-                            double maxAspectRatio,
-                            double cropCenterToAspectRatio,
-                            uint32_t outputImageRows,
-                            uint32_t outputImageColumns,
-                            Magick::Image &image);
+    static bool resizeImage(
+        double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Magick::Image &image);
 
     // Returns 1 byte for each of rgb in CHW format, for example [r0, g0, b0, r1, g1, b1, ...]
     static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray);
 
    private:
     ImageLoader() {}
+
+    struct MagickInitializer {
+        MagickInitializer();
+    };
+    static MagickInitializer magickInitializer;
 };

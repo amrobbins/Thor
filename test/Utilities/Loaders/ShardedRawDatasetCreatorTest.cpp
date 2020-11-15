@@ -27,6 +27,7 @@ class TestDataProcessor : public DataProcessor {
     virtual DataElement operator()(DataElement &input) { return input; }
 };
 
+/*
 TEST(SharedRawDatasetCreator, evaluatesDataset) {
     string baseFilename = "testDataset";
     unordered_set<string> sourceDirectories;
@@ -40,6 +41,22 @@ TEST(SharedRawDatasetCreator, evaluatesDataset) {
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
     creator.createDataset(unique_ptr<TestDataProcessor>(new TestDataProcessor()));
 }
+
+// /media/andrew/SSD_Storage/imageNetTrainImages/train/cat/n03085013_2277.JPEG
+
+TEST(SharedRawDatasetCreator, loadAndProcessImages) {
+
+    string baseFilename = "testDataset";
+    unordered_set<string> sourceDirectories;
+    unordered_set<string> destDirectories;
+
+    sourceDirectories.insert("/media/andrew/SSD_Storage/aFewImages/");
+    destDirectories.insert("/media/andrew/SSD_Storage/");
+
+    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 8, 224, 224)));
+}
+*/
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
