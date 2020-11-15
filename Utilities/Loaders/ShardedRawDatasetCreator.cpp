@@ -1,7 +1,6 @@
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 
 using namespace boost::filesystem;
-using namespace boost::interprocess;
 
 using std::make_pair;
 using std::map;
@@ -151,6 +150,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64
                             if (addToClasses) {
                                 mtx.lock();
                                 string className = classDirectory.filename().native();
+                                assert(className.length() <= 256);
                                 classes.insert(className);
                                 mtx.unlock();
                                 addToClasses = false;
@@ -258,7 +258,7 @@ void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, 
         }
 
         // printf("writing %s class %s to shard %ld\n", type.c_str(), processedDataElement.className.c_str(), destShard);
-        shards[destShard].writeExample(processedDataElement.data.get(), processedDataElement.exampleType);
+        shards[destShard].writeExample(processedDataElement.data.get(), processedDataElement.className, processedDataElement.exampleType);
     }
     // printf("queue closed\n");
 }
