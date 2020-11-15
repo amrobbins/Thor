@@ -128,7 +128,6 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64
 
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= exampleType;
-            // printf("%s\n", datasetDirectory.native().c_str());
             assert(is_directory(datasetDirectory));
             uint32_t thread = 0;
             for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
@@ -245,6 +244,8 @@ void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, 
     uint64_t destShard;
     while (queueOpen) {
         queueOpen = workQueue->pop(processedDataElement);
+        if (processedDataElement.numDataBytes == 0 || processedDataElement.data == nullptr)
+            continue;
         if (processedDataElement.exampleType == ExampleType::TRAIN) {
             destShard = destShardTrain.fetch_add(1) % numOutputShards;
             type = "train";

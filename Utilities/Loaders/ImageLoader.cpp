@@ -24,42 +24,17 @@ bool ImageLoader::loadImage(void *rawImageData, uint64_t rawImageDataSizeInBytes
     return true;
 }
 
-bool ImageLoader::resizeImage(double minAspectRatio,
-                              double maxAspectRatio,
-                              double cropCenterToAspectRatio,
-                              uint32_t outputImageRows,
-                              uint32_t outputImageColumns,
-                              Image &image) {
+bool ImageLoader::resizeImage(
+    double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Image &image) {
     if (minAspectRatio > 0 && maxAspectRatio > 0)
         assert(minAspectRatio <= maxAspectRatio);
-    if (cropCenterToAspectRatio > 0)
-        assert(cropCenterToAspectRatio >= 1.0);
-    if (cropCenterToAspectRatio > 0 && minAspectRatio > 0)
-        assert(cropCenterToAspectRatio >= minAspectRatio);
-    if (cropCenterToAspectRatio > 0 && maxAspectRatio > 0)
-        assert(cropCenterToAspectRatio <= maxAspectRatio);
 
-    double rowAspectRatio = outputImageRows / image.rows();
-    double colAspectRatio = outputImageColumns / image.columns();
+    double rowAspectRatio = (double)outputImageRows / image.rows();
+    double colAspectRatio = (double)outputImageColumns / image.columns();
     if (minAspectRatio > 0.0 && (rowAspectRatio < minAspectRatio || colAspectRatio < minAspectRatio))
         return false;
-    if (maxAspectRatio > 0.0 && (rowAspectRatio > maxAspectRatio || colAspectRatio < maxAspectRatio))
+    if (maxAspectRatio > 0.0 && (rowAspectRatio > maxAspectRatio || colAspectRatio > maxAspectRatio))
         return false;
-
-    if (rowAspectRatio > cropCenterToAspectRatio || colAspectRatio > cropCenterToAspectRatio) {
-        // crop
-        uint32_t numCroppedRows = image.rows();
-        uint32_t numCroppedColumns = image.columns();
-        if (rowAspectRatio > cropCenterToAspectRatio)
-            numCroppedRows = ceil(cropCenterToAspectRatio * image.rows());
-        if (colAspectRatio > cropCenterToAspectRatio)
-            numCroppedColumns = ceil(cropCenterToAspectRatio * image.columns());
-        uint32_t cropStartRow = (numCroppedRows - image.rows()) / 2;
-        uint32_t cropStartCol = (numCroppedColumns - image.columns()) / 2;
-        image.crop(Geometry(numCroppedColumns, numCroppedRows, cropStartCol, cropStartRow));
-        rowAspectRatio = outputImageRows / image.rows();
-        colAspectRatio = outputImageColumns / image.columns();
-    }
 
     if (image.rows() != outputImageRows || image.columns() != outputImageColumns) {
         // zoom
@@ -91,3 +66,6 @@ bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray) {
     }
     return true;
 }
+
+ImageLoader::MagickInitializer::MagickInitializer() { InitializeMagick(nullptr); }
+ImageLoader::MagickInitializer ImageLoader::magickInitializer;
