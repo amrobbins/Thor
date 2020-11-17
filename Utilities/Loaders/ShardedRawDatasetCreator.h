@@ -148,7 +148,6 @@ class Shard {
             uint64_t numExamples = trainData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = trainData->data();
-            // fixme: put string loading on the stream
             label = (*trainLabels)[exampleIndex].c_str();
         } else if (exampleType == ExampleType::VALIDATE) {
             uint64_t numExamples = validateData->size() / exampleSizeInBytes;
@@ -173,27 +172,32 @@ class Shard {
         cudaError_t cudaStatus;
 
         uint8_t *data;
+        LabelCallbackParams *labelCallbackParams = new LabelCallbackParams();
         if (exampleType == ExampleType::TRAIN) {
             uint64_t numExamples = trainData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = trainData->data();
-            label = (*trainLabels)[exampleIndex].c_str();
+            labelCallbackParams->labels = trainLabels;
         } else if (exampleType == ExampleType::VALIDATE) {
             uint64_t numExamples = validateData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = validateData->data();
-            label = (*validateLabels)[exampleIndex].c_str();
+            labelCallbackParams->labels = validateLabels;
         } else if (exampleType == ExampleType::TEST) {
             uint64_t numExamples = testData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = testData->data();
-            label = (*testLabels)[exampleIndex].c_str();
+            labelCallbackParams->labels = testLabels;
         } else {
             assert(false);
         }
 
         uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
         cudaStatus = cudaMemcpyAsync(buffer, exampleStart, exampleSizeInBytes, cudaMemcpyHostToHost, stream);
+        assert(cudaStatus == cudaSuccess);
+        labelCallbackParams->label = &label;
+        labelCallbackParams->labelIndex = exampleIndex;
+        cudaStatus = cudaLaunchHostFunc(stream, getLabelCallback, labelCallbackParams);
         assert(cudaStatus == cudaSuccess);
     }
 
@@ -220,6 +224,18 @@ class Shard {
     file_string_vector_t *validateLabels;
     file_string_vector_t *testLabels;
     ShardMetadata *shardMetadata;
+
+    struct LabelCallbackParams {
+        file_string_vector_t *labels;
+        string *label;
+        uint64_t labelIndex;
+    };
+
+    static void CUDART_CB getLabelCallback(void *data) {
+        LabelCallbackParams *params = (LabelCallbackParams *)data;
+        *(params->label) = (*(params->labels))[params->labelIndex].c_str();
+        delete params;
+    }
 };
 
 class DataProcessor : public WorkQueueExecutorBase<DataElement, DataElement> {
