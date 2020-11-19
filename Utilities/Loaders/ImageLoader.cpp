@@ -1,4 +1,5 @@
 #include "Utilities/Loaders/ImageLoader.h"
+#include <X11/Xlib.h>
 
 using namespace Magick;
 using namespace std;
@@ -67,5 +68,8 @@ bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray) {
     return true;
 }
 
-ImageLoader::MagickInitializer::MagickInitializer() { InitializeMagick(nullptr); }
+ImageLoader::MagickInitializer::MagickInitializer() {
+    XInitThreads();
+    InitializeMagick(nullptr);
+}
 ImageLoader::MagickInitializer ImageLoader::magickInitializer;
