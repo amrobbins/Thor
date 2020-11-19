@@ -2,11 +2,13 @@
 
 using namespace std;
 
-ImageProcessor::ImageProcessor(double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns) {
+ImageProcessor::ImageProcessor(
+    double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, bool display) {
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;
     this->outputImageRows = outputImageRows;
     this->outputImageColumns = outputImageColumns;
+    this->display = display;
 }
 
 uint64_t ImageProcessor::outputTensorSizeInBytes() { return 3 * outputImageRows * outputImageColumns; }
@@ -30,6 +32,12 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     success = ImageLoader::toRgbArray(image, data.get());
     if (!success)
         return output;
+
+    if (display) {
+        mutex.lock();
+        image.display();
+        mutex.unlock();
+    }
 
     output.numDataBytes = outputTensorSizeInBytes();
     output.data.reset(data.release());

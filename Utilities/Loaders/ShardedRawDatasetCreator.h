@@ -37,9 +37,12 @@ using std::thread;
 typedef boost::interprocess::allocator<uint8_t, boost::interprocess::managed_mapped_file::segment_manager> file_vector_allocator_t;
 typedef boost::interprocess::vector<uint8_t, file_vector_allocator_t> file_vector_t;
 
-typedef boost::interprocess::allocator<boost::interprocess::string, boost::interprocess::managed_mapped_file::segment_manager>
+typedef boost::interprocess::allocator<char, boost::interprocess::managed_mapped_file::segment_manager> file_string_allocator_t;
+typedef boost::interprocess::basic_string<char, std::char_traits<char>, file_string_allocator_t> file_string_t;
+
+typedef boost::interprocess::allocator<file_string_t, boost::interprocess::managed_mapped_file::segment_manager>
     file_string_vector_allocator_t;
-typedef boost::interprocess::vector<boost::interprocess::string, file_string_vector_allocator_t> file_string_vector_t;
+typedef boost::interprocess::vector<file_string_t, file_string_vector_allocator_t> file_string_vector_t;
 
 enum class ExampleType { TRAIN = 3, VALIDATE, TEST };
 
@@ -64,6 +67,7 @@ class Shard {
         string filename, uint64_t numTrainExamples, uint64_t numValidateExamples, uint64_t numTestExamples, uint64_t exampleSizeInBytes) {
         this->filename = filename;
         this->exampleSizeInBytes = exampleSizeInBytes;
+        // FIXME: find the longest class name and use that for the max string length
         uint64_t shardSizeInBytes = (numTrainExamples + numValidateExamples + numTestExamples) * (exampleSizeInBytes + 300) + 1000000;
         mappedFile = boost::interprocess::managed_mapped_file(boost::interprocess::create_only, filename.c_str(), shardSizeInBytes);
 
@@ -93,6 +97,8 @@ class Shard {
         file_string_vector_allocator_t testLabelsAllocator(mappedFile.get_segment_manager());
         testLabels = mappedFile.construct<file_string_vector_t>("testLabels")(testLabelsAllocator);
         testLabels->reserve(numTestExamples);
+
+        fileStringAllocator = std::make_shared<file_string_allocator_t>(mappedFile.get_segment_manager());
     }
 
     void openShard(string filename) {
@@ -121,19 +127,22 @@ class Shard {
             assert(trainData->capacity() > trainData->size() + exampleSizeInBytes);
             trainData->insert(trainData->end(), buffer, buffer + exampleSizeInBytes);
             assert(trainLabels->capacity() > trainLabels->size());
-            boost::interprocess::string diskLabel(label.c_str());
+            file_string_t diskLabel(*fileStringAllocator);
+            diskLabel = label.c_str();
             trainLabels->push_back(diskLabel);
         } else if (exampleType == ExampleType::VALIDATE) {
             assert(validateData->capacity() > validateData->size() + exampleSizeInBytes);
             validateData->insert(validateData->end(), buffer, buffer + exampleSizeInBytes);
             assert(validateLabels->capacity() > validateLabels->size());
-            boost::interprocess::string diskLabel(label.c_str());
+            file_string_t diskLabel(*fileStringAllocator);
+            diskLabel = label.c_str();
             validateLabels->push_back(diskLabel);
         } else if (exampleType == ExampleType::TEST) {
             assert(testData->capacity() > testData->size() + exampleSizeInBytes);
             testData->insert(testData->end(), buffer, buffer + exampleSizeInBytes);
             assert(testLabels->capacity() > testLabels->size());
-            boost::interprocess::string diskLabel(label.c_str());
+            file_string_t diskLabel(*fileStringAllocator);
+            diskLabel = label.c_str();
             testLabels->push_back(diskLabel);
         } else {
             assert(false);
@@ -224,6 +233,8 @@ class Shard {
     file_string_vector_t *validateLabels;
     file_string_vector_t *testLabels;
     ShardMetadata *shardMetadata;
+
+    std::shared_ptr<file_string_allocator_t> fileStringAllocator;
 
     struct LabelCallbackParams {
         file_string_vector_t *labels;
