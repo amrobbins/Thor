@@ -28,6 +28,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     success = ImageLoader::resizeImage(minAspectRatio, maxAspectRatio, outputImageRows, outputImageColumns, image);
     if (!success)
         return output;
+
     unique_ptr<uint8_t> data(new uint8_t[outputTensorSizeInBytes()]);
     success = ImageLoader::toRgbArray(image, data.get());
     if (!success)
