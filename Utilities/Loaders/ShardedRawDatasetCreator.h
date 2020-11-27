@@ -61,14 +61,21 @@ struct ShardMetadata {
 
 class Shard {
    public:
-    Shard() {}
+    Shard() { mtx = std::make_shared<std::mutex>(); }
 
-    void createShard(
-        string filename, uint64_t numTrainExamples, uint64_t numValidateExamples, uint64_t numTestExamples, uint64_t exampleSizeInBytes) {
+    void createShard(string filename,
+                     uint64_t numTrainExamples,
+                     uint64_t numValidateExamples,
+                     uint64_t numTestExamples,
+                     uint64_t exampleSizeInBytes,
+                     uint64_t maxFilenameChars,
+                     uint64_t numClasses,
+                     uint64_t maxClassNameChars) {
         this->filename = filename;
         this->exampleSizeInBytes = exampleSizeInBytes;
-        // FIXME: find the longest class name and use that for the max string length
-        uint64_t shardSizeInBytes = (numTrainExamples + numValidateExamples + numTestExamples) * (exampleSizeInBytes + 300) + 1000000;
+        uint64_t shardSizeInBytes =
+            (numTrainExamples + numValidateExamples + numTestExamples) * (exampleSizeInBytes + (maxFilenameChars + 32)) +
+            (numClasses * (maxClassNameChars + 32)) + 1000000;
         mappedFile = boost::interprocess::managed_mapped_file(boost::interprocess::create_only, filename.c_str(), shardSizeInBytes);
 
         shardMetadata = mappedFile.construct<ShardMetadata>("shardMetadata")();
@@ -98,6 +105,18 @@ class Shard {
         testLabels = mappedFile.construct<file_string_vector_t>("testLabels")(testLabelsAllocator);
         testLabels->reserve(numTestExamples);
 
+        file_string_vector_allocator_t trainFilenamesAllocator(mappedFile.get_segment_manager());
+        trainFilenames = mappedFile.construct<file_string_vector_t>("trainFilenames")(trainFilenamesAllocator);
+        trainFilenames->reserve(numTrainExamples);
+
+        file_string_vector_allocator_t validateFilenamesAllocator(mappedFile.get_segment_manager());
+        validateFilenames = mappedFile.construct<file_string_vector_t>("validateFilenames")(validateFilenamesAllocator);
+        validateFilenames->reserve(numValidateExamples);
+
+        file_string_vector_allocator_t testFilenamesAllocator(mappedFile.get_segment_manager());
+        testFilenames = mappedFile.construct<file_string_vector_t>("testFilenames")(testFilenamesAllocator);
+        testFilenames->reserve(numTestExamples);
+
         fileStringAllocator = std::make_shared<file_string_allocator_t>(mappedFile.get_segment_manager());
     }
 
@@ -109,6 +128,9 @@ class Shard {
         trainLabels = mappedFile.find<file_string_vector_t>("trainLabels").first;
         validateLabels = mappedFile.find<file_string_vector_t>("validateLabels").first;
         testLabels = mappedFile.find<file_string_vector_t>("testLabels").first;
+        trainFilenames = mappedFile.find<file_string_vector_t>("trainFilenames").first;
+        validateFilenames = mappedFile.find<file_string_vector_t>("validateFilenames").first;
+        testFilenames = mappedFile.find<file_string_vector_t>("testFilenames").first;
         shardMetadata = mappedFile.find<ShardMetadata>("shardMetadata").first;
         exampleSizeInBytes = shardMetadata->exampleSizeInBytes;
 
@@ -118,10 +140,15 @@ class Shard {
         assert(trainLabels->size() == trainData->size() / exampleSizeInBytes);
         assert(validateLabels->size() == validateData->size() / exampleSizeInBytes);
         assert(testLabels->size() == testData->size() / exampleSizeInBytes);
+        assert(trainFilenames->size() == trainData->size() / exampleSizeInBytes);
+        assert(validateFilenames->size() == validateData->size() / exampleSizeInBytes);
+        assert(testFilenames->size() == testData->size() / exampleSizeInBytes);
     }
 
-    void writeExample(uint8_t *buffer, const string &label, ExampleType exampleType) {
+    void writeExample(uint8_t *buffer, const string &label, const string &filename, ExampleType exampleType) {
         assert(buffer != nullptr);
+
+        std::unique_lock<std::mutex> lck(*mtx);
 
         if (exampleType == ExampleType::TRAIN) {
             assert(trainData->capacity() > trainData->size() + exampleSizeInBytes);
@@ -129,27 +156,42 @@ class Shard {
             assert(trainLabels->capacity() > trainLabels->size());
             file_string_t diskLabel(*fileStringAllocator);
             diskLabel = label.c_str();
+            diskLabel.shrink_to_fit();
             trainLabels->push_back(diskLabel);
+            file_string_t diskFilename(*fileStringAllocator);
+            diskFilename = filename.c_str();
+            diskFilename.shrink_to_fit();
+            trainFilenames->push_back(diskFilename);
         } else if (exampleType == ExampleType::VALIDATE) {
             assert(validateData->capacity() > validateData->size() + exampleSizeInBytes);
             validateData->insert(validateData->end(), buffer, buffer + exampleSizeInBytes);
             assert(validateLabels->capacity() > validateLabels->size());
             file_string_t diskLabel(*fileStringAllocator);
             diskLabel = label.c_str();
+            diskLabel.shrink_to_fit();
             validateLabels->push_back(diskLabel);
+            file_string_t diskFilename(*fileStringAllocator);
+            diskFilename = filename.c_str();
+            diskFilename.shrink_to_fit();
+            validateFilenames->push_back(diskFilename);
         } else if (exampleType == ExampleType::TEST) {
             assert(testData->capacity() > testData->size() + exampleSizeInBytes);
             testData->insert(testData->end(), buffer, buffer + exampleSizeInBytes);
             assert(testLabels->capacity() > testLabels->size());
             file_string_t diskLabel(*fileStringAllocator);
             diskLabel = label.c_str();
+            diskLabel.shrink_to_fit();
             testLabels->push_back(diskLabel);
+            file_string_t diskFilename(*fileStringAllocator);
+            diskFilename = filename.c_str();
+            diskFilename.shrink_to_fit();
+            testFilenames->push_back(diskFilename);
         } else {
             assert(false);
         }
     }
 
-    void loadExample(uint8_t *buffer, string &label, ExampleType exampleType, uint64_t exampleIndex) {
+    void loadExample(uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex) {
         assert(buffer != nullptr);
 
         uint8_t *data;
@@ -158,16 +200,19 @@ class Shard {
             assert(exampleIndex < numExamples);
             data = trainData->data();
             label = (*trainLabels)[exampleIndex].c_str();
+            filename = (*trainFilenames)[exampleIndex].c_str();
         } else if (exampleType == ExampleType::VALIDATE) {
             uint64_t numExamples = validateData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = validateData->data();
             label = (*validateLabels)[exampleIndex].c_str();
+            filename = (*validateFilenames)[exampleIndex].c_str();
         } else if (exampleType == ExampleType::TEST) {
             uint64_t numExamples = testData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = testData->data();
             label = (*testLabels)[exampleIndex].c_str();
+            filename = (*testFilenames)[exampleIndex].c_str();
         } else {
             assert(false);
         }
@@ -176,7 +221,7 @@ class Shard {
         memcpy(buffer, exampleStart, exampleSizeInBytes);
     }
 
-    void loadExampleAsync(uint8_t *buffer, string &label, ExampleType exampleType, uint64_t exampleIndex, Stream stream) {
+    void loadExampleAsync(uint8_t *buffer, string &label, string &filename, ExampleType exampleType, uint64_t exampleIndex, Stream stream) {
         assert(buffer != nullptr);
         cudaError_t cudaStatus;
 
@@ -187,16 +232,19 @@ class Shard {
             assert(exampleIndex < numExamples);
             data = trainData->data();
             labelCallbackParams->labels = trainLabels;
+            labelCallbackParams->filenames = trainFilenames;
         } else if (exampleType == ExampleType::VALIDATE) {
             uint64_t numExamples = validateData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = validateData->data();
             labelCallbackParams->labels = validateLabels;
+            labelCallbackParams->filenames = validateFilenames;
         } else if (exampleType == ExampleType::TEST) {
             uint64_t numExamples = testData->size() / exampleSizeInBytes;
             assert(exampleIndex < numExamples);
             data = testData->data();
             labelCallbackParams->labels = testLabels;
+            labelCallbackParams->filenames = testFilenames;
         } else {
             assert(false);
         }
@@ -204,8 +252,9 @@ class Shard {
         uint8_t *exampleStart = data + (exampleIndex * exampleSizeInBytes);
         cudaStatus = cudaMemcpyAsync(buffer, exampleStart, exampleSizeInBytes, cudaMemcpyHostToHost, stream);
         assert(cudaStatus == cudaSuccess);
+        labelCallbackParams->index = exampleIndex;
         labelCallbackParams->label = &label;
-        labelCallbackParams->labelIndex = exampleIndex;
+        labelCallbackParams->filename = &filename;
         cudaStatus = cudaLaunchHostFunc(stream, getLabelCallback, labelCallbackParams);
         assert(cudaStatus == cudaSuccess);
     }
@@ -217,8 +266,27 @@ class Shard {
         trainLabels->shrink_to_fit();
         validateLabels->shrink_to_fit();
         testLabels->shrink_to_fit();
+        trainFilenames->shrink_to_fit();
+        validateFilenames->shrink_to_fit();
+        testFilenames->shrink_to_fit();
         bool status = boost::interprocess::managed_mapped_file::shrink_to_fit(filename.c_str());
         assert(status == true);
+    }
+
+    string getFilename() { return filename; }
+
+    uint64_t getExampleSizeInBytes() { return exampleSizeInBytes; }
+
+    uint64_t getNumExamples(ExampleType exampleType) {
+        if (exampleType == ExampleType::TRAIN) {
+            return trainLabels->size();
+        } else if (exampleType == ExampleType::VALIDATE) {
+            return validateLabels->size();
+        } else if (exampleType == ExampleType::TEST) {
+            return testLabels->size();
+        } else {
+            assert(false);
+        }
     }
 
    private:
@@ -232,19 +300,27 @@ class Shard {
     file_string_vector_t *trainLabels;
     file_string_vector_t *validateLabels;
     file_string_vector_t *testLabels;
+    file_string_vector_t *trainFilenames;
+    file_string_vector_t *validateFilenames;
+    file_string_vector_t *testFilenames;
     ShardMetadata *shardMetadata;
+
+    std::shared_ptr<std::mutex> mtx;
 
     std::shared_ptr<file_string_allocator_t> fileStringAllocator;
 
     struct LabelCallbackParams {
+        uint64_t index;
         file_string_vector_t *labels;
         string *label;
-        uint64_t labelIndex;
+        file_string_vector_t *filenames;
+        string *filename;
     };
 
     static void CUDART_CB getLabelCallback(void *data) {
         LabelCallbackParams *params = (LabelCallbackParams *)data;
-        *(params->label) = (*(params->labels))[params->labelIndex].c_str();
+        *(params->label) = (*(params->labels))[params->index].c_str();
+        *(params->filename) = (*(params->filenames))[params->index].c_str();
         delete params;
     }
 };
@@ -269,7 +345,7 @@ class ShardedRawDatasetCreator {
                              std::unordered_set<string> destDirectories,
                              string baseDatasetFileName);
 
-    bool createDataset(std::unique_ptr<DataProcessor> &&dataProcessor);
+    bool createDataset(std::unique_ptr<DataProcessor> &&dataProcessor, std::vector<Shard> &shards);
 
    private:
     std::unordered_set<string> sourceDirectories;
@@ -289,13 +365,16 @@ class ShardedRawDatasetCreator {
 
     uint32_t numOutputShards;
     std::vector<boost::filesystem::path> destShardFiles;
-    std::vector<Shard> shards;
 
     mutex mtx;
 
-    void getNumExamples(uint64_t &numTrainExamples, uint64_t &numValidateExamples, uint64_t &numTestExamples);
+    void getNumExamples(uint64_t &numTrainExamples,
+                        uint64_t &numValidateExamples,
+                        uint64_t &numTestExamples,
+                        uint64_t &numFilenameChars,
+                        uint64_t &numClassNameChars);
     void loadExamples(WorkQueueUnordered<DataElement, DataElement> &workQueue);
-    void writeDataToShard(WorkQueueUnordered<DataElement, DataElement> *workQueue);
+    void writeDataToShard(WorkQueueUnordered<DataElement, DataElement> *workQueue, std::vector<Shard> *shards);
 
     atomic<uint64_t> destShardTrain;
     atomic<uint64_t> destShardValidate;

@@ -37,10 +37,13 @@ ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceD
     }
 }
 
-bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataProcessor) {
+bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataProcessor, std::vector<Shard>& shards) {
     uint32_t numOutputShards = destDirectories.size();
     uint64_t numTrainExamples, numValidateExamples, numTestExamples;
-    getNumExamples(numTrainExamples, numValidateExamples, numTestExamples);
+    uint64_t maxFilenameChars;
+    uint64_t maxClassNameChars;
+    classes.clear();
+    getNumExamples(numTrainExamples, numValidateExamples, numTestExamples, maxFilenameChars, maxClassNameChars);
     uint64_t numTrainExamplesPerShard = (numTrainExamples / numOutputShards) + numOutputShards;
     uint64_t numValidateExamplesPerShard = (numValidateExamples / numOutputShards) + numOutputShards;
     uint64_t numTestExamplesPerShard = (numTestExamples / numOutputShards) + numOutputShards;
@@ -62,13 +65,16 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
                                   numTrainExamplesPerShard,
                                   numValidateExamplesPerShard,
                                   numTestExamplesPerShard,
-                                  outputTensorSizeInBytes);
+                                  outputTensorSizeInBytes,
+                                  maxFilenameChars,
+                                  classes.size(),
+                                  maxClassNameChars);
     }
 
     // start numDestDisks threads, each pops a processed training example and writes it to the end of the memMappedFile that it is told too
     std::vector<thread> writerThreads;
     for (uint32_t i = 0; i < numOutputShards; ++i) {
-        writerThreads.emplace_back(&ShardedRawDatasetCreator::writeDataToShard, this, &workQueue);
+        writerThreads.emplace_back(&ShardedRawDatasetCreator::writeDataToShard, this, &workQueue, &shards);
     }
 
     loadExamples(workQueue);
@@ -97,10 +103,17 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
     return true;
 }
 
-void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64_t& numValidateExamples, uint64_t& numTestExamples) {
+void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
+                                              uint64_t& numValidateExamples,
+                                              uint64_t& numTestExamples,
+                                              uint64_t& maxFilenameChars,
+                                              uint64_t& maxClassNameChars) {
     numTrainExamples = 0;
     numValidateExamples = 0;
     numTestExamples = 0;
+
+    maxFilenameChars = 0;
+    maxClassNameChars = 0;
 
     for (auto it = sourceDirectories.begin(); it != sourceDirectories.end(); ++it) {
         string datasetDirectoryString = *it;
@@ -138,7 +151,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64
             }
 
             uint64_t numExamples = 0;
-#pragma omp parallel for schedule(static, 1) reduction(+ : numExamples)
+#pragma omp parallel for schedule(static, 1) reduction(+ : numExamples) reduction(max : maxFilenameChars)
             for (uint64_t processor = 0; processor < numProcessors; ++processor) {
                 uint64_t numClasses = classesPerThread[processor].size();
                 for (uint64_t i = 0; i < numClasses; ++i) {
@@ -146,11 +159,13 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64
                     bool addToClasses = (type == ExampleType::TRAIN);
                     for (directory_entry& example : directory_iterator(classDirectory)) {
                         if (is_regular_file(example.path())) {
+                            string filename = example.path().filename().native();
+                            string className = classDirectory.filename().native();
+                            if (filename.length() > maxFilenameChars)
+                                maxFilenameChars = filename.length();
                             numExamples += 1;
                             if (addToClasses) {
                                 mtx.lock();
-                                string className = classDirectory.filename().native();
-                                assert(className.length() <= 256);
                                 classes.insert(className);
                                 mtx.unlock();
                                 addToClasses = false;
@@ -158,6 +173,11 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples, uint64
                         }
                     }
                 }
+            }
+
+            for (auto it = classes.begin(); it != classes.end(); ++it) {
+                if (it->length() > maxClassNameChars)
+                    maxClassNameChars = it->length();
             }
 
             if (type == ExampleType::TRAIN)
@@ -237,13 +257,16 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
     }
 }
 
-void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, DataElement>* workQueue) {
+void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, DataElement>* workQueue, std::vector<Shard>* shards) {
     bool queueOpen = true;
     DataElement processedDataElement;
     string type;
     uint64_t destShard;
-    while (queueOpen) {
+    while (true) {
         queueOpen = workQueue->pop(processedDataElement);
+        if (!queueOpen)
+            break;
+
         if (processedDataElement.numDataBytes == 0 || processedDataElement.data == nullptr)
             continue;
         if (processedDataElement.exampleType == ExampleType::TRAIN) {
@@ -258,7 +281,10 @@ void ShardedRawDatasetCreator::writeDataToShard(WorkQueueUnordered<DataElement, 
         }
 
         // printf("writing %s class %s to shard %ld\n", type.c_str(), processedDataElement.className.c_str(), destShard);
-        shards[destShard].writeExample(processedDataElement.data.get(), processedDataElement.className, processedDataElement.exampleType);
+        (*shards)[destShard].writeExample(processedDataElement.data.get(),
+                                          processedDataElement.className,
+                                          processedDataElement.fileName,
+                                          processedDataElement.exampleType);
     }
     // printf("queue closed\n");
 }

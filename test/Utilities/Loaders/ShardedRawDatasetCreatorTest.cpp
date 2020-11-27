@@ -17,9 +17,12 @@
 
 using std::mutex;
 using std::pair;
+using std::set;
 using std::string;
 using std::unordered_set;
 using std::vector;
+
+using namespace boost::filesystem;
 
 class TestDataProcessor : public DataProcessor {
     virtual uint64_t outputTensorSizeInBytes() { return 100; }
@@ -27,34 +30,89 @@ class TestDataProcessor : public DataProcessor {
     virtual DataElement operator()(DataElement &input) { return input; }
 };
 
-/*
+void verifyImages(Shard &shard) {
+    uint8_t buffer[224 * 224 * 3];
+    string label;
+    string filename;
+    for (int exampleTypeInt = (int)ExampleType::TRAIN; exampleTypeInt <= (int)ExampleType::TEST; ++exampleTypeInt) {
+        ExampleType exampleType = (ExampleType)exampleTypeInt;
+        set<string> exampleNames;
+        for (uint32_t i = 0; i < shard.getNumExamples(exampleType); ++i) {
+            shard.loadExample(buffer, label, filename, exampleType, i);
+            string qualifiedExampleName = label + '/' + filename;
+            ASSERT_EQ(exampleNames.count(qualifiedExampleName), 0u);
+            exampleNames.insert(qualifiedExampleName);
+
+            uint8_t pixel[3];
+            if (filename == "white.png") {
+                pixel[0] = 255;
+                pixel[1] = 255;
+                pixel[2] = 255;
+            } else if (filename == "black.png") {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
+            } else if (filename == "red.png") {
+                pixel[0] = 255;
+                pixel[1] = 0;
+                pixel[2] = 0;
+            } else if (filename == "green.png") {
+                pixel[0] = 0;
+                pixel[1] = 255;
+                pixel[2] = 0;
+            } else if (filename == "blue.png") {
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 255;
+            } else {
+                ASSERT_TRUE(false);
+            }
+
+            for (uint32_t p = 0; p < 224 * 224; ++p) {
+                ASSERT_EQ(buffer[3 * p], pixel[0]);
+                ASSERT_EQ(buffer[3 * p + 1], pixel[1]);
+                ASSERT_EQ(buffer[3 * p + 2], pixel[2]);
+            }
+        }
+    }
+}
+
 TEST(SharedRawDatasetCreator, evaluatesDataset) {
     string baseFilename = "testDataset";
+    string testDatasetDir("test/DeepLearning/DataSet");
+
+    path tempDirectoryPath = temp_directory_path();
+    tempDirectoryPath /= "ThorFrameworkDatasetTest";
+    remove_all(tempDirectoryPath);
+    create_directory(tempDirectoryPath);
+
     unordered_set<string> sourceDirectories;
     unordered_set<string> destDirectories;
 
-    sourceDirectories.insert("/home/andrew/ThorTestDataset/inputShard0");
-    sourceDirectories.insert("/home/andrew/ThorTestDataset/inputShard1");
-    destDirectories.insert("/home/andrew/ThorTestDataset/outputShard0");
-    destDirectories.insert("/home/andrew/ThorTestDataset/outputShard1");
+    sourceDirectories.insert(testDatasetDir);
+    destDirectories.insert(tempDirectoryPath.native());
 
+    std::vector<Shard> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<TestDataProcessor>(new TestDataProcessor()));
-}
-*/
-// /media/andrew/SSD_Storage/imageNetTrainImages/train/cat/n03085013_2277.JPEG
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224, false)), shards);
 
-TEST(SharedRawDatasetCreator, loadAndProcessImages) {
-    string baseFilename = "testDataset";
-    unordered_set<string> sourceDirectories;
-    unordered_set<string> destDirectories;
+    // load the dataset, ensure it contains the expected contents
+    ASSERT_EQ(shards.size(), 1u);
+    ASSERT_EQ(shards[0].getNumExamples(ExampleType::TRAIN), 3u);
+    ASSERT_EQ(shards[0].getNumExamples(ExampleType::VALIDATE), 1u);
+    ASSERT_EQ(shards[0].getNumExamples(ExampleType::TEST), 7u);
 
-    sourceDirectories.insert("/media/andrew/SSD_Storage/ImageNet_2012/");
-    destDirectories.insert("/media/andrew/SSD_Storage/");
-    destDirectories.insert("/media/andrew/PCIE_SSD");
+    if (rand() % 2 == 0)
+        shards.clear();
 
-    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224, false)));
+    Shard reopenedShard;
+    path shardPath;
+    shardPath = tempDirectoryPath;
+    shardPath /= (baseFilename + "_1_of_1");
+    reopenedShard.openShard(shardPath.native());
+    verifyImages(reopenedShard);
+
+    remove_all(tempDirectoryPath);
 }
 
 int main(int argc, char **argv) {

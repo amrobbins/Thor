@@ -61,6 +61,7 @@ bool ImageLoader::resizeImage(
 
 bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray) {
     try {
+        image.getConstPixels(0, 0, image.columns(), image.rows());
         image.writePixels(RGBQuantum, rgbPixelArray);
     } catch (Exception e) {
         return false;
