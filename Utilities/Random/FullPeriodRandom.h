@@ -45,7 +45,6 @@ class FullPeriodRandom {
             std::unique_lock<std::mutex> lck(mtx);
 
         if (periodCount == period) {
-            periodCount = 0;
             reseed();
         }
 
@@ -57,25 +56,9 @@ class FullPeriodRandom {
         return X;
     }
 
-   private:
-    const uint64_t period;
-    uint64_t implementationPeriod;
-
-    uint64_t X;
-    uint64_t a;
-    uint64_t baseAMinusOne;
-    uint64_t maxBaseAMinusOneMultiple;
-    uint64_t c;
-
-    uint64_t periodCount;
-
-    vector<uint64_t> periodFactors;
-    vector<uint64_t> periodNonFactors;
-
-    const bool synchronized;
-    mutex mtx;
-
     void reseed(Optional<uint64_t> seed = Optional<uint64_t>::empty()) {
+        periodCount = 0;
+
         if (period == 1)
             return;
 
@@ -107,6 +90,24 @@ class FullPeriodRandom {
 
         X = seed;
     }
+
+   private:
+    const uint64_t period;
+    uint64_t implementationPeriod;
+
+    uint64_t X;
+    uint64_t a;
+    uint64_t baseAMinusOne;
+    uint64_t maxBaseAMinusOneMultiple;
+    uint64_t c;
+
+    uint64_t periodCount;
+
+    vector<uint64_t> periodFactors;
+    vector<uint64_t> periodNonFactors;
+
+    const bool synchronized;
+    mutex mtx;
 
     uint64_t getClockSeed() {
         std::hash<uint64_t> hashFunctor;

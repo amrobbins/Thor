@@ -19,10 +19,11 @@ class ImageLoader {
         double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Magick::Image &image);
 
     // Returns 1 byte for each of rgb in CHW format, for example [r0, g0, b0, r1, g1, b1, ...]
-    static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray);
+    static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray, bool toHWCLayout = false);
 
    private:
     ImageLoader() {}
+    static void convertRGB_HWCtoCHW(uint8_t *sourceRgbPixelArray, uint8_t *destRgbPixelArray, uint64_t rows, uint64_t cols);
 
     struct MagickInitializer {
         MagickInitializer();

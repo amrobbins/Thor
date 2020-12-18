@@ -68,11 +68,12 @@ void verifyImages(Shard &shard) {
                 ASSERT_TRUE(false);
             }
 
-            for (uint32_t p = 0; p < 224 * 224; ++p) {
-                ASSERT_EQ(buffer[3 * p], pixel[0]);
-                ASSERT_EQ(buffer[3 * p + 1], pixel[1]);
-                ASSERT_EQ(buffer[3 * p + 2], pixel[2]);
-            }
+            for (uint32_t p = 0; p < 224 * 224; ++p)
+                ASSERT_EQ(buffer[p], pixel[0]);
+            for (uint32_t p = 0; p < 224 * 224; ++p)
+                ASSERT_EQ(buffer[224 * 224 + p], pixel[1]);
+            for (uint32_t p = 0; p < 224 * 224; ++p)
+                ASSERT_EQ(buffer[2 * 224 * 224 + p], pixel[2]);
         }
     }
 }
@@ -114,6 +115,24 @@ TEST(SharedRawDatasetCreator, evaluatesDataset) {
 
     remove_all(tempDirectoryPath);
 }
+
+/*
+TEST(SharedRawDatasetCreator, createImagenet) {
+    string baseFilename = "ImageNet2012";
+    string testDatasetDir("/media/andrew/SSD_Storage/ImageNet_2012");
+
+    unordered_set<string> sourceDirectories;
+    unordered_set<string> destDirectories;
+
+    sourceDirectories.insert(testDatasetDir);
+    destDirectories.insert("/media/andrew/SSD_Storage/");
+    destDirectories.insert("/media/andrew/PCIE_SSD/");
+
+    std::vector<Shard> shards;
+    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, false)), shards);
+}
+*/
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

@@ -16,8 +16,6 @@ AsyncTensorQueue::AsyncTensorQueue(uint64_t queueSize, TensorDescriptor bufferDe
     this->queueSize = queueSize;
     this->bufferDescriptor = bufferDescriptor;
     this->bufferPlacement = bufferPlacement;
-
-    allocateBuffers();
 }
 
 AsyncTensorQueue::~AsyncTensorQueue() { close(); }
@@ -31,8 +29,6 @@ void AsyncTensorQueue::resize(uint64_t queueSize, TensorDescriptor bufferDescrip
     this->queueSize = queueSize;
     this->bufferDescriptor = bufferDescriptor;
     this->bufferPlacement = bufferPlacement;
-
-    allocateBuffers();
 }
 
 // By default the queue opens with num hardware threads - 1, and 4x this number of output buffers
@@ -42,6 +38,7 @@ void AsyncTensorQueue::open() {
     assert(queueOpen == false);
     assert(queueSize > 0);
 
+    allocateBuffers();
     queueOpen = true;
 }
 

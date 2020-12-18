@@ -149,6 +149,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
                    build/Utilities/Loaders/ImageLoader.o \
                    build/Utilities/Loaders/ImageProcessor.o \
+                   build/Utilities/Loaders/BatchAssembler.o \
                    build/Utilities/WorkQueue/AsyncTensorQueue.o \
                    build/DeepLearning/Api/Tensor/Tensor.o \
                    build/DeepLearning/Api/Layers/Layer.o \
@@ -426,6 +427,10 @@ build/Utilities/Loaders/ImageLoader.o: Utilities/Loaders/ImageLoader.h Utilities
 build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Utilities/Loaders/ImageProcessor.cpp
 	mkdir -p build/Utilities/Loaders
 	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ImageProcessor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageProcessor.o
+
+build/Utilities/Loaders/BatchAssembler.o: Utilities/Loaders/BatchAssembler.h Utilities/Loaders/BatchAssembler.cpp
+	mkdir -p build/Utilities/Loaders
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/BatchAssembler.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/BatchAssembler.o
 
 build/Utilities/WorkQueue/AsyncTensorQueue.o: Utilities/WorkQueue/AsyncTensorQueue.h Utilities/WorkQueue/AsyncTensorQueue.cpp
 	mkdir -p build/Utilities/WorkQueue

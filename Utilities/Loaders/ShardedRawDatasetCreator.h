@@ -11,6 +11,7 @@
 
 #include <boost/filesystem.hpp>
 #include <boost/interprocess/containers/map.hpp>
+#include <boost/interprocess/containers/set.hpp>
 #include <boost/interprocess/containers/string.hpp>
 #include <boost/interprocess/containers/vector.hpp>
 #include <boost/interprocess/managed_mapped_file.hpp>
@@ -44,6 +45,10 @@ typedef boost::interprocess::allocator<file_string_t, boost::interprocess::manag
     file_string_vector_allocator_t;
 typedef boost::interprocess::vector<file_string_t, file_string_vector_allocator_t> file_string_vector_t;
 
+typedef boost::interprocess::allocator<file_string_t, boost::interprocess::managed_mapped_file::segment_manager>
+    file_string_set_allocator_t;
+typedef boost::interprocess::set<file_string_t, file_string_set_allocator_t> file_string_set_t;
+
 enum class ExampleType { TRAIN = 3, VALIDATE, TEST };
 
 struct DataElement {
@@ -61,7 +66,10 @@ struct ShardMetadata {
 
 class Shard {
    public:
-    Shard() { mtx = std::make_shared<std::mutex>(); }
+    Shard() {
+        mtx = std::make_shared<std::mutex>();
+        open = false;
+    }
 
     void createShard(string filename,
                      uint64_t numTrainExamples,
@@ -73,9 +81,11 @@ class Shard {
                      uint64_t maxClassNameChars) {
         this->filename = filename;
         this->exampleSizeInBytes = exampleSizeInBytes;
-        uint64_t shardSizeInBytes =
-            (numTrainExamples + numValidateExamples + numTestExamples) * (exampleSizeInBytes + (maxFilenameChars + 32)) +
-            (numClasses * (maxClassNameChars + 32)) + 1000000;
+        uint64_t numExamples = numTrainExamples + numValidateExamples + numTestExamples;
+        uint64_t rawDataBytes = numExamples * exampleSizeInBytes;
+        uint64_t labelBytes = numExamples * (maxClassNameChars + 32 + sizeof(file_string_t));
+        uint64_t filenameBytes = numExamples * (maxFilenameChars + 32 + sizeof(file_string_t));
+        uint64_t shardSizeInBytes = rawDataBytes + labelBytes + filenameBytes + 1000000;
         mappedFile = boost::interprocess::managed_mapped_file(boost::interprocess::create_only, filename.c_str(), shardSizeInBytes);
 
         shardMetadata = mappedFile.construct<ShardMetadata>("shardMetadata")();
@@ -118,6 +128,8 @@ class Shard {
         testFilenames->reserve(numTestExamples);
 
         fileStringAllocator = std::make_shared<file_string_allocator_t>(mappedFile.get_segment_manager());
+
+        open = true;
     }
 
     void openShard(string filename) {
@@ -143,7 +155,11 @@ class Shard {
         assert(trainFilenames->size() == trainData->size() / exampleSizeInBytes);
         assert(validateFilenames->size() == validateData->size() / exampleSizeInBytes);
         assert(testFilenames->size() == testData->size() / exampleSizeInBytes);
+
+        open = true;
     }
+
+    bool isOpen() { return open; }
 
     void writeExample(uint8_t *buffer, const string &label, const string &filename, ExampleType exampleType) {
         assert(buffer != nullptr);
@@ -293,6 +309,7 @@ class Shard {
     string filename;
     uint64_t exampleSizeInBytes;
     boost::interprocess::managed_mapped_file mappedFile;
+    bool open;
 
     file_vector_t *trainData;
     file_vector_t *validateData;
