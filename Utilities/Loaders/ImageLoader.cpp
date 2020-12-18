@@ -59,14 +59,33 @@ bool ImageLoader::resizeImage(
     return true;
 }
 
-bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray) {
+bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray, bool toHWCLayout) {
     try {
-        image.getConstPixels(0, 0, image.columns(), image.rows());
-        image.writePixels(RGBQuantum, rgbPixelArray);
+        if (toHWCLayout) {
+            image.getConstPixels(0, 0, image.columns(), image.rows());
+            image.writePixels(RGBQuantum, rgbPixelArray);
+        } else {
+            uint8_t *buffer = new uint8_t[3 * image.rows() * image.columns()];
+            image.getConstPixels(0, 0, image.columns(), image.rows());
+            image.writePixels(RGBQuantum, buffer);
+            convertRGB_HWCtoCHW(buffer, rgbPixelArray, image.rows(), image.columns());
+            delete[] buffer;
+        }
     } catch (Exception e) {
         return false;
     }
     return true;
+}
+
+void ImageLoader::convertRGB_HWCtoCHW(uint8_t *sourceRgbPixelArray, uint8_t *destRgbPixelArray, uint64_t rows, uint64_t cols) {
+    uint64_t columnBytes = 3 * cols;
+    for (uint64_t r = 0; r < rows; ++r) {
+        for (uint64_t c = 0; c < cols; ++c) {
+            destRgbPixelArray[r * cols + c] = sourceRgbPixelArray[r * columnBytes + 3 * c];
+            destRgbPixelArray[r * cols + c + (rows * cols)] = sourceRgbPixelArray[r * columnBytes + 3 * c + 1];
+            destRgbPixelArray[r * cols + c + 2 * (rows * cols)] = sourceRgbPixelArray[r * columnBytes + 3 * c + 2];
+        }
+    }
 }
 
 ImageLoader::MagickInitializer::MagickInitializer() {
