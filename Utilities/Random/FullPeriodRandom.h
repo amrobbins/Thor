@@ -6,6 +6,7 @@
 #include <cmath>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 using std::thread;
 
@@ -103,8 +104,8 @@ class FullPeriodRandom {
 
     uint64_t periodCount;
 
-    vector<uint64_t> periodFactors;
-    vector<uint64_t> periodNonFactors;
+    std::vector<uint64_t> periodFactors;
+    std::vector<uint64_t> periodNonFactors;
 
     const bool synchronized;
     mutex mtx;
@@ -126,9 +127,9 @@ class FullPeriodRandom {
         return seed;
     }
 
-    void getFactors(uint64_t period, vector<uint64_t> &factors, vector<uint64_t> &nonFactors) {
+    void getFactors(uint64_t period, std::vector<uint64_t> &factors, std::vector<uint64_t> &nonFactors) {
         uint64_t maxPrime = period;
-        vector<uint32_t> mem((maxPrime + 63) / 64, 0);
+        std::vector<uint32_t> mem((maxPrime + 63) / 64, 0);
 
         factors.clear();
         nonFactors.clear();
