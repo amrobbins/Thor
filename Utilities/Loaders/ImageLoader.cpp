@@ -7,7 +7,7 @@ using namespace std;
 bool ImageLoader::loadImage(const string &filename, Image &image) {
     try {
         image = Image(filename);
-    } catch (Exception e) {
+    } catch (Exception &e) {
         return false;
     }
 
@@ -18,7 +18,7 @@ bool ImageLoader::loadImage(void *rawImageData, uint64_t rawImageDataSizeInBytes
     try {
         Blob imageBlob(rawImageData, rawImageDataSizeInBytes);
         image = Image(imageBlob);
-    } catch (Exception e) {
+    } catch (Exception &e) {
         return false;
     }
 
@@ -71,7 +71,7 @@ bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray, bool toHWCLay
             convertRGB_HWCtoCHW(buffer, rgbPixelArray, image.rows(), image.columns());
             delete[] buffer;
         }
-    } catch (Exception e) {
+    } catch (Exception &e) {
         return false;
     }
     return true;

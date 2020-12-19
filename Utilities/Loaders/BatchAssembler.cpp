@@ -1,3 +1,5 @@
+/*
+
 #include "Utilities/Loaders/BatchAssembler.h"
 
 using std::thread;
@@ -196,3 +198,5 @@ void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {
 }
 
 uint64_t BatchAssembler::getNumBatchesPerEpoch() { return batchesPerEpoch; }
+
+*/
