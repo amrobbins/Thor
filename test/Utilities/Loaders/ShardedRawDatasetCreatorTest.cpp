@@ -6,6 +6,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <memory.h>
 #include <set>
 #include <string>
 #include <utility>
@@ -18,6 +19,7 @@
 using std::mutex;
 using std::pair;
 using std::set;
+using std::shared_ptr;
 using std::string;
 using std::unordered_set;
 using std::vector;
@@ -93,15 +95,15 @@ TEST(SharedRawDatasetCreator, evaluatesDataset) {
     sourceDirectories.insert(testDatasetDir);
     destDirectories.insert(tempDirectoryPath.native());
 
-    std::vector<Shard> shards;
+    std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
     creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224, false)), shards);
 
     // load the dataset, ensure it contains the expected contents
     ASSERT_EQ(shards.size(), 1u);
-    ASSERT_EQ(shards[0].getNumExamples(ExampleType::TRAIN), 3u);
-    ASSERT_EQ(shards[0].getNumExamples(ExampleType::VALIDATE), 1u);
-    ASSERT_EQ(shards[0].getNumExamples(ExampleType::TEST), 7u);
+    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TRAIN), 3u);
+    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::VALIDATE), 1u);
+    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TEST), 7u);
 
     if (rand() % 2 == 0)
         shards.clear();
@@ -128,7 +130,7 @@ TEST(SharedRawDatasetCreator, createImagenet) {
     destDirectories.insert("/media/andrew/SSD_Storage/");
     destDirectories.insert("/media/andrew/PCIE_SSD/");
 
-    std::vector<Shard> shards;
+    std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
     creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, false)), shards);
 }

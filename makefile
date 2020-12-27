@@ -146,6 +146,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
                    build/Utilities/Common/Stream.o \
+                   build/Utilities/Loaders/Shard.o \
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
                    build/Utilities/Loaders/ImageLoader.o \
                    build/Utilities/Loaders/ImageProcessor.o \
@@ -415,6 +416,10 @@ build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h Dee
 build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
+
+build/Utilities/Loaders/Shard.o: Utilities/Loaders/Shard.h Utilities/Loaders/Shard.cpp
+	mkdir -p build/Utilities/Loaders
+	$(Gpp) -Wno-error=maybe-uninitialized $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/Shard.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/Shard.o $(GRAPHICS_MAGICK)
 
 build/Utilities/Loaders/ShardedRawDatasetCreator.o: Utilities/Loaders/ShardedRawDatasetCreator.h Utilities/Loaders/ShardedRawDatasetCreator.cpp
 	mkdir -p build/Utilities/Loaders
