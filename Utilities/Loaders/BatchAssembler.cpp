@@ -1,12 +1,16 @@
-/*
-
 #include "Utilities/Loaders/BatchAssembler.h"
 
-using std::thread;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 
-BatchAssembler::BatchAssembler(vector<Shard *> shards, ExampleType exampleType, TensorDescriptor exampleDescriptor, uint64_t batchSize) {
+using std::shared_ptr;
+using std::thread;
+using std::unique_ptr;
+
+BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
+                               ExampleType exampleType,
+                               TensorDescriptor exampleDescriptor,
+                               uint64_t batchSize) {
     assert(!shards.empty());
     assert(batchSize > 0);
 
@@ -26,17 +30,16 @@ BatchAssembler::BatchAssembler(vector<Shard *> shards, ExampleType exampleType, 
 
         numExamples += shards[i]->getNumExamples(exampleType);
         numExamplesPerShard.push_back(shards[i]->getNumExamples(exampleType));
-        randomizers.emplace_back(numExamplesPerShard[i]);
-
-        set<string> classesInShard = shards[i]->getAllClassesInShard();
-        for (auto it = classesInShard.begin(); it != classesInShard.end(); ++it) {
-            string className = *it;
-            if (classIndexes.count(className) == 0) {
-                uint64_t index = classIndexes.size();
-                classIndexes[className] = index;
-            }
-        }
+        randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i]));
     }
+
+    file_string_vector_t *allClasses = shards[0]->getAllClasses();
+    for (uint64_t c = 0; c < allClasses->size(); ++c) {
+        string className = (*allClasses)[c].c_str();
+        uint64_t index = classIndexes.size();
+        classIndexes[className] = index;
+    }
+
     batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, classIndexes.size()});
 
     batchesPerEpoch = (numExamples + (batchSize - 1)) / batchSize;
@@ -52,9 +55,9 @@ void BatchAssembler::open() {
     assert(shardQueues.empty());
 
     for (uint64_t i = 0; i < shards.size(); ++i) {
-        shardQueues.emplace_back(32);
-        shardQueues.back().open();
-        randomizers[i].reseed();
+        shardQueues.emplace_back(new AsyncQueue<LabeledExample>(32));
+        shardQueues.back()->open();
+        randomizers[i]->reseed();
 
         shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
     }
@@ -70,7 +73,7 @@ void BatchAssembler::open() {
 
 void BatchAssembler::close() {
     for (uint64_t i = 0; i < shards.size(); ++i)
-        shardQueues[i].close();
+        shardQueues[i]->close();
     batchDataQueue.close();
     batchLabelQueue.close();
 
@@ -88,9 +91,9 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
 
     while (1) {
         shards[shard]->loadExample(
-            labeledExample.data.data(), labeledExample.label, labeledExample.filename, exampleType, randomizers[shard].getRandomNumber());
+            labeledExample.data.data(), labeledExample.label, labeledExample.filename, exampleType, randomizers[shard]->getRandomNumber());
 
-        queueOpen = shardQueues[shard].push(labeledExample);
+        queueOpen = shardQueues[shard]->push(labeledExample);
         if (!queueOpen)
             return;
     }
@@ -126,7 +129,7 @@ void BatchAssembler::batchAssemblerThread() {
         randomNumber %= numExamplesLeftInEpoch;
 
         uint64_t priorExamples = 0;
-        uint64_t chosenShard;
+        uint64_t chosenShard = numExamplesPerShard.size();
         for (uint64_t i = 0; i < numExamplesPerShard.size(); ++i) {
             priorExamples += numExamplesLeftPerShard[i];
             if (priorExamples > randomNumber) {
@@ -136,8 +139,9 @@ void BatchAssembler::batchAssemblerThread() {
                 break;
             }
         }
+        assert(chosenShard < numExamplesPerShard.size());
 
-        queueOpen = shardQueues[chosenShard].pop(labeledExample);
+        queueOpen = shardQueues[chosenShard]->pop(labeledExample);
         if (!queueOpen)
             return;
 
@@ -198,5 +202,3 @@ void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {
 }
 
 uint64_t BatchAssembler::getNumBatchesPerEpoch() { return batchesPerEpoch; }
-
-*/
