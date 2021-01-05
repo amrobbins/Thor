@@ -38,10 +38,7 @@ class BatchAssembler {
 
     uint64_t getNumBatchesPerEpoch();
 
-    void getBatch(ThorImplementation::Tensor &batchTensor,
-                  ThorImplementation::Tensor &labelTensor,
-                  uint64_t &batchNum,
-                  uint64_t &numBatchesInEpoch);
+    void getBatch(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor, uint64_t &batchNum);
     void returnBuffer(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor);
 
    private:
