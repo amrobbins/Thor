@@ -73,14 +73,16 @@ bool AsyncTensorQueue::getBufferToLoad(Tensor &bufferToLoad) {
 bool AsyncTensorQueue::bufferLoaded(Tensor loadedBuffer) {
     std::unique_lock<std::mutex> lck(mtx);
 
+    if (!queueOpen)
+        return false;
+
     assert(loadingBuffers.count(loadedBuffer) == 1);
     loadingBuffers.erase(loadedBuffer);
-    if (queueOpen) {
-        loadedBuffers.push_back(loadedBuffer);
-        notEmpty.notify_one();
-    }
+    loadedBuffers.push_back(loadedBuffer);
 
-    return queueOpen;
+    notEmpty.notify_one();
+
+    return true;
 }
 
 bool AsyncTensorQueue::getBufferToUnload(Tensor &bufferToUnload) {
@@ -106,13 +108,16 @@ bool AsyncTensorQueue::getBufferToUnload(Tensor &bufferToUnload) {
 bool AsyncTensorQueue::bufferUnloaded(Tensor unloadedBuffer) {
     std::unique_lock<std::mutex> lck(mtx);
 
+    if (!queueOpen)
+        return false;
+
     assert(unloadingBuffers.count(unloadedBuffer) == 1);
     unloadingBuffers.erase(unloadedBuffer);
-    if (queueOpen) {
-        emptyBuffers.push_back(unloadedBuffer);
-        notFull.notify_one();
-    }
-    return queueOpen;
+    emptyBuffers.push_back(unloadedBuffer);
+
+    notFull.notify_one();
+
+    return true;
 }
 
 bool AsyncTensorQueue::tryGetBufferToLoad(Tensor &bufferToLoad) {
@@ -184,9 +189,12 @@ void AsyncTensorQueue::allocateBuffers() {
 void AsyncTensorQueue::deallocateBuffers() {
     assert(queueOpen == false);
 
-    // Since there may be work still going on with the *ing buffers, only deallocate the ones that are not rented out.
+    // Buffers are reference counted, if and *ing buffers are being used externally, they will not be deallocated until they are no longer
+    // referenced.
     emptyBuffers.clear();
     emptyBuffers.shrink_to_fit();
+    loadingBuffers.clear();
     loadedBuffers.clear();
     loadedBuffers.shrink_to_fit();
+    unloadingBuffers.clear();
 }
