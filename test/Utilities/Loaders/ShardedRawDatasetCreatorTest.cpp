@@ -80,8 +80,82 @@ void verifyImages(Shard &shard) {
     }
 }
 
+void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTensors, vector<ThorImplementation::Tensor> labelTensors) {
+    const uint64_t NUM_CLASSES = 4;
+    uint64_t numMiniBatches = batchTensors.size();
+    ASSERT_GT(batchSize, 0u);
+    ASSERT_GT(numMiniBatches, 0u);
+
+    for (uint64_t i = 0; i < batchTensors.size(); ++i) {
+        ASSERT_EQ(batchTensors[i].getDescriptor().getTotalNumElements(), batchSize * 224 * 224 * 3);
+        ASSERT_EQ(labelTensors[i].getDescriptor().getTotalNumElements(), batchSize * NUM_CLASSES);
+
+        for (uint64_t j = 0; j < batchSize; ++j) {
+            bool oneHotFound = false;
+            float *oneHotLabelArray = (float *)labelTensors[i].getMemPtr();
+            for (uint64_t k = 0; k < NUM_CLASSES; ++k) {
+                if (oneHotLabelArray[j * NUM_CLASSES + k] != 0) {
+                    ASSERT_EQ(oneHotFound, false);
+                    oneHotFound = true;
+                }
+            }
+            ASSERT_EQ(oneHotFound, true);
+
+            printf("%ld %ld\n", i, j);
+
+            string imageColor = "";
+            uint8_t *image = (uint8_t *)batchTensors[i].getMemPtr();
+            image += j * 224 * 224 * 3;
+            if (image[0] == 255 && image[1] == 255 && image[2] == 255) {
+                imageColor = "white";
+                printf("%s-\n", imageColor.c_str());
+                for (int k = 0; k < 224 * 224; ++k) {
+                    ASSERT_EQ(image[3 * k], 255);
+                    ASSERT_EQ(image[3 * k + 1], 255);
+                    ASSERT_EQ(image[3 * k + 2], 255);
+                }
+            } else if (image[0] == 0 && image[1] == 0 && image[2] == 0) {
+                imageColor = "black";
+                printf("%s-\n", imageColor.c_str());
+                for (int k = 0; k < 224 * 224; ++k) {
+                    ASSERT_EQ(image[3 * k], 0);
+                    ASSERT_EQ(image[3 * k + 1], 0);
+                    ASSERT_EQ(image[3 * k + 2], 0);
+                }
+            } else if (image[0] == 255 && image[1] == 0 && image[2] == 0) {
+                imageColor = "red";
+                printf("%s-\n", imageColor.c_str());
+                for (int k = 0; k < 224 * 224; ++k) {
+                    ASSERT_EQ(image[3 * k], 255);
+                    ASSERT_EQ(image[3 * k + 1], 0);
+                    ASSERT_EQ(image[3 * k + 2], 0);
+                }
+            } else if (image[0] == 0 && image[1] == 255 && image[2] == 0) {
+                imageColor = "green";
+                printf("%s-\n", imageColor.c_str());
+                for (int k = 0; k < 224 * 224; ++k) {
+                    ASSERT_EQ(image[3 * k], 0);
+                    ASSERT_EQ(image[3 * k + 1], 255);
+                    ASSERT_EQ(image[3 * k + 2], 0);
+                }
+            } else if (image[0] == 0 && image[1] == 0 && image[2] == 255) {
+                imageColor = "blue";
+                printf("%s-\n", imageColor.c_str());
+                for (int k = 0; k < 224 * 224; ++k) {
+                    ASSERT_EQ(image[3 * k], 0);
+                    ASSERT_EQ(image[3 * k + 1], 0);
+                    ASSERT_EQ(image[3 * k + 2], 255);
+                }
+            }
+            ASSERT_GT(imageColor.size(), 0u);
+        }
+    }
+}
+
 void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
-    uint64_t batchSize = (rand() % 4) + 1;
+    srand(time(nullptr));
+
+    uint64_t batchSize = (rand() % 3) + 1;
 
     BatchAssembler batchAssembler(
         shards,
@@ -91,12 +165,26 @@ void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
 
     printf("batchSize %ld\n", batchSize);
     ASSERT_EQ(batchAssembler.getNumBatchesPerEpoch(), (7 + (batchSize - 1)) / batchSize);
-    /*
-        void getBatch(ThorImplementation::Tensor &batchTensor,
-                      ThorImplementation::Tensor &labelTensor,
-                      uint64_t &batchNum);
-        void returnBuffer(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor);
-    */
+
+    ThorImplementation::Tensor batchTensor;
+    ThorImplementation::Tensor labelTensor;
+    vector<ThorImplementation::Tensor> batchTensors;
+    vector<ThorImplementation::Tensor> labelTensors;
+    uint64_t batchNum;
+
+    batchAssembler.getBatch(batchTensor, labelTensor, batchNum);
+    batchTensors.push_back(batchTensor);
+    labelTensors.push_back(labelTensor);
+    do {
+        batchAssembler.getBatch(batchTensor, labelTensor, batchNum);
+        batchTensors.push_back(batchTensor);
+        labelTensors.push_back(labelTensor);
+    } while (batchNum != 1);
+
+    verifyBatch(batchSize, batchTensors, labelTensors);
+
+    // Next line just to cover that function, does not return all buffers.
+    batchAssembler.returnBuffer(batchTensor, labelTensor);
 }
 
 TEST(SharedRawDatasetCreator, evaluatesDataset) {

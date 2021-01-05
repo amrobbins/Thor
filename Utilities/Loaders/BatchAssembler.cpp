@@ -38,8 +38,9 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     file_string_vector_t *allClasses = shards[0]->getAllClasses();
     for (uint64_t c = 0; c < allClasses->size(); ++c) {
         string className = (*allClasses)[c].c_str();
-        uint64_t index = classIndexes.size();
-        classIndexes[className] = index;
+        if (classIndexes.count(className) == 0) {
+            classIndexes[className] = classIndexes.size();
+        }
     }
 
     batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, classIndexes.size()});
@@ -167,6 +168,11 @@ void BatchAssembler::batchAssemblerThread() {
 
         // Load data to pinned memory buffer
         batchSlotOffset = exampleSizeInBytes * batchSlot;
+        printf("exBytes %ld  batchSlot %ld batchSlotOffset %ld batchNum %ld\n",
+               exampleSizeInBytes,
+               batchSlot,
+               batchSlotOffset,
+               currentBatchNum);
         memcpy((uint8_t *)batchDataBuffer.getMemPtr() + batchSlotOffset, labeledExample.data.data(), exampleSizeInBytes);
 
         // Load one-hot labels to pinned memory buffer
