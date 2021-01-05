@@ -155,7 +155,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
                 if (is_directory(classDirectory.path()) && !classDirectory.path().filename_is_dot() &&
                     !classDirectory.path().filename_is_dot_dot()) {
                     classesPerThread[thread].push_back(classDirectory.path());
-                    allClasses.insert(classDirectory.path().native());
+                    allClasses.insert(classDirectory.path().filename().native());
                     thread = (thread + 1) % numProcessors;
                 }
             }
