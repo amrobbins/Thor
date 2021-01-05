@@ -18,9 +18,11 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     this->exampleType = exampleType;
     this->batchSize = batchSize;
     this->exampleDescriptor = exampleDescriptor;
+
     vector<uint64_t> batchDimensions;
     batchDimensions.push_back(batchSize);
-    batchDimensions.insert(batchDimensions.end(), exampleDescriptor.getDimensions().begin(), exampleDescriptor.getDimensions().end());
+    for (uint64_t i = 0; i < exampleDescriptor.getDimensions().size(); ++i)
+        batchDimensions.push_back(exampleDescriptor.getDimensions()[i]);
     batchDataTensorDescriptor = TensorDescriptor(exampleDescriptor.getDataType(), batchDimensions);
     this->exampleDescriptor = exampleDescriptor;
 
@@ -99,6 +101,7 @@ void BatchAssembler::shardReaderThread(uint64_t shard) {
     }
 }
 
+// There can be only 1 batchAssemblerThread, it is designed expecting that there is just the one.
 void BatchAssembler::batchAssemblerThread() {
     uint64_t exampleSizeInBytes = shards[0]->getExampleSizeInBytes();
 
@@ -112,12 +115,26 @@ void BatchAssembler::batchAssemblerThread() {
     bool queueOpen;
     LabeledExample labeledExample;
     uint64_t batchSlot = 0;
+    Tensor batchDataBuffer;
+    Tensor batchLabelsBuffer;
+    uint64_t batchSlotOffset;
 
     while (1) {
         if (numExamplesLeftInEpoch == 0) {
             numExamplesLeftInEpoch = numExamplesInEpoch;
             for (uint64_t i = 0; i < numExamplesPerShard.size(); ++i) {
                 numExamplesLeftPerShard[i] = numExamplesPerShard[i];
+            }
+        }
+
+        if (batchSlot == 0) {
+            queueOpen = batchDataQueue.getBufferToLoad(batchDataBuffer);
+            if (!queueOpen)
+                return;
+            queueOpen = batchLabelQueue.getBufferToLoad(batchLabelsBuffer);
+            if (!queueOpen) {
+                batchDataQueue.bufferLoaded(batchDataBuffer);
+                return;
             }
         }
 
@@ -142,21 +159,17 @@ void BatchAssembler::batchAssemblerThread() {
         assert(chosenShard < numExamplesPerShard.size());
 
         queueOpen = shardQueues[chosenShard]->pop(labeledExample);
-        if (!queueOpen)
+        if (!queueOpen) {
+            batchDataQueue.bufferLoaded(batchDataBuffer);
+            batchLabelQueue.bufferLoaded(batchLabelsBuffer);
             return;
+        }
 
-        Tensor batchDataBuffer;
-        uint64_t batchSlotOffset;
-        queueOpen = batchDataQueue.getBufferToLoad(batchDataBuffer);
-        if (!queueOpen)
-            return;
+        // Load data to pinned memory buffer
         batchSlotOffset = exampleSizeInBytes * batchSlot;
         memcpy((uint8_t *)batchDataBuffer.getMemPtr() + batchSlotOffset, labeledExample.data.data(), exampleSizeInBytes);
 
-        Tensor batchLabelsBuffer;
-        queueOpen = batchLabelQueue.getBufferToLoad(batchLabelsBuffer);
-        if (!queueOpen)
-            return;
+        // Load one-hot labels to pinned memory buffer
         batchSlotOffset = classIndexes.size() * batchSlot;
         float *batchLabels = (float *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
         memset(batchLabels, 0, sizeof(float) * classIndexes.size());
@@ -166,13 +179,8 @@ void BatchAssembler::batchAssemblerThread() {
         if (batchSlot == batchSize) {
             batchSlot = 0;
 
-            queueOpen = batchDataQueue.bufferLoaded(batchDataBuffer);
-            if (!queueOpen)
-                return;
-
-            queueOpen = batchLabelQueue.bufferLoaded(batchLabelsBuffer);
-            if (!queueOpen)
-                return;
+            batchDataQueue.bufferLoaded(batchDataBuffer);
+            batchLabelQueue.bufferLoaded(batchLabelsBuffer);
 
             batchNumQueue.push_back(currentBatchNum);
             currentBatchNum += 1;
@@ -182,7 +190,7 @@ void BatchAssembler::batchAssemblerThread() {
     }
 }
 
-void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t &batchNum, uint64_t &numBatchesInEpoch) {
+void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t &batchNum) {
     bool queueOpen;
     queueOpen = batchDataQueue.getBufferToUnload(batchTensor);
     assert(queueOpen);
@@ -190,7 +198,6 @@ void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t
     assert(queueOpen);
     batchNum = batchNumQueue.front() + 1;
     batchNumQueue.pop_front();
-    numBatchesInEpoch = batchesPerEpoch;
 }
 
 void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {

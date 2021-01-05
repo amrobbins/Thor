@@ -80,6 +80,25 @@ void verifyImages(Shard &shard) {
     }
 }
 
+void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
+    uint64_t batchSize = (rand() % 4) + 1;
+
+    BatchAssembler batchAssembler(
+        shards,
+        ExampleType::TEST,
+        ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224}),
+        batchSize);
+
+    printf("batchSize %ld\n", batchSize);
+    ASSERT_EQ(batchAssembler.getNumBatchesPerEpoch(), (7 + (batchSize - 1)) / batchSize);
+    /*
+        void getBatch(ThorImplementation::Tensor &batchTensor,
+                      ThorImplementation::Tensor &labelTensor,
+                      uint64_t &batchNum);
+        void returnBuffer(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor);
+    */
+}
+
 TEST(SharedRawDatasetCreator, evaluatesDataset) {
     string baseFilename = "testDataset";
     string testDatasetDir("test/DeepLearning/DataSet");
@@ -104,6 +123,8 @@ TEST(SharedRawDatasetCreator, evaluatesDataset) {
     ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TRAIN), 3u);
     ASSERT_EQ(shards[0]->getNumExamples(ExampleType::VALIDATE), 1u);
     ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TEST), 7u);
+
+    verifyBatchAssembler(shards);
 
     if (rand() % 2 == 0)
         shards.clear();
