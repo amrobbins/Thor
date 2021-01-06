@@ -26,6 +26,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     batchDataTensorDescriptor = TensorDescriptor(exampleDescriptor.getDataType(), batchDimensions);
     this->exampleDescriptor = exampleDescriptor;
 
+    numExamples = 0;
     for (uint64_t i = 0; i < shards.size(); ++i) {
         assert(shards[i]->isOpen());
         assert(shards[i]->getExampleSizeInBytes() == exampleDescriptor.getArraySizeInBytes());
@@ -115,11 +116,11 @@ void BatchAssembler::batchAssemblerThread() {
 
     bool queueOpen;
     LabeledExample labeledExample;
-    uint64_t batchSlot = 0;
     Tensor batchDataBuffer;
     Tensor batchLabelsBuffer;
     uint64_t batchSlotOffset;
 
+    uint64_t batchSlot = 0;
     while (1) {
         if (numExamplesLeftInEpoch == 0) {
             numExamplesLeftInEpoch = numExamplesInEpoch;
@@ -168,11 +169,6 @@ void BatchAssembler::batchAssemblerThread() {
 
         // Load data to pinned memory buffer
         batchSlotOffset = exampleSizeInBytes * batchSlot;
-        printf("exBytes %ld  batchSlot %ld batchSlotOffset %ld batchNum %ld\n",
-               exampleSizeInBytes,
-               batchSlot,
-               batchSlotOffset,
-               currentBatchNum);
         memcpy((uint8_t *)batchDataBuffer.getMemPtr() + batchSlotOffset, labeledExample.data.data(), exampleSizeInBytes);
 
         // Load one-hot labels to pinned memory buffer
