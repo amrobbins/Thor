@@ -1,25 +1,24 @@
 #pragma once
 
-#include "DeepLearning/Api/Loaders/LoaderBase.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Loaders/Shard.h"
 
 #include <assert.h>
+#include <map>
 #include <memory>
-
-namespace Thor {
+#include <string>
 
 using std::shared_ptr;
 
 class Loader {
    public:
-    Loader() {}
-    Loader(LoaderBase *loaderBase);
-
     virtual ~Loader() {}
 
-    Loader *getLoader();
+    virtual std::map<std::string, ThorImplementation::Tensor> getBatch(ExampleType exampleType, uint64_t &batchNum) = 0;
+    virtual void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap) = 0;
 
-   private:
-    shared_ptr<LoaderBase> loader;
+    virtual uint64_t getBatchSize() { return batchSize; }
+
+   protected:
+    uint64_t batchSize;
 };
-
-}  // namespace Thor

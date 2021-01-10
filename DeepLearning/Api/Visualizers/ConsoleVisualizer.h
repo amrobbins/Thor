@@ -1,17 +1,17 @@
 #pragma once
 
-#include "DeepLearning/Api/Visualizers/VisualizerBase.h"
+#include "DeepLearning/Api/Visualizers/Visualizer.h"
 
 namespace Thor {
 
 class Visualizer;
 
-class ConsoleVisualizer : public VisualizerBase {
+class ConsoleVisualizer : public Visualizer {
    public:
     class Builder;
     ConsoleVisualizer() : initialized(false) {}
 
-    virtual ~ConsoleVisualizer();
+    virtual ~ConsoleVisualizer() {}
 
    private:
     bool initialized;

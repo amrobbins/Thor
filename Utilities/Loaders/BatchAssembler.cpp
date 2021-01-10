@@ -33,7 +33,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 
         numExamples += shards[i]->getNumExamples(exampleType);
         numExamplesPerShard.push_back(shards[i]->getNumExamples(exampleType));
-        randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i]));
+        randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i], true));
     }
 
     file_string_vector_t *allClasses = shards[0]->getAllClasses();
@@ -64,6 +64,8 @@ void BatchAssembler::open() {
         randomizers[i]->reseed();
 
         shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
+        shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
+        shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
     }
     currentBatchNum = 0;
 
@@ -76,12 +78,12 @@ void BatchAssembler::open() {
 }
 
 void BatchAssembler::close() {
-    for (uint64_t i = 0; i < shards.size(); ++i)
+    for (uint64_t i = 0; i < shardQueues.size(); ++i)
         shardQueues[i]->close();
     batchDataQueue.close();
     batchLabelQueue.close();
 
-    for (uint64_t i = 0; i < shards.size(); ++i)
+    for (uint64_t i = 0; i < shardThreads.size(); ++i)
         shardThreads[i].join();
     assemblerThread.join();
 
