@@ -3,21 +3,21 @@
 
 using namespace Thor;
 
-Executor LocalExecutor::Builder::build() {
+LocalExecutor LocalExecutor::Builder::build() {
     assert(_network.isPresent());
-    assert(_loader.isPresent());
-    assert(_hyperparameterController.isPresent());
+    assert(_loader);
+    // assert(_hyperparameterController.isPresent());
 
     if (_visualizers.isEmpty()) {
         _visualizers = vector<Visualizer>();
         _visualizers.get().push_back(ConsoleVisualizer::Builder().build());
     }
 
-    LocalExecutor *localExecutor = new LocalExecutor();
-    localExecutor->network = _network;
-    localExecutor->loader = _loader;
-    localExecutor->hyperparameterController = _hyperparameterController;
-    localExecutor->visualizers = _visualizers;
-    localExecutor->initialized = true;
-    return Executor(localExecutor);
+    LocalExecutor localExecutor;
+    localExecutor.network = _network;
+    localExecutor.loader = _loader;
+    // localExecutor.hyperparameterController = _hyperparameterController;
+    localExecutor.visualizers = _visualizers;
+    localExecutor.initialized = true;
+    return localExecutor;
 }

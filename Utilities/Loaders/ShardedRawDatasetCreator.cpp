@@ -33,7 +33,7 @@ ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceD
     uint64_t i = 0;
     for (auto it = destDirectories.begin(); it != destDirectories.end(); ++it) {
         path shardPath(*it);
-        shardPath /= (baseDatasetFileName + "_" + std::to_string(i + 1) + "_of_" + std::to_string(destDirectories.size()));
+        shardPath /= (baseDatasetFileName + "_" + std::to_string(i + 1) + "_of_" + std::to_string(destDirectories.size())) + ".shard";
         destShardFiles.push_back(shardPath);
         ++i;
     }

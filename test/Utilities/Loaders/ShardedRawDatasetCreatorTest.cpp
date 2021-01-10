@@ -196,7 +196,7 @@ void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
     batchAssembler.returnBuffer(batchTensor, labelTensor);
 }
 
-TEST(SharedRawDatasetCreator, evaluatesDataset) {
+TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     string baseFilename = "testDataset";
     string testDatasetDir("test/DeepLearning/DataSet");
 
@@ -229,7 +229,7 @@ TEST(SharedRawDatasetCreator, evaluatesDataset) {
     Shard reopenedShard;
     path shardPath;
     shardPath = tempDirectoryPath;
-    shardPath /= (baseFilename + "_1_of_1");
+    shardPath /= (baseFilename + "_1_of_1.shard");
     reopenedShard.openShard(shardPath.native());
     verifyImages(reopenedShard);
 
@@ -237,7 +237,7 @@ TEST(SharedRawDatasetCreator, evaluatesDataset) {
 }
 
 /*
-TEST(SharedRawDatasetCreator, createImagenet) {
+TEST(ShardedRawDatasetCreator, createImagenet) {
     string baseFilename = "ImageNet2012";
     string testDatasetDir("/media/andrew/SSD_Storage/ImageNet_2012");
 

@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 
+#include <memory>
 #include <string>
 
 namespace Thor {
@@ -23,22 +24,22 @@ class LocalExecutor : public ExecutorBase {
 
     virtual ~LocalExecutor() {}
 
-    void trainEpochs(double epochs);
-    void trainBatches(uint32_t batches);
-    void createSnapshot(string filepath);
+    void trainEpochs(double epochs) {}       // FIXME
+    void trainBatches(uint32_t batches) {}   // FIXME
+    void createSnapshot(string filepath) {}  // FIXME
 
    private:
     bool initialized;
 
     Network network;
-    Loader loader;
+    std::shared_ptr<Loader> loader;
     HyperparameterController hyperparameterController;
     vector<Visualizer> visualizers;
 };
 
 class LocalExecutor::Builder {
    public:
-    virtual Executor build();
+    virtual LocalExecutor build();
 
     LocalExecutor::Builder network(Network _network) {
         assert(!this->_network.isPresent());
@@ -46,8 +47,9 @@ class LocalExecutor::Builder {
         return *this;
     }
 
-    LocalExecutor::Builder loader(Loader _loader) {
-        assert(!this->_loader.isPresent());
+    LocalExecutor::Builder loader(std::shared_ptr<Loader> _loader) {
+        assert(_loader);
+        assert(!this->_loader);
         this->_loader = _loader;
         return *this;
     }
@@ -67,7 +69,7 @@ class LocalExecutor::Builder {
 
    private:
     Optional<Network> _network;
-    Optional<Loader> _loader;
+    shared_ptr<Loader> _loader;
     Optional<HyperparameterController> _hyperparameterController;
     Optional<vector<Visualizer>> _visualizers;
 };
