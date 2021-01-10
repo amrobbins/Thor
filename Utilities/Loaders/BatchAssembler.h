@@ -53,6 +53,7 @@ class BatchAssembler {
     uint64_t numExamples;
     uint64_t batchesPerEpoch;
     uint64_t currentBatchNum;
+    uint64_t currentExampleNum;
 
     std::unordered_map<std::string, uint64_t> classIndexes;
 

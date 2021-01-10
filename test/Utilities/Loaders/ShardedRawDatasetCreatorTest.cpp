@@ -145,6 +145,8 @@ void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTen
             }
             ASSERT_GT(imageColor.size(), 0u);
 
+            // printf("%s\n", imageColor.c_str());
+
             globalCount += 1;
             colorCount[imageColor] += 1;
             if (globalCount % 7 == 0) {

@@ -21,3 +21,7 @@ LocalExecutor LocalExecutor::Builder::build() {
     localExecutor.initialized = true;
     return localExecutor;
 }
+
+void LocalExecutor::trainBatches(uint32_t batches) {}
+
+void LocalExecutor::trainEpochs(double epochs) { trainBatches(epochs * loader->getNumBatchesPerEpoch()); }
