@@ -41,6 +41,8 @@ class BatchAssembler {
     void getBatch(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor, uint64_t &batchNum);
     void returnBuffer(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor);
 
+    uint64_t getNextBatchNum();
+
    private:
     std::vector<std::shared_ptr<Shard>> shards;
     std::vector<std::unique_ptr<FullPeriodRandom>> randomizers;
@@ -60,7 +62,7 @@ class BatchAssembler {
     std::vector<std::unique_ptr<AsyncQueue<LabeledExample>>> shardQueues;
     AsyncTensorQueue batchDataQueue;
     AsyncTensorQueue batchLabelQueue;
-    deque<uint64_t> batchNumQueue;
+    AsyncQueue<uint64_t> batchNumQueue;
 
     std::vector<std::thread> shardThreads;
     std::thread assemblerThread;

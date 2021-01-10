@@ -72,6 +72,8 @@ void BatchAssembler::open() {
     batchDataQueue.open();
     batchLabelQueue.resize(32, batchLabelTensorDescriptor, TensorPlacement::MemDevices::CPU);
     batchLabelQueue.open();
+    batchNumQueue.resize(32);
+    batchNumQueue.open();
 
     assemblerThread = thread(&BatchAssembler::batchAssemblerThread, this);
 }
@@ -81,6 +83,7 @@ void BatchAssembler::close() {
         shardQueues[i]->close();
     batchDataQueue.close();
     batchLabelQueue.close();
+    batchNumQueue.close();
 
     for (uint64_t i = 0; i < shardThreads.size(); ++i)
         shardThreads[i].join();
@@ -187,7 +190,7 @@ void BatchAssembler::batchAssemblerThread() {
             batchDataQueue.bufferLoaded(batchDataBuffer);
             batchLabelQueue.bufferLoaded(batchLabelsBuffer);
 
-            batchNumQueue.push_back(currentBatchNum);
+            batchNumQueue.push(currentBatchNum);
             currentBatchNum += 1;
             if (currentBatchNum == batchesPerEpoch) {
                 // An epoch may not be exactly divisible by an integer number of batches, make sure this does not cause drift.
@@ -205,8 +208,15 @@ void BatchAssembler::getBatch(Tensor &batchTensor, Tensor &labelTensor, uint64_t
     assert(queueOpen);
     queueOpen = batchLabelQueue.getBufferToUnload(labelTensor);
     assert(queueOpen);
-    batchNum = batchNumQueue.front() + 1;
-    batchNumQueue.pop_front();
+    queueOpen = batchNumQueue.pop(batchNum);
+    assert(queueOpen);
+}
+
+uint64_t BatchAssembler::getNextBatchNum() {
+    uint64_t nextBatchNum;
+    bool queueOpen = batchNumQueue.peek(nextBatchNum);
+    assert(queueOpen);
+    return nextBatchNum;
 }
 
 void BatchAssembler::returnBuffer(Tensor &batchTensor, Tensor &labelTensor) {

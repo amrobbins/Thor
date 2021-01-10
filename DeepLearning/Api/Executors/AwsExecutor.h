@@ -1,10 +1,10 @@
 #pragma once
 
-#include "DeepLearning/Api/Executors/ExecutorBase.h"
+#include "DeepLearning/Api/Executors/Executor.h"
 
 namespace Thor {
 
-class AwsExecutor : public ExecutorBase {
+class AwsExecutor : public Executor {
    public:
     virtual ~AwsExecutor();
 };

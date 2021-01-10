@@ -1,12 +1,14 @@
 #pragma once
 
-#include "DeepLearning/Api/Executors/ExecutorBase.h"
+#include "DeepLearning/Api/Executors/Executor.h"
 #include "DeepLearning/Api/HyperparameterControllers/HyperparameterController.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include <map>
 #include <memory>
 #include <string>
 
@@ -16,7 +18,7 @@ class Executor;
 
 using std::string;
 
-class LocalExecutor : public ExecutorBase {
+class LocalExecutor : public Executor {
    public:
     class Builder;
 
@@ -24,8 +26,9 @@ class LocalExecutor : public ExecutorBase {
 
     virtual ~LocalExecutor() {}
 
-    void trainEpochs(double epochs);
-    void trainBatches(uint32_t batches);
+    // FIXME: need train, validate and test and no exampleType
+    void trainTillEpochIsFinished(ExampleType exampleType);
+    uint64_t trainBatches(uint32_t batches, ExampleType exampleType);
     void createSnapshot(string filepath) {}  // FIXME
 
    private:
@@ -35,6 +38,8 @@ class LocalExecutor : public ExecutorBase {
     std::shared_ptr<Loader> loader;
     HyperparameterController hyperparameterController;
     vector<Visualizer> visualizers;
+
+    vector<ThorImplementation::StampedNetwork> stampedNetworks;
 };
 
 class LocalExecutor::Builder {

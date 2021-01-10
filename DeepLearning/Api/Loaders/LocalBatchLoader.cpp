@@ -53,7 +53,27 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths, ThorImplementation::T
         batchSize);
 }
 
-uint64_t LocalBatchLoader::getNumBatchesPerEpoch() { return batchAssemblerTrain->getNumBatchesPerEpoch(); }
+uint64_t LocalBatchLoader::getNextBatchNum(ExampleType exampleType) {
+    if (exampleType == ExampleType::TRAIN)
+        return batchAssemblerTrain->getNextBatchNum();
+    else if (exampleType == ExampleType::VALIDATE)
+        return batchAssemblerValidate->getNextBatchNum();
+    else if (exampleType == ExampleType::TEST)
+        return batchAssemblerTest->getNextBatchNum();
+    else
+        assert(false);
+}
+
+uint64_t LocalBatchLoader::getNumBatchesPerEpoch(ExampleType exampleType) {
+    if (exampleType == ExampleType::TRAIN)
+        return batchAssemblerTrain->getNumBatchesPerEpoch();
+    else if (exampleType == ExampleType::VALIDATE)
+        return batchAssemblerValidate->getNumBatchesPerEpoch();
+    else if (exampleType == ExampleType::TEST)
+        return batchAssemblerTest->getNumBatchesPerEpoch();
+    else
+        assert(false);
+}
 
 map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
     map<string, Tensor> tensorMap;
