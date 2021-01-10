@@ -33,7 +33,7 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
 
         numExamples += shards[i]->getNumExamples(exampleType);
         numExamplesPerShard.push_back(shards[i]->getNumExamples(exampleType));
-        randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i], true));
+        randomizers.emplace_back(new FullPeriodRandom(numExamplesPerShard[i], false));
     }
 
     file_string_vector_t *allClasses = shards[0]->getAllClasses();
@@ -64,10 +64,9 @@ void BatchAssembler::open() {
         randomizers[i]->reseed();
 
         shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
-        shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
-        shardThreads.emplace_back(&BatchAssembler::shardReaderThread, this, i);
     }
     currentBatchNum = 0;
+    currentExampleNum = 0;
 
     batchDataQueue.resize(32, batchDataTensorDescriptor, TensorPlacement::MemDevices::CPU);
     batchDataQueue.open();
@@ -179,6 +178,8 @@ void BatchAssembler::batchAssemblerThread() {
         memset(batchLabels, 0, sizeof(float) * classIndexes.size());
         batchLabels[classIndexes[labeledExample.label]] = 1.0f;
 
+        currentExampleNum += 1;
+
         batchSlot += 1;
         if (batchSlot == batchSize) {
             batchSlot = 0;
@@ -188,8 +189,12 @@ void BatchAssembler::batchAssemblerThread() {
 
             batchNumQueue.push_back(currentBatchNum);
             currentBatchNum += 1;
-            if (currentBatchNum == batchesPerEpoch)
-                currentBatchNum = 0;
+            if (currentBatchNum == batchesPerEpoch) {
+                // An epoch may not be exactly divisible by an integer number of batches, make sure this does not cause drift.
+                uint64_t batchProgress = currentExampleNum % numExamples;
+                uint64_t batchesLeftInEpoch = ((numExamples - batchProgress) + (batchSize - 1)) / batchSize;
+                currentBatchNum = batchesPerEpoch - batchesLeftInEpoch;
+            }
         }
     }
 }

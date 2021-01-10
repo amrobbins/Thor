@@ -24,8 +24,8 @@ class LocalExecutor : public ExecutorBase {
 
     virtual ~LocalExecutor() {}
 
-    void trainEpochs(double epochs) {}       // FIXME
-    void trainBatches(uint32_t batches) {}   // FIXME
+    void trainEpochs(double epochs);
+    void trainBatches(uint32_t batches);
     void createSnapshot(string filepath) {}  // FIXME
 
    private:
