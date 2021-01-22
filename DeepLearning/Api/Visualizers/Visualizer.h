@@ -1,5 +1,8 @@
 #pragma once
 
+#include "DeepLearning/Api/Executors/ExecutionState.h"
+#include "DeepLearning/Api/HyperparameterControllers/HyperparameterController.h"
+
 #include <assert.h>
 #include <memory>
 
@@ -12,6 +15,8 @@ class Visualizer {
     Visualizer() {}
 
     virtual ~Visualizer() {}
+
+    virtual void updateState(ExecutionState executionState, HyperparameterController hyperparameterController) = 0;
 };
 
 }  // namespace Thor

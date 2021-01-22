@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/Executors/Executor.h"
 #include "DeepLearning/Api/HyperparameterControllers/HyperparameterController.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
@@ -16,7 +17,18 @@ namespace Thor {
 
 class Executor;
 
-using std::string;
+struct LoanedBufferMetadata {
+    LoanedBufferMetadata() {}
+    LoanedBufferMetadata(Event doneWithBufferEvent, ExampleType exampleType, map<std::string, ThorImplementation::Tensor> batchTensorMap) {
+        this->doneWithBufferEvent = doneWithBufferEvent;
+        this->exampleType = exampleType;
+        this->batchTensorMap = batchTensorMap;
+    }
+
+    Event doneWithBufferEvent;
+    ExampleType exampleType;
+    std::map<std::string, ThorImplementation::Tensor> batchTensorMap;
+};
 
 class LocalExecutor : public Executor {
    public:
@@ -29,7 +41,7 @@ class LocalExecutor : public Executor {
     // FIXME: need train, validate and test and no exampleType
     void trainTillEpochIsFinished(ExampleType exampleType);
     uint64_t trainBatches(uint32_t batches, ExampleType exampleType);
-    void createSnapshot(string filepath) {}  // FIXME
+    void createSnapshot(std::string filepath) {}  // FIXME
 
    private:
     bool initialized;
@@ -37,14 +49,19 @@ class LocalExecutor : public Executor {
     Network network;
     std::shared_ptr<Loader> loader;
     HyperparameterController hyperparameterController;
-    vector<Visualizer> visualizers;
+    vector<std::shared_ptr<Visualizer>> visualizers;
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
+
+    unique_ptr<AsyncQueue<ExecutionState>> hyperparameterControllerExecutionState;
+    vector<unique_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
+
+    unique_ptr<AsyncQueue<LoanedBufferMetadata>> loanedBufferQueue;
 };
 
 class LocalExecutor::Builder {
    public:
-    virtual LocalExecutor build();
+    virtual std::shared_ptr<LocalExecutor> build();
 
     LocalExecutor::Builder network(Network _network) {
         assert(!this->_network.isPresent());
@@ -65,18 +82,18 @@ class LocalExecutor::Builder {
         return *this;
     }
 
-    LocalExecutor::Builder visualizer(Visualizer _visualizer) {
+    LocalExecutor::Builder visualizer(std::shared_ptr<Visualizer> _visualizer) {
         if (_visualizers.isEmpty())
-            _visualizers = vector<Visualizer>();
+            _visualizers = vector<shared_ptr<Visualizer>>();
         _visualizers.get().push_back(_visualizer);
         return *this;
     }
 
    private:
     Optional<Network> _network;
-    shared_ptr<Loader> _loader;
+    std::shared_ptr<Loader> _loader;
     Optional<HyperparameterController> _hyperparameterController;
-    Optional<vector<Visualizer>> _visualizers;
+    Optional<vector<std::shared_ptr<Visualizer>>> _visualizers;
 };
 
 }  // namespace Thor
