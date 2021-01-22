@@ -143,6 +143,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
                    build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o \
+                   build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o \
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
                    build/Utilities/Common/Stream.o \
@@ -405,6 +406,10 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: Dee
 build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o: DeepLearning/Api/Visualizers/ConsoleVisualizer.h DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp
 	mkdir -p build/DeepLearning/Api/Visualizers
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o
+
+build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o: DeepLearning/Api/HyperparameterControllers/HyperparameterController.h DeepLearning/Api/HyperparameterControllers/HyperparameterController.cpp
+	mkdir -p build/DeepLearning/Api/HyperparameterControllers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/HyperparameterControllers/HyperparameterController.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o
 
 build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/LocalExecutor.h DeepLearning/Api/Executors/LocalExecutor.cpp
 	mkdir -p build/DeepLearning/Api/Executors

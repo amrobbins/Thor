@@ -78,7 +78,10 @@ class StampedNetwork {
         }
     }
 
-    void sendBatch(map<string, Tensor> batchInputs, map<string, Tensor> &batchOutputs) {
+    void sendBatch(map<string, Tensor> batchInputs,
+                   map<string, Tensor> &batchOutputs,
+                   map<string, Event> &outputReadyEvents,
+                   Event processingFinishedEvent) {
         assert(batchInputs.size() == inputs.size());
 
         for (uint32_t i = 0; i < inputs.size(); ++i) {
@@ -88,19 +91,28 @@ class StampedNetwork {
             inputs[i]->forward(inputTensor);
         }
 
+        // The stream from input 0 waits for all outputs to be ready
         for (uint32_t i = 0; i < outputs.size(); ++i) {
             batchOutputs[outputs[i]->getName()] = outputs[i]->getFeatureOutput();
-            for (uint j = 0; j < inputs.size(); ++j) {
-                inputs[j]->getStream().waitEvent(outputs[i]->getStream().putEvent());
-            }
+            Event outputReadyEvent = outputs[i]->getStream().putEvent();
+            outputReadyEvents[outputs[i]->getName()] = outputReadyEvent;
+            inputs[0]->getStream().waitEvent(outputReadyEvent);
         }
 
+        // The stream from input 0 waits for all gradient updates to finish
         for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
             trainableLayers[i]->updateWeightsAndBiasesWithScaledGradient();
-            for (uint j = 0; j < inputs.size(); ++j) {
-                assert(trainableLayers[i]->getGradientUpdateStream().isInitialized());
-                inputs[j]->getStream().waitEvent(trainableLayers[i]->getGradientUpdateStream().putEvent());
-            }
+            assert(trainableLayers[i]->getGradientUpdateStream().isInitialized());
+            Event gradientUpdateFinishedEvent = trainableLayers[i]->getGradientUpdateStream().putEvent();
+            inputs[0]->getStream().waitEvent(gradientUpdateFinishedEvent);
+        }
+
+        // Processing is finished when the stream from input 0 is ready
+        processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
+
+        // The streams from all other inputs wait for the stream from input 0 to be ready
+        for (uint i = 1; i < inputs.size(); ++i) {
+            inputs[i]->getStream().waitEvent(processingFinishedEvent);
         }
     }
 

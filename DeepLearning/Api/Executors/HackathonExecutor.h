@@ -42,6 +42,8 @@ class HackathonExecutor {
         Event startEvent;
         map<string, ThorImplementation::Tensor> batchInput;
         map<string, ThorImplementation::Tensor> batchOutput;
+        vector<map<string, Event>> outputReadyEvents(numStamps);
+        vector<Event> processingFinishedEvent(numStamps);
         batchInput["images"] = inputTensor;
         batchInput["labels"] = labelsTensor;
         omp_set_num_threads(numStamps);
@@ -49,11 +51,11 @@ class HackathonExecutor {
 #pragma omp parallel for schedule(static, 1)
         for (uint32_t j = 0; j < numStamps; ++j) {
             for (uint32_t i = 0; i < numBatches; ++i) {
-                stampedNetworks[j].sendBatch(batchInput, batchOutput);
+                stampedNetworks[j].sendBatch(batchInput, batchOutput, outputReadyEvents[j], processingFinishedEvent[j]);
             }
         }
         for (uint32_t j = 1; j < numStamps; ++j)
-            stampedNetworks[0].inputs[0]->getStream().waitEvent(stampedNetworks[j].inputs[0]->getStream().putEvent());
+            stampedNetworks[0].inputs[0]->getStream().waitEvent(processingFinishedEvent[j]);
         Event endEvent = stampedNetworks[0].inputs[0]->getStream().putEvent(true, true);
         printf("waiting for end\n");
         double milliseconds = endEvent.synchronizeAndReportElapsedTimeInMilliseconds(startEvent);
