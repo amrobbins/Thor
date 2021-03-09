@@ -18,7 +18,7 @@ COMPUTE_CAPABILITIES = -gencode=arch=compute_52,code=compute_52 -gencode=arch=co
 COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
 
 
-BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl
+BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl -lncurses
 
 GRAPHICS_MAGICK_INCLUDE_DIR = -I /usr/local/include/GraphicsMagick/
 GRAPHICS_MAGICK = `GraphicsMagick++-config --cppflags --cxxflags --ldflags --libs`
@@ -107,6 +107,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/DeepLearning/Implementation/SimpleNetworkTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
+            build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest \
 
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
@@ -600,6 +601,10 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest: build/t
 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Visualizers/
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/DeepLearning/
