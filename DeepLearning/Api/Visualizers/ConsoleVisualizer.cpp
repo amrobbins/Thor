@@ -12,7 +12,7 @@ using std::vector;
 
 const int ConsoleVisualizer::MIN_WIDTH = 140;
 const int ConsoleVisualizer::HEIGHT_W0 = 5;
-const int ConsoleVisualizer::MIN_HEIGHT_W1 = 30;
+const int ConsoleVisualizer::MIN_HEIGHT_W1 = 10;
 const int ConsoleVisualizer::HEIGHT_W2 = 5;
 
 void *ConsoleVisualizer::win0 = nullptr;
@@ -67,7 +67,7 @@ ConsoleVisualizer::ConsoleVisualizer() {
 }
 
 ConsoleVisualizer::~ConsoleVisualizer() {
-    signal(SIGWINCH, SIG_DFL);
+    signal(SIGWINCH, originalResizeHandler);
     deleteWindows();
     endwin();
 }
@@ -88,23 +88,18 @@ void ConsoleVisualizer::createWindows() {
     int windowWidth = terminalCols;
     if (windowWidth < MIN_WIDTH)
         windowWidth = MIN_WIDTH;
+
     heightW0 = HEIGHT_W0;
-    if (heightW0 > terminalRows)
-        heightW0 = terminalRows;
-    assert(windowWidth > 0);
-    assert(heightW0 > 0);
 
     heightW1 = terminalRows - (heightW0 + HEIGHT_W2);
-    if (heightW1 < 0)
-        heightW1 = 0;
+    if (heightW1 < MIN_HEIGHT_W1)
+        heightW1 = MIN_HEIGHT_W1;
 
-    heightW2 = terminalRows - (heightW0 + heightW1);
+    heightW2 = HEIGHT_W2;
 
     win0 = newwin(heightW0, windowWidth, 0, 0);
-    if (heightW1 > 0)
-        win1 = newwin(heightW1, windowWidth, heightW0, 0);
-    if (heightW2 > 0)
-        win2 = newwin(HEIGHT_W2, windowWidth, heightW0 + heightW1, 0);
+    win1 = newwin(heightW1, windowWidth, heightW0, 0);
+    win2 = newwin(heightW2, windowWidth, heightW0 + heightW1, 0);
 }
 
 void ConsoleVisualizer::deleteWindows() {
