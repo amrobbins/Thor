@@ -24,6 +24,7 @@ Dependencies, with installation directions for Ubuntu:
   3. clang-format  - can install with 'sudo apt-get install clang-format'
   4. boost 1.72 (later is probably fine.) get it here: https://www.boost.org/users/download/#live
   5. GraphicsMagick - http://www.graphicsmagick.org/README.html
+  6. ncurses
 
 Install:
 

@@ -12,7 +12,8 @@ using namespace Thor;
 int main() {
     ConsoleVisualizer consoleVisualizer;
 
-    while (true)
-        ;
-    // consoleVisualizer.printHeader(ExecutionState(), HyperparameterController());
+    consoleVisualizer.display();
+    mutex mtx;
+    mtx.lock();
+    mtx.lock();
 }

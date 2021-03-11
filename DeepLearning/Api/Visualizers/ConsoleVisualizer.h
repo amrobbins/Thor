@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 
+#include <boost/algorithm/string.hpp>
+
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -25,6 +27,9 @@ class ConsoleVisualizer : public Visualizer {
 
     void updateState(ExecutionState executionState, HyperparameterController hyperparameterController);
 
+    // temp public:
+    static void display();
+
    private:
     static const int MIN_WIDTH;
     static const int HEIGHT_W0;
@@ -33,6 +38,7 @@ class ConsoleVisualizer : public Visualizer {
 
     static int terminalRows;
     static int terminalCols;
+    static int windowWidth;
     static int heightW0;
     static int heightW1;
     static int heightW2;
@@ -52,11 +58,20 @@ class ConsoleVisualizer : public Visualizer {
     static void resizeHandler(int sig);
     static void (*originalResizeHandler)(int);
 
-    static void display();
+    static void interruptHandler(int sig);
+    static void (*originalInterruptHandler)(int);
 
-   public:  // TEMP
-    void printHeader(ExecutionState executionState, HyperparameterController hyperparameterController);
-    void printLine(ExecutionState executionState, HyperparameterController hyperparameterController);
+    static void drawHeader();
+    static void drawProgressRows();
+    static void drawFooter();
+    static void drawOverallStatusBar();
+
+    static void drawStatusBar(void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel);
+
+    static string popUpPrompt(string message);
+    static void popUpAcknowledge(string message);
+
+    static void printLine(ExecutionState executionState, HyperparameterController hyperparameterController);
 };
 
 class ConsoleVisualizer::Builder {
