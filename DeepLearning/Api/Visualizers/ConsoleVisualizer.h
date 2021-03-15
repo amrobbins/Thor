@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -18,6 +19,24 @@ namespace Thor {
 
 class Visualizer;
 
+struct ProgressRow {
+    string label;
+    int curBatch;
+    int numBatches;
+    double batchLoss;
+    double accuracy;
+
+    ProgressRow(string label, int curBatch, int numBatches, double batchLoss, double accuracy) {
+        this->label = label;
+        this->curBatch = curBatch;
+        this->numBatches = numBatches;
+        this->batchLoss = batchLoss;
+        this->accuracy = accuracy;
+    }
+};
+
+// FIXME: should be a singleton
+
 class ConsoleVisualizer : public Visualizer {
    public:
     class Builder;
@@ -25,10 +44,10 @@ class ConsoleVisualizer : public Visualizer {
 
     virtual ~ConsoleVisualizer();
 
-    void updateState(ExecutionState executionState, HyperparameterController hyperparameterController);
+    void startUI();
+    void stopUI();
 
-    // temp public:
-    static void display();
+    void updateState(ExecutionState executionState, HyperparameterController hyperparameterController);
 
    private:
     static const int MIN_WIDTH;
@@ -43,7 +62,16 @@ class ConsoleVisualizer : public Visualizer {
     static int heightW1;
     static int heightW2;
 
-    bool initialized;
+    static std::thread *uiThread;
+    static std::recursive_mutex mtx;
+    static bool uiRunning;
+
+    static bool scrollVisible;
+    static int scrollTop;
+    static int scrollBottom;
+    static int scrollLeft;
+    static int scrollRight;
+    static int scrollTopElement;
 
     Optional<ExecutionState> previousExecutionState;
 
@@ -61,10 +89,18 @@ class ConsoleVisualizer : public Visualizer {
     static void interruptHandler(int sig);
     static void (*originalInterruptHandler)(int);
 
+    static void noOpHandler(int sig);
+
+    static void inputHandler();
+
+    static void redrawWindows();
+
     static void drawHeader();
     static void drawProgressRows();
     static void drawFooter();
     static void drawOverallStatusBar();
+
+    static void display();
 
     static void drawStatusBar(void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel);
 
@@ -72,6 +108,9 @@ class ConsoleVisualizer : public Visualizer {
     static void popUpAcknowledge(string message);
 
     static void printLine(ExecutionState executionState, HyperparameterController hyperparameterController);
+
+    static void drawBox(void *win, int top, int bottom, int left, int right);
+    static void drawBlock(void *win, int top, int bottom, int left, int right);
 };
 
 class ConsoleVisualizer::Builder {

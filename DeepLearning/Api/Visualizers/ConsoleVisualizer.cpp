@@ -7,13 +7,16 @@
 using namespace Thor;
 
 using std::make_shared;
+using std::mutex;
 using std::pair;
+using std::thread;
+using std::unique_lock;
 using std::vector;
 
 const int ConsoleVisualizer::MIN_WIDTH = 140;
-const int ConsoleVisualizer::HEIGHT_W0 = 8;
+const int ConsoleVisualizer::HEIGHT_W0 = 9;
 const int ConsoleVisualizer::MIN_HEIGHT_W1 = 10;
-const int ConsoleVisualizer::HEIGHT_W2 = 15;
+const int ConsoleVisualizer::HEIGHT_W2 = 10;
 
 void *ConsoleVisualizer::win0 = nullptr;
 void *ConsoleVisualizer::win1 = nullptr;
@@ -24,13 +27,22 @@ int ConsoleVisualizer::windowWidth;
 int ConsoleVisualizer::heightW0;
 int ConsoleVisualizer::heightW1;
 int ConsoleVisualizer::heightW2;
+std::thread *ConsoleVisualizer::uiThread = nullptr;
+bool ConsoleVisualizer::uiRunning = false;
+std::recursive_mutex ConsoleVisualizer::mtx;
+
+bool ConsoleVisualizer::scrollVisible = false;
+int ConsoleVisualizer::scrollTop;
+int ConsoleVisualizer::scrollBottom;
+int ConsoleVisualizer::scrollLeft;
+int ConsoleVisualizer::scrollRight;
+int ConsoleVisualizer::scrollTopElement = -1;
 
 void (*ConsoleVisualizer::originalResizeHandler)(int);
 void (*ConsoleVisualizer::originalInterruptHandler)(int);
 
 shared_ptr<Visualizer> ConsoleVisualizer::Builder::build() {
     shared_ptr<ConsoleVisualizer> consoleVisualizer = make_shared<ConsoleVisualizer>();
-    consoleVisualizer->initialized = true;
     return consoleVisualizer;
 }
 
@@ -50,37 +62,108 @@ void ConsoleVisualizer::updateState(ExecutionState executionState, Hyperparamete
 }
 
 void ConsoleVisualizer::resizeHandler(int sig) {
-    originalResizeHandler(sig);
-
-    deleteWindows();
-    createWindows();
+    unique_lock<recursive_mutex> lck(mtx);
+    originalResizeHandler(SIGWINCH);
     display();
 }
 
-string ConsoleVisualizer::popUpPrompt(string message) {
-    // FIXME: implement
-    return "";
-}
-
-void ConsoleVisualizer::popUpAcknowledge(string message) {
-    // FIXME: implement
-    wgetch((WINDOW *)win0);
-}
-
 void ConsoleVisualizer::interruptHandler(int sig) {
-    originalInterruptHandler(sig);
+    unique_lock<recursive_mutex> lck(mtx);
+    signal(SIGINT, noOpHandler);
 
-    string response = "yes";
-    response = popUpPrompt("Do you really want to quit? Type yes to quit: ");
-    response = "yes";  // FIXME
+    string response = popUpPrompt("Do you really want to quit? Type yes to quit:");
 
     if (boost::iequals(response, "yes")) {
         signal(SIGWINCH, originalResizeHandler);
-        signal(SIGWINCH, originalInterruptHandler);
+        signal(SIGINT, originalInterruptHandler);
         originalInterruptHandler(sig);
     } else {
-        popUpAcknowledge("Response was not yes - press any key to continue");
+        popUpAcknowledge("Response was not yes");
     }
+
+    signal(SIGINT, interruptHandler);
+
+    originalResizeHandler(SIGWINCH);
+    display();
+}
+
+void ConsoleVisualizer::noOpHandler(int sig) {}
+
+void ConsoleVisualizer::inputHandler() {
+    while (uiRunning) {
+        mtx.lock();
+        int ch = wgetch((WINDOW *)win1);
+        if (ch != ERR) {
+            // Pass mouse events to scroll bar
+            ;
+        }
+        mtx.unlock();
+    }
+}
+
+string ConsoleVisualizer::popUpPrompt(string message) {
+    // The resize handler needs to be removed while this message is active,
+    // or else resizing the window will display the usual contents and hide this message.
+    void (*initialResizeHandler)(int);
+    initialResizeHandler = signal(SIGWINCH, noOpHandler);
+
+    deleteWindows();
+
+    WINDOW *win = newwin(terminalRows, windowWidth, 0, 0);
+    nodelay(win, TRUE);
+    keypad(win, TRUE);
+    waddstr(win, message.c_str());
+    waddch(win, ' ');
+    int ch;
+    string response;
+    flushinp();
+    while (true) {
+        ch = wgetch(win);
+
+        if (ch == ERR) {
+            continue;
+        } else if (ch == KEY_BACKSPACE) {
+            if (!response.empty()) {
+                response = response.substr(0, response.length() - 1);
+                mvwaddch(win, 0, message.length() + 1 + response.length(), ' ');
+                wmove(win, 0, message.length() + 1 + response.length());
+            }
+            continue;
+        } else if (ch == '\n' || ch == '\r' || ch == EOF || ch == KEY_ENTER) {
+            break;
+        } else if ((ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') && (ch < '0' || ch > '9')) {
+            continue;
+        }
+
+        waddch(win, (char)ch);
+        response += (char)ch;
+    }
+
+    wrefresh(win);
+    delwin(win);
+
+    signal(SIGWINCH, initialResizeHandler);
+    return response;
+}
+
+void ConsoleVisualizer::popUpAcknowledge(string message) {
+    // The resize handler needs to be removed while this message is active,
+    // or else resizing the window will display the usual contents and hide this message.
+    void (*initialResizeHandler)(int);
+    initialResizeHandler = signal(SIGWINCH, noOpHandler);
+
+    deleteWindows();
+
+    WINDOW *win = newwin(terminalRows, windowWidth, 0, 0);
+    waddstr(win, message.c_str());
+    waddstr(win, " - press any key to continue");
+    flushinp();
+    wgetch(win);
+
+    wrefresh(win);
+    delwin(win);
+
+    signal(SIGWINCH, initialResizeHandler);
 }
 
 ConsoleVisualizer::ConsoleVisualizer() {
@@ -88,16 +171,14 @@ ConsoleVisualizer::ConsoleVisualizer() {
     assert(win1 == nullptr);
     assert(win2 == nullptr);
 
-    initialized = false;
     initializeWindows();
-    createWindows();
     originalResizeHandler = signal(SIGWINCH, resizeHandler);
     originalInterruptHandler = signal(SIGINT, interruptHandler);
 }
 
 ConsoleVisualizer::~ConsoleVisualizer() {
     signal(SIGWINCH, originalResizeHandler);
-    signal(SIGWINCH, originalInterruptHandler);
+    signal(SIGINT, originalInterruptHandler);
     deleteWindows();
     endwin();
 }
@@ -106,16 +187,24 @@ void ConsoleVisualizer::initializeWindows() {
     initscr();
     cbreak();
     noecho();
+    nodelay(stdscr, TRUE);
     keypad(stdscr, TRUE);
     curs_set(0);
-    start_color();
-    init_color(COLOR_BLACK, 999, 999, 999);   // black is now white
-    init_color(COLOR_WHITE, 0, 0, 0);         // white is now black
-    init_color(COLOR_YELLOW, 333, 333, 333);  // YELLOW is now gray
-    init_color(COLOR_GREEN, 86, 539, 141);
-    init_pair(2, COLOR_GREEN, COLOR_BLACK);
-    init_pair(3, COLOR_YELLOW, COLOR_BLACK);
-    init_pair(4, COLOR_BLUE, COLOR_BLACK);
+    if (has_colors()) {
+        start_color();
+        init_color(COLOR_BLACK, 999, 999, 999);   // black is now white
+        init_color(COLOR_WHITE, 0, 0, 0);         // white is now black
+        init_color(COLOR_YELLOW, 333, 333, 333);  // YELLOW is now gray
+        init_color(COLOR_GREEN, 86, 539, 141);
+        init_pair(2, COLOR_GREEN, COLOR_BLACK);
+        init_pair(3, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(4, COLOR_BLUE, COLOR_BLACK);
+    }
+
+    mmask_t newMouseMask;
+    mmask_t oldMouseMask;
+    newMouseMask = BUTTON1_PRESSED | BUTTON1_RELEASED | REPORT_MOUSE_POSITION;
+    mousemask(newMouseMask, &oldMouseMask);
 }
 
 void ConsoleVisualizer::createWindows() {
@@ -135,7 +224,9 @@ void ConsoleVisualizer::createWindows() {
 
     win0 = newwin(heightW0, windowWidth, 0, 0);
     win1 = newwin(heightW1, windowWidth, heightW0, 0);
-    scrollok((WINDOW *)win1, TRUE);
+    wtimeout((WINDOW *)win1, 10);
+    nodelay((WINDOW *)win1, TRUE);
+    keypad((WINDOW *)win1, TRUE);
     win2 = newwin(heightW2, windowWidth, heightW0 + heightW1, 0);
 }
 
@@ -158,6 +249,12 @@ void ConsoleVisualizer::deleteWindows() {
 }
 
 void ConsoleVisualizer::display() {
+    deleteWindows();
+    createWindows();
+    redrawWindows();
+}
+
+void ConsoleVisualizer::redrawWindows() {
     wrefresh((WINDOW *)win0);
 
     drawHeader();
@@ -184,29 +281,37 @@ void ConsoleVisualizer::drawHeader() {
     wmove((WINDOW *)win0, 3, 0);
     waddstr((WINDOW *)win0, "Network Name: ");
     wattroff((WINDOW *)win0, A_BOLD);
+    wmove((WINDOW *)win0, 3, 20);
     waddstr((WINDOW *)win0, "EyeNet");
     wattron((WINDOW *)win0, A_BOLD);
     wmove((WINDOW *)win0, 4, 0);
     waddstr((WINDOW *)win0, "Dataset Name: ");
     wattroff((WINDOW *)win0, A_BOLD);
+    wmove((WINDOW *)win0, 4, 20);
     waddstr((WINDOW *)win0, "ImageNet 2012");
+    wattron((WINDOW *)win0, A_BOLD);
+    wmove((WINDOW *)win0, 5, 0);
+    waddstr((WINDOW *)win0, "ThorDash: ");
+    wattroff((WINDOW *)win0, A_BOLD);
+    wmove((WINDOW *)win0, 5, 20);
+    waddstr((WINDOW *)win0, "file:///home/andrew/EyeNet/train7/ThorDash/index.html");
     wattron((WINDOW *)win0, A_BOLD);
 
     wattron((WINDOW *)win0, A_UNDERLINE);
 
-    wmove((WINDOW *)win0, 7, 0);
+    wmove((WINDOW *)win0, 8, 0);
     waddstr((WINDOW *)win0, "Epoch");
 
-    wmove((WINDOW *)win0, 7, 15);
+    wmove((WINDOW *)win0, 8, 15);
     waddstr((WINDOW *)win0, "Progress");
 
-    wmove((WINDOW *)win0, 7, 70);
+    wmove((WINDOW *)win0, 8, 70);
     waddstr((WINDOW *)win0, "Batch");
 
-    wmove((WINDOW *)win0, 7, 95);
+    wmove((WINDOW *)win0, 8, 95);
     waddstr((WINDOW *)win0, "Batch Loss");
 
-    wmove((WINDOW *)win0, 7, 110);
+    wmove((WINDOW *)win0, 8, 110);
     waddstr((WINDOW *)win0, "Accuracy");
 
     wattroff((WINDOW *)win0, A_UNDERLINE);
@@ -215,56 +320,64 @@ void ConsoleVisualizer::drawHeader() {
 }
 
 void ConsoleVisualizer::drawProgressRows() {
-    wmove((WINDOW *)win1, 0, 0);
-    waddstr((WINDOW *)win1, "Train 0");
-    drawStatusBar(win1, 0, 15, 65, 100.0, "", "");
-    wmove((WINDOW *)win1, 0, 70);
-    waddstr((WINDOW *)win1, "7500 of 7500");
-    wmove((WINDOW *)win1, 0, 95);
-    waddstr((WINDOW *)win1, "0.753");
-    wmove((WINDOW *)win1, 0, 110);
-    waddstr((WINDOW *)win1, "0.174");
+    vector<ProgressRow> rows;
 
-    wmove((WINDOW *)win1, 1, 0);
-    waddstr((WINDOW *)win1, "Validate 0");
-    drawStatusBar(win1, 1, 15, 65, 100.0, "", "");
-    wmove((WINDOW *)win1, 1, 70);
-    waddstr((WINDOW *)win1, "1000 of 1000");
-    wmove((WINDOW *)win1, 1, 95);
-    waddstr((WINDOW *)win1, "0.620");
-    wmove((WINDOW *)win1, 1, 110);
-    waddstr((WINDOW *)win1, "0.196");
-
-    wmove((WINDOW *)win1, 2, 0);
-    waddstr((WINDOW *)win1, "Train 1");
-    drawStatusBar(win1, 2, 15, 65, 100.0, "", "");
-    wmove((WINDOW *)win1, 2, 70);
-    waddstr((WINDOW *)win1, "7500 of 7500");
-    wmove((WINDOW *)win1, 2, 95);
-    waddstr((WINDOW *)win1, "0.572");
-    wmove((WINDOW *)win1, 2, 110);
-    waddstr((WINDOW *)win1, "0.212");
-
-    wmove((WINDOW *)win1, 3, 0);
-    waddstr((WINDOW *)win1, "Validate 1");
-    drawStatusBar(win1, 3, 15, 65, 100.0, "", "");
-    wmove((WINDOW *)win1, 3, 70);
-    waddstr((WINDOW *)win1, "1000 of 1000");
-    wmove((WINDOW *)win1, 3, 95);
-    waddstr((WINDOW *)win1, "0.565");
-    wmove((WINDOW *)win1, 3, 110);
-    waddstr((WINDOW *)win1, "0.243");
-
+    for (int i = 0; i < 25; ++i) {
+        rows.emplace_back("Train " + std::to_string(i), 7500, 7500, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
+        rows.emplace_back("Validate " + std::to_string(i), 1000, 1000, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
+    }
     double progress = (rand() % 101) / 100.0;
-    wmove((WINDOW *)win1, 4, 0);
-    waddstr((WINDOW *)win1, "Train 2");
-    drawStatusBar(win1, 4, 15, 65, progress, "", "");
-    wmove((WINDOW *)win1, 4, 70);
-    wprintw((WINDOW *)win1, "%d of 7500", (int)(7500 * progress));
-    wmove((WINDOW *)win1, 4, 95);
-    waddstr((WINDOW *)win1, "0.510");
-    wmove((WINDOW *)win1, 4, 110);
-    waddstr((WINDOW *)win1, "0.271");
+    rows.emplace_back("Train 25", progress * 7500, 7500, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
+
+    int firstToDisplay;
+    if ((int)rows.size() <= heightW1) {
+        scrollVisible = false;
+        firstToDisplay = 0;
+    } else {
+        scrollVisible = true;
+
+        if ((int)rows.size() - heightW1 <= scrollTopElement) {
+            scrollTopElement = -1;
+        }
+
+        if (scrollTopElement == -1) {
+            firstToDisplay = rows.size() - heightW1;
+        } else {
+            firstToDisplay = scrollTopElement;
+        }
+
+        drawBox(win1, 0, heightW1 - 1, 125, 129);
+        if (scrollTopElement == -1) {
+            scrollTop = heightW1 - 6;
+        } else {
+            int numRowsHidden = heightW1 - rows.size();
+            // FIXME: I'll have to snap when slots per element > 1
+            int elementsPerScrollSlot = ((heightW1 - 7) + numRowsHidden - 1) / numRowsHidden;
+            scrollTop = (firstToDisplay + (elementsPerScrollSlot - 1)) / elementsPerScrollSlot;
+            if (scrollTop > heightW1 - 6) {
+                scrollTop = heightW1 - 6;
+                scrollTopElement = -1;
+                firstToDisplay = rows.size() - heightW1;
+            }
+        }
+        scrollBottom = scrollTop + 4;
+        scrollLeft = 126;
+        scrollRight = 128;
+        drawBlock(win1, scrollTop, scrollBottom, scrollLeft, scrollRight);
+    }
+
+    for (int i = 0; i < heightW1 && i + firstToDisplay < (int)rows.size(); ++i) {
+        wmove((WINDOW *)win1, i, 0);
+        waddstr((WINDOW *)win1, rows[firstToDisplay + i].label.c_str());
+        drawStatusBar(win1, i, 15, 65, double(rows[firstToDisplay + i].curBatch) / rows[firstToDisplay + i].numBatches, "", "");
+        wmove((WINDOW *)win1, i, 70);
+        waddstr((WINDOW *)win1,
+                (std::to_string(rows[firstToDisplay + i].curBatch) + " of " + std::to_string(rows[firstToDisplay + i].numBatches)).c_str());
+        wmove((WINDOW *)win1, i, 95);
+        waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].batchLoss).c_str());
+        wmove((WINDOW *)win1, i, 110);
+        waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].accuracy).c_str());
+    }
 }
 
 void ConsoleVisualizer::drawFooter() {
@@ -314,9 +427,6 @@ void ConsoleVisualizer::drawFooter() {
     wmove((WINDOW *)win2, 4, 105);
     waddstr((WINDOW *)win2, "/home/andrew/EyeNet/train7/");
     wmove((WINDOW *)win2, 5, 70);
-    waddstr((WINDOW *)win2, "ThorDash:");
-    wmove((WINDOW *)win2, 5, 105);
-    waddstr((WINDOW *)win2, "file:///home/andrew/EyeNet/train7/ThorDash/index.html");
 }
 
 void ConsoleVisualizer::drawOverallStatusBar() {
@@ -348,10 +458,14 @@ void ConsoleVisualizer::drawStatusBar(void *win, int y, int xStart, int xEnd, do
     waddch((WINDOW *)win, '[' | A_BOLD);
     int rangeSize = ((xEnd - xStart) - 1) - labelLength;
     for (int i = 0; i < rangeSize; ++i) {
-        if (progress > i / (double)rangeSize)
-            waddch((WINDOW *)win, '=' | A_BOLD | COLOR_PAIR(2));
-        else
+        if (progress > i / (double)rangeSize) {
+            if (has_colors())
+                waddch((WINDOW *)win, '=' | A_BOLD | COLOR_PAIR(2));
+            else
+                waddch((WINDOW *)win, '=' | A_BOLD);
+        } else {
             waddch((WINDOW *)win, ' ');
+        }
     }
     waddch((WINDOW *)win, ']' | A_BOLD);
 
@@ -387,4 +501,62 @@ void ConsoleVisualizer::printLine(ExecutionState executionState, HyperparameterC
     for (uint32_t i = 0; i < numStars; ++i) {
         printf("%s%s\n", std::string(numStars, '*').c_str(), std::string(100 - numStars, 'o').c_str());
     }
+}
+
+void ConsoleVisualizer::drawBox(void *win, int top, int bottom, int left, int right) {
+    wmove((WINDOW *)win, top, left);
+    waddch((WINDOW *)win, ACS_ULCORNER);
+    wmove((WINDOW *)win, top, right);
+    waddch((WINDOW *)win, ACS_URCORNER);
+    wmove((WINDOW *)win, bottom, left);
+    waddch((WINDOW *)win, ACS_LLCORNER);
+    wmove((WINDOW *)win, bottom, right);
+    waddch((WINDOW *)win, ACS_LRCORNER);
+
+    for (int i = top + 1; i <= bottom - 1; ++i) {
+        wmove((WINDOW *)win, i, left);
+        waddch((WINDOW *)win, ACS_VLINE);
+        wmove((WINDOW *)win, i, right);
+        waddch((WINDOW *)win, ACS_VLINE);
+    }
+
+    for (int i = left + 1; i <= right - 1; ++i) {
+        wmove((WINDOW *)win, top, i);
+        waddch((WINDOW *)win, ACS_HLINE);
+        wmove((WINDOW *)win, bottom, i);
+        waddch((WINDOW *)win, ACS_HLINE);
+    }
+}
+
+void ConsoleVisualizer::drawBlock(void *win, int top, int bottom, int left, int right) {
+    for (int i = top; i <= bottom; ++i) {
+        wmove((WINDOW *)win, i, left);
+        for (int j = left; j <= right; ++j) {
+            waddch((WINDOW *)win, ACS_CKBOARD);
+        }
+    }
+}
+
+void ConsoleVisualizer::startUI() {
+    unique_lock<recursive_mutex> lck(mtx);
+
+    if (uiRunning)
+        return;
+
+    uiThread = new thread(inputHandler);
+    uiRunning = true;
+
+    display();
+}
+
+void ConsoleVisualizer::stopUI() {
+    unique_lock<recursive_mutex> lck(mtx);
+
+    if (!uiRunning)
+        return;
+
+    uiThread->join();
+    delete uiThread;
+    uiThread = nullptr;
+    uiRunning = false;
 }
