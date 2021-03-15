@@ -12,7 +12,8 @@ using namespace Thor;
 int main() {
     ConsoleVisualizer consoleVisualizer;
 
-    consoleVisualizer.display();
+    consoleVisualizer.startUI();
+
     mutex mtx;
     mtx.lock();
     mtx.lock();
