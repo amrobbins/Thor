@@ -2,7 +2,7 @@
 
 // curses.h creates macros that clash with GraphicsMagick, so the two cannot be used together
 // so curses.h is included in the source file rather than the header file.
-#include <ncurses.h>
+#include <curses.h>
 
 using namespace Thor;
 
@@ -37,6 +37,14 @@ int ConsoleVisualizer::scrollBottom;
 int ConsoleVisualizer::scrollLeft;
 int ConsoleVisualizer::scrollRight;
 int ConsoleVisualizer::scrollTopElement = -1;
+bool ConsoleVisualizer::scrollBarSelected = false;
+int ConsoleVisualizer::scrollClickFromTopOffset;
+int ConsoleVisualizer::scrollBarDesiredTop;
+
+int ConsoleVisualizer::thorDashLeft;
+int ConsoleVisualizer::thorDashRight;
+int ConsoleVisualizer::thorDashY;
+string ConsoleVisualizer::thorDashUrl;
 
 void (*ConsoleVisualizer::originalResizeHandler)(int);
 void (*ConsoleVisualizer::originalInterruptHandler)(int);
@@ -76,6 +84,7 @@ void ConsoleVisualizer::interruptHandler(int sig) {
     if (boost::iequals(response, "yes")) {
         signal(SIGWINCH, originalResizeHandler);
         signal(SIGINT, originalInterruptHandler);
+        printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
         originalInterruptHandler(sig);
     } else {
         popUpAcknowledge("Response was not yes");
@@ -93,11 +102,39 @@ void ConsoleVisualizer::inputHandler() {
     while (uiRunning) {
         mtx.lock();
         int ch = wgetch((WINDOW *)win1);
-        if (ch != ERR) {
+        if (ch == KEY_MOUSE) {
             // Pass mouse events to scroll bar
-            ;
+            MEVENT event;
+            while (getmouse(&event) == OK) {
+                if (event.bstate & BUTTON1_PRESSED) {
+                    if (event.x >= thorDashLeft && event.x <= thorDashRight && event.y == thorDashY) {
+                        openUrl(thorDashUrl);
+                    } else if (event.x >= scrollLeft && event.x <= scrollRight && (event.y - heightW0) >= scrollTop &&
+                               (event.y - heightW0) <= scrollBottom) {
+                        scrollBarSelected = true;
+                        scrollClickFromTopOffset = scrollTop - (event.y - heightW0);
+                    } else if (event.x >= scrollLeft && event.x <= scrollRight && (event.y - heightW0) >= 1 &&
+                               (event.y - heightW0) <= heightW1 - 1) {
+                        scrollBarSelected = true;
+                        scrollBarDesiredTop = (event.y - heightW0) + scrollClickFromTopOffset;
+                        display();
+                        scrollBarSelected = false;
+                    } else {
+                        scrollBarSelected = false;
+                    }
+                } else if (event.bstate & BUTTON1_RELEASED) {
+                    scrollBarSelected = false;
+                } else {
+                    if (scrollBarSelected) {
+                        scrollBarDesiredTop = (event.y - heightW0) + scrollClickFromTopOffset;
+                        display();
+                    }
+                }
+            }
         }
         mtx.unlock();
+        if (ch == ERR)
+            usleep(10000);
     }
 }
 
@@ -180,6 +217,9 @@ ConsoleVisualizer::~ConsoleVisualizer() {
     signal(SIGWINCH, originalResizeHandler);
     signal(SIGINT, originalInterruptHandler);
     deleteWindows();
+
+    printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
+
     endwin();
 }
 
@@ -192,19 +232,32 @@ void ConsoleVisualizer::initializeWindows() {
     curs_set(0);
     if (has_colors()) {
         start_color();
-        init_color(COLOR_BLACK, 999, 999, 999);   // black is now white
-        init_color(COLOR_WHITE, 0, 0, 0);         // white is now black
-        init_color(COLOR_YELLOW, 333, 333, 333);  // YELLOW is now gray
+        init_color(COLOR_BLACK, 999, 999, 999);  // black is now white
+        init_color(COLOR_WHITE, 0, 0, 0);        // white is now black
+        init_color(COLOR_BLUE, 0, 0, 999);
         init_color(COLOR_GREEN, 86, 539, 141);
         init_pair(2, COLOR_GREEN, COLOR_BLACK);
         init_pair(3, COLOR_YELLOW, COLOR_BLACK);
         init_pair(4, COLOR_BLUE, COLOR_BLACK);
     }
 
+    printf("\033[?1003h\n");  // Makes the terminal report mouse movement events
+
+    mouseinterval(0);
     mmask_t newMouseMask;
-    mmask_t oldMouseMask;
     newMouseMask = BUTTON1_PRESSED | BUTTON1_RELEASED | REPORT_MOUSE_POSITION;
-    mousemask(newMouseMask, &oldMouseMask);
+    mousemask(newMouseMask, nullptr);
+}
+
+int ConsoleVisualizer::openUrl(string URL) {
+    string command;
+#if __APPLE__
+    command = "open " + URL;
+#else
+    command = "xdg-open " + URL;
+#endif
+    FILE *proc = popen(command.c_str(), "r");
+    return pclose(proc);
 }
 
 void ConsoleVisualizer::createWindows() {
@@ -224,7 +277,7 @@ void ConsoleVisualizer::createWindows() {
 
     win0 = newwin(heightW0, windowWidth, 0, 0);
     win1 = newwin(heightW1, windowWidth, heightW0, 0);
-    wtimeout((WINDOW *)win1, 10);
+    wtimeout((WINDOW *)win1, 3);
     nodelay((WINDOW *)win1, TRUE);
     keypad((WINDOW *)win1, TRUE);
     win2 = newwin(heightW2, windowWidth, heightW0 + heightW1, 0);
@@ -293,8 +346,14 @@ void ConsoleVisualizer::drawHeader() {
     wmove((WINDOW *)win0, 5, 0);
     waddstr((WINDOW *)win0, "ThorDash: ");
     wattroff((WINDOW *)win0, A_BOLD);
+    wattron((WINDOW *)win0, COLOR_PAIR(4));
     wmove((WINDOW *)win0, 5, 20);
-    waddstr((WINDOW *)win0, "file:///home/andrew/EyeNet/train7/ThorDash/index.html");
+    thorDashUrl = "file:///home/andrew/EyeNet/train7/ThorDash/index.html";
+    waddstr((WINDOW *)win0, thorDashUrl.c_str());
+    thorDashLeft = 20;
+    thorDashRight = 20 + thorDashUrl.length() - 1;
+    thorDashY = 5;
+    wattroff((WINDOW *)win0, COLOR_PAIR(4));
     wattron((WINDOW *)win0, A_BOLD);
 
     wattron((WINDOW *)win0, A_UNDERLINE);
@@ -329,42 +388,66 @@ void ConsoleVisualizer::drawProgressRows() {
     double progress = (rand() % 101) / 100.0;
     rows.emplace_back("Train 25", progress * 7500, 7500, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
 
-    int firstToDisplay;
+    // int firstToDisplay;
     if ((int)rows.size() <= heightW1) {
         scrollVisible = false;
-        firstToDisplay = 0;
+        // firstToDisplay = 0;
+        scrollTopElement = -1;
     } else {
         scrollVisible = true;
 
-        if ((int)rows.size() - heightW1 <= scrollTopElement) {
-            scrollTopElement = -1;
+        double numRowsHidden = rows.size() - heightW1;
+        double elementsPerScrollSlot = numRowsHidden / (heightW1 - 7);
+
+        if (scrollBarSelected) {
+            if (elementsPerScrollSlot >= 1.0) {
+                scrollTop = scrollBarDesiredTop;
+            } else {
+                // Snap to element
+                if (scrollBarDesiredTop <= 1 || scrollBarDesiredTop >= heightW1 - 6)
+                    scrollTop = scrollBarDesiredTop;
+                else if ((int)(scrollBarDesiredTop * elementsPerScrollSlot) != (int)(scrollTop * elementsPerScrollSlot))
+                    scrollTop = scrollBarDesiredTop;
+            }
         }
 
-        if (scrollTopElement == -1) {
-            firstToDisplay = rows.size() - heightW1;
+        if (scrollTop < 1)
+            scrollTop = 1;
+        if (scrollTop > heightW1 - 6)
+            scrollTop = heightW1 - 6;
+
+        if (scrollTop == 1) {
+            scrollTopElement = 0;
+        } else if (scrollTop == heightW1 - 6) {
+            scrollTopElement = -1;
         } else {
-            firstToDisplay = scrollTopElement;
+            if (scrollBarSelected) {
+                scrollTopElement = elementsPerScrollSlot * (scrollTop - 1);
+            } else {
+                if (scrollTopElement == -1)
+                    scrollTop = heightW1 - 6;
+                else
+                    scrollTop = (scrollTopElement / elementsPerScrollSlot) + 1;
+            }
+
+            if (scrollTopElement + heightW1 >= (int)rows.size()) {
+                scrollTopElement = -1;
+                scrollTop = heightW1 - 6;
+            }
         }
 
         drawBox(win1, 0, heightW1 - 1, 125, 129);
-        if (scrollTopElement == -1) {
-            scrollTop = heightW1 - 6;
-        } else {
-            int numRowsHidden = heightW1 - rows.size();
-            // FIXME: I'll have to snap when slots per element > 1
-            int elementsPerScrollSlot = ((heightW1 - 7) + numRowsHidden - 1) / numRowsHidden;
-            scrollTop = (firstToDisplay + (elementsPerScrollSlot - 1)) / elementsPerScrollSlot;
-            if (scrollTop > heightW1 - 6) {
-                scrollTop = heightW1 - 6;
-                scrollTopElement = -1;
-                firstToDisplay = rows.size() - heightW1;
-            }
-        }
         scrollBottom = scrollTop + 4;
         scrollLeft = 126;
         scrollRight = 128;
         drawBlock(win1, scrollTop, scrollBottom, scrollLeft, scrollRight);
     }
+
+    int firstToDisplay = scrollTopElement;
+    if (firstToDisplay == -1)
+        firstToDisplay = rows.size() - heightW1;
+    if (firstToDisplay < 0)
+        firstToDisplay = 0;
 
     for (int i = 0; i < heightW1 && i + firstToDisplay < (int)rows.size(); ++i) {
         wmove((WINDOW *)win1, i, 0);
@@ -384,59 +467,59 @@ void ConsoleVisualizer::drawFooter() {
     wattron((WINDOW *)win2, A_BOLD);
     wattron((WINDOW *)win2, A_UNDERLINE);
 
-    wmove((WINDOW *)win2, 0, 0);
+    wmove((WINDOW *)win2, 1, 0);
     waddstr((WINDOW *)win2, "Training Info");
 
-    wmove((WINDOW *)win2, 0, 70);
+    wmove((WINDOW *)win2, 1, 70);
     waddstr((WINDOW *)win2, "Job Info");
 
     wattroff((WINDOW *)win2, A_UNDERLINE);
     wattroff((WINDOW *)win2, A_BOLD);
 
-    wmove((WINDOW *)win2, 1, 0);
-    waddstr((WINDOW *)win2, "Training Algorithm:");
-    wmove((WINDOW *)win2, 1, 35);
-    waddstr((WINDOW *)win2, "Minibatch SGD");
     wmove((WINDOW *)win2, 2, 0);
-    waddstr((WINDOW *)win2, "Current Learning Rate:");
+    waddstr((WINDOW *)win2, "Training Algorithm:");
     wmove((WINDOW *)win2, 2, 35);
-    waddstr((WINDOW *)win2, "0.05");
+    waddstr((WINDOW *)win2, "Minibatch SGD");
     wmove((WINDOW *)win2, 3, 0);
-    waddstr((WINDOW *)win2, "Momentum:");
+    waddstr((WINDOW *)win2, "Current Learning Rate:");
     wmove((WINDOW *)win2, 3, 35);
-    waddstr((WINDOW *)win2, "0.75");
+    waddstr((WINDOW *)win2, "0.05");
     wmove((WINDOW *)win2, 4, 0);
-    waddstr((WINDOW *)win2, "Number of epochs to train:");
+    waddstr((WINDOW *)win2, "Momentum:");
     wmove((WINDOW *)win2, 4, 35);
+    waddstr((WINDOW *)win2, "0.75");
+    wmove((WINDOW *)win2, 5, 0);
+    waddstr((WINDOW *)win2, "Number of epochs to train:");
+    wmove((WINDOW *)win2, 5, 35);
     waddstr((WINDOW *)win2, "50");
 
-    wmove((WINDOW *)win2, 1, 70);
-    waddstr((WINDOW *)win2, "Training examples per hour:");
-    wmove((WINDOW *)win2, 1, 105);
-    waddstr((WINDOW *)win2, "7,562,149");
     wmove((WINDOW *)win2, 2, 70);
-    waddstr((WINDOW *)win2, "Gpu's being used:");
+    waddstr((WINDOW *)win2, "Training examples per hour:");
     wmove((WINDOW *)win2, 2, 105);
-    waddstr((WINDOW *)win2, "4 Nvidia 2080 Ti's");
+    waddstr((WINDOW *)win2, "7,562,149");
     wmove((WINDOW *)win2, 3, 70);
-    waddstr((WINDOW *)win2, "Parallelization strategy:");
+    waddstr((WINDOW *)win2, "Gpu's being used:");
     wmove((WINDOW *)win2, 3, 105);
-    waddstr((WINDOW *)win2, "Replicate and reduce");
+    waddstr((WINDOW *)win2, "4 Nvidia 2080 Ti's");
     wmove((WINDOW *)win2, 4, 70);
-    waddstr((WINDOW *)win2, "Output directory:");
+    waddstr((WINDOW *)win2, "Parallelization strategy:");
     wmove((WINDOW *)win2, 4, 105);
-    waddstr((WINDOW *)win2, "/home/andrew/EyeNet/train7/");
+    waddstr((WINDOW *)win2, "Replicate and reduce");
     wmove((WINDOW *)win2, 5, 70);
+    waddstr((WINDOW *)win2, "Output directory:");
+    wmove((WINDOW *)win2, 5, 105);
+    waddstr((WINDOW *)win2, "/home/andrew/EyeNet/train7/");
 }
 
 void ConsoleVisualizer::drawOverallStatusBar() {
     int statusBarEnd = terminalCols - 5;
     if (terminalCols < 75)
         statusBarEnd = 70;
-    drawStatusBar(win2, heightW2 - 1, 5, statusBarEnd, (rand() % 101) / 100.0, "Elapsed: 5h 23m 7s", "Remaining: 2h 12m 32s");
+    drawStatusBar(win2, heightW2 - 1, 5, statusBarEnd, (rand() % 101) / 100.0, "Elapsed: 5h 23m 7s", "Remaining: 2h 12m 32s", true);
 }
 
-void ConsoleVisualizer::drawStatusBar(void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel) {
+void ConsoleVisualizer::drawStatusBar(
+    void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel, bool boldLabels) {
     int labelLength = leftLabel.length() + rightLabel.length();
     if (!leftLabel.empty())
         labelLength += 1;  // space
@@ -452,8 +535,13 @@ void ConsoleVisualizer::drawStatusBar(void *win, int y, int xStart, int xEnd, do
 
     wmove((WINDOW *)win, y, xStart);
 
-    if (!leftLabel.empty())
+    if (!leftLabel.empty()) {
+        if (boldLabels)
+            wattron((WINDOW *)win2, A_BOLD);
         wprintw((WINDOW *)win, "%s ", leftLabel.c_str());
+        if (boldLabels)
+            wattroff((WINDOW *)win2, A_BOLD);
+    }
 
     waddch((WINDOW *)win, '[' | A_BOLD);
     int rangeSize = ((xEnd - xStart) - 1) - labelLength;
@@ -469,8 +557,13 @@ void ConsoleVisualizer::drawStatusBar(void *win, int y, int xStart, int xEnd, do
     }
     waddch((WINDOW *)win, ']' | A_BOLD);
 
-    if (!rightLabel.empty())
+    if (!rightLabel.empty()) {
+        if (boldLabels)
+            wattron((WINDOW *)win2, A_BOLD);
         wprintw((WINDOW *)win, " %s", rightLabel.c_str());
+        if (boldLabels)
+            wattroff((WINDOW *)win2, A_BOLD);
+    }
 
     int percentLocation = xStart + (rangeSize / 2);
     if (!leftLabel.empty())

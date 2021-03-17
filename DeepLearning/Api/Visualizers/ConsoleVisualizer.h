@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -72,6 +73,14 @@ class ConsoleVisualizer : public Visualizer {
     static int scrollLeft;
     static int scrollRight;
     static int scrollTopElement;
+    static bool scrollBarSelected;
+    static int scrollClickFromTopOffset;
+    static int scrollBarDesiredTop;
+
+    static int thorDashLeft;
+    static int thorDashRight;
+    static int thorDashY;
+    static string thorDashUrl;
 
     Optional<ExecutionState> previousExecutionState;
 
@@ -102,7 +111,10 @@ class ConsoleVisualizer : public Visualizer {
 
     static void display();
 
-    static void drawStatusBar(void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel);
+    static int openUrl(string URL);
+
+    static void drawStatusBar(
+        void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel, bool boldLabels = false);
 
     static string popUpPrompt(string message);
     static void popUpAcknowledge(string message);
