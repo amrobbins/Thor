@@ -18,7 +18,7 @@ COMPUTE_CAPABILITIES = -gencode=arch=compute_52,code=compute_52 -gencode=arch=co
 COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
 
 
-BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl -lncurses
+BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl -lcurses
 
 GRAPHICS_MAGICK_INCLUDE_DIR = -I /usr/local/include/GraphicsMagick/
 GRAPHICS_MAGICK = `GraphicsMagick++-config --cppflags --cxxflags --ldflags --libs`
