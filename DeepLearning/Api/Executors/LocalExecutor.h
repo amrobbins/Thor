@@ -18,12 +18,14 @@ namespace Thor {
 class Executor;
 
 struct BufferStampTensorsParams {
-    std::shared_ptr<unordered_map<int, vector<unordered_map<string, vector<uint8_t>>>>> batchletData;
+    std::shared_ptr<std::unordered_map<uint64_t, std::vector<std::unordered_map<std::string, std::vector<uint8_t>>>>> batchletData;
+    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<std::string, std::vector<uint8_t>>>> batchData;
     std::shared_ptr<mutex> mtx;
     std::shared_ptr<Loader> loader;
 
     ExampleType exampleType;
-    int epochBatchNum;
+    uint64_t epochBatchNum;
+    uint64_t numBatchletsInBatch;
 
     set<string> tensorsToReturn;
     map<string, ThorImplementation::Tensor> batchletInput;
@@ -40,7 +42,7 @@ class LocalExecutor : public Executor {
 
     // FIXME: need train, validate and test and no exampleType
     void trainTillEpochIsFinished(ExampleType exampleType, set<string> tensorsToReturn);
-    uint64_t trainBatches(uint32_t batches, ExampleType exampleType, set<string> tensorsToReturn);
+    uint64_t trainBatches(uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
 
    private:
@@ -57,7 +59,7 @@ class LocalExecutor : public Executor {
     vector<unique_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
 
     // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
-    std::unordered_map<int, std::deque<pair<Event, Event>>> batchletTimingEvents;
+    std::unordered_map<uint64_t, std::deque<pair<Event, Event>>> batchletTimingEvents;
 
     static void CUDART_CB bufferStampTensors(void* data);
 };

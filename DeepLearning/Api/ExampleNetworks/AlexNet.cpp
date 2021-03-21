@@ -157,7 +157,7 @@ Network buildAlexNet() {
     UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
 
     NetworkInput imagesInput =
-        NetworkInput::Builder().network(alexNet).name("images").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();
+        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();
 
     Tensor topPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
     Tensor bottomPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
