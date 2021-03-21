@@ -44,7 +44,8 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
         }
     }
 
-    batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, classIndexes.size()});
+    // FIXME: datatype
+    batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, classIndexes.size()});
 
     batchesPerEpoch = (numExamples + (batchSize - 1)) / batchSize;
 

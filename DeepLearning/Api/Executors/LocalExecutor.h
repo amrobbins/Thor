@@ -17,17 +17,17 @@ namespace Thor {
 
 class Executor;
 
-struct LoanedBufferMetadata {
-    LoanedBufferMetadata() {}
-    LoanedBufferMetadata(Event doneWithBufferEvent, ExampleType exampleType, map<std::string, ThorImplementation::Tensor> batchTensorMap) {
-        this->doneWithBufferEvent = doneWithBufferEvent;
-        this->exampleType = exampleType;
-        this->batchTensorMap = batchTensorMap;
-    }
+struct BufferStampTensorsParams {
+    std::shared_ptr<unordered_map<int, vector<unordered_map<string, vector<uint8_t>>>>> batchletData;
+    std::shared_ptr<mutex> mtx;
+    std::shared_ptr<Loader> loader;
 
-    Event doneWithBufferEvent;
     ExampleType exampleType;
-    std::map<std::string, ThorImplementation::Tensor> batchTensorMap;
+    int epochBatchNum;
+
+    set<string> tensorsToReturn;
+    map<string, ThorImplementation::Tensor> batchletInput;
+    map<string, ThorImplementation::Tensor> batchletOutput;
 };
 
 class LocalExecutor : public Executor {
@@ -39,8 +39,8 @@ class LocalExecutor : public Executor {
     virtual ~LocalExecutor() {}
 
     // FIXME: need train, validate and test and no exampleType
-    void trainTillEpochIsFinished(ExampleType exampleType);
-    uint64_t trainBatches(uint32_t batches, ExampleType exampleType);
+    void trainTillEpochIsFinished(ExampleType exampleType, set<string> tensorsToReturn);
+    uint64_t trainBatches(uint32_t batches, ExampleType exampleType, set<string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
 
    private:
@@ -49,14 +49,17 @@ class LocalExecutor : public Executor {
     Network network;
     std::shared_ptr<Loader> loader;
     HyperparameterController hyperparameterController;
-    vector<std::shared_ptr<Visualizer>> visualizers;
+    vector<Visualizer*> visualizers;
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
     unique_ptr<AsyncQueue<ExecutionState>> hyperparameterControllerExecutionState;
     vector<unique_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
 
-    unique_ptr<AsyncQueue<LoanedBufferMetadata>> loanedBufferQueue;
+    // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
+    std::unordered_map<int, std::deque<pair<Event, Event>>> batchletTimingEvents;
+
+    static void CUDART_CB bufferStampTensors(void* data);
 };
 
 class LocalExecutor::Builder {
@@ -82,9 +85,9 @@ class LocalExecutor::Builder {
         return *this;
     }
 
-    LocalExecutor::Builder visualizer(std::shared_ptr<Visualizer> _visualizer) {
+    LocalExecutor::Builder visualizer(Visualizer* _visualizer) {
         if (_visualizers.isEmpty())
-            _visualizers = vector<shared_ptr<Visualizer>>();
+            _visualizers = vector<Visualizer*>();
         _visualizers.get().push_back(_visualizer);
         return *this;
     }
@@ -93,7 +96,7 @@ class LocalExecutor::Builder {
     Optional<Network> _network;
     std::shared_ptr<Loader> _loader;
     Optional<HyperparameterController> _hyperparameterController;
-    Optional<vector<std::shared_ptr<Visualizer>>> _visualizers;
+    Optional<vector<Visualizer*>> _visualizers;
 };
 
 }  // namespace Thor

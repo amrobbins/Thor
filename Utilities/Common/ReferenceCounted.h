@@ -77,7 +77,7 @@ using std::recursive_mutex;
  * when changing the object that they refer to, if the derived class has a need to do that.
  *
  */
-#define DEBUG_REF_COUNTS
+// FIXME: #define DEBUG_REF_COUNTS
 
 class ReferenceCounted {
    public:
@@ -157,6 +157,7 @@ class ReferenceCounted {
     virtual ~ReferenceCounted() {}
 
     bool uninitialized() const { return referenceCount == nullptr; }
+    bool initialized() const { return !uninitialized(); }
 
     virtual void destroy() = 0;
 
