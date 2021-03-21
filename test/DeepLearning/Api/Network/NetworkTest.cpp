@@ -371,16 +371,16 @@ TEST(Network, AlexnetIsProperlyFormed) {
 
     ThorImplementation::NetworkInput *images;
     ThorImplementation::NetworkInput *labels;
-    if (stampedNetwork.inputs[0]->getName() == "images") {
+    if (stampedNetwork.inputs[0]->getName() == "examples") {
         images = stampedNetwork.inputs[0];
-        ASSERT_EQ(images->getName(), "images");
+        ASSERT_EQ(images->getName(), "examples");
         labels = stampedNetwork.inputs[1];
         ASSERT_EQ(labels->getName(), "labels");
     } else {
         labels = stampedNetwork.inputs[0];
         ASSERT_EQ(labels->getName(), "labels");
         images = stampedNetwork.inputs[1];
-        ASSERT_EQ(images->getName(), "images");
+        ASSERT_EQ(images->getName(), "examples");
     }
 
     ThorImplementation::NetworkOutput *predictions;
