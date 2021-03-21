@@ -44,7 +44,7 @@ class HackathonExecutor {
         map<string, ThorImplementation::Tensor> batchOutput;
         vector<map<string, Event>> outputReadyEvents(numStamps);
         vector<Event> processingFinishedEvent(numStamps);
-        batchInput["images"] = inputTensor;
+        batchInput["examples"] = inputTensor;
         batchInput["labels"] = labelsTensor;
         omp_set_num_threads(numStamps);
         startEvent = stampedNetworks[0].outputs[0]->getStream().putEvent(true, true);
