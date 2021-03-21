@@ -17,11 +17,13 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths, ThorImplementation::T
         shards.back()->openShard(shardPath);
         assert(shards.back()->getExampleSizeInBytes() == exampleSizeInBytes);
 
+        /*
         printf("%ld %ld %ld %ld\n",
                shards.back()->getNumExamples(ExampleType::TRAIN),
                shards.back()->getNumExamples(ExampleType::VALIDATE),
                shards.back()->getNumExamples(ExampleType::TEST),
                shards.back()->getExampleSizeInBytes());
+        */
     }
 
     /*

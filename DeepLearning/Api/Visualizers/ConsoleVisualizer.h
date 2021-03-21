@@ -40,17 +40,25 @@ struct ProgressRow {
 
 class ConsoleVisualizer : public Visualizer {
    public:
-    class Builder;
-    ConsoleVisualizer();
+    static ConsoleVisualizer &instance() {
+        static ConsoleVisualizer singletonInstance;  // Guaranteed to be destroyed. Instantiated on first use.
+        return singletonInstance;
+    }
+
+    // Forbid copying since ConsoleVisualizer is a singleton
+    ConsoleVisualizer(const ConsoleVisualizer &) = delete;
+    ConsoleVisualizer &operator=(const ConsoleVisualizer &) = delete;
 
     virtual ~ConsoleVisualizer();
 
-    void startUI();
-    void stopUI();
+    virtual void startUI();
+    virtual void stopUI();
 
-    void updateState(ExecutionState executionState, HyperparameterController hyperparameterController);
+    virtual void updateState(ExecutionState executionState, HyperparameterController hyperparameterController);
 
    private:
+    ConsoleVisualizer();
+
     static const int MIN_WIDTH;
     static const int HEIGHT_W0;
     static const int MIN_HEIGHT_W1;
@@ -98,6 +106,9 @@ class ConsoleVisualizer : public Visualizer {
     static void interruptHandler(int sig);
     static void (*originalInterruptHandler)(int);
 
+    static void abortHandler(int sig);
+    static void (*originalAbortHandler)(int);
+
     static void noOpHandler(int sig);
 
     static void inputHandler();
@@ -123,11 +134,6 @@ class ConsoleVisualizer : public Visualizer {
 
     static void drawBox(void *win, int top, int bottom, int left, int right);
     static void drawBlock(void *win, int top, int bottom, int left, int right);
-};
-
-class ConsoleVisualizer::Builder {
-   public:
-    virtual shared_ptr<Visualizer> build();
 };
 
 }  // namespace Thor

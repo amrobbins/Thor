@@ -80,6 +80,8 @@ class Event : private ReferenceCounted {
         return milliseconds;
     }
 
+    long getReferenceCountedId() { return ReferenceCounted::getReferenceCountedId(); }
+
    private:
     int gpuNum;
     cudaEvent_t cudaEvent;

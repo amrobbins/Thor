@@ -78,10 +78,8 @@ class StampedNetwork {
         }
     }
 
-    void sendBatch(map<string, Tensor> batchInputs,
-                   map<string, Tensor> &batchOutputs,
-                   map<string, Event> &outputReadyEvents,
-                   Event processingFinishedEvent) {
+    // Note that all processing is finished at the end of any input stream of the stamp.
+    Event sendBatch(map<string, Tensor> batchInputs, map<string, Tensor> &batchOutputs, map<string, Event> &outputReadyEvents) {
         assert(batchInputs.size() == inputs.size());
 
         for (uint32_t i = 0; i < inputs.size(); ++i) {
@@ -108,12 +106,14 @@ class StampedNetwork {
         }
 
         // Processing is finished when the stream from input 0 is ready
-        processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
+        Event processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
 
         // The streams from all other inputs wait for the stream from input 0 to be ready
         for (uint i = 1; i < inputs.size(); ++i) {
             inputs[i]->getStream().waitEvent(processingFinishedEvent);
         }
+
+        return processingFinishedEvent;
     }
 
     void clear() {

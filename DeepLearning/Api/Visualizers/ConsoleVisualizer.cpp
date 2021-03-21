@@ -48,11 +48,7 @@ string ConsoleVisualizer::thorDashUrl;
 
 void (*ConsoleVisualizer::originalResizeHandler)(int);
 void (*ConsoleVisualizer::originalInterruptHandler)(int);
-
-shared_ptr<Visualizer> ConsoleVisualizer::Builder::build() {
-    shared_ptr<ConsoleVisualizer> consoleVisualizer = make_shared<ConsoleVisualizer>();
-    return consoleVisualizer;
-}
+void (*ConsoleVisualizer::originalAbortHandler)(int);
 
 void ConsoleVisualizer::updateState(ExecutionState executionState, HyperparameterController hyperparameterController) {
     if (previousExecutionState.isEmpty()) {
@@ -75,16 +71,33 @@ void ConsoleVisualizer::resizeHandler(int sig) {
     display();
 }
 
+void ConsoleVisualizer::abortHandler(int sig) {
+    unique_lock<recursive_mutex> lck(mtx);
+
+    wprintw((WINDOW *)win1, "abort");
+
+    signal(SIGWINCH, originalResizeHandler);
+    signal(SIGINT, originalInterruptHandler);
+    signal(SIGABRT, originalAbortHandler);
+    printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
+    endwin();
+    originalAbortHandler(sig);
+}
+
 void ConsoleVisualizer::interruptHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
     signal(SIGINT, noOpHandler);
+
+    wprintw((WINDOW *)win1, "interrupt");
 
     string response = popUpPrompt("Do you really want to quit? Type yes to quit:");
 
     if (boost::iequals(response, "yes")) {
         signal(SIGWINCH, originalResizeHandler);
         signal(SIGINT, originalInterruptHandler);
+        signal(SIGABRT, originalAbortHandler);
         printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
+        endwin();
         originalInterruptHandler(sig);
     } else {
         popUpAcknowledge("Response was not yes");
@@ -211,14 +224,16 @@ ConsoleVisualizer::ConsoleVisualizer() {
     initializeWindows();
     originalResizeHandler = signal(SIGWINCH, resizeHandler);
     originalInterruptHandler = signal(SIGINT, interruptHandler);
+    originalAbortHandler = signal(SIGABRT, abortHandler);
 }
 
 ConsoleVisualizer::~ConsoleVisualizer() {
     signal(SIGWINCH, originalResizeHandler);
     signal(SIGINT, originalInterruptHandler);
+    signal(SIGABRT, originalAbortHandler);
     deleteWindows();
 
-    printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
+    stopUI();
 
     endwin();
 }
@@ -636,20 +651,26 @@ void ConsoleVisualizer::startUI() {
     if (uiRunning)
         return;
 
-    uiThread = new thread(inputHandler);
+    printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
     uiRunning = true;
+    uiThread = new thread(inputHandler);
 
     display();
 }
 
 void ConsoleVisualizer::stopUI() {
-    unique_lock<recursive_mutex> lck(mtx);
+    {
+        unique_lock<recursive_mutex> lck(mtx);
 
-    if (!uiRunning)
-        return;
+        if (!uiRunning)
+            return;
+
+        printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
+
+        uiRunning = false;
+    }
 
     uiThread->join();
     delete uiThread;
     uiThread = nullptr;
-    uiRunning = false;
 }

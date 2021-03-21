@@ -2,7 +2,7 @@
 // /usr/local/cuda/include -I /usr/include -I/home/andrew/Thor -L/home/andrew/Thor -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l
 // cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /usr/local/lib/libboost_filesystem.a -I./ -L./ -lThor -I ./ -I
 // /usr/local/cuda/include -I /usr/include -I /usr/local/boost -ldl -I /usr/local/include/GraphicsMagick/ -I build/test/googletest/include
-// -pthread -I /usr/local/cuda/include -I /usr/include -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L
+// -pthread -I /usr/local/cuda/include -I /usr/include -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -l ncurses -L
 // /usr/lib/x86_64-linux-gnu -l cudnn /usr/local/lib/libboost_filesystem.a `GraphicsMagick++-config --cppflags --cxxflags --ldflags --libs`
 #include "Thor.h"
 
@@ -20,8 +20,12 @@ using std::string;
 using std::unordered_set;
 using std::vector;
 
+using namespace Thor;
+
 int main() {
     Thor::Network alexNet = buildAlexNet();
+
+    ConsoleVisualizer::instance().startUI();
 
     set<string> shardPaths;
     shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_1_of_2.shard");
@@ -30,15 +34,15 @@ int main() {
 
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, 512);
 
-    Thor::LocalExecutor executor = Thor::LocalExecutor::Builder()
-                                       .network(alexNet)
-                                       .loader(batchLoader)
-                                       //.hyperparameterController(hyperparameterController)
-                                       //.visualizer(consoleVisualizer)
-                                       .build();
+    shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
+                                                   .network(alexNet)
+                                                   .loader(batchLoader)
+                                                   //.hyperparameterController(hyperparameterController)
+                                                   .visualizer(&ConsoleVisualizer::instance())
+                                                   .build();
 
-    executor.trainEpochs(5);
-    executor.createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
+    // executor->trainBatches(1, ExampleType::TRAIN);
+    // executor->createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
 
     return 0;
 }
