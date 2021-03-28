@@ -41,8 +41,24 @@ int main() {
                                                    .visualizer(&ConsoleVisualizer::instance())
                                                    .build();
 
-    // executor->trainBatches(1, ExampleType::TRAIN);
+    set<string> tensorsToReturn;
+    tensorsToReturn.insert("examples");
+    tensorsToReturn.insert("labels");
+
+    executor->trainEpoch(ExampleType::TRAIN, tensorsToReturn);
+
+    while (true) {
+        executor->waitForBatchData();
+        if (executor->isBatchDataReady())
+            executor->popBatchData();
+        else
+            break;
+    }
+
     // executor->createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
+
+    // cudaError_t cudaStatus = cudaDeviceSynchronize();
+    // assert(cudaStatus == cudaSuccess);
 
     return 0;
 }

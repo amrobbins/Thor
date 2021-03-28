@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include <condition_variable>
 #include <map>
 #include <memory>
 #include <string>
@@ -18,14 +19,19 @@ namespace Thor {
 class Executor;
 
 struct BufferStampTensorsParams {
-    std::shared_ptr<std::unordered_map<uint64_t, std::vector<std::unordered_map<std::string, std::vector<uint8_t>>>>> batchletData;
-    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<std::string, std::vector<uint8_t>>>> batchData;
-    std::shared_ptr<mutex> mtx;
+    std::shared_ptr<std::vector<std::unordered_map<std::string, std::vector<uint8_t>>>> batchletData;
+    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<string, vector<uint8_t>>>> batchData;
+    std::shared_ptr<std::mutex> batchMutex;
+    std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
+    std::shared_ptr<std::mutex> epochMutex;
+    std::shared_ptr<uint64_t> numBatchesDoneInEpoch;
+    std::shared_ptr<std::condition_variable> batchFinished;
     std::shared_ptr<Loader> loader;
 
     ExampleType exampleType;
     uint64_t epochBatchNum;
     uint64_t numBatchletsInBatch;
+    uint64_t numBatchesInEpoch;
 
     set<string> tensorsToReturn;
     map<string, ThorImplementation::Tensor> batchletInput;
@@ -41,9 +47,13 @@ class LocalExecutor : public Executor {
     virtual ~LocalExecutor() {}
 
     // FIXME: need train, validate and test and no exampleType
-    void trainTillEpochIsFinished(ExampleType exampleType, set<string> tensorsToReturn);
-    uint64_t trainBatches(uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn);
+    void trainEpoch(ExampleType exampleType, set<string> tensorsToReturn);
+    void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
+
+    bool isBatchDataReady();
+    void waitForBatchData();
+    unordered_map<string, std::vector<uint8_t>> popBatchData();
 
    private:
     bool initialized;
@@ -55,11 +65,21 @@ class LocalExecutor : public Executor {
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
+    std::shared_ptr<std::mutex> epochMutex;
+    std::shared_ptr<uint64_t> numBatchesDoneInEpoch;
+    std::shared_ptr<std::condition_variable> batchFinished;
+    std::condition_variable batchDataPopped;
+    std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
+    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<string, vector<uint8_t>>>> batchData;
+
     unique_ptr<AsyncQueue<ExecutionState>> hyperparameterControllerExecutionState;
     vector<unique_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
 
     // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
-    std::unordered_map<uint64_t, std::deque<pair<Event, Event>>> batchletTimingEvents;
+    std::unordered_map<uint64_t, std::deque<std::pair<Event, Event>>> batchletTimingEvents;
+
+    bool isBatchDataReadyUnlocked();
+    void waitForBatchDataUnlocked(std::unique_lock<std::mutex>& lck);
 
     static void CUDART_CB bufferStampTensors(void* data);
 };

@@ -74,8 +74,6 @@ void ConsoleVisualizer::resizeHandler(int sig) {
 void ConsoleVisualizer::abortHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
 
-    wprintw((WINDOW *)win1, "abort");
-
     signal(SIGWINCH, originalResizeHandler);
     signal(SIGINT, originalInterruptHandler);
     signal(SIGABRT, originalAbortHandler);
