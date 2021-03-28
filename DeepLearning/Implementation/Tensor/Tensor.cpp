@@ -106,6 +106,12 @@ void Tensor::destroy() {
         // NOP
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         cudaError_t cudaStatus = cudaFreeHost(mem);
+
+        if (cudaStatus != cudaSuccess) {
+            printf("cuda status %d\n", cudaStatus);
+            fflush(stdout);
+        }
+
         assert(cudaStatus == cudaSuccess);
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());

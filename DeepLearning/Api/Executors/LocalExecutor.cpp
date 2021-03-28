@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Executors/LocalExecutor.h"
 
+using std::condition_variable;
 using std::map;
 using std::string;
 
@@ -45,6 +46,13 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
             localExecutor->stampedNetworks[i].trainableLayers[t]->setLearningRate(0.001);
     }
 
+    localExecutor->batchDataReady = make_shared<map<uint64_t, bool>>();
+    localExecutor->batchData = make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();
+    localExecutor->batchFinished = make_shared<condition_variable>();
+
+    localExecutor->epochMutex = make_shared<mutex>();
+    localExecutor->numBatchesDoneInEpoch = make_shared<uint64_t>(0);
+
     localExecutor->initialized = true;
 
     return localExecutor;
@@ -70,20 +78,16 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
         memcpy(&(bufferMap[tensorName][0]), copyFromTensor.getMemPtr(), numTensorBytes);
     }
 
-    params->mtx->lock();
-
-    // FIXME: what about collision by training more than one epoch at a time and not clearing the entry before writing the new one?
-
-    vector<unordered_map<string, vector<uint8_t>>> &currentBatchesBatchletData = (*(params->batchletData))[params->epochBatchNum];
-    currentBatchesBatchletData.push_back(bufferMap);
+    params->batchMutex->lock();
+    params->batchletData->push_back(bufferMap);
 
     // When all batchlets are available for a batch, then concatenate the data into the batch data array
-    if (currentBatchesBatchletData.size() == params->numBatchletsInBatch) {
-        unordered_map<string, vector<uint8_t>> &currentBatchData = (*params->batchData)[params->epochBatchNum];
+    if (params->batchletData->size() == params->numBatchletsInBatch) {
+        params->epochMutex->lock();
         for (auto it = bufferMap.begin(); it != bufferMap.end(); ++it) {
             string tensorName = it->first;
             uint64_t bytesPerBatchlet = it->second.size();
-            currentBatchData[tensorName] = vector<uint8_t>(bytesPerBatchlet * params->numBatchletsInBatch);
+            (*(params->batchData))[params->epochBatchNum][tensorName] = vector<uint8_t>(bytesPerBatchlet * params->numBatchletsInBatch);
         }
 
         // batchletData:
@@ -93,28 +97,30 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
             for (auto it = bufferMap.begin(); it != bufferMap.end(); ++it) {
                 string tensorName = it->first;
                 uint64_t bytesPerBatchlet = it->second.size();
-                unordered_map<string, vector<uint8_t>> &currentIterationBatchData =
-                    (*(params->batchletData))[params->epochBatchNum][batchletIndex];
+                unordered_map<string, vector<uint8_t>> &currentIterationBatchData = (*(params->batchletData))[batchletIndex];
 
-                memcpy(&(currentBatchData[tensorName][bytesPerBatchlet * batchletIndex]),
+                memcpy(&((*(params->batchData))[params->epochBatchNum][tensorName][bytesPerBatchlet * batchletIndex]),
                        &(currentIterationBatchData[tensorName][0]),
                        bytesPerBatchlet);
             }
         }
 
-        params->batchletData->erase(params->epochBatchNum);
+        (*(params->batchDataReady))[params->epochBatchNum] = true;
+        (*(params->numBatchesDoneInEpoch)) += 1;
+        params->batchFinished->notify_all();
+        params->epochMutex->unlock();
+
+        params->loader->returnBatchBuffers(params->exampleType, params->batchletInput);
+        params->batchMutex->unlock();
+        delete params;
+    } else {
+        params->loader->returnBatchBuffers(params->exampleType, params->batchletInput);
+        params->batchMutex->unlock();
     }
-
-    // FIXME: could push batchdata to an async queue here
-
-    params->mtx->unlock();
-
-    params->loader->returnBatchBuffers(params->exampleType, params->batchletInput);
-
-    delete params;
 }
 
-uint64_t LocalExecutor::trainBatches(uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn) {
+// FIXME: trainBatches should be private
+void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn) {
     assert(batches > 0);
 
     // FIXME: this should be based on first expected to be done. Also there should be a GPU side input and output queue.
@@ -127,30 +133,44 @@ uint64_t LocalExecutor::trainBatches(uint64_t batches, ExampleType exampleType, 
     // FIXME:
     uint64_t batchletsPerBatch = 1;
 
-    // batchNumber ->   batchlet0                              batchlet1
-    //               [[input0 -> buffer, output0 -> buffer], [input0 -> buffer, output0 -> buffer]]
-    shared_ptr<unordered_map<uint64_t, vector<unordered_map<string, vector<uint8_t>>>>> batchletData =
-        make_shared<unordered_map<uint64_t, vector<unordered_map<string, vector<uint8_t>>>>>();
-    // The concatenation of all batchlet datas for the batch:
-    shared_ptr<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>> batchData =
-        make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();
-    shared_ptr<mutex> mtx = make_shared<mutex>();
+    shared_ptr<mutex> batchMutex = make_shared<mutex>();
 
-    uint64_t epochBatchNum;
+    *numBatchesDoneInEpoch = initialEpochBatchNum;
+
+    // Scheduling in the following loop schedules far enough ahead untill all input batch buffers are exhausted.
+    // Once that happens scheduling does not get any further ahead.
     for (uint64_t batch = 0; batch < batches; ++batch) {
-        // FIXME: wait until there are 10 or less batches scheduled -> check the contents of batchletData, use mutex.
+        uint64_t epochBatchNum = initialEpochBatchNum + batch;
+
+        // batchNumber ->   batchlet0                              batchlet1
+        //               [[input0 -> buffer, output0 -> buffer], [input0 -> buffer, output0 -> buffer]]
+        shared_ptr<vector<unordered_map<string, vector<uint8_t>>>> batchletData =
+            make_shared<vector<unordered_map<string, vector<uint8_t>>>>();
+
+        {
+            unique_lock<mutex> lck(*epochMutex);
+            (*(batchDataReady))[epochBatchNum] = false;
+            while (batchDataReady->size() > 32) {
+                batchDataPopped.wait(lck);
+            }
+        }
 
         for (uint64_t batchlet = 0; batchlet < batchletsPerBatch; ++batchlet) {
             BufferStampTensorsParams *bufferStampTensorsParams = new BufferStampTensorsParams();
             bufferStampTensorsParams->batchletData = batchletData;
             bufferStampTensorsParams->batchData = batchData;
-            bufferStampTensorsParams->mtx = mtx;
+            bufferStampTensorsParams->batchMutex = batchMutex;
+            bufferStampTensorsParams->epochMutex = epochMutex;
+            bufferStampTensorsParams->numBatchesDoneInEpoch = numBatchesDoneInEpoch;
+            bufferStampTensorsParams->batchFinished = batchFinished;
+            bufferStampTensorsParams->batchDataReady = batchDataReady;
             bufferStampTensorsParams->loader = loader;
             bufferStampTensorsParams->exampleType = exampleType;
             bufferStampTensorsParams->epochBatchNum = epochBatchNum;
             bufferStampTensorsParams->numBatchletsInBatch = batchletsPerBatch;
             bufferStampTensorsParams->tensorsToReturn = tensorsToReturn;
 
+            // Note: blocks when batch input buffers are exhausted (all of them loaned out)
             bufferStampTensorsParams->batchletInput = loader->getBatch(exampleType, epochBatchNum);
 
             // Note that all work is done for a stamp at the end of any input stream belonging to the stamp
@@ -159,7 +179,7 @@ uint64_t LocalExecutor::trainBatches(uint64_t batches, ExampleType exampleType, 
 
             // Execute the stamp, noting the time taken using events.
             Event startBatchletEvent = stream.putEvent(true, false);
-            processingFinishedEvents[nextStampToProcess] = stampedNetworks[nextStampToProcess].sendBatch(
+            stampedNetworks[nextStampToProcess].sendBatch(
                 bufferStampTensorsParams->batchletInput, bufferStampTensorsParams->batchletOutput, outputReadyEvents[nextStampToProcess]);
             Event doneBatchletEvent = stream.putEvent(true, false);
             batchletTimingEvents[nextStampToProcess].emplace_back(startBatchletEvent, doneBatchletEvent);
@@ -167,28 +187,84 @@ uint64_t LocalExecutor::trainBatches(uint64_t batches, ExampleType exampleType, 
             // Copy all data to buffers at the end of the work stream
             cudaStatus = cudaLaunchHostFunc(stream, bufferStampTensors, bufferStampTensorsParams);
             assert(cudaStatus == cudaSuccess);
+            processingFinishedEvents[nextStampToProcess] = stream.putEvent();
 
             nextStampToProcess += 1;
             nextStampToProcess %= stampedNetworks.size();
         }
 
+        // FIXME: Reduce gradients and broadcast updated weights
+
         // Now the input stream from each stamp waits till all gradient update work is done for the stamp, before it will begin processing
         // the next set of inputs passed to it.
+        // FIXME: wait for weight update to happen
     }
 
+    /*
     // FIXME: I should push each batch data to an async queue or something like that
     for (auto it = processingFinishedEvents.begin(); it != processingFinishedEvents.end(); ++it) {
         Event processingFinishedEvent = it->second;
-        processingFinishedEvent.synchronize();
+        processingFinishedEvent.synchronize();  // FIXME: temp
     }
-
-    // FIXME need to fill batchData
-
-    return epochBatchNum;
+    */
 }
 
-void LocalExecutor::trainTillEpochIsFinished(ExampleType exampleType, set<string> tensorsToReturn) {
+void LocalExecutor::trainEpoch(ExampleType exampleType, set<string> tensorsToReturn) {
     uint64_t nextBatchNum = loader->getNextBatchNum(exampleType);
-    uint64_t batchesToTrain = loader->getNumBatchesPerEpoch(exampleType) - nextBatchNum;
-    trainBatches(batchesToTrain, exampleType, tensorsToReturn);
+    // uint64_t batchesToTrain = loader->getNumBatchesPerEpoch(exampleType) - nextBatchNum;
+    uint64_t batchesToTrain = 5;  // FIXME temp
+    trainBatches(nextBatchNum, batchesToTrain, exampleType, tensorsToReturn);
+}
+
+bool LocalExecutor::isBatchDataReady() {
+    unique_lock<mutex> lck(*epochMutex);
+    return isBatchDataReadyUnlocked();
+}
+
+bool LocalExecutor::isBatchDataReadyUnlocked() {
+    if (batchDataReady->empty()) {
+        return false;
+    } else {
+        auto it = batchDataReady->begin();
+        return it->second;
+    }
+}
+
+// Blocking
+// Waits until a batch is finished
+// --or--
+// there is no batch finished and there are no more batches being processed
+void LocalExecutor::waitForBatchData() {
+    unique_lock<mutex> lck(*epochMutex);
+    waitForBatchDataUnlocked(lck);
+}
+
+void LocalExecutor::waitForBatchDataUnlocked(unique_lock<mutex> &lck) {
+    // uint64_t numBatchesInEpoch = loader->getNumBatchesPerEpoch(exampleType);
+    uint64_t numBatchesInEpoch = 5;  // FIXME temp
+    bool allBatchesDoneForEpoch = (*numBatchesDoneInEpoch == numBatchesInEpoch);
+    while (!allBatchesDoneForEpoch && !isBatchDataReadyUnlocked()) {
+        batchFinished->wait(lck);
+    }
+}
+
+// Blocking
+// Returns a map of tensorName -> vector<uint8_t>, which holds the raw tensor value.
+// If there is no more data that is being processed, returns an empty map.
+unordered_map<string, std::vector<uint8_t>> LocalExecutor::popBatchData() {
+    unique_lock<mutex> lck(*epochMutex);
+
+    waitForBatchDataUnlocked(lck);
+
+    if (!isBatchDataReadyUnlocked())
+        return unordered_map<string, std::vector<uint8_t>>();
+
+    auto it = batchData->begin();
+    unordered_map<string, std::vector<uint8_t>> currentBatchData = it->second;
+    batchData->erase(it);
+    batchDataReady->erase(batchDataReady->begin());
+
+    batchDataPopped.notify_all();
+
+    return currentBatchData;
 }
