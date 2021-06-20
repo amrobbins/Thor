@@ -69,7 +69,8 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/WorkQueue/WorkQueueTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
-                build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
+                build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
+                build/test/DeepLearning/Api/Optimizers/SgdTest \
 
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
                 #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
@@ -108,6 +109,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
             build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest \
+            build/test/DeepLearning/Api/Optimizers/SgdTest \
 
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
             #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
@@ -663,8 +665,9 @@ build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTe
 	mkdir -p build/DeepLearning/Api/ExampleNetworks/PerformanceTests
 	$(Gpp) $(DEBUG) DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest.cpp -O3 -std=c++11 -pthread $(THOR_LIBS) $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest
 
-
-
+build/test/DeepLearning/Api/Optimizers/SgdTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Optimizers/SgdTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Optimizers
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Optimizers/SgdTest test/DeepLearning/Api/Optimizers/SgdTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 

@@ -40,7 +40,7 @@ unordered_map<string, float> Sgd::initializeStampedNetworkParameters(ThorImpleme
     }
 
     unordered_map<string, float> updatedParameters;
-    updatedParameters["initialLearningRate"] = initialLearningRate;
+    updatedParameters["currentLearningRate"] = currentLearningRate;
     return updatedParameters;
 }
 

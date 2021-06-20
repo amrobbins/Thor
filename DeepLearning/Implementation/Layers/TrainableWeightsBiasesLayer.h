@@ -272,6 +272,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     }
 
     virtual void setLearningRate(float learningRate) { this->learningRate = learningRate; }
+    virtual float getLearningRate() { return learningRate; }
 
     virtual Tensor getWeights() { return weights; }
     virtual Optional<Tensor> getBiases() { return biases; }
