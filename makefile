@@ -421,7 +421,7 @@ build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o: Dee
 
 build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/LocalExecutor.h DeepLearning/Api/Executors/LocalExecutor.cpp
 	mkdir -p build/DeepLearning/Api/Executors
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Executors/LocalExecutor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Executors/LocalExecutor.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Executors/LocalExecutor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Executors/LocalExecutor.o
 
 build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h DeepLearning/Api/Network/Network.cpp
 	mkdir -p build/DeepLearning/Api/Network
@@ -438,27 +438,27 @@ build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stre
 
 build/Utilities/Loaders/Shard.o: Utilities/Loaders/Shard.h Utilities/Loaders/Shard.cpp
 	mkdir -p build/Utilities/Loaders
-	$(Gpp) -Wno-error=maybe-uninitialized $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/Shard.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/Shard.o $(GRAPHICS_MAGICK)
+	$(Gpp) -Wno-error=maybe-uninitialized -c -O3 -std=c++11 Utilities/Loaders/Shard.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/Shard.o $(GRAPHICS_MAGICK)
 
 build/Utilities/Loaders/ShardedRawDatasetCreator.o: Utilities/Loaders/ShardedRawDatasetCreator.h Utilities/Loaders/ShardedRawDatasetCreator.cpp
 	mkdir -p build/Utilities/Loaders
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ShardedRawDatasetCreator.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ShardedRawDatasetCreator.o $(GRAPHICS_MAGICK)
+	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/ShardedRawDatasetCreator.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ShardedRawDatasetCreator.o $(GRAPHICS_MAGICK)
 
 build/Utilities/Loaders/ImageLoader.o: Utilities/Loaders/ImageLoader.h Utilities/Loaders/ImageLoader.cpp
 	mkdir -p build/Utilities/Loaders
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ImageLoader.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageLoader.o
+	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/ImageLoader.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageLoader.o
 
 build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Utilities/Loaders/ImageProcessor.cpp
 	mkdir -p build/Utilities/Loaders
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/ImageProcessor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageProcessor.o
+	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/ImageProcessor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageProcessor.o
 
 build/Utilities/Loaders/BatchAssembler.o: Utilities/Loaders/BatchAssembler.h Utilities/Loaders/BatchAssembler.cpp
 	mkdir -p build/Utilities/Loaders
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 Utilities/Loaders/BatchAssembler.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/BatchAssembler.o
+	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/BatchAssembler.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/BatchAssembler.o
 
 build/DeepLearning/Api/Loaders/LocalBatchLoader.o: DeepLearning/Api/Loaders/LocalBatchLoader.h DeepLearning/Api/Loaders/LocalBatchLoader.cpp
 	mkdir -p build/DeepLearning/Api/Loaders/
-	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Loaders/LocalBatchLoader.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Loaders/LocalBatchLoader.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Loaders/LocalBatchLoader.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Loaders/LocalBatchLoader.o
 
 build/Utilities/WorkQueue/AsyncTensorQueue.o: Utilities/WorkQueue/AsyncTensorQueue.h Utilities/WorkQueue/AsyncTensorQueue.cpp
 	mkdir -p build/Utilities/WorkQueue
