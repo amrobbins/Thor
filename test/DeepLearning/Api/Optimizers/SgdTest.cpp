@@ -15,36 +15,6 @@ using std::vector;
 
 using namespace Thor;
 
-/*
-class Sgd : public Optimizer {
-   public:
-    class Builder;
-
-    Sgd();
-    virtual ~Sgd();
-
-    virtual void setNetwork(Thor::Network *network);
-
-    // returns a map of updated parameters
-    std::unordered_map<std::string, float> updateParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-    std::unordered_map<std::string, float> initializeStampedNetworkParameters(ThorImplementation::StampedNetwork &stampedNetwork,
-                                                                              uint64_t epoch,
-                                                                              uint64_t batch,
-                                                                              uint64_t batchesPerEpoch);
-    std::unordered_map<std::string, float> getAllParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-
-   private:
-    float initialLearningRate;
-    float decay;
-    float momentum;
-    bool useNesterov;
-    uint64_t currentEpoch;
-    bool parametersInitialized;
-
-    Thor::Network *network;
-};
-*/
-
 Network buildNetwork(uint32_t numFCLayers) {
     Network network;
     Tensor latestOutputTensor;
