@@ -9,6 +9,7 @@ using namespace Thor;
 shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     assert(_network.isPresent());
     assert(_loader);
+    assert(_optimizer);
     // FIXME: add hyperparameter controller
     // assert(_hyperparameterController.isPresent());
 
@@ -20,10 +21,11 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     shared_ptr<LocalExecutor> localExecutor = make_shared<LocalExecutor>();
     localExecutor->network = _network;
     localExecutor->loader = _loader;
+    localExecutor->optimizer = _optimizer;
+    localExecutor->optimizer->setNetwork(&(localExecutor->network));
     // localExecutor->hyperparameterController = _hyperparameterController;
     localExecutor->visualizers = _visualizers;
 
-    localExecutor->hyperparameterControllerExecutionState.reset(new AsyncQueue<ExecutionState>(32));
     for (uint64_t i = 0; i < localExecutor->visualizers.size(); ++i) {
         localExecutor->visualizerExecutionState.emplace_back(new AsyncQueue<ExecutionState>(32));
         localExecutor->visualizers[i]->startUI();
@@ -51,6 +53,7 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     localExecutor->batchFinished = make_shared<condition_variable>();
 
     localExecutor->epochMutex = make_shared<mutex>();
+    localExecutor->currentEpoch = make_shared<uint64_t>(0);
     localExecutor->numBatchesDoneInEpoch = make_shared<uint64_t>(0);
 
     localExecutor->initialized = true;
@@ -120,8 +123,10 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
 }
 
 // FIXME: trainBatches should be private
-void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn) {
+void LocalExecutor::trainBatches(
+    uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn) {
     assert(batches > 0);
+    assert(initialEpochBatchNum + batches <= batchesPerEpoch);
 
     // FIXME: this should be based on first expected to be done. Also there should be a GPU side input and output queue.
     uint64_t nextStampToProcess = 0;
@@ -141,6 +146,8 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
     // Once that happens scheduling does not get any further ahead.
     for (uint64_t batch = 0; batch < batches; ++batch) {
         uint64_t epochBatchNum = initialEpochBatchNum + batch;
+
+        optimizer->updateParameters(*currentEpoch, epochBatchNum, batchesPerEpoch);
 
         // batchNumber ->   batchlet0                              batchlet1
         //               [[input0 -> buffer, output0 -> buffer], [input0 -> buffer, output0 -> buffer]]
@@ -211,9 +218,11 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
 void LocalExecutor::trainEpoch(ExampleType exampleType, set<string> tensorsToReturn) {
     uint64_t nextBatchNum = loader->getNextBatchNum(exampleType);
-    // uint64_t batchesToTrain = loader->getNumBatchesPerEpoch(exampleType) - nextBatchNum;
-    uint64_t batchesToTrain = 5;  // FIXME temp
-    trainBatches(nextBatchNum, batchesToTrain, exampleType, tensorsToReturn);
+    uint64_t batchesPerEpoch = loader->getNumBatchesPerEpoch(exampleType);
+    uint64_t batchesToTrain = loader->getNumBatchesPerEpoch(exampleType) - nextBatchNum;
+    // uint64_t batchesToTrain = 5;  // FIXME temp
+    trainBatches(nextBatchNum, batchesToTrain, batchesPerEpoch, exampleType, tensorsToReturn);
+    (*currentEpoch) += 1;
 }
 
 bool LocalExecutor::isBatchDataReady() {
@@ -240,8 +249,8 @@ void LocalExecutor::waitForBatchData() {
 }
 
 void LocalExecutor::waitForBatchDataUnlocked(unique_lock<mutex> &lck) {
-    // uint64_t numBatchesInEpoch = loader->getNumBatchesPerEpoch(exampleType);
-    uint64_t numBatchesInEpoch = 5;  // FIXME temp
+    uint64_t numBatchesInEpoch = loader->getNumBatchesPerEpoch(ExampleType::TRAIN);  // FIXME exampleType
+    // uint64_t numBatchesInEpoch = 5;  // FIXME temp
     bool allBatchesDoneForEpoch = (*numBatchesDoneInEpoch == numBatchesInEpoch);
     while (!allBatchesDoneForEpoch && !isBatchDataReadyUnlocked()) {
         batchFinished->wait(lck);
