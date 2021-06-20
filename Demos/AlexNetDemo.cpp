@@ -1,12 +1,8 @@
-// g++ -Wall -Werror -fopenmp -ggdb -o AlexNetDemo -O3 -std=c++11 -pthread Demos/AlexNetDemo.cpp -I /usr/local/cuda/include -I /usr/include
-// -I /usr/local/cuda/include -I /usr/include -I/home/andrew/Thor -L/home/andrew/Thor -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l
-// cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /usr/local/lib/libboost_filesystem.a -I./ -L./ -lThor -I ./ -I
-// /usr/local/cuda/include -I /usr/include -I /usr/local/boost -ldl -I /usr/local/include/GraphicsMagick/ -I build/test/googletest/include
-// -pthread -I /usr/local/cuda/include -I /usr/include -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -l ncurses -L
-// /usr/lib/x86_64-linux-gnu -l cudnn /usr/local/lib/libboost_filesystem.a `GraphicsMagick++-config --cppflags --cxxflags --ldflags --libs`
-
 #include "Thor.h"
 
+#include <boost/filesystem.hpp>
+
+#include <assert.h>
 #include <memory.h>
 #include <set>
 #include <string>
@@ -29,6 +25,9 @@ int main() {
     ConsoleVisualizer::instance().startUI();
 
     set<string> shardPaths;
+
+    assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_1_of_2.shard"));
+    assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_2_of_2.shard"));
     shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_1_of_2.shard");
     shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_2_of_2.shard");
     ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224});
