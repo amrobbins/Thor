@@ -174,6 +174,7 @@ class Network {
 
     virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
+    virtual vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
 
    protected:
     set<shared_ptr<Layer>> network;
@@ -186,6 +187,8 @@ class Network {
     map<Layer *, vector<Tensor>> apiLayerToApiInputTensors;
 
     vector<shared_ptr<Initializer>> initializers;
+
+    vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
     uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement);
     uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement);

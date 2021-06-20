@@ -147,6 +147,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o \
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
                    build/DeepLearning/Api/Network/Network.o \
+                   build/DeepLearning/Api/Optimizers/Sgd.o \
                    build/Utilities/Common/Stream.o \
                    build/Utilities/Loaders/Shard.o \
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
@@ -178,6 +179,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o \
 
 
+ALL_DEMOS = build/Demos/AlexNetDemo
+
 ML_DEV = libThor.a Thor.h
 
 
@@ -186,6 +189,7 @@ ML_DEV = libThor.a Thor.h
 # Overall make targets
 
 all: $(ML_DEV)
+	$(MAKE) $(ALL_DEMOS)
 	$(MAKE) $(ALL_TESTS)
 	$(RUN_ALL_TESTS)
 	@echo ""
@@ -195,6 +199,7 @@ all: $(ML_DEV)
 	@echo ""
 
 build: $(ML_DEV)
+	$(MAKE) $(ALL_DEMOS)
 	@echo ""
 	@echo ""
 	@echo "Build Succeeded, no tests run"
@@ -420,6 +425,11 @@ build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h Dee
 	mkdir -p build/DeepLearning/Api/Network
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Network/Network.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Network/Network.o
 
+build/DeepLearning/Api/Optimizers/Sgd.o: DeepLearning/Api/Optimizers/Sgd.h DeepLearning/Api/Optimizers/Sgd.cpp
+	mkdir -p build/DeepLearning/Api/Optimizers/
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Optimizers/Sgd.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Optimizers/Sgd.o
+
+
 build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
@@ -488,6 +498,9 @@ build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNe
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
 
+build/Demos/AlexNetDemo: build/test/googletest/libgtest.a Demos/AlexNetDemo.cpp $(THOR)
+	mkdir -p build/Demos
+	$(Gpp) -o build/Demos/AlexNetDemo -O3 -std=c++11 -pthread Demos/AlexNetDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 # Test Framework
 

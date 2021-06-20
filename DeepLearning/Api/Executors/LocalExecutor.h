@@ -2,9 +2,9 @@
 
 #include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/Executors/Executor.h"
-#include "DeepLearning/Api/HyperparameterControllers/HyperparameterController.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -48,7 +48,8 @@ class LocalExecutor : public Executor {
 
     // FIXME: need train, validate and test and no exampleType
     void trainEpoch(ExampleType exampleType, set<string> tensorsToReturn);
-    void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn);
+    void trainBatches(
+        uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
 
     bool isBatchDataReady();
@@ -60,19 +61,19 @@ class LocalExecutor : public Executor {
 
     Network network;
     std::shared_ptr<Loader> loader;
-    HyperparameterController hyperparameterController;
+    std::shared_ptr<Optimizer> optimizer;
     vector<Visualizer*> visualizers;
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
     std::shared_ptr<std::mutex> epochMutex;
+    std::shared_ptr<uint64_t> currentEpoch;
     std::shared_ptr<uint64_t> numBatchesDoneInEpoch;
     std::shared_ptr<std::condition_variable> batchFinished;
     std::condition_variable batchDataPopped;
     std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
     std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<string, vector<uint8_t>>>> batchData;
 
-    unique_ptr<AsyncQueue<ExecutionState>> hyperparameterControllerExecutionState;
     vector<unique_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
 
     // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
@@ -101,9 +102,10 @@ class LocalExecutor::Builder {
         return *this;
     }
 
-    LocalExecutor::Builder hyperparameterController(HyperparameterController _hyperparameterController) {
-        assert(!this->_hyperparameterController.isPresent());
-        this->_hyperparameterController = _hyperparameterController;
+    LocalExecutor::Builder optimizer(std::shared_ptr<Optimizer> _optimizer) {
+        assert(_optimizer);
+        assert(!this->_optimizer);
+        this->_optimizer = _optimizer;
         return *this;
     }
 
@@ -117,7 +119,7 @@ class LocalExecutor::Builder {
    private:
     Optional<Network> _network;
     std::shared_ptr<Loader> _loader;
-    Optional<HyperparameterController> _hyperparameterController;
+    std::shared_ptr<Optimizer> _optimizer;
     Optional<vector<Visualizer*>> _visualizers;
 };
 

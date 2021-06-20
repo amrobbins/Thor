@@ -97,6 +97,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
         return StatusCode::GPU_OUT_OF_MEMORY;
     }
 
+    stampedNetworks.push_back(stampedNetwork);
+
     return StatusCode::SUCCESS;
 }
 
