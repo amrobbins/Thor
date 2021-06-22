@@ -92,8 +92,20 @@ class Loss : public Layer {
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType, int loaderConnectionType = 0) {
         if (driverConnectionType == (int)ConnectionType::PREDICTIONS) {
             connectToPredictionOutputLayer(nextLayer, loaderConnectionType);
-        } else if (driverConnectionType == (int)ConnectionType::LOSS) {
-            connectToLossOutputLayer(nextLayer, loaderConnectionType);
+        } else if (driverConnectionType == (int)ConnectionType::BATCH_LOSS) {
+            assert(lossOutputLayer.isEmpty());
+            connectToBatchLossOutputLayer(nextLayer, loaderConnectionType);
+        } else if (driverConnectionType == (int)ConnectionType::CLASSWISE_PER_ELEMENT_LOSS) {
+            assert(lossOutputLayer.isEmpty());
+            // FIXME: implement
+            assert(false);
+        } else if (driverConnectionType == (int)ConnectionType::CLASSWISE_LOSS) {
+            assert(lossOutputLayer.isEmpty());
+            // FIXME: implement
+            assert(false);
+        } else if (driverConnectionType == (int)ConnectionType::ELEMENTWISE_LOSS) {
+            assert(lossOutputLayer.isEmpty());
+            connectToElementwiseLossOutputLayer(nextLayer, loaderConnectionType);
         } else {
             assert(false);
         }
@@ -117,20 +129,36 @@ class Loss : public Layer {
         ensureNoDeviceCrossing();
     }
 
-    virtual void connectToLossOutputLayer(Layer *lossOutputLayer, int loaderConnectionType) {
+    virtual void connectToElementwiseLossOutputLayer(Layer *lossOutputLayer, int loaderConnectionType) {
         assert(!compiled);
         assert(this->lossOutputLayer.isEmpty());
         assert(featureInput.isPresent());
+        assert(elementwiseLossOutput.isEmpty());
+        assert(batchLossOutput.isEmpty());
 
         this->lossOutputLayer = lossOutputLayer;
 
-        // Allocate loss output tensor
-        // FIXME: I want to output loss per batch item per class from loss layers, then another layer can be used
-        //        to reduce this when desired. I want to be able to offer loss per class, and this needs the unreduced loss.
         uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-        lossOutput = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+        elementwiseLossOutput = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+        lossOutputLayer->connectToPreviousLayer(this, elementwiseLossOutput, labelsStream, false, loaderConnectionType);
 
-        lossOutputLayer->connectToPreviousLayer(this, lossOutput, labelsStream, false, loaderConnectionType);
+        ensureNoDeviceCrossing();
+    }
+
+    virtual void connectToBatchLossOutputLayer(Layer *lossOutputLayer, int loaderConnectionType) {
+        assert(!compiled);
+        assert(this->lossOutputLayer.isEmpty());
+        assert(featureInput.isPresent());
+        assert(featureInput.get().getPlacement() == TensorPlacement::MemDevices::GPU);
+        assert(elementwiseLossOutput.isEmpty());
+        assert(batchLossOutput.isEmpty());
+
+        this->lossOutputLayer = lossOutputLayer;
+
+        uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
+        elementwiseLossOutput = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
+        batchLossOutput = Tensor(elementwiseLossOutput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+        lossOutputLayer->connectToPreviousLayer(this, batchLossOutput, labelsStream, false, loaderConnectionType);
 
         ensureNoDeviceCrossing();
     }
@@ -212,18 +240,34 @@ class Loss : public Layer {
     }
 
     virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
-    virtual Optional<Tensor> getLossOutput() { return lossOutput; }
+    virtual Optional<Tensor> getLossOutput() {
+        if (batchLossOutput.isPresent())
+            return batchLossOutput;
+        else if (elementwiseLossOutput.isPresent())
+            return elementwiseLossOutput;
+        else
+            assert(false);
+    }
 
-    virtual void computeLoss(Tensor labels, Tensor normalizedPredictionsOut, Tensor loss, Stream stream) = 0;
+    virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictionsOut, Tensor loss, Stream stream) = 0;
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) = 0;
 
-    enum class ConnectionType { FORWARD_BACKWARD = 5, LABELS, PREDICTIONS, LOSS };
+    enum class ConnectionType {
+        FORWARD_BACKWARD = 5,
+        LABELS,
+        PREDICTIONS,
+        BATCH_LOSS,
+        CLASSWISE_PER_ELEMENT_LOSS,
+        CLASSWISE_LOSS,
+        ELEMENTWISE_LOSS
+    };
 
    protected:
     Optional<Layer *> lossOutputLayer;
 
     Optional<Tensor> labelsInput;
-    Optional<Tensor> lossOutput;
+    Optional<Tensor> elementwiseLossOutput;
+    Optional<Tensor> batchLossOutput;
 
     float lossScalingFactor;
     Tensor lossScalingFactorTensor;
@@ -245,8 +289,14 @@ class Loss : public Layer {
             }
 
             // Compute loss, for forward direction
-            if (lossOutput.isPresent())
-                computeLoss(labelsInput, featureOutput, lossOutput, labelsStream);
+            if (elementwiseLossOutput.isPresent()) {
+                computeElementwiseLoss(labelsInput, featureOutput, elementwiseLossOutput, labelsStream);
+            }
+
+            if (batchLossOutput.isPresent()) {
+                assert(elementwiseLossOutput.isPresent());
+                computeBatchLoss(elementwiseLossOutput, batchLossOutput, labelsStream);
+            }
 
             // Compute loss gradient, for backward direction
             if (errorOutput.isPresent())
@@ -260,15 +310,35 @@ class Loss : public Layer {
 
         if (nextLayer.isPresent())
             nextLayer.get()->forward(featureOutput);
-        if (lossOutputLayer.isPresent())
-            lossOutputLayer.get()->forward(lossOutput);
-
+        if (lossOutputLayer.isPresent()) {
+            if (batchLossOutput.isPresent())
+                lossOutputLayer.get()->forward(batchLossOutput);
+            else if (elementwiseLossOutput.isPresent())
+                lossOutputLayer.get()->forward(elementwiseLossOutput);
+            else
+                assert(false);
+        }
         if (isInferenceOnly())
             return;
 
         // Initiate back propagation
         assert(previousLayer.isPresent());
         previousLayer.get()->backward(errorOutput);
+    }
+
+    void computeBatchLoss(Tensor loss, Tensor batchLoss, Stream stream) {
+        assert(loss.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        assert(batchLoss.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+        uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
+
+        if (loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+            launchSumManyToOne((float *)loss.getMemPtr(), (float *)batchLoss.getMemPtr(), batchSize, 1, false, false, stream);
+        } else if (loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            launchSumManyToOne((half *)loss.getMemPtr(), (half *)batchLoss.getMemPtr(), batchSize, 1, false, false, stream);
+        } else {
+            assert(false);
+        }
     }
 };
 

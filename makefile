@@ -502,7 +502,7 @@ build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNe
 
 build/Demos/AlexNetDemo: build/test/googletest/libgtest.a Demos/AlexNetDemo.cpp $(THOR)
 	mkdir -p build/Demos
-	$(Gpp) -o build/Demos/AlexNetDemo -O3 -std=c++11 -pthread Demos/AlexNetDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+	$(Gpp) $(DEBUG) -o build/Demos/AlexNetDemo -O3 -std=c++11 -pthread Demos/AlexNetDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 # Test Framework
 

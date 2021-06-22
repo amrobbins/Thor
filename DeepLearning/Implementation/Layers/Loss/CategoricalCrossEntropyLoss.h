@@ -100,7 +100,7 @@ class CategoricalCrossEntropyLoss : public Loss {
     }
 
     // normalizedPredictions is featureOutput and loss is errorOutput
-    virtual void computeLoss(Tensor labels, Tensor normalizedPredictions, Tensor loss, Stream stream) {
+    virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictions, Tensor loss, Stream stream) {
         // Cross Entropy Loss
         if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             launchCrossEntropyLoss((half*)labels.getMemPtr(),

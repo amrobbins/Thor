@@ -51,16 +51,6 @@ void createLabeledFeatures(Tensor featureIn, Tensor labelsIn, vector<set<int>> &
     }
 }
 
-float computeBatchLoss(Tensor loss) {
-    int batchSize = loss.getDescriptor().getDimensions()[0];
-    float *lossMem = (float *)loss.getMemPtr();
-    float batchLoss = 0.0f;
-    for (int i = 0; i < batchSize; ++i) {
-        batchLoss += lossMem[i];
-    }
-    return batchLoss;
-}
-
 int getClassNum(Tensor labels, int batchItem, float &confidence) {
     int numClasses = labels.getDescriptor().getDimensions()[1];
 
@@ -112,7 +102,7 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     LayerTestHelper::connectTwoLayers(logitsLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
     LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
     LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, predictionsOutput, (int)Loss::ConnectionType::PREDICTIONS);
-    LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::LOSS);
+    LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::BATCH_LOSS);
 
     vector<Layer *> layers;
     layers.push_back(featureInput);
@@ -174,7 +164,7 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
             lossOutput->getOutputReadyEvent().synchronize();
             Tensor loss = lossOutput->getFeatureOutput();
 
-            printf("batch %d,  batch loss %f\n", i, computeBatchLoss(loss));
+            printf("batch %d,  batch loss %f\n", i, ((float *)loss.getMemPtr())[0]);
             for (int i = 0; i < 10; ++i) {
                 int label;
                 float confidence;
@@ -196,7 +186,7 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     lossOutput->getOutputReadyEvent().synchronize();
     Tensor loss = lossOutput->getFeatureOutput();
 
-    ASSERT_LT(computeBatchLoss(loss), 10.0f);
+    ASSERT_LT(((float *)loss.getMemPtr())[0], 10.0f);
 
     LayerTestHelper::tearDownNetwork(layers);
 }

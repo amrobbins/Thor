@@ -220,8 +220,12 @@ Network buildAlexNet() {
                               .build()
                               .getFeatureOutput();
 
-    CategoricalCrossEntropyLoss lossLayer =
-        CategoricalCrossEntropyLoss::Builder().network(alexNet).featureInput(latestOutputTensor).labels(labelsTensor).build();
+    CategoricalCrossEntropyLoss lossLayer = CategoricalCrossEntropyLoss::Builder()
+                                                .network(alexNet)
+                                                .featureInput(latestOutputTensor)
+                                                .labels(labelsTensor)
+                                                .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
+                                                .build();
 
     latestOutputTensor = lossLayer.getFeatureInput();
     labelsTensor = lossLayer.getLabels();

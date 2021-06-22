@@ -8,7 +8,7 @@
 template <typename SOURCE_TYPE, typename DEST_TYPE>
 void launchSumManyToOne(SOURCE_TYPE *source_d,
                         DEST_TYPE *dest_d,
-                        uint32_t numElementsPerBatch,
+                        uint32_t numElementsPerBatchItem,
                         uint32_t batchSize,
                         bool invert,
                         bool accumulate,
@@ -16,4 +16,4 @@ void launchSumManyToOne(SOURCE_TYPE *source_d,
 
 template <typename SOURCE_TYPE, typename DEST_TYPE>
 void launchSumBatch(
-    SOURCE_TYPE *source_d, DEST_TYPE *dest_d, uint32_t numElementsPerBatch, uint32_t batchSize, bool accumulate, Stream stream);
+    SOURCE_TYPE *source_d, DEST_TYPE *dest_d, uint32_t numElementsPerBatchItem, uint32_t batchSize, bool accumulate, Stream stream);
