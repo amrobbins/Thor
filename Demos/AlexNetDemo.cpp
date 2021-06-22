@@ -43,27 +43,9 @@ int main() {
     tensorsToReturn.insert("examples");
     tensorsToReturn.insert("labels");
 
-    thread executorThread(&LocalExecutor::trainEpoch, executor, ExampleType::TRAIN, tensorsToReturn);
-    // executor->trainEpoch(ExampleType::TRAIN, tensorsToReturn);
-
-    // uint64_t i = 0;
-    while (true) {
-        executor->waitForBatchData();
-        if (executor->isBatchDataReady())
-            executor->popBatchData();
-        else
-            break;
-        //++i;
-        // printf("%ld\n\r", i);
-        // fflush(stdout);
-    }
+    executor->trainEpoch(ExampleType::TRAIN, tensorsToReturn);
 
     // executor->createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
-
-    // cudaError_t cudaStatus = cudaDeviceSynchronize();
-    // assert(cudaStatus == cudaSuccess);
-
-    executorThread.join();
 
     return 0;
 }
