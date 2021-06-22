@@ -17,7 +17,7 @@ class Visualizer {
     virtual void startUI() {}
     virtual void stopUI() {}
 
-    virtual void updateState(ExecutionState executionState, HyperparameterController hyperparameterController) = 0;
+    virtual void updateState(ExecutionState executionState) = 0;
 
     virtual ~Visualizer() {}
 };

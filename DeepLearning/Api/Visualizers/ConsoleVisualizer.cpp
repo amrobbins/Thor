@@ -50,10 +50,10 @@ void (*ConsoleVisualizer::originalResizeHandler)(int);
 void (*ConsoleVisualizer::originalInterruptHandler)(int);
 void (*ConsoleVisualizer::originalAbortHandler)(int);
 
-void ConsoleVisualizer::updateState(ExecutionState executionState, HyperparameterController hyperparameterController) {
+void ConsoleVisualizer::updateState(ExecutionState executionState) {
     if (previousExecutionState.isEmpty()) {
         drawHeader();
-        printLine(executionState, hyperparameterController);
+        printLine(executionState);
     } else {
         if (previousExecutionState.get().executionMode != executionState.executionMode) {
             // start a new line
@@ -585,11 +585,11 @@ void ConsoleVisualizer::drawStatusBar(
     wprintw((WINDOW *)win, "%0.0lf%%", progress * 100.0);
 }
 
-void ConsoleVisualizer::printLine(ExecutionState executionState, HyperparameterController hyperparameterController) {
-    vector<pair<string, string>> hyperparameterDisplayInfo = hyperparameterController.getCurrentEpochInfo(executionState);
-    for (uint32_t i = 0; i < hyperparameterDisplayInfo.size(); ++i) {
-        printf("%s %s\n", hyperparameterDisplayInfo[i].first.c_str(), hyperparameterDisplayInfo[i].second.c_str());
-    }
+void ConsoleVisualizer::printLine(ExecutionState executionState) {
+    // vector<pair<string, string>> hyperparameterDisplayInfo = hyperparameterController.getCurrentEpochInfo(executionState);
+    // for (uint32_t i = 0; i < hyperparameterDisplayInfo.size(); ++i) {
+    //    printf("%s %s\n", hyperparameterDisplayInfo[i].first.c_str(), hyperparameterDisplayInfo[i].second.c_str());
+    //}
     string epochType;
     if (executionState.executionMode == ExampleType::TRAIN)
         epochType = "Trainining";

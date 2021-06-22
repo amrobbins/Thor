@@ -3,6 +3,7 @@
 using std::condition_variable;
 using std::map;
 using std::string;
+using std::thread;
 
 using namespace Thor;
 
@@ -122,7 +123,6 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
     }
 }
 
-// FIXME: trainBatches should be private
 void LocalExecutor::trainBatches(
     uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn) {
     assert(batches > 0);
@@ -220,8 +220,25 @@ void LocalExecutor::trainEpoch(ExampleType exampleType, set<string> tensorsToRet
     uint64_t nextBatchNum = loader->getNextBatchNum(exampleType);
     uint64_t batchesPerEpoch = loader->getNumBatchesPerEpoch(exampleType);
     uint64_t batchesToTrain = loader->getNumBatchesPerEpoch(exampleType) - nextBatchNum;
-    // uint64_t batchesToTrain = 5;  // FIXME temp
-    trainBatches(nextBatchNum, batchesToTrain, batchesPerEpoch, exampleType, tensorsToReturn);
+
+    thread trainingThread(&LocalExecutor::trainBatches, this, nextBatchNum, batchesToTrain, batchesPerEpoch, exampleType, tensorsToReturn);
+    unordered_map<string, std::vector<uint8_t>> batchData;
+    while (true) {
+        waitForBatchData();
+        if (isBatchDataReady()) {
+            batchData = popBatchData();
+            // FIXME: fill in executionState
+            ExecutionState executionState;
+            executionState.batchesPerEpoch = batchesPerEpoch;
+            for (uint32_t i = 0; i < visualizers.size(); ++i) {
+                visualizers[i]->updateState(executionState);
+            }
+        } else {
+            break;
+        }
+    }
+    trainingThread.join();
+
     (*currentEpoch) += 1;
 }
 
