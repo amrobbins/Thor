@@ -51,14 +51,20 @@ class CategoricalCrossEntropyLoss::Builder {
         assert(_featureInput.isPresent());
         assert(_labels.isPresent());
         assert(_featureInput.get() != _labels.get());
+        assert(_lossType.isPresent());
 
         CategoricalCrossEntropyLoss categoricalCrossEntropyLoss;
         categoricalCrossEntropyLoss.lossScalingFactor = _lossScalingFactor;
         categoricalCrossEntropyLoss.featureInput = _featureInput;
         categoricalCrossEntropyLoss.labelsTensor = _labels;
         categoricalCrossEntropyLoss.predictionsTensor = _featureInput.get().clone(Tensor::DataType::FP32);
-        // Loss is per batch item currently so this is an empty tensor
-        categoricalCrossEntropyLoss.lossTensor = Tensor(Tensor::DataType::FP32, vector<uint64_t>());
+        categoricalCrossEntropyLoss.lossType = _lossType;
+        if (_lossType == ThorImplementation::Loss::ConnectionType::BATCH_LOSS) {
+            categoricalCrossEntropyLoss.lossTensor = Tensor(Tensor::DataType::FP32, {1});
+        } else if (_lossType == ThorImplementation::Loss::ConnectionType::ELEMENTWISE_LOSS) {
+            uint32_t batchSize = _featureInput.get().getDimensions()[0];
+            categoricalCrossEntropyLoss.lossTensor = Tensor(Tensor::DataType::FP32, {batchSize});
+        }
         categoricalCrossEntropyLoss.initialized = true;
         categoricalCrossEntropyLoss.addToNetwork(_network.get());
         return categoricalCrossEntropyLoss;
@@ -91,14 +97,22 @@ class CategoricalCrossEntropyLoss::Builder {
         return *this;
     }
 
-    // FIXME: implement these options:
-    enum class LossFormat { PER_BATCH = 5, PER_BATCH_ITEM, PER_CLASS, PER_BATCH_ITEM_PER_CLASS };
+    virtual CategoricalCrossEntropyLoss::Builder &lossType(ThorImplementation::Loss::ConnectionType _lossType) {
+        // FIXME: temp
+        assert(_lossType == ThorImplementation::Loss::ConnectionType::BATCH_LOSS ||
+               _lossType == ThorImplementation::Loss::ConnectionType::ELEMENTWISE_LOSS);
+
+        assert(!this->_lossType.isPresent());
+        this->_lossType = _lossType;
+        return *this;
+    }
 
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
     Optional<Tensor> _labels;
     Optional<float> _lossScalingFactor;
+    Optional<ThorImplementation::Loss::ConnectionType> _lossType;
 };
 
 }  // namespace Thor

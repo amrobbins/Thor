@@ -31,8 +31,11 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     if (rand() % 2)
         lossScalingFactor = (1 + (rand() % 100)) / 10.0f;
 
-    CategoricalCrossEntropyLoss::Builder crossEntropyBuilder =
-        CategoricalCrossEntropyLoss::Builder().network(network).featureInput(featureInput).labels(labels);
+    CategoricalCrossEntropyLoss::Builder crossEntropyBuilder = CategoricalCrossEntropyLoss::Builder()
+                                                                   .network(network)
+                                                                   .featureInput(featureInput)
+                                                                   .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
+                                                                   .labels(labels);
     if (lossScalingFactor.isPresent())
         crossEntropyBuilder.lossScalingFactor(lossScalingFactor);
 
@@ -58,7 +61,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     Optional<Tensor> actualLoss = crossEntropy.getLoss();
     ASSERT_TRUE(actualLoss.isPresent());
     ASSERT_EQ(actualLoss.get().getDataType(), Tensor::DataType::FP32);
-    ASSERT_TRUE(actualLoss.get().getDimensions().empty());
+    ASSERT_EQ(actualLoss.get().getDimensions(), vector<uint64_t>(1, 1));
 
     Optional<float> actualLossScalingFactor = crossEntropy.getLossScalingFactor();
     ASSERT_TRUE(actualLossScalingFactor.isPresent() == lossScalingFactor.isPresent());
@@ -84,7 +87,7 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     Optional<Tensor> cloneLoss = clone->getLoss();
     ASSERT_TRUE(cloneLoss.isPresent());
     ASSERT_EQ(cloneLoss.get().getDataType(), Tensor::DataType::FP32);
-    ASSERT_TRUE(cloneLoss.get().getDimensions().empty());
+    ASSERT_EQ(cloneLoss.get().getDimensions(), vector<uint64_t>(1, 1));
 
     Optional<float> cloneLossScalingFactor = clone->getLossScalingFactor();
     ASSERT_TRUE(cloneLossScalingFactor.isPresent() == lossScalingFactor.isPresent());

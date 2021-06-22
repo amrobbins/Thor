@@ -48,8 +48,6 @@ class LocalExecutor : public Executor {
 
     // FIXME: need train, validate and test and no exampleType
     void trainEpoch(ExampleType exampleType, set<string> tensorsToReturn);
-    void trainBatches(
-        uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
 
     bool isBatchDataReady();
@@ -81,6 +79,9 @@ class LocalExecutor : public Executor {
 
     bool isBatchDataReadyUnlocked();
     void waitForBatchDataUnlocked(std::unique_lock<std::mutex>& lck);
+
+    void trainBatches(
+        uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn);
 
     static void CUDART_CB bufferStampTensors(void* data);
 };

@@ -19,6 +19,7 @@ class Loss : public Layer {
     virtual bool mustConnectAllInputsToDriveOutput() { return true; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
         numInputConnectionsMade += 1;
+        // Only one type of loss is supported at a time.
         assert(numInputConnectionsMade < 3);
     }
 
@@ -36,7 +37,7 @@ class Loss : public Layer {
         else if (connectingTensor == getPredictions())
             return (int)ThorImplementation::Loss::ConnectionType::PREDICTIONS;
         else if (connectingTensor == getLoss())
-            return (int)ThorImplementation::Loss::ConnectionType::LOSS;
+            return (int)lossType;
         assert(false);
     }
 
@@ -71,6 +72,9 @@ class Loss : public Layer {
 
         return fixedMem + batchSize * (predictionsOutputBytes + labelsBytes + errorOutputBytes + lossBytes);
     }
+
+    // Loss type must be set by deriving class
+    ThorImplementation::Loss::ConnectionType lossType;
 
    private:
     Tensor getFeatureOutput() { assert(false); }
