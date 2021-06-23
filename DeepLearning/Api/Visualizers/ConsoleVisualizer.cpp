@@ -7,9 +7,11 @@
 using namespace Thor;
 
 using std::make_shared;
+using std::map;
 using std::mutex;
 using std::pair;
 using std::thread;
+using std::to_string;
 using std::unique_lock;
 using std::vector;
 
@@ -46,10 +48,17 @@ int ConsoleVisualizer::thorDashRight;
 int ConsoleVisualizer::thorDashY;
 string ConsoleVisualizer::thorDashUrl;
 
+ExecutionState ConsoleVisualizer::mostRecentExecutionState;
+string ConsoleVisualizer::cudaDevicesString;
+vector<ProgressRow> ConsoleVisualizer::rows;
+std::chrono::high_resolution_clock::time_point ConsoleVisualizer::start;
+double ConsoleVisualizer::totalEpochLoss = 0;
+
 void (*ConsoleVisualizer::originalResizeHandler)(int);
 void (*ConsoleVisualizer::originalInterruptHandler)(int);
 void (*ConsoleVisualizer::originalAbortHandler)(int);
 
+/*
 void ConsoleVisualizer::updateState(ExecutionState executionState) {
     if (previousExecutionState.isEmpty()) {
         drawHeader();
@@ -64,6 +73,7 @@ void ConsoleVisualizer::updateState(ExecutionState executionState) {
 
     previousExecutionState = executionState;
 }
+*/
 
 void ConsoleVisualizer::resizeHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
@@ -110,8 +120,36 @@ void ConsoleVisualizer::interruptHandler(int sig) {
 void ConsoleVisualizer::noOpHandler(int sig) {}
 
 void ConsoleVisualizer::inputHandler() {
+    assert(executionStateQueue != nullptr);
+
+    uint32_t delayMicroseconds = 10000;
+
     while (uiRunning) {
         mtx.lock();
+
+        // printf("occ %d\n", executionStateQueue->occupancy());
+
+        ExecutionState executionState;
+        bool newStateArrived = false;
+        while (executionStateQueue->tryPop(executionState)) {
+            newStateArrived = true;
+            mostRecentExecutionState = executionState;
+
+            if (mostRecentExecutionState.batchSize <= 0)
+                totalEpochLoss = 0;
+            else if (rows.empty() || rows.back().epochNum != mostRecentExecutionState.epochNum ||
+                     rows.back().executionMode != mostRecentExecutionState.executionMode) {
+                totalEpochLoss = mostRecentExecutionState.batchLoss;
+            } else {
+                totalEpochLoss += mostRecentExecutionState.batchLoss;
+            }
+
+            updateLog();
+        }
+        if (newStateArrived) {
+            display();
+        }
+
         int ch = wgetch((WINDOW *)win1);
         if (ch == KEY_MOUSE) {
             // Pass mouse events to scroll bar
@@ -144,8 +182,11 @@ void ConsoleVisualizer::inputHandler() {
             }
         }
         mtx.unlock();
-        if (ch == ERR)
-            usleep(10000);
+        if (ch == ERR && delayMicroseconds > 0)
+            usleep(delayMicroseconds);
+
+        if (executionStateQueue->occupancy() > 8)
+            delayMicroseconds /= 10;
     }
 }
 
@@ -219,7 +260,6 @@ ConsoleVisualizer::ConsoleVisualizer() {
     assert(win1 == nullptr);
     assert(win2 == nullptr);
 
-    initializeWindows();
     originalResizeHandler = signal(SIGWINCH, resizeHandler);
     originalInterruptHandler = signal(SIGINT, interruptHandler);
     originalAbortHandler = signal(SIGABRT, abortHandler);
@@ -348,13 +388,16 @@ void ConsoleVisualizer::drawHeader() {
     waddstr((WINDOW *)win0, "Network Name: ");
     wattroff((WINDOW *)win0, A_BOLD);
     wmove((WINDOW *)win0, 3, 20);
-    waddstr((WINDOW *)win0, "EyeNet");
+    if (mostRecentExecutionState.batchSize <= 0)
+        waddstr((WINDOW *)win0, "Loading...");
+    else
+        waddstr((WINDOW *)win0, mostRecentExecutionState.networkName.c_str());
     wattron((WINDOW *)win0, A_BOLD);
     wmove((WINDOW *)win0, 4, 0);
     waddstr((WINDOW *)win0, "Dataset Name: ");
     wattroff((WINDOW *)win0, A_BOLD);
     wmove((WINDOW *)win0, 4, 20);
-    waddstr((WINDOW *)win0, "ImageNet 2012");
+    waddstr((WINDOW *)win0, mostRecentExecutionState.datasetName.c_str());
     wattron((WINDOW *)win0, A_BOLD);
     wmove((WINDOW *)win0, 5, 0);
     waddstr((WINDOW *)win0, "ThorDash: ");
@@ -392,19 +435,25 @@ void ConsoleVisualizer::drawHeader() {
 }
 
 void ConsoleVisualizer::drawProgressRows() {
-    vector<ProgressRow> rows;
-
-    for (int i = 0; i < 25; ++i) {
-        rows.emplace_back("Train " + std::to_string(i), 7500, 7500, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
-        rows.emplace_back("Validate " + std::to_string(i), 1000, 1000, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
+    if (mostRecentExecutionState.batchSize <= 0) {
+        return;
     }
-    double progress = (rand() % 101) / 100.0;
-    rows.emplace_back("Train 25", progress * 7500, 7500, (rand() % 1000) / 1000.0, (rand() % 1000) / 1000.0);
 
-    // int firstToDisplay;
+    if (rows.empty() || rows.back().epochNum != mostRecentExecutionState.epochNum ||
+        rows.back().executionMode != mostRecentExecutionState.executionMode) {
+        rows.emplace_back(mostRecentExecutionState.executionMode,
+                          mostRecentExecutionState.epochNum,
+                          mostRecentExecutionState.batchNum,
+                          mostRecentExecutionState.batchesPerEpoch,
+                          totalEpochLoss / mostRecentExecutionState.batchNum,
+                          5.0);
+    } else {
+        rows.back().curBatch = mostRecentExecutionState.batchNum;
+        rows.back().batchLoss = totalEpochLoss / mostRecentExecutionState.batchNum;
+    }
+
     if ((int)rows.size() <= heightW1) {
         scrollVisible = false;
-        // firstToDisplay = 0;
         scrollTopElement = -1;
     } else {
         scrollVisible = true;
@@ -489,6 +538,11 @@ void ConsoleVisualizer::drawFooter() {
     wattroff((WINDOW *)win2, A_UNDERLINE);
     wattroff((WINDOW *)win2, A_BOLD);
 
+    char learningRateString[10];
+    snprintf(learningRateString, 10, "%0.5f", mostRecentExecutionState.learningRate);
+    char momentumString[10];
+    snprintf(momentumString, 10, "%0.2f", mostRecentExecutionState.momentum);
+
     wmove((WINDOW *)win2, 2, 0);
     waddstr((WINDOW *)win2, "Training Algorithm:");
     wmove((WINDOW *)win2, 2, 35);
@@ -496,24 +550,54 @@ void ConsoleVisualizer::drawFooter() {
     wmove((WINDOW *)win2, 3, 0);
     waddstr((WINDOW *)win2, "Current Learning Rate:");
     wmove((WINDOW *)win2, 3, 35);
-    waddstr((WINDOW *)win2, "0.05");
+    waddstr((WINDOW *)win2, learningRateString);
     wmove((WINDOW *)win2, 4, 0);
     waddstr((WINDOW *)win2, "Momentum:");
     wmove((WINDOW *)win2, 4, 35);
-    waddstr((WINDOW *)win2, "0.75");
+    waddstr((WINDOW *)win2, momentumString);
     wmove((WINDOW *)win2, 5, 0);
     waddstr((WINDOW *)win2, "Number of epochs to train:");
     wmove((WINDOW *)win2, 5, 35);
-    waddstr((WINDOW *)win2, "50");
+    waddstr((WINDOW *)win2, to_string(mostRecentExecutionState.epochsToTrain).c_str());
+
+    char examplesPerHourString[31];
+    double examplesPerHour = 0;
+    string exampleUnits;
+    if (mostRecentExecutionState.batchSize == 0) {
+        examplesPerHourString[0] = '0';
+        examplesPerHourString[1] = 0;
+    } else {
+        // double secondsPerBatch = mostRecentExecutionState.runningAverageTimePerBatch;
+        // double batchesPerSecond = 1.0 / mostRecentExecutionState.runningAverageTimePerBatch;
+        examplesPerHour = (1.0 / mostRecentExecutionState.runningAverageTimePerBatch) * mostRecentExecutionState.batchSize * 3600;
+        snprintf(examplesPerHourString, 31, "%0.1lf %s", examplesPerHour, exampleUnits.c_str());
+        if (examplesPerHour > 1.0e15) {
+            examplesPerHour /= 1.0e15;
+            exampleUnits = "Quadrillion";
+        } else if (examplesPerHour > 1.0e12) {
+            examplesPerHour /= 1.0e12;
+            exampleUnits = "Trillion";
+        } else if (examplesPerHour > 1.0e9) {
+            examplesPerHour /= 1.0e9;
+            exampleUnits = "Billion";
+        } else if (examplesPerHour > 1.0e6) {
+            examplesPerHour /= 1.0e6;
+            exampleUnits = "Million";
+        } else if (examplesPerHour > 1.0e3) {
+            examplesPerHour /= 1.0e3;
+            exampleUnits = "Thousand";
+        }
+        snprintf(examplesPerHourString, 31, "%0.1lf %s", examplesPerHour, exampleUnits.c_str());
+    }
 
     wmove((WINDOW *)win2, 2, 70);
     waddstr((WINDOW *)win2, "Training examples per hour:");
     wmove((WINDOW *)win2, 2, 105);
-    waddstr((WINDOW *)win2, "7,562,149");
+    waddstr((WINDOW *)win2, examplesPerHourString);
     wmove((WINDOW *)win2, 3, 70);
-    waddstr((WINDOW *)win2, "Gpu's being used:");
+    waddstr((WINDOW *)win2, "GPUs:");
     wmove((WINDOW *)win2, 3, 105);
-    waddstr((WINDOW *)win2, "4 Nvidia 2080 Ti's");
+    waddstr((WINDOW *)win2, cudaDevicesString.c_str());
     wmove((WINDOW *)win2, 4, 70);
     waddstr((WINDOW *)win2, "Parallelization strategy:");
     wmove((WINDOW *)win2, 4, 105);
@@ -521,14 +605,92 @@ void ConsoleVisualizer::drawFooter() {
     wmove((WINDOW *)win2, 5, 70);
     waddstr((WINDOW *)win2, "Output directory:");
     wmove((WINDOW *)win2, 5, 105);
-    waddstr((WINDOW *)win2, "/home/andrew/EyeNet/train7/");
+    waddstr((WINDOW *)win2, mostRecentExecutionState.outputDirectory.c_str());
 }
 
 void ConsoleVisualizer::drawOverallStatusBar() {
+    if (mostRecentExecutionState.batchSize <= 0) {
+        start = std::chrono::high_resolution_clock::now();
+        return;
+    }
     int statusBarEnd = terminalCols - 5;
     if (terminalCols < 75)
         statusBarEnd = 70;
-    drawStatusBar(win2, heightW2 - 1, 5, statusBarEnd, (rand() % 101) / 100.0, "Elapsed: 5h 23m 7s", "Remaining: 2h 12m 32s", true);
+    uint64_t totalBatchesToTrain = mostRecentExecutionState.epochsToTrain * mostRecentExecutionState.batchesPerEpoch;
+    uint64_t batchesTrained =
+        mostRecentExecutionState.epochNum * mostRecentExecutionState.batchesPerEpoch + mostRecentExecutionState.batchNum;
+    double progress = batchesTrained / (double)totalBatchesToTrain;
+    uint64_t batchesRemaining = totalBatchesToTrain - batchesTrained;
+    double timeRemaining = batchesRemaining * mostRecentExecutionState.runningAverageTimePerBatch;
+    string timeRemainingString = string("Remaining: ");
+    bool includeAllSmaller = false;
+    if (timeRemaining >= 60 * 60 * 24) {
+        includeAllSmaller = true;
+        uint32_t timeRemainingDays = timeRemaining / (60 * 60 * 24);
+        timeRemaining -= timeRemainingDays * (60 * 60 * 24);
+        timeRemainingString += to_string(timeRemainingDays) + " day" + (timeRemainingDays > 1 ? "s " : "  ");
+    }
+    if (timeRemaining >= 60 * 60 || includeAllSmaller) {
+        includeAllSmaller = true;
+        uint32_t timeRemainingHours = timeRemaining / (60 * 60);
+        timeRemaining -= timeRemainingHours * (60 * 60);
+        string hours = to_string(timeRemainingHours);
+        if (hours.length() == 1)
+            hours = " " + hours;
+        timeRemainingString += hours + " hour" + (timeRemainingHours > 1 ? "s " : "  ");
+    }
+    // if(timeRemaining >= 60 || includeAllSmaller) {
+    includeAllSmaller = true;
+    uint32_t timeRemainingMinutes = timeRemaining / 60;
+    timeRemaining -= timeRemainingMinutes * 60;
+    string minutes = to_string(timeRemainingMinutes);
+    if (minutes.length() == 1)
+        minutes = " " + minutes;
+    timeRemainingString += minutes + " minute" + (timeRemainingMinutes > 1 ? "s " : "  ");
+    //}
+    /*
+        uint32_t timeRemainingSeconds = timeRemaining;
+        string seconds = to_string(timeRemainingSeconds);
+        if(seconds.length() == 1)
+            seconds = " " + seconds;
+        timeRemainingString += seconds + " second" + (timeRemainingSeconds > 1 ? "s " : "  ");
+    */
+
+    double timeElapsed =
+        std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::high_resolution_clock::now() - start).count();
+    string timeElapsedString = string("Elapsed: ");
+    includeAllSmaller = false;
+    if (timeElapsed >= 60 * 60 * 24) {
+        includeAllSmaller = true;
+        uint32_t timeElapsedDays = timeElapsed / (60 * 60 * 24);
+        timeElapsed -= timeElapsedDays * (60 * 60 * 24);
+        timeElapsedString += to_string(timeElapsedDays) + " day" + (timeElapsedDays > 1 ? "s " : "  ");
+    }
+    if (timeElapsed >= 60 * 60 || includeAllSmaller) {
+        includeAllSmaller = true;
+        uint32_t timeElapsedHours = timeElapsed / (60 * 60);
+        timeElapsed -= timeElapsedHours * (60 * 60);
+        string hours = to_string(timeElapsedHours);
+        if (hours.length() == 1)
+            hours = " " + hours;
+        timeElapsedString += hours + " hour" + (timeElapsedHours > 1 ? "s " : "  ");
+    }
+    if (timeElapsed >= 60 || includeAllSmaller) {
+        includeAllSmaller = true;
+        uint32_t timeElapsedMinutes = timeElapsed / 60;
+        timeElapsed -= timeElapsedMinutes * 60;
+        string minutes = to_string(timeElapsedMinutes);
+        if (minutes.length() == 1)
+            minutes = " " + minutes;
+        timeElapsedString += minutes + " minute" + (timeElapsedMinutes > 1 ? "s " : "  ");
+    }
+    uint32_t timeElapsedSeconds = timeElapsed;
+    string seconds = to_string(timeElapsedSeconds);
+    if (seconds.length() == 1)
+        seconds = " " + seconds;
+    timeElapsedString += seconds + " second" + (timeElapsedSeconds > 1 ? "s " : "  ");
+
+    drawStatusBar(win2, heightW2 - 1, 5, statusBarEnd, progress, timeElapsedString.c_str(), timeRemainingString.c_str(), true);
 }
 
 void ConsoleVisualizer::drawStatusBar(
@@ -597,11 +759,13 @@ void ConsoleVisualizer::printLine(ExecutionState executionState) {
         epochType = "Validating";
     else
         epochType = "Testing";
-    printf("%s Epoch %ld, batch %ld of %ld\n",
+    printf("%s Epoch %ld, batch %ld of %ld loss %f examples per second %d\n",
            epochType.c_str(),
            executionState.epochNum,
            executionState.batchNum + 1,
-           executionState.batchesPerEpoch);
+           executionState.batchesPerEpoch,
+           executionState.batchLoss,
+           (int)(executionState.batchSize / executionState.runningAverageTimePerBatch));
     double percentComplete = (executionState.batchNum + 1) / executionState.batchesPerEpoch;
     uint32_t numStars = percentComplete * 100;
     for (uint32_t i = 0; i < numStars; ++i) {
@@ -643,15 +807,42 @@ void ConsoleVisualizer::drawBlock(void *win, int top, int bottom, int left, int 
     }
 }
 
+void ConsoleVisualizer::dumpSummaryToTerminal() {
+    // FIXME: implement
+}
+
+void ConsoleVisualizer::updateLog() {
+    // FIXME: implement
+}
+
 void ConsoleVisualizer::startUI() {
     unique_lock<recursive_mutex> lck(mtx);
 
     if (uiRunning)
         return;
 
+    initializeWindows();
+
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    map<string, uint32_t> cudaDevices;
+    for (uint32_t i = 0; i < numGpus; ++i) {
+        cudaDevices[MachineEvaluator::instance().getGpuType(i)] += 1;
+    }
+    cudaDevicesString = "";
+    for (auto it = cudaDevices.begin(); it != cudaDevices.end(); ++it) {
+        string deviceType = it->first;
+        uint32_t deviceCount = it->second;
+        if (cudaDevicesString.empty())
+            cudaDevicesString = to_string(deviceCount) + "x " + deviceType;
+        else
+            cudaDevicesString += ", " + to_string(deviceCount) + "x " + deviceType;
+    }
+
+    mostRecentExecutionState.batchSize = 0;
+
     printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
     uiRunning = true;
-    uiThread = new thread(inputHandler);
+    uiThread = new thread(&ConsoleVisualizer::inputHandler, this);
 
     display();
 }
@@ -671,4 +862,6 @@ void ConsoleVisualizer::stopUI() {
     uiThread->join();
     delete uiThread;
     uiThread = nullptr;
+
+    dumpSummaryToTerminal();
 }

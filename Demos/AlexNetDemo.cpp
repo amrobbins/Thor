@@ -22,8 +22,6 @@ using namespace Thor;
 int main() {
     Thor::Network alexNet = buildAlexNet();
 
-    ConsoleVisualizer::instance().startUI();
-
     set<string> shardPaths;
 
     assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_1_of_2.shard"));
@@ -33,6 +31,7 @@ int main() {
     ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224});
 
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, 512);
+    batchLoader->setDatasetName("ImageNet 2012");
 
     std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01).decay(0.9).momentum(0).build();
 
@@ -40,10 +39,10 @@ int main() {
         LocalExecutor::Builder().network(alexNet).loader(batchLoader).optimizer(sgd).visualizer(&ConsoleVisualizer::instance()).build();
 
     set<string> tensorsToReturn;
-    tensorsToReturn.insert("examples");
-    tensorsToReturn.insert("labels");
+    tensorsToReturn.insert("predictions");
+    tensorsToReturn.insert("loss");
 
-    executor->trainEpoch(ExampleType::TRAIN, tensorsToReturn);
+    executor->trainEpochs(10, tensorsToReturn);
 
     // executor->createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
 

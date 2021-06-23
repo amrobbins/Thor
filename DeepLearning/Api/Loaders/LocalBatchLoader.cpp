@@ -77,6 +77,17 @@ uint64_t LocalBatchLoader::getNumBatchesPerEpoch(ExampleType exampleType) {
         assert(false);
 }
 
+uint64_t LocalBatchLoader::getNumExamples(ExampleType exampleType) {
+    if (exampleType == ExampleType::TRAIN)
+        return batchAssemblerTrain->getNumExamples();
+    else if (exampleType == ExampleType::VALIDATE)
+        return batchAssemblerValidate->getNumExamples();
+    else if (exampleType == ExampleType::TEST)
+        return batchAssemblerTest->getNumExamples();
+    else
+        assert(false);
+}
+
 map<string, Tensor> LocalBatchLoader::getBatch(ExampleType exampleType, uint64_t &batchNum) {
     map<string, Tensor> tensorMap;
 

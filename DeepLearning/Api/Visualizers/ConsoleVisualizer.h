@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Executors/ExecutionState.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <boost/algorithm/string.hpp>
 
@@ -9,7 +10,9 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <cstdlib>
+#include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -21,22 +24,25 @@ namespace Thor {
 class Visualizer;
 
 struct ProgressRow {
+    ExampleType executionMode;
+    uint64_t epochNum;
     string label;
-    int curBatch;
-    int numBatches;
+    uint64_t curBatch;
+    uint64_t numBatches;
     double batchLoss;
     double accuracy;
 
-    ProgressRow(string label, int curBatch, int numBatches, double batchLoss, double accuracy) {
-        this->label = label;
+    ProgressRow(ExampleType executionMode, uint64_t epochNum, uint64_t curBatch, uint64_t numBatches, double batchLoss, double accuracy) {
+        this->executionMode = executionMode;
+        this->epochNum = epochNum;
+        label = executionMode == ExampleType::TRAIN ? "Train " : "Validate ";
+        label += std::to_string(epochNum);
         this->curBatch = curBatch;
         this->numBatches = numBatches;
         this->batchLoss = batchLoss;
         this->accuracy = accuracy;
     }
 };
-
-// FIXME: should be a singleton
 
 class ConsoleVisualizer : public Visualizer {
    public:
@@ -54,7 +60,7 @@ class ConsoleVisualizer : public Visualizer {
     virtual void startUI();
     virtual void stopUI();
 
-    virtual void updateState(ExecutionState executionState);
+    // virtual void updateState(ExecutionState executionState);
 
    private:
     ConsoleVisualizer();
@@ -90,7 +96,14 @@ class ConsoleVisualizer : public Visualizer {
     static int thorDashY;
     static string thorDashUrl;
 
-    Optional<ExecutionState> previousExecutionState;
+    static ExecutionState mostRecentExecutionState;
+    static vector<ProgressRow> rows;
+    static std::chrono::high_resolution_clock::time_point start;
+    static double totalEpochLoss;
+
+    static string cudaDevicesString;
+
+    // Optional<ExecutionState> previousExecutionState;
 
     static void *win0;
     static void *win1;
@@ -111,7 +124,7 @@ class ConsoleVisualizer : public Visualizer {
 
     static void noOpHandler(int sig);
 
-    static void inputHandler();
+    void inputHandler();
 
     static void redrawWindows();
 
@@ -134,6 +147,9 @@ class ConsoleVisualizer : public Visualizer {
 
     static void drawBox(void *win, int top, int bottom, int left, int right);
     static void drawBlock(void *win, int top, int bottom, int left, int right);
+
+    static void updateLog();
+    static void dumpSummaryToTerminal();
 };
 
 }  // namespace Thor
