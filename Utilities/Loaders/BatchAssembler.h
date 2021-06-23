@@ -37,6 +37,7 @@ class BatchAssembler {
     virtual ~BatchAssembler();
 
     uint64_t getNumBatchesPerEpoch();
+    uint64_t getNumExamples() { return numExamples; }
 
     void getBatch(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor, uint64_t &batchNum);
     void returnBuffer(ThorImplementation::Tensor &batchTensor, ThorImplementation::Tensor &labelTensor);

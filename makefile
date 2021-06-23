@@ -413,7 +413,7 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: Dee
 
 build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o: DeepLearning/Api/Visualizers/ConsoleVisualizer.h DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp
 	mkdir -p build/DeepLearning/Api/Visualizers
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o
 
 build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o: DeepLearning/Api/HyperparameterControllers/HyperparameterController.h DeepLearning/Api/HyperparameterControllers/HyperparameterController.cpp
 	mkdir -p build/DeepLearning/Api/HyperparameterControllers
@@ -421,7 +421,7 @@ build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o: Dee
 
 build/DeepLearning/Api/Executors/LocalExecutor.o: DeepLearning/Api/Executors/LocalExecutor.h DeepLearning/Api/Executors/LocalExecutor.cpp
 	mkdir -p build/DeepLearning/Api/Executors
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Executors/LocalExecutor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Executors/LocalExecutor.o
+	$(Gpp) $(DEBUG) -c -O3 -std=c++11 DeepLearning/Api/Executors/LocalExecutor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Executors/LocalExecutor.o
 
 build/DeepLearning/Api/Network/Network.o: DeepLearning/Api/Network/Network.h DeepLearning/Api/Network/Network.cpp
 	mkdir -p build/DeepLearning/Api/Network

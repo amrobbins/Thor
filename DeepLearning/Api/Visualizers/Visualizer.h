@@ -17,9 +17,15 @@ class Visualizer {
     virtual void startUI() {}
     virtual void stopUI() {}
 
-    virtual void updateState(ExecutionState executionState) = 0;
+    virtual void connectStateUpdateQueue(shared_ptr<AsyncQueue<ExecutionState>> executionStateQueue) {
+        this->executionStateQueue = executionStateQueue;
+    }
+    // virtual void updateState(ExecutionState executionState) = 0;
 
     virtual ~Visualizer() {}
+
+   protected:
+    shared_ptr<AsyncQueue<ExecutionState>> executionStateQueue;
 };
 
 }  // namespace Thor

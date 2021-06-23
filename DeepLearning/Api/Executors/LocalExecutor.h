@@ -9,6 +9,8 @@
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include <boost/filesystem.hpp>
+
 #include <condition_variable>
 #include <map>
 #include <memory>
@@ -45,10 +47,10 @@ class LocalExecutor : public Executor {
 
     LocalExecutor() { initialized = false; }
 
-    virtual ~LocalExecutor() {}
+    virtual ~LocalExecutor();
 
     // FIXME: need train, validate and test and no exampleType
-    void trainEpoch(ExampleType exampleType, set<string> tensorsToReturn);
+    void trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
 
     bool isBatchDataReady();
@@ -61,6 +63,7 @@ class LocalExecutor : public Executor {
     Network network;
     std::shared_ptr<Loader> loader;
     std::shared_ptr<Optimizer> optimizer;
+    // FIXME: shared_ptr, however how do I deal with singletons then?
     vector<Visualizer*> visualizers;
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
@@ -73,7 +76,9 @@ class LocalExecutor : public Executor {
     std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
     std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<string, vector<uint8_t>>>> batchData;
 
-    vector<unique_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
+    vector<shared_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
+
+    string outputDirectory;
 
     // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
     std::unordered_map<uint64_t, std::deque<std::pair<Event, Event>>> batchletTimingEvents;
@@ -118,11 +123,21 @@ class LocalExecutor::Builder {
         return *this;
     }
 
+    LocalExecutor::Builder outputDirectory(string _outputDirectory) {
+        assert(this->_outputDirectory.isEmpty());
+        if (_outputDirectory.empty())
+            _outputDirectory = "./";
+        boost::filesystem::path outputPath = boost::filesystem::absolute(boost::filesystem::path(_outputDirectory));
+        this->_outputDirectory = boost::filesystem::canonical(outputPath).string();
+        return *this;
+    }
+
    private:
     Optional<Network> _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
     Optional<vector<Visualizer*>> _visualizers;
+    Optional<string> _outputDirectory;
 };
 
 }  // namespace Thor

@@ -176,6 +176,9 @@ class Network {
     virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
     virtual vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
 
+    virtual void setNetworkName(string networkName) { this->networkName = networkName; }
+    virtual string getNetworkName() { return networkName; }
+
    protected:
     set<shared_ptr<Layer>> network;
     vector<pair<Optional<Tensor>, Layer *>> orderedNetwork;
@@ -236,17 +239,19 @@ class Network {
 
     void addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
 
+    std::string networkName;
+
     // void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork);
     // void reorderLayers(StampedNetwork &stampedNetwork, vector<Layer*> &layersToReoder, vector<Layer*> &destinationStorage);
 
     bool terminatesWithoutHitting(Tensor tensor, Layer *layer);
 
+    bool frozen;
+
     class GpuOutOfMemoryError {};
 
     friend void Layer::addToNetwork(Network *network);
     friend class Executor;
-
-    bool frozen;
 };
 
 }  // namespace Thor

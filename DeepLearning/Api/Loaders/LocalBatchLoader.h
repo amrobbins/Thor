@@ -15,6 +15,7 @@ class LocalBatchLoader : public Loader {
     virtual void returnBatchBuffers(ExampleType exampleType, std::map<std::string, ThorImplementation::Tensor> tensorMap);
 
     virtual uint64_t getNumBatchesPerEpoch(ExampleType exampleType);
+    virtual uint64_t getNumExamples(ExampleType exampleType);
     virtual uint64_t getNextBatchNum(ExampleType exampleType);
 
    private:
