@@ -71,6 +71,7 @@ class LocalExecutor : public Executor {
     std::shared_ptr<std::mutex> epochMutex;
     std::shared_ptr<uint64_t> currentEpoch;
     std::shared_ptr<uint64_t> numBatchesDoneInEpoch;
+    std::shared_ptr<uint64_t> numBatchesInEpoch;
     std::shared_ptr<std::condition_variable> batchFinished;
     std::condition_variable batchDataPopped;
     std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
@@ -86,8 +87,7 @@ class LocalExecutor : public Executor {
     bool isBatchDataReadyUnlocked();
     void waitForBatchDataUnlocked(std::unique_lock<std::mutex>& lck);
 
-    void trainBatches(
-        uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn);
+    void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn);
 
     static void CUDART_CB bufferStampTensors(void* data);
 };

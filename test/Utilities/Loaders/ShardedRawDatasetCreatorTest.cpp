@@ -215,7 +215,7 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224, false)), shards);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224)), shards);
 
     // load the dataset, ensure it contains the expected contents
     ASSERT_EQ(shards.size(), 1u);
