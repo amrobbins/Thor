@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <mutex>
@@ -59,8 +60,6 @@ class ConsoleVisualizer : public Visualizer {
 
     virtual void startUI();
     virtual void stopUI();
-
-    // virtual void updateState(ExecutionState executionState);
 
    private:
     ConsoleVisualizer();
@@ -142,8 +141,6 @@ class ConsoleVisualizer : public Visualizer {
 
     static string popUpPrompt(string message);
     static void popUpAcknowledge(string message);
-
-    static void printLine(ExecutionState executionState);
 
     static void drawBox(void *win, int top, int bottom, int left, int right);
     static void drawBlock(void *win, int top, int bottom, int left, int right);

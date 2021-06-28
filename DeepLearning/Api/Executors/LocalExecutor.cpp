@@ -67,6 +67,7 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     localExecutor->epochMutex = make_shared<mutex>();
     localExecutor->currentEpoch = make_shared<uint64_t>(0);
     localExecutor->numBatchesDoneInEpoch = make_shared<uint64_t>(0);
+    localExecutor->numBatchesInEpoch = make_shared<uint64_t>(0);
 
     localExecutor->initialized = true;
 
@@ -140,10 +141,9 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
     }
 }
 
-void LocalExecutor::trainBatches(
-    uint64_t initialEpochBatchNum, uint64_t batches, uint64_t batchesPerEpoch, ExampleType exampleType, set<string> tensorsToReturn) {
+void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn) {
     assert(batches > 0);
-    assert(initialEpochBatchNum + batches <= batchesPerEpoch);
+    assert(initialEpochBatchNum + batches <= *numBatchesInEpoch);
 
     // FIXME: this should be based on first expected to be done. Also there should be a GPU side input and output queue.
     uint64_t nextStampToProcess = 0;
@@ -157,14 +157,12 @@ void LocalExecutor::trainBatches(
 
     shared_ptr<mutex> batchMutex = make_shared<mutex>();
 
-    *numBatchesDoneInEpoch = initialEpochBatchNum;
-
     // Scheduling in the following loop schedules far enough ahead untill all input batch buffers are exhausted.
     // Once that happens scheduling does not get any further ahead.
     for (uint64_t batch = 0; batch < batches; ++batch) {
         uint64_t epochBatchNum = initialEpochBatchNum + batch;
 
-        optimizer->updateParameters(*currentEpoch, epochBatchNum, batchesPerEpoch);
+        optimizer->updateParameters(*currentEpoch, epochBatchNum, *numBatchesInEpoch);
 
         // batchNumber ->   batchlet0                              batchlet1
         //               [[input0 -> buffer, output0 -> buffer], [input0 -> buffer, output0 -> buffer]]
@@ -234,6 +232,9 @@ void LocalExecutor::trainBatches(
 }
 
 void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn) {
+    double averageTrainingBatchTime = -1;
+    double averageValidationBatchTime = -1;
+
     for (uint32_t i = 0; i < numEpochs; ++i) {
         // Training phase
         uint64_t batchNum = loader->getNextBatchNum(ExampleType::TRAIN);
@@ -241,10 +242,11 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         uint64_t batchesToTrain = loader->getNumBatchesPerEpoch(ExampleType::TRAIN) - batchNum;
         uint64_t batchSize = loader->getBatchSize();
 
-        thread trainingThread(
-            &LocalExecutor::trainBatches, this, batchNum, batchesToTrain, batchesPerEpoch, ExampleType::TRAIN, tensorsToReturn);
+        *numBatchesDoneInEpoch = batchNum;
+        *numBatchesInEpoch = batchesPerEpoch;
+
+        thread trainingThread(&LocalExecutor::trainBatches, this, batchNum, batchesToTrain, ExampleType::TRAIN, tensorsToReturn);
         unordered_map<string, std::vector<uint8_t>> batchData;
-        double averageBatchTime = -1;
 
         ExecutionState executionState;
         executionState.outputDirectory = outputDirectory;
@@ -268,18 +270,18 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 std::chrono::high_resolution_clock::time_point done = std::chrono::high_resolution_clock::now();
                 std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(done - start);
                 start = done;
-                if (averageBatchTime < 0.0)
-                    averageBatchTime = elapsed.count();
+                if (averageTrainingBatchTime < 0.0)
+                    averageTrainingBatchTime = elapsed.count();
                 else
-                    averageBatchTime = 0.05 * elapsed.count() + 0.95 * averageBatchTime;
+                    averageTrainingBatchTime = 0.05 * elapsed.count() + 0.95 * averageTrainingBatchTime;
 
                 unordered_map<string, float> optimizerParameters = optimizer->getAllParameters(*currentEpoch, batchNum, batchesPerEpoch);
                 executionState.learningRate = optimizerParameters["currentLearningRate"];
                 executionState.momentum = optimizerParameters["momentum"];
 
                 batchData = popBatchData();
-                executionState.batchNum = batchNum;
-                executionState.runningAverageTimePerBatch = averageBatchTime;
+                executionState.batchNum = batchNum + 1;
+                executionState.runningAverageTimePerTrainingBatch = averageTrainingBatchTime;
                 float *batchLoss = (float *)(batchData["loss"].data());
                 executionState.batchLoss = *batchLoss;
                 executionState.epochAccuracy = 2.0f;  // FIXME
@@ -292,6 +294,64 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
             }
         }
         trainingThread.join();
+
+        // Validation phase
+        batchNum = loader->getNextBatchNum(ExampleType::VALIDATE);
+        batchesPerEpoch = loader->getNumBatchesPerEpoch(ExampleType::VALIDATE);
+        uint64_t batchesToValidate = loader->getNumBatchesPerEpoch(ExampleType::VALIDATE) - batchNum;
+        batchSize = loader->getBatchSize();
+
+        *numBatchesDoneInEpoch = batchNum;
+        *numBatchesInEpoch = batchesPerEpoch;
+
+        // FIXME: I am currently training using the validation data. A validation step needs to be built.
+        thread validationThread(&LocalExecutor::trainBatches, this, batchNum, batchesToValidate, ExampleType::VALIDATE, tensorsToReturn);
+
+        executionState.outputDirectory = outputDirectory;
+        executionState.epochsToTrain = numEpochs;
+        executionState.networkName = network.getNetworkName();
+        executionState.datasetName = loader->getDatasetName();
+        executionState.executionMode = ExampleType::VALIDATE;
+        executionState.epochNum = *currentEpoch;
+        executionState.batchSize = batchSize;
+        executionState.batchesPerEpoch = batchesPerEpoch;
+        executionState.numTrainingExamples = loader->getNumExamples(ExampleType::VALIDATE);
+        executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
+        executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
+        executionState.batchesPerEpoch = batchesPerEpoch;
+
+        start = std::chrono::high_resolution_clock::now();
+
+        while (true) {
+            waitForBatchData();
+            if (isBatchDataReady()) {
+                std::chrono::high_resolution_clock::time_point done = std::chrono::high_resolution_clock::now();
+                std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(done - start);
+                start = done;
+                if (averageValidationBatchTime < 0.0)
+                    averageValidationBatchTime = elapsed.count();
+                else
+                    averageValidationBatchTime = 0.05 * elapsed.count() + 0.95 * averageValidationBatchTime;
+
+                unordered_map<string, float> optimizerParameters = optimizer->getAllParameters(*currentEpoch, batchNum, batchesPerEpoch);
+                executionState.learningRate = optimizerParameters["currentLearningRate"];
+                executionState.momentum = optimizerParameters["momentum"];
+
+                batchData = popBatchData();
+                executionState.batchNum = batchNum + 1;
+                executionState.runningAverageTimePerValidationBatch = averageValidationBatchTime;
+                float *batchLoss = (float *)(batchData["loss"].data());
+                executionState.batchLoss = *batchLoss;
+                executionState.epochAccuracy = 2.0f;  // FIXME
+                for (uint32_t i = 0; i < visualizers.size(); ++i) {
+                    visualizerExecutionState[i]->push(executionState);
+                }
+                batchNum += 1;
+            } else {
+                break;
+            }
+        }
+        validationThread.join();
 
         /*
         Also need to include this in total execution time estimate
@@ -381,9 +441,7 @@ void LocalExecutor::waitForBatchData() {
 }
 
 void LocalExecutor::waitForBatchDataUnlocked(unique_lock<mutex> &lck) {
-    uint64_t numBatchesInEpoch = loader->getNumBatchesPerEpoch(ExampleType::TRAIN);  // FIXME exampleType
-    // uint64_t numBatchesInEpoch = 5;  // FIXME temp
-    bool allBatchesDoneForEpoch = (*numBatchesDoneInEpoch == numBatchesInEpoch);
+    bool allBatchesDoneForEpoch = (*numBatchesDoneInEpoch == *numBatchesInEpoch);
     while (!allBatchesDoneForEpoch && !isBatchDataReadyUnlocked()) {
         batchFinished->wait(lck);
     }

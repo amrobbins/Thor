@@ -27,7 +27,8 @@ struct ExecutionState {
     uint64_t numValidationExamples;
     uint64_t numTestExamples;
 
-    double runningAverageTimePerBatch;
+    double runningAverageTimePerTrainingBatch;
+    double runningAverageTimePerValidationBatch;
 
     double batchLoss;
     std::vector<float> lossPerExamplePerClass;

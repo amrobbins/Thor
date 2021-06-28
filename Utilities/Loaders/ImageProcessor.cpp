@@ -2,12 +2,17 @@
 
 using namespace std;
 
-ImageProcessor::ImageProcessor(
-    double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, bool display) {
+ImageProcessor::ImageProcessor(double minAspectRatio,
+                               double maxAspectRatio,
+                               uint32_t outputImageRows,
+                               uint32_t outputImageColumns,
+                               bool (*customProcessor)(Magick::Image &regularlyProcessedImage),
+                               bool display) {
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;
     this->outputImageRows = outputImageRows;
     this->outputImageColumns = outputImageColumns;
+    this->customProcessor = customProcessor;
     this->display = display;
 }
 
@@ -33,6 +38,12 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     success = ImageLoader::toRgbArray(image, data.get());
     if (!success)
         return output;
+
+    if (customProcessor != nullptr) {
+        bool useImage = customProcessor(image);
+        if (!useImage)
+            return output;
+    }
 
     if (display) {
         mutex.lock();

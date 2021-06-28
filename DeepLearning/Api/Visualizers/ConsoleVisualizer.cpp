@@ -54,26 +54,9 @@ vector<ProgressRow> ConsoleVisualizer::rows;
 std::chrono::high_resolution_clock::time_point ConsoleVisualizer::start;
 double ConsoleVisualizer::totalEpochLoss = 0;
 
-void (*ConsoleVisualizer::originalResizeHandler)(int);
-void (*ConsoleVisualizer::originalInterruptHandler)(int);
-void (*ConsoleVisualizer::originalAbortHandler)(int);
-
-/*
-void ConsoleVisualizer::updateState(ExecutionState executionState) {
-    if (previousExecutionState.isEmpty()) {
-        drawHeader();
-        printLine(executionState);
-    } else {
-        if (previousExecutionState.get().executionMode != executionState.executionMode) {
-            // start a new line
-        } else {
-            // continue with line
-        }
-    }
-
-    previousExecutionState = executionState;
-}
-*/
+void (*ConsoleVisualizer::originalResizeHandler)(int) = nullptr;
+void (*ConsoleVisualizer::originalInterruptHandler)(int) = nullptr;
+void (*ConsoleVisualizer::originalAbortHandler)(int) = nullptr;
 
 void ConsoleVisualizer::resizeHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
@@ -89,7 +72,11 @@ void ConsoleVisualizer::abortHandler(int sig) {
     signal(SIGABRT, originalAbortHandler);
     printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
     endwin();
-    originalAbortHandler(sig);
+
+    if (originalAbortHandler != nullptr)
+        originalAbortHandler(sig);
+    else
+        interruptHandler(SIGINT);
 }
 
 void ConsoleVisualizer::interruptHandler(int sig) {
@@ -122,33 +109,19 @@ void ConsoleVisualizer::noOpHandler(int sig) {}
 void ConsoleVisualizer::inputHandler() {
     assert(executionStateQueue != nullptr);
 
+    if (originalResizeHandler == nullptr)
+        originalResizeHandler = signal(SIGWINCH, resizeHandler);
+    assert(originalResizeHandler != nullptr);
+    if (originalInterruptHandler == nullptr)
+        originalInterruptHandler = signal(SIGINT, interruptHandler);
+    assert(originalInterruptHandler != nullptr);
+    if (originalAbortHandler == nullptr)
+        originalAbortHandler = signal(SIGABRT, abortHandler);
+
     uint32_t delayMicroseconds = 10000;
 
     while (uiRunning) {
         mtx.lock();
-
-        // printf("occ %d\n", executionStateQueue->occupancy());
-
-        ExecutionState executionState;
-        bool newStateArrived = false;
-        while (executionStateQueue->tryPop(executionState)) {
-            newStateArrived = true;
-            mostRecentExecutionState = executionState;
-
-            if (mostRecentExecutionState.batchSize <= 0)
-                totalEpochLoss = 0;
-            else if (rows.empty() || rows.back().epochNum != mostRecentExecutionState.epochNum ||
-                     rows.back().executionMode != mostRecentExecutionState.executionMode) {
-                totalEpochLoss = mostRecentExecutionState.batchLoss;
-            } else {
-                totalEpochLoss += mostRecentExecutionState.batchLoss;
-            }
-
-            updateLog();
-        }
-        if (newStateArrived) {
-            display();
-        }
 
         int ch = wgetch((WINDOW *)win1);
         if (ch == KEY_MOUSE) {
@@ -181,6 +154,28 @@ void ConsoleVisualizer::inputHandler() {
                 }
             }
         }
+
+        ExecutionState executionState;
+        bool newStateArrived = false;
+        while (executionStateQueue->tryPop(executionState)) {
+            newStateArrived = true;
+            mostRecentExecutionState = executionState;
+
+            if (mostRecentExecutionState.batchSize <= 0)
+                totalEpochLoss = 0;
+            else if (rows.empty() || rows.back().epochNum != mostRecentExecutionState.epochNum ||
+                     rows.back().executionMode != mostRecentExecutionState.executionMode) {
+                totalEpochLoss = mostRecentExecutionState.batchLoss;
+            } else {
+                totalEpochLoss += mostRecentExecutionState.batchLoss;
+            }
+
+            updateLog();
+        }
+        if (newStateArrived) {
+            display();
+        }
+
         mtx.unlock();
         if (ch == ERR && delayMicroseconds > 0)
             usleep(delayMicroseconds);
@@ -259,14 +254,11 @@ ConsoleVisualizer::ConsoleVisualizer() {
     assert(win0 == nullptr);
     assert(win1 == nullptr);
     assert(win2 == nullptr);
-
-    originalResizeHandler = signal(SIGWINCH, resizeHandler);
-    originalInterruptHandler = signal(SIGINT, interruptHandler);
-    originalAbortHandler = signal(SIGABRT, abortHandler);
 }
 
 ConsoleVisualizer::~ConsoleVisualizer() {
-    signal(SIGWINCH, originalResizeHandler);
+    if (originalResizeHandler != nullptr)
+        signal(SIGWINCH, originalResizeHandler);
     signal(SIGINT, originalInterruptHandler);
     signal(SIGABRT, originalAbortHandler);
     deleteWindows();
@@ -567,9 +559,7 @@ void ConsoleVisualizer::drawFooter() {
         examplesPerHourString[0] = '0';
         examplesPerHourString[1] = 0;
     } else {
-        // double secondsPerBatch = mostRecentExecutionState.runningAverageTimePerBatch;
-        // double batchesPerSecond = 1.0 / mostRecentExecutionState.runningAverageTimePerBatch;
-        examplesPerHour = (1.0 / mostRecentExecutionState.runningAverageTimePerBatch) * mostRecentExecutionState.batchSize * 3600;
+        examplesPerHour = (1.0 / mostRecentExecutionState.runningAverageTimePerTrainingBatch) * mostRecentExecutionState.batchSize * 3600;
         snprintf(examplesPerHourString, 31, "%0.1lf %s", examplesPerHour, exampleUnits.c_str());
         if (examplesPerHour > 1.0e15) {
             examplesPerHour /= 1.0e15;
@@ -616,55 +606,16 @@ void ConsoleVisualizer::drawOverallStatusBar() {
     int statusBarEnd = terminalCols - 5;
     if (terminalCols < 75)
         statusBarEnd = 70;
-    uint64_t totalBatchesToTrain = mostRecentExecutionState.epochsToTrain * mostRecentExecutionState.batchesPerEpoch;
-    uint64_t batchesTrained =
-        mostRecentExecutionState.epochNum * mostRecentExecutionState.batchesPerEpoch + mostRecentExecutionState.batchNum;
-    double progress = batchesTrained / (double)totalBatchesToTrain;
-    uint64_t batchesRemaining = totalBatchesToTrain - batchesTrained;
-    double timeRemaining = batchesRemaining * mostRecentExecutionState.runningAverageTimePerBatch;
-    string timeRemainingString = string("Remaining: ");
-    bool includeAllSmaller = false;
-    if (timeRemaining >= 60 * 60 * 24) {
-        includeAllSmaller = true;
-        uint32_t timeRemainingDays = timeRemaining / (60 * 60 * 24);
-        timeRemaining -= timeRemainingDays * (60 * 60 * 24);
-        timeRemainingString += to_string(timeRemainingDays) + " day" + (timeRemainingDays > 1 ? "s " : "  ");
-    }
-    if (timeRemaining >= 60 * 60 || includeAllSmaller) {
-        includeAllSmaller = true;
-        uint32_t timeRemainingHours = timeRemaining / (60 * 60);
-        timeRemaining -= timeRemainingHours * (60 * 60);
-        string hours = to_string(timeRemainingHours);
-        if (hours.length() == 1)
-            hours = " " + hours;
-        timeRemainingString += hours + " hour" + (timeRemainingHours > 1 ? "s " : "  ");
-    }
-    // if(timeRemaining >= 60 || includeAllSmaller) {
-    includeAllSmaller = true;
-    uint32_t timeRemainingMinutes = timeRemaining / 60;
-    timeRemaining -= timeRemainingMinutes * 60;
-    string minutes = to_string(timeRemainingMinutes);
-    if (minutes.length() == 1)
-        minutes = " " + minutes;
-    timeRemainingString += minutes + " minute" + (timeRemainingMinutes > 1 ? "s " : "  ");
-    //}
-    /*
-        uint32_t timeRemainingSeconds = timeRemaining;
-        string seconds = to_string(timeRemainingSeconds);
-        if(seconds.length() == 1)
-            seconds = " " + seconds;
-        timeRemainingString += seconds + " second" + (timeRemainingSeconds > 1 ? "s " : "  ");
-    */
 
     double timeElapsed =
         std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::high_resolution_clock::now() - start).count();
     string timeElapsedString = string("Elapsed: ");
-    includeAllSmaller = false;
+    bool includeAllSmaller = false;
     if (timeElapsed >= 60 * 60 * 24) {
         includeAllSmaller = true;
         uint32_t timeElapsedDays = timeElapsed / (60 * 60 * 24);
         timeElapsed -= timeElapsedDays * (60 * 60 * 24);
-        timeElapsedString += to_string(timeElapsedDays) + " day" + (timeElapsedDays > 1 ? "s " : "  ");
+        timeElapsedString += to_string(timeElapsedDays) + " day" + (timeElapsedDays != 1 ? "s " : "  ");
     }
     if (timeElapsed >= 60 * 60 || includeAllSmaller) {
         includeAllSmaller = true;
@@ -673,7 +624,7 @@ void ConsoleVisualizer::drawOverallStatusBar() {
         string hours = to_string(timeElapsedHours);
         if (hours.length() == 1)
             hours = " " + hours;
-        timeElapsedString += hours + " hour" + (timeElapsedHours > 1 ? "s " : "  ");
+        timeElapsedString += hours + " hour" + (timeElapsedHours != 1 ? "s " : "  ");
     }
     if (timeElapsed >= 60 || includeAllSmaller) {
         includeAllSmaller = true;
@@ -682,13 +633,90 @@ void ConsoleVisualizer::drawOverallStatusBar() {
         string minutes = to_string(timeElapsedMinutes);
         if (minutes.length() == 1)
             minutes = " " + minutes;
-        timeElapsedString += minutes + " minute" + (timeElapsedMinutes > 1 ? "s " : "  ");
+        timeElapsedString += minutes + " minute" + (timeElapsedMinutes != 1 ? "s " : "  ");
     }
     uint32_t timeElapsedSeconds = timeElapsed;
     string seconds = to_string(timeElapsedSeconds);
     if (seconds.length() == 1)
         seconds = " " + seconds;
-    timeElapsedString += seconds + " second" + (timeElapsedSeconds > 1 ? "s " : "  ");
+    timeElapsedString += seconds + " second" + (timeElapsedSeconds != 1 ? "s " : "  ");
+
+    // FIXME: need to correct estimates to consider training and validation
+    uint64_t totalBatchesToTrain;
+    uint64_t batchesTrained;
+    uint64_t totalBatchesToValidate;
+    uint64_t batchesValidated;
+    double timePerValidationBatch;
+    if (mostRecentExecutionState.executionMode == ExampleType::TRAIN) {
+        totalBatchesToTrain =
+            mostRecentExecutionState.epochsToTrain * (mostRecentExecutionState.numTrainingExamples / mostRecentExecutionState.batchSize);
+        batchesTrained =
+            mostRecentExecutionState.epochNum * (mostRecentExecutionState.numTrainingExamples / mostRecentExecutionState.batchSize) +
+            mostRecentExecutionState.batchNum;
+        totalBatchesToValidate =
+            mostRecentExecutionState.epochsToTrain * (mostRecentExecutionState.numValidationExamples / mostRecentExecutionState.batchSize);
+        batchesValidated =
+            mostRecentExecutionState.epochNum * (mostRecentExecutionState.numValidationExamples / mostRecentExecutionState.batchSize);
+
+        // guess before have a measurement
+        if (mostRecentExecutionState.epochNum == 0)
+            timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerTrainingBatch / 3;
+        else
+            timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerValidationBatch;
+    } else if (mostRecentExecutionState.executionMode == ExampleType::VALIDATE) {
+        totalBatchesToTrain =
+            mostRecentExecutionState.epochsToTrain * (mostRecentExecutionState.numTrainingExamples / mostRecentExecutionState.batchSize);
+        batchesTrained =
+            (mostRecentExecutionState.epochNum + 1) * (mostRecentExecutionState.numTrainingExamples / mostRecentExecutionState.batchSize);
+        totalBatchesToValidate =
+            mostRecentExecutionState.epochsToTrain * (mostRecentExecutionState.numValidationExamples / mostRecentExecutionState.batchSize);
+        batchesValidated =
+            mostRecentExecutionState.epochNum * (mostRecentExecutionState.numValidationExamples / mostRecentExecutionState.batchSize) +
+            mostRecentExecutionState.batchNum;
+
+        timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerValidationBatch;
+    } else {
+        // FIXME: test mode
+        assert(false);
+    }
+
+    uint64_t trainingBatchesRemaining = totalBatchesToTrain - batchesTrained;
+    uint64_t validationBatchesRemaining = totalBatchesToValidate - batchesValidated;
+    double trainingTimeRemaining = trainingBatchesRemaining * mostRecentExecutionState.runningAverageTimePerTrainingBatch;
+    double validationTimeRemaining = validationBatchesRemaining * timePerValidationBatch;
+    double timeRemaining = trainingTimeRemaining + validationTimeRemaining;
+
+    timeElapsed = std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::high_resolution_clock::now() - start).count();
+    double progress = timeElapsed / (timeElapsed + timeRemaining);
+
+    // double progress = batchesTrained / (double)totalBatchesToTrain;
+    // uint64_t batchesRemaining = totalBatchesToTrain - batchesTrained;
+    // double timeRemaining = batchesRemaining * mostRecentExecutionState.runningAverageTimePerTrainingBatch;
+
+    string timeRemainingString = string("Remaining: ");
+    includeAllSmaller = false;
+    if (timeRemaining >= 60 * 60 * 24) {
+        includeAllSmaller = true;
+        uint32_t timeRemainingDays = timeRemaining / (60 * 60 * 24);
+        timeRemaining -= timeRemainingDays * (60 * 60 * 24);
+        timeRemainingString += to_string(timeRemainingDays) + " day" + (timeRemainingDays != 1 ? "s " : "  ");
+    }
+    if (timeRemaining >= 60 * 60 || includeAllSmaller) {
+        includeAllSmaller = true;
+        uint32_t timeRemainingHours = timeRemaining / (60 * 60);
+        timeRemaining -= timeRemainingHours * (60 * 60);
+        string hours = to_string(timeRemainingHours);
+        if (hours.length() == 1)
+            hours = " " + hours;
+        timeRemainingString += hours + " hour" + (timeRemainingHours != 1 ? "s " : "  ");
+    }
+    includeAllSmaller = true;
+    uint32_t timeRemainingMinutes = timeRemaining / 60;
+    timeRemaining -= timeRemainingMinutes * 60;
+    string minutes = to_string(timeRemainingMinutes);
+    if (minutes.length() == 1)
+        minutes = " " + minutes;
+    timeRemainingString += minutes + " minute" + (timeRemainingMinutes != 1 ? "s " : "  ");
 
     drawStatusBar(win2, heightW2 - 1, 5, statusBarEnd, progress, timeElapsedString.c_str(), timeRemainingString.c_str(), true);
 }
@@ -745,32 +773,6 @@ void ConsoleVisualizer::drawStatusBar(
         percentLocation += leftLabel.length() + 1;
     wmove((WINDOW *)win, y, percentLocation);
     wprintw((WINDOW *)win, "%0.0lf%%", progress * 100.0);
-}
-
-void ConsoleVisualizer::printLine(ExecutionState executionState) {
-    // vector<pair<string, string>> hyperparameterDisplayInfo = hyperparameterController.getCurrentEpochInfo(executionState);
-    // for (uint32_t i = 0; i < hyperparameterDisplayInfo.size(); ++i) {
-    //    printf("%s %s\n", hyperparameterDisplayInfo[i].first.c_str(), hyperparameterDisplayInfo[i].second.c_str());
-    //}
-    string epochType;
-    if (executionState.executionMode == ExampleType::TRAIN)
-        epochType = "Trainining";
-    if (executionState.executionMode == ExampleType::TRAIN)
-        epochType = "Validating";
-    else
-        epochType = "Testing";
-    printf("%s Epoch %ld, batch %ld of %ld loss %f examples per second %d\n",
-           epochType.c_str(),
-           executionState.epochNum,
-           executionState.batchNum + 1,
-           executionState.batchesPerEpoch,
-           executionState.batchLoss,
-           (int)(executionState.batchSize / executionState.runningAverageTimePerBatch));
-    double percentComplete = (executionState.batchNum + 1) / executionState.batchesPerEpoch;
-    uint32_t numStars = percentComplete * 100;
-    for (uint32_t i = 0; i < numStars; ++i) {
-        printf("%s%s\n", std::string(numStars, '*').c_str(), std::string(100 - numStars, 'o').c_str());
-    }
 }
 
 void ConsoleVisualizer::drawBox(void *win, int top, int bottom, int left, int right) {
