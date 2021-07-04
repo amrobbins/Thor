@@ -18,7 +18,7 @@ using namespace Thor;
 Network buildNetwork(uint32_t numFCLayers) {
     Network network;
     Tensor latestOutputTensor;
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+    UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();

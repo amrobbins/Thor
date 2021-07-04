@@ -28,7 +28,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
     uint32_t numOutputFeatures = 1 + (rand() % 1000);
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
+    UniformRandom::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;

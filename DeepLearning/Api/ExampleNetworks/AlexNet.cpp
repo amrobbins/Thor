@@ -6,7 +6,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
     Tensor latestOutputTensor;
 
     vector<uint64_t> expectedDimensions;
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+    Glorot::Builder glorot = Glorot::Builder();
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -19,8 +19,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalPadding(2)
                              .verticalPadding(2)
                              .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -38,8 +38,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -71,8 +71,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -104,8 +104,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -123,8 +123,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -155,7 +155,7 @@ Network buildAlexNet() {
 
     vector<uint64_t> expectedDimensions;
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+    Glorot::Builder glorot = Glorot::Builder();
 
     NetworkInput imagesInput =
         NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();
@@ -180,8 +180,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .build()
                              .getFeatureOutput();
 
@@ -194,8 +194,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .build()
                              .getFeatureOutput();
 
@@ -204,8 +204,8 @@ Network buildAlexNet() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(1000)
                              .hasBias(true)
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                             .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
                              .noActivation()
                              .build()
                              .getFeatureOutput();

@@ -1,33 +1,32 @@
 #pragma once
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
-#include "DeepLearning/Implementation/Initializers/UniformRandomInitializer.h"
+#include "DeepLearning/Implementation/Initializers/UniformRandom.h"
 
 #include <assert.h>
 
 namespace Thor {
 
-class UniformRandomInitializer : public Initializer {
+class UniformRandom : public Initializer {
    public:
     class Builder;
 
-    virtual ~UniformRandomInitializer() {}
+    virtual ~UniformRandom() {}
 
-    virtual shared_ptr<Initializer> clone() const { return make_shared<UniformRandomInitializer>(*this); }
+    virtual shared_ptr<Initializer> clone() const { return make_shared<UniformRandom>(*this); }
 };
 
-class UniformRandomInitializer::Builder : public Initializer::Builder {
+class UniformRandom::Builder : public Initializer::Builder {
    public:
     virtual ~Builder() { _layerThatOwnsTensor = nullptr; }
 
     virtual shared_ptr<Initializer> build() {
         assert(_tensorToInitialize.isPresent());
 
-        UniformRandomInitializer uniformRandomInitializer;
+        UniformRandom uniformRandomInitializer;
         uniformRandomInitializer.tensorToInitialize = _tensorToInitialize;
-        uniformRandomInitializer.implementationInitializer =
-            ThorImplementation::UniformRandomInitializer(_maxValue.get(), _minValue.get()).clone();
         uniformRandomInitializer.layerThatOwnsTensor = _layerThatOwnsTensor;
+        uniformRandomInitializer.implementationInitializer = ThorImplementation::UniformRandom(_maxValue.get(), _minValue.get()).clone();
         uniformRandomInitializer.initialized = true;
         return uniformRandomInitializer.clone();
     }
@@ -44,7 +43,7 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
         this->_layerThatOwnsTensor = _layerThatOwnsTensor;
     }
 
-    virtual UniformRandomInitializer::Builder &minValue(double _minValue) {
+    virtual UniformRandom::Builder &minValue(double _minValue) {
         assert(!this->_minValue.isPresent());
         if (_maxValue.isPresent())
             assert(_minValue <= _maxValue.get());
@@ -52,7 +51,7 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
         return *this;
     }
 
-    virtual UniformRandomInitializer::Builder &maxValue(double _maxValue) {
+    virtual UniformRandom::Builder &maxValue(double _maxValue) {
         assert(!this->_maxValue.isPresent());
         if (_minValue.isPresent())
             assert(_maxValue >= _minValue.get());
@@ -60,7 +59,7 @@ class UniformRandomInitializer::Builder : public Initializer::Builder {
         return *this;
     }
 
-    virtual shared_ptr<Initializer::Builder> clone() { return make_shared<UniformRandomInitializer::Builder>(*this); }
+    virtual shared_ptr<Initializer::Builder> clone() { return make_shared<UniformRandom::Builder>(*this); }
 
    protected:
     Optional<ThorImplementation::Tensor> _tensorToInitialize;

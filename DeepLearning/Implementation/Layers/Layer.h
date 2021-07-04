@@ -244,6 +244,28 @@ class Layer {
 
     uint64_t getId() { return id; }
 
+    // compute the fan in for one element of a batch
+    virtual uint64_t getFanIn() {
+        assert(featureInput.isPresent());
+        vector<uint64_t> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        uint64_t fanIn = 1;
+        for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
+            fanIn *= inputDimensions[i];
+        }
+        return fanIn;
+    }
+
+    // compute the fan out for one element of a batch
+    virtual uint64_t getFanOut() {
+        assert(featureOutput.isPresent());
+        vector<uint64_t> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
+        uint64_t fanOut = 1;
+        for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
+            fanOut *= outputDimensions[i];
+        }
+        return fanOut;
+    }
+
    protected:
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;

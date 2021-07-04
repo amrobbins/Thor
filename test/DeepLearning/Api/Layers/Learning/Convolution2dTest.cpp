@@ -34,7 +34,7 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
 
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
+    UniformRandom::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -138,7 +138,7 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
 
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
+    UniformRandom::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -567,7 +567,7 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
 
     bool hasBias = rand() % 2;
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder;
+    UniformRandom::Builder uniformRandomInitializerBuilder;
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;

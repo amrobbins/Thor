@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
-#include "DeepLearning/Api/Initializers/UniformRandomInitializer.h"
+#include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"

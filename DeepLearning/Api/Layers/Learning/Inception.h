@@ -68,11 +68,9 @@ class Inception::Builder {
         assert(_outputChannelsPooling.isPresent());
 
         if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder =
-                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+            _weightsInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
         if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder =
-                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+            _biasInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
 
         Inception inception;
         inception.network = _network;
