@@ -710,13 +710,20 @@ void ConsoleVisualizer::drawOverallStatusBar() {
             hours = " " + hours;
         timeRemainingString += hours + " hour" + (timeRemainingHours != 1 ? "s " : "  ");
     }
-    includeAllSmaller = true;
     uint32_t timeRemainingMinutes = timeRemaining / 60;
     timeRemaining -= timeRemainingMinutes * 60;
     string minutes = to_string(timeRemainingMinutes);
-    if (minutes.length() == 1)
-        minutes = " " + minutes;
-    timeRemainingString += minutes + " minute" + (timeRemainingMinutes != 1 ? "s " : "  ");
+    if (timeRemainingMinutes > 0 || includeAllSmaller) {
+        if (minutes.length() == 1)
+            minutes = " " + minutes;
+        timeRemainingString += minutes + " minute" + (timeRemainingMinutes != 1 ? "s " : "  ");
+    } else {
+        uint32_t timeRemainingSeconds = timeRemainingSeconds;
+        string seconds = to_string(timeRemainingSeconds);
+        if (seconds.length() == 1)
+            seconds = " " + seconds;
+        timeRemainingString += seconds + " second" + (timeRemainingMinutes != 1 ? "s " : "  ");
+    }
 
     drawStatusBar(win2, heightW2 - 1, 5, statusBarEnd, progress, timeElapsedString.c_str(), timeRemainingString.c_str(), true);
 }
@@ -772,7 +779,9 @@ void ConsoleVisualizer::drawStatusBar(
     if (!leftLabel.empty())
         percentLocation += leftLabel.length() + 1;
     wmove((WINDOW *)win, y, percentLocation);
-    wprintw((WINDOW *)win, "%0.0lf%%", progress * 100.0);
+    if (progress < 1.0)
+        percentLocation += 1;
+    wprintw((WINDOW *)win, "%0.0lf%%", floor(progress * 100.0));
 }
 
 void ConsoleVisualizer::drawBox(void *win, int top, int bottom, int left, int right) {

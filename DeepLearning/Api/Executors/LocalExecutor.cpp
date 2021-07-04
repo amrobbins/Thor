@@ -315,7 +315,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         executionState.epochNum = *currentEpoch;
         executionState.batchSize = batchSize;
         executionState.batchesPerEpoch = batchesPerEpoch;
-        executionState.numTrainingExamples = loader->getNumExamples(ExampleType::VALIDATE);
+        executionState.numTrainingExamples = loader->getNumExamples(ExampleType::TRAIN);
         executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
         executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
         executionState.batchesPerEpoch = batchesPerEpoch;
