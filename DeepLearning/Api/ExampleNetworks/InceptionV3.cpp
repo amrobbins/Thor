@@ -32,7 +32,7 @@ Network buildInceptionV3() {
 
     vector<uint64_t> expectedDimensions;
 
-    UniformRandomInitializer::Builder uniformRandomInitializerBuilder = UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1);
+    UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
 
     NetworkInput imagesInput =
         NetworkInput::Builder().network(inceptionV3).name("images").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();

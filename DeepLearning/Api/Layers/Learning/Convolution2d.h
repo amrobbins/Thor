@@ -1,7 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Initializers/Initializer.h"
-#include "DeepLearning/Api/Initializers/UniformRandomInitializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
@@ -154,11 +154,9 @@ class Convolution2d::Builder {
         if (_hasBias.isEmpty())
             _hasBias = false;
         if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder =
-                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+            _weightsInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
         if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder =
-                make_shared<UniformRandomInitializer::Builder>(UniformRandomInitializer::Builder().minValue(-0.1).maxValue(0.1));
+            _biasInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
         if (!_activationBuilder && !_activationExplicitlyRemoved)
             _activationBuilder = make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())

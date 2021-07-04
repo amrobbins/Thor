@@ -145,6 +145,9 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
+                   build/DeepLearning/Implementation/Initializers/Initializer.o \
+                   build/DeepLearning/Implementation/Initializers/UniformRandom.o \
+                   build/DeepLearning/Implementation/Initializers/Glorot.o \
                    build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o \
                    build/DeepLearning/Api/HyperparameterControllers/HyperparameterController.o \
                    build/DeepLearning/Api/Executors/LocalExecutor.o \
@@ -410,6 +413,18 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o: DeepLearning/I
 build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o
+
+build/DeepLearning/Implementation/Initializers/Initializer.o: DeepLearning/Implementation/Initializers/Initializer.h DeepLearning/Implementation/Initializers/Initializer.cpp
+	mkdir -p build/DeepLearning/Implementation/Initializers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Initializers/Initializer.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Initializers/Initializer.o
+
+build/DeepLearning/Implementation/Initializers/UniformRandom.o: DeepLearning/Implementation/Initializers/UniformRandom.h DeepLearning/Implementation/Initializers/UniformRandom.cpp
+	mkdir -p build/DeepLearning/Implementation/Initializers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Initializers/UniformRandom.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Initializers/UniformRandom.o
+
+build/DeepLearning/Implementation/Initializers/Glorot.o: DeepLearning/Implementation/Initializers/Glorot.h DeepLearning/Implementation/Initializers/Glorot.cpp
+	mkdir -p build/DeepLearning/Implementation/Initializers
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Initializers/Glorot.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Initializers/Glorot.o
 
 build/DeepLearning/Api/Visualizers/ConsoleVisualizer.o: DeepLearning/Api/Visualizers/ConsoleVisualizer.h DeepLearning/Api/Visualizers/ConsoleVisualizer.cpp
 	mkdir -p build/DeepLearning/Api/Visualizers

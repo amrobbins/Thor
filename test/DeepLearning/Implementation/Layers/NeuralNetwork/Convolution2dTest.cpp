@@ -477,7 +477,7 @@ void backwardPass(Convolution2d *convolution2dLayer,
     }
 }
 
-TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
+TEST(Convolution2dInitializers, UniformRandomWorks) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -525,7 +525,7 @@ TEST(Convolution2dInitializers, UniformRandomInitializerWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        UniformRandomInitializer initializer(0.1, -0.1);
+        UniformRandom initializer(0.1, -0.1);
         initializer.initialize(convolution2dLayer, convolution2dLayer->getWeights());
         if (hasBias)
             initializer.initialize(convolution2dLayer, convolution2dLayer->getBiases());

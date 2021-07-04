@@ -52,7 +52,7 @@ TEST(BatchNormalization, 2dYieldsFiniteValues) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        UniformRandomInitializer initializer(0.1, -0.1);
+        UniformRandom initializer(0.1, -0.1);
         initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getWeights());
         initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getBiases());
 
@@ -141,7 +141,7 @@ TEST(BatchNormalization, 4dYieldsFiniteValues) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        UniformRandomInitializer initializer(0.1, -0.1);
+        UniformRandom initializer(0.1, -0.1);
         initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getWeights());
         initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getBiases());
 

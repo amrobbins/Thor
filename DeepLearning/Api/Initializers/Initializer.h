@@ -39,12 +39,6 @@ class Initializer {
     Optional<ThorImplementation::Tensor> tensorToInitialize;
     ThorImplementation::Layer *layerThatOwnsTensor;
 
-    // If you want to initialize a tensor that is not owned by a layer, use this version:
-    virtual void initializeSynchronous(Stream stream) {
-        assert(tensorToInitialize.isPresent());
-        implementationInitializer->initializeSynchronous(stream, tensorToInitialize);
-    }
-
     // Referring to the initializer object, not the tensor that gets initialized:
     bool initialized;
 

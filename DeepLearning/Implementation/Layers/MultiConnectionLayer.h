@@ -206,6 +206,30 @@ class MultiConnectionLayer : public Layer {
     virtual vector<Optional<Layer *>> getNextLayers() { return nextLayers; }
     virtual vector<Stream> getStreams() { return streams; }
 
+    // compute the fan in for one element of a batch
+    virtual uint64_t getFanIn() {
+        Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+        assert(anyFeatureInput.isPresent());
+        vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
+        uint64_t fanIn = 1;
+        for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
+            fanIn *= inputDimensions[i];
+        }
+        return fanIn;
+    }
+
+    // compute the fan out for one element of a batch
+    virtual uint64_t getFanOut() {
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureOutput.isPresent());
+        vector<uint64_t> outputDimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
+        uint64_t fanOut = 1;
+        for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
+            fanOut *= outputDimensions[i];
+        }
+        return fanOut;
+    }
+
    protected:
     set<unsigned long> allErrorInputTensorIds;
     set<unsigned long> stillWaitingForErrorInputTensors;

@@ -349,7 +349,7 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accu
     }
 }
 
-TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
+TEST(FullyConnectedInitializers, UniformRandomWorks) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -375,7 +375,7 @@ TEST(FullyConnectedInitializers, UniformRandomInitializerWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        UniformRandomInitializer initializer(0.1, -0.1);
+        UniformRandom initializer(0.1, -0.1);
         initializer.initialize(fullyConnectedLayer, fullyConnectedLayer->getWeights());
         if (hasBiases) {
             initializer.initialize(fullyConnectedLayer, fullyConnectedLayer->getBiases());

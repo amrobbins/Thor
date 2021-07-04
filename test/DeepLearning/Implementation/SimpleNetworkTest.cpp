@@ -117,7 +117,7 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     LayerTestHelper::initializeNetwork(layers);
 
     // Initialize weights
-    UniformRandomInitializer initializer(0.1, -0.1);
+    UniformRandom initializer(0.1, -0.1);
     initializer.initialize(fullyConnectedLayer, fullyConnectedLayer->getWeights());
     initializer.initialize(fullyConnectedLayer, fullyConnectedLayer->getBiases());
     initializer.initialize(logitsLayer, logitsLayer->getWeights());
