@@ -318,7 +318,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
 
-    float lossScalingFactor = 1.0f;
+    uint32_t lossScalingFactor = 1;
 };
 
 }  // namespace ThorImplementation

@@ -309,7 +309,7 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accu
     half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();
     half *weightsGradientMem = (half *)weightsGradientGpu_h.getMemPtr();
     for (int i = 0; i < numWeights; ++i) {
-        half expected = weightsMem[i] - learningRate * weightsGradientMem[i];
+        half expected = weightsMem[i] - (learningRate * weightsGradientMem[i]) / batchSize;
         maxDiff = abs(expected / 1000.0f);
         if (maxDiff < 0.01)
             maxDiff = 0.01;
@@ -331,7 +331,7 @@ void backwardPass(FullyConnected *fullyConnectedLayer, bool hasBiases, bool accu
         half *biasesGpuMem = (half *)biasesGpu_h.getMemPtr();
         half *biasesGradientMem = (half *)biasesGradientGpu_h.getMemPtr();
         for (int i = 0; i < numBiases; ++i) {
-            half expected = biasesMem[i] - learningRate * biasesGradientMem[i];
+            half expected = biasesMem[i] - (learningRate * biasesGradientMem[i]) / batchSize;
             maxDiff = abs(expected / 1000.0f);
             if (maxDiff < 0.01)
                 maxDiff = 0.01;
