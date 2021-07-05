@@ -124,7 +124,7 @@ class Layer {
         return featureInput.get().clone();
     }
 
-    virtual void forward(Optional<Tensor> featureInput) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(running);
 
         infer(featureInput, featureOutput, stream);
@@ -133,7 +133,7 @@ class Layer {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayer.get()->forward(featureOutput);
+        nextLayer.get()->forward(featureOutput, validationPass);
     }
 
     virtual void backward(Optional<Tensor> errorInput) {

@@ -145,6 +145,8 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
     assert(batches > 0);
     assert(initialEpochBatchNum + batches <= *numBatchesInEpoch);
 
+    bool validationPass = (exampleType != ExampleType::TRAIN);
+
     // FIXME: this should be based on first expected to be done. Also there should be a GPU side input and output queue.
     uint64_t nextStampToProcess = 0;
 
@@ -201,8 +203,10 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
             // Execute the stamp, noting the time taken using events.
             Event startBatchletEvent = stream.putEvent(true, false);
-            stampedNetworks[nextStampToProcess].sendBatch(
-                bufferStampTensorsParams->batchletInput, bufferStampTensorsParams->batchletOutput, outputReadyEvents[nextStampToProcess]);
+            stampedNetworks[nextStampToProcess].sendBatch(bufferStampTensorsParams->batchletInput,
+                                                          bufferStampTensorsParams->batchletOutput,
+                                                          outputReadyEvents[nextStampToProcess],
+                                                          validationPass);
             Event doneBatchletEvent = stream.putEvent(true, false);
             batchletTimingEvents[nextStampToProcess].emplace_back(startBatchletEvent, doneBatchletEvent);
 
@@ -352,66 +356,6 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
             }
         }
         validationThread.join();
-
-        /*
-        Also need to include this in total execution time estimate
-
-        // Validation Phase
-        batchNum = loader->getNextBatchNum(ExampleType::VALIDATE);
-        batchesPerEpoch = loader->getNumBatchesPerEpoch(ExampleType::VALIDATE);
-        batchesToTrain = loader->getNumBatchesPerEpoch(ExampleType::VALIDATE) - batchNum;
-        batchSize = loader->getBatchSize();
-
-        thread validationThread(
-            &LocalExecutor::trainBatches, this, batchNum, batchesToTrain, batchesPerEpoch, ExampleType::VALIDATE, tensorsToReturn);
-        averageBatchTime = -1;
-
-        executionState.outputDirectory = outputDirectory;
-        executionState.epochsToTrain = numEpochs;
-        executionState.networkName = network.getNetworkName();
-        executionState.datasetName = loader->getDatasetName();
-        executionState.executionMode = ExampleType::VALIDATE;
-        executionState.epochNum = *currentEpoch;
-        executionState.batchSize = batchSize;
-        executionState.batchesPerEpoch = batchesPerEpoch;
-        executionState.numTrainingExamples = loader->getNumExamples(ExampleType::VALIDATE);
-        executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
-        executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
-        executionState.batchesPerEpoch = batchesPerEpoch;
-
-        start = std::chrono::high_resolution_clock::now();
-
-        while (true) {
-            waitForBatchData();
-            if (isBatchDataReady()) {
-                std::chrono::high_resolution_clock::time_point done = std::chrono::high_resolution_clock::now();
-                std::chrono::duration<double> elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(done - start);
-                start = done;
-                if (averageBatchTime < 0.0)
-                    averageBatchTime = elapsed.count();
-                else
-                    averageBatchTime = 0.05 * elapsed.count() + 0.95 * averageBatchTime;
-
-                unordered_map<string, float> optimizerParameters = optimizer->getAllParameters(*currentEpoch, batchNum, batchesPerEpoch);
-                executionState.learningRate = optimizerParameters["currentLearningRate"];
-                executionState.momentum = optimizerParameters["momentum"];
-
-                batchData = popBatchData();
-                executionState.batchNum = batchNum;
-                executionState.runningAverageTimePerBatch = averageBatchTime;
-                float *batchLoss = (float *)(batchData["loss"].data());
-                executionState.batchLoss = *batchLoss;
-                executionState.epochAccuracy = 2.0f;  // FIXME
-                for (uint32_t i = 0; i < visualizers.size(); ++i) {
-                    visualizerExecutionState[i]->push(executionState);
-                }
-                batchNum += 1;
-            } else {
-                break;
-            }
-        }
-        validationThread.join();
-        */
 
         (*currentEpoch) += 1;
     }

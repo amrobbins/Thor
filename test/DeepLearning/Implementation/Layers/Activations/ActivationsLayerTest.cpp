@@ -58,7 +58,7 @@ TEST(Relu, Works) {
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(featureInGpu);
+        layers[0]->forward(featureInGpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
@@ -143,7 +143,7 @@ TEST(Tanh, Works) {
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(featureInGpu);
+        layers[0]->forward(featureInGpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 

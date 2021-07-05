@@ -61,7 +61,7 @@ class NetworkInput : public Layer {
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
 
     // Only called for input endpoints
-    virtual void forward(Optional<Tensor> featureInput) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(contentDimensions.isPresent() == featureInput.isPresent());
 
         if (contentDimensions.isPresent())
@@ -75,7 +75,7 @@ class NetworkInput : public Layer {
             featureOutput.get().copyFromAsync(featureInput, stream);
         }
 
-        nextLayer.get()->forward(featureOutput);
+        nextLayer.get()->forward(featureOutput, validationPass);
     }
 
     virtual void backward(Optional<Tensor> errorInput) {}

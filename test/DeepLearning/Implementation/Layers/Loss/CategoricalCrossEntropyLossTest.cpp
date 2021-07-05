@@ -102,8 +102,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult) {
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
-        activationsInput->forward(activationsGpu);
-        labelsInput->forward(labelsGpu);
+        activationsInput->forward(activationsGpu, false);
+        labelsInput->forward(labelsGpu, false);
 
         labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
         lossGpu_h.copyFromAsync(outputGpu, labelsStream);
@@ -285,8 +285,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult) {
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
-        activationsInput->forward(activationsGpu);
-        labelsInput->forward(labelsGpu);
+        activationsInput->forward(activationsGpu, false);
+        labelsInput->forward(labelsGpu, false);
 
         labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
         lossGpu_h.copyFromAsync(outputGpu, labelsStream);

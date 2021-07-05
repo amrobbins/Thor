@@ -32,7 +32,7 @@ class MultiConnectionLayer : public Layer {
         stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
     }
 
-    virtual void forward(Optional<Tensor> featureInput) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(running);
 
         unsigned int connectionNumber = 0;
@@ -57,7 +57,7 @@ class MultiConnectionLayer : public Layer {
             return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber]);
+        nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], validationPass);
     }
 
     virtual void backward(Optional<Tensor> errorInput) {

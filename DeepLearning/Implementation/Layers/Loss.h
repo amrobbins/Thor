@@ -162,7 +162,7 @@ class Loss : public Layer {
         return featureInput.get().clone(TensorDescriptor::DataType::FP32);
     }
 
-    virtual void forward(Optional<Tensor> inputTensor) {
+    virtual void forward(Optional<Tensor> inputTensor, bool validationPass) {
         assert(running);
         if (!isInferenceOnly()) {
             assert(labelsStream.isInitialized());
@@ -178,29 +178,29 @@ class Loss : public Layer {
         assert(inputTensor.isPresent());
 
         if (inputTensor.get() == featureInput.get())
-            forwardFeatures(inputTensor);
+            forwardFeatures(inputTensor, validationPass);
         else if (inputTensor.get() == labelsInput.get())
-            forwardLabels(inputTensor);
+            forwardLabels(inputTensor, validationPass);
         else
             assert(false);
     }
 
-    virtual void forwardFeatures(Tensor featureInput) {
+    virtual void forwardFeatures(Tensor featureInput, bool validationPass) {
         assert(this->featureInput.get() == featureInput);
 
         assert(featureInputReceived == false);
         featureInputReceived = true;
 
-        advanceDataIfReady();
+        advanceDataIfReady(validationPass);
     }
 
-    virtual void forwardLabels(Tensor labelsInput) {
+    virtual void forwardLabels(Tensor labelsInput, bool validationPass) {
         assert(this->labelsInput.get() == labelsInput);
 
         assert(labelsReceived == false);
         labelsReceived = true;
 
-        advanceDataIfReady();
+        advanceDataIfReady(validationPass);
     }
 
     virtual void backward(Optional<Tensor> errorInput) {
@@ -269,7 +269,7 @@ class Loss : public Layer {
     bool featureInputReceived;
     bool labelsReceived;
 
-    virtual void advanceDataIfReady() {
+    virtual void advanceDataIfReady(bool validationPass) {
         if (featureInputReceived && labelsReceived) {
             // Normalize predictions
             infer(featureInput, featureOutput, stream);
@@ -302,16 +302,16 @@ class Loss : public Layer {
         }
 
         if (nextLayer.isPresent())
-            nextLayer.get()->forward(featureOutput);
+            nextLayer.get()->forward(featureOutput, validationPass);
         if (lossOutputLayer.isPresent()) {
             if (batchLossOutput.isPresent())
-                lossOutputLayer.get()->forward(batchLossOutput);
+                lossOutputLayer.get()->forward(batchLossOutput, validationPass);
             else if (elementwiseLossOutput.isPresent())
-                lossOutputLayer.get()->forward(elementwiseLossOutput);
+                lossOutputLayer.get()->forward(elementwiseLossOutput, validationPass);
             else
                 assert(false);
         }
-        if (isInferenceOnly())
+        if (isInferenceOnly() || validationPass)
             return;
 
         // Initiate back propagation
