@@ -60,20 +60,32 @@ bool ImageLoader::resizeImage(
 }
 
 bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray, bool toHWCLayout) {
+    uint64_t numPixels = 3 * image.rows() * image.columns();
+    uint8_t *buffer1 = new uint8_t[3 * image.rows() * image.columns()];
+    uint8_t *buffer2 = new uint8_t[3 * image.rows() * image.columns()];
     try {
         if (toHWCLayout) {
             image.getConstPixels(0, 0, image.columns(), image.rows());
-            image.writePixels(RGBQuantum, rgbPixelArray);
+            image.writePixels(RGBQuantum, buffer1);
+            for(uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = (uint8_t)buffer1[i];
+            }
         } else {
-            uint8_t *buffer = new uint8_t[3 * image.rows() * image.columns()];
             image.getConstPixels(0, 0, image.columns(), image.rows());
-            image.writePixels(RGBQuantum, buffer);
-            convertRGB_HWCtoCHW(buffer, rgbPixelArray, image.rows(), image.columns());
-            delete[] buffer;
+            image.writePixels(RGBQuantum, buffer1);
+            convertRGB_HWCtoCHW(buffer1, buffer2, image.rows(), image.columns());
+            for(uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = (uint8_t)buffer2[i];
+            }
         }
     } catch (Exception &e) {
+        delete[] buffer1;
+        delete[] buffer2;
         return false;
     }
+
+    delete[] buffer1;
+    delete[] buffer2;
     return true;
 }
 

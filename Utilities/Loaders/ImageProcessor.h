@@ -12,7 +12,7 @@ class ImageProcessor : public DataProcessor {
                    double maxAspectRatio,
                    uint32_t outputImageRows,
                    uint32_t outputImageColumns,
-                   bool (*customProcessor)(Magick::Image &regularlyProcessedImage) = nullptr,
+                   bool (*customProcessor)(uint8_t *regularlyProcessedImage) = nullptr,
                    bool display = false);
     virtual ~ImageProcessor() {}
 
@@ -26,7 +26,7 @@ class ImageProcessor : public DataProcessor {
     double cropCenterToAspectRatio;
     uint32_t outputImageRows;
     uint32_t outputImageColumns;
-    bool (*customProcessor)(Magick::Image &regularlyProcessedImage);
+    bool (*customProcessor)(uint8_t *regularlyProcessedImage);
     bool display;
 
     std::mutex mutex;

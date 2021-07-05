@@ -19,7 +19,7 @@ class ImageLoader {
         double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Magick::Image &image);
 
     // Returns 1 byte for each of rgb in CHW format, for example [r0, g0, b0, r1, g1, b1, ...]
-    static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray, bool toHWCLayout = false);
+    static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray, bool toHWCLayout);
 
    private:
     ImageLoader() {}
