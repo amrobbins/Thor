@@ -152,8 +152,8 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
             logitsLayer->setLearningRate(0.0096);
         }
         createLabeledFeatures(featureIn, labelsIn, featuresPerClass);
-        featureInput->forward(featureIn);
-        labelsInput->forward(labelsIn);
+        featureInput->forward(featureIn, false);
+        labelsInput->forward(labelsIn, false);
         Event batchDone0 = fullyConnectedLayer->updateWeightsAndBiasesWithScaledGradient();
         Event batchDone1 = logitsLayer->updateWeightsAndBiasesWithScaledGradient();
 

@@ -89,7 +89,7 @@ class TensorFanout : public MultiConnectionLayer {
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
 
-    virtual void forward(Optional<Tensor> featureInput) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(featureInput.isPresent());
         assert(featureInput.get() == featureInputs[0]);
 
@@ -99,7 +99,7 @@ class TensorFanout : public MultiConnectionLayer {
             streams[i].waitEvent(inputReadyEvent);
 
         for (unsigned int i = 0; i < nextLayers.size(); ++i)
-            nextLayers[i].get()->forward(featureInput);
+            nextLayers[i].get()->forward(featureInput, validationPass);
     }
 
     virtual void backward(Optional<Tensor> errorInput) {

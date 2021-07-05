@@ -62,7 +62,7 @@ TEST(BatchNormalization, 2dYieldsFiniteValues) {
         for (uint32_t i = 0; i < numElements; ++i)
             featureInputMem[i] = ((rand() % 10) / 1.0f) - 5.0f;
 
-        layers[0]->forward(featureInputCpu);
+        layers[0]->forward(featureInputCpu, false);
         Tensor featureOutGpu_h = featureInputCpu.clone();
         featureOutGpu_h.copyFromAsync(featureInputCpu, stream);
         stream.synchronize();
@@ -151,7 +151,7 @@ TEST(BatchNormalization, 4dYieldsFiniteValues) {
         for (uint32_t i = 0; i < numElements; ++i)
             featureInputMem[i] = ((rand() % 10) / 1.0f) - 5.0f;
 
-        layers[0]->forward(featureInputCpu);
+        layers[0]->forward(featureInputCpu, false);
         Tensor featureOutGpu_h = featureInputCpu.clone();
         featureOutGpu_h.copyFromAsync(featureInputCpu, stream);
         stream.synchronize();

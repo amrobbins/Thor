@@ -345,7 +345,7 @@ TEST(Pooling, MaxPoolingWorks) {
         // Forward pass
 
         // Network is runnable here
-        layers[0]->forward(featureIn);
+        layers[0]->forward(featureIn, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
         featureOut = maxPoolingForward(featureIn,
@@ -490,7 +490,7 @@ TEST(Pooling, AveragePoolingWorks) {
         // Forward pass
 
         // Network is runnable here
-        layers[0]->forward(featureIn);
+        layers[0]->forward(featureIn, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
         featureOut = averagePoolingForward(featureIn,

@@ -51,7 +51,7 @@ class HackathonExecutor {
 #pragma omp parallel for schedule(static, 1)
         for (uint32_t j = 0; j < numStamps; ++j) {
             for (uint32_t i = 0; i < numBatches; ++i) {
-                processingFinishedEvent[j] = stampedNetworks[j].sendBatch(batchInput, batchOutput, outputReadyEvents[j]);
+                processingFinishedEvent[j] = stampedNetworks[j].sendBatch(batchInput, batchOutput, outputReadyEvents[j], false);
             }
         }
         for (uint32_t j = 1; j < numStamps; ++j)

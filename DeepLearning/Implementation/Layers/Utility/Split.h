@@ -163,7 +163,7 @@ class Split : public MultiConnectionLayer {
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {}
 
-    virtual void forward(Optional<Tensor> featureInput) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(featureInput.isPresent());
 
         launchSplit(splitTensorFeatureOutputMemoriesArray_d,
@@ -178,10 +178,10 @@ class Split : public MultiConnectionLayer {
                     streams[0]);
 
         Event readyEvent = streams[0].putEvent();
-        nextLayers[0].get()->forward(featureOutputs[0]);
+        nextLayers[0].get()->forward(featureOutputs[0], validationPass);
         for (unsigned int i = 1; i < featureOutputs.size(); ++i) {
             streams[i].waitEvent(readyEvent);
-            nextLayers[i].get()->forward(featureOutputs[i]);
+            nextLayers[i].get()->forward(featureOutputs[i], validationPass);
         }
     }
 

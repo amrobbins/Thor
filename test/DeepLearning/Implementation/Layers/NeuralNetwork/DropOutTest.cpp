@@ -60,7 +60,7 @@ TEST(DropOut, InferenceWorks) {
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu);
+        layers[0]->forward(sourceGpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
@@ -139,7 +139,7 @@ TEST(DropOut, TrainingNoDropOut) {
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu);
+        layers[0]->forward(sourceGpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
@@ -218,7 +218,7 @@ TEST(DropOut, TrainingAllDropOut) {
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu);
+        layers[0]->forward(sourceGpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
@@ -305,7 +305,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu);
+        layers[0]->forward(sourceGpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 

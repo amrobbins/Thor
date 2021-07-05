@@ -192,7 +192,7 @@ class Concatenate : public MultiConnectionLayer {
         }
     }
 
-    virtual void forward(Optional<Tensor> featureInput) {
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(featureInput.isPresent());
         auto it = stillWaitingForFeatureInputTensors.find(featureInput.get().getTensorId());
         assert(it != stillWaitingForFeatureInputTensors.end());
@@ -218,7 +218,7 @@ class Concatenate : public MultiConnectionLayer {
                           streams[0]);
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
-        nextLayers[0].get()->forward(featureOutputs[0]);
+        nextLayers[0].get()->forward(featureOutputs[0], validationPass);
     }
 
     virtual void cleanup() {

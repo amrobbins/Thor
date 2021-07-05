@@ -159,7 +159,7 @@ TEST(Convolution2d, Convolution2dWorks) {
             convolution2dLayer->getBiases().get().copyFromAsync(biasesCpu, stream);
 
         // Network is runnable here
-        layers[0]->forward(featureInputCpu);
+        layers[0]->forward(featureInputCpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
         ConvolutionKernelRequirement convolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),

@@ -96,7 +96,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
             fullyConnectedLayer->getGradientUpdateStream().waitEvent(weightsUpdatedEvent);
 
         // Network is runnable here
-        layers[0]->forward(featureIn);
+        layers[0]->forward(featureIn, false);
         dataStream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
 
         matrixMultiplyCpuHalf((half *)featureIn.getMemPtr(),
