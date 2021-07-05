@@ -63,10 +63,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult) {
                 labels[i] = ((rand() % 1000) / 999.0f);
             }
         }
-        float lossScalingFactor = (rand() % 1000) / 100;
-        if (rand() % 5)
-            lossScalingFactor = 1.0f;
 
+        uint32_t lossScalingFactor = 1;
         vector<Layer *> layers;
         NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
@@ -74,7 +72,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult) {
         layers.push_back(noOpLayer);
         NetworkInput *labelsInput = new NetworkInput(labelsGpu);
         layers.push_back(labelsInput);
-        CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(lossScalingFactor);
+        CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss();
         if (inferenceOnly)
             categoricalCrossEntropyLoss->setConstructForInferenceOnly(true);
         layers.push_back(categoricalCrossEntropyLoss);
@@ -248,10 +246,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult) {
                 labels[i] = ((rand() % 1000) / 999.0f);
             }
         }
-        float lossScalingFactor = (rand() % 1000) / 100;
-        if (rand() % 5)
-            lossScalingFactor = 1.0f;
 
+        uint32_t lossScalingFactor = 1;
         vector<Layer *> layers;
         NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
@@ -259,7 +255,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult) {
         layers.push_back(noOpLayer);
         NetworkInput *labelsInput = new NetworkInput(labelsGpu);
         layers.push_back(labelsInput);
-        CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(lossScalingFactor);
+        CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss();
         if (inferenceOnly)
             categoricalCrossEntropyLoss->setConstructForInferenceOnly(true);
         layers.push_back(categoricalCrossEntropyLoss);

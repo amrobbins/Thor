@@ -17,7 +17,7 @@ class CategoricalCrossEntropyLoss : public Loss {
    public:
     virtual ~CategoricalCrossEntropyLoss(){};
 
-    CategoricalCrossEntropyLoss(Optional<float> lossScalingFactor) : Loss(lossScalingFactor.isPresent() ? lossScalingFactor.get() : 1.0f) {}
+    CategoricalCrossEntropyLoss() : Loss() {}
 
     virtual void compile() {
         if (!isInferenceOnly()) {
@@ -128,7 +128,7 @@ class CategoricalCrossEntropyLoss : public Loss {
     }
 
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {
-        if (lossScalingFactor == 1.0f) {
+        if (lossScalingFactor == 1) {
             if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
                 launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
                                           (half*)labels.getMemPtr(),
@@ -157,7 +157,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                           stream);
             }
             launchScale((float*)errorOutputWorkspace.get().getMemPtr(),
-                        lossScalingFactor,
+                        (float)lossScalingFactor,
                         (half*)lossGradient.getMemPtr(),
                         lossGradient.getDescriptor().getTotalNumElements(),
                         stream);

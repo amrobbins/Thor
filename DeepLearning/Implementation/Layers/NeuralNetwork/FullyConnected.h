@@ -252,30 +252,27 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     static const float BETA_CLEAR;
     static const float BETA_ACCUMULATE;
 
-    /*
-        void createBiasesTensorDescriptor() {
-            assert(!uninitialized());
+    void createBiasesTensorDescriptor() {
+        cudnnStatus_t cudnnStatus;
+        cudnnTensorDescriptor_t descriptor;
 
-            if (*ppBiasesDescriptor != nullptr)
-                return **ppBiasesDescriptor;
-            *ppBiasesDescriptor = new cudnnTensorDescriptor_t;
+        cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureOutput.isPresent());
+        uint32_t numOutputFeatures = anyFeatureOutput.get().getDescriptor().getDimensions()[1];
+        cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputFeatures, 1, 1);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-            cudnnStatus_t cudnnStatus;
-
-            cudnnStatus = cudnnCreateTensorDescriptor(*ppBiasesDescriptor);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            cudnnStatus = cudnnSetTensor4dDescriptor(**ppBiasesDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputChannels, 1, 1);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-
-            return **ppBiasesDescriptor;
-        }
-
-        cudnnTensorDescriptor_t getBiasesTensorDescriptor()
-    */
+        cudnnBiasDescriptor = descriptor;
+    }
 
     uint32_t numInputFeatures;
     const uint32_t numOutputFeatures;
     uint32_t batchSize;
+
+    Optional<cudnnTensorDescriptor_t> cudnnBiasDescriptor;
+    Optional<cudnnTensorDescriptor_t> cudnnFeatureOutputDescriptor;
 
     Optional<Tensor> workspaceForward;
     Optional<Tensor> workspaceBackwardData;

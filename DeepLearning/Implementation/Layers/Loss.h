@@ -22,7 +22,7 @@ namespace ThorImplementation {
  */
 class Loss : public Layer {
    public:
-    Loss(float lossScalingFactor = 1.0f) { this->lossScalingFactor = lossScalingFactor; }
+    Loss() {}
 
     // The feature input to this layer is the (unnormalized) likelihood predictions per batch item per classification class
     virtual Optional<Tensor> connectToPreviousLayer(
@@ -263,7 +263,7 @@ class Loss : public Layer {
     Optional<Tensor> elementwiseLossOutput;
     Optional<Tensor> batchLossOutput;
 
-    float lossScalingFactor = 1.0f;
+    uint32_t lossScalingFactor = 1;
     Stream labelsStream;
 
     bool featureInputReceived;

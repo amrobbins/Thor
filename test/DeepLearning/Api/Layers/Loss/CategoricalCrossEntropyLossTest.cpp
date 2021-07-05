@@ -27,18 +27,11 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     firstDimension.push_back(dimensions[0]);
     Tensor labels(Tensor::DataType::FP32, firstDimension);
 
-    Optional<float> lossScalingFactor;
-    if (rand() % 2)
-        lossScalingFactor = (1 + (rand() % 100)) / 10.0f;
-
     CategoricalCrossEntropyLoss::Builder crossEntropyBuilder = CategoricalCrossEntropyLoss::Builder()
                                                                    .network(network)
                                                                    .featureInput(featureInput)
                                                                    .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
                                                                    .labels(labels);
-    if (lossScalingFactor.isPresent())
-        crossEntropyBuilder.lossScalingFactor(lossScalingFactor);
-
     CategoricalCrossEntropyLoss crossEntropy = crossEntropyBuilder.build();
 
     ASSERT_TRUE(crossEntropy.isInitialized());
@@ -63,11 +56,6 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     ASSERT_EQ(actualLoss.get().getDataType(), Tensor::DataType::FP32);
     ASSERT_EQ(actualLoss.get().getDimensions(), vector<uint64_t>(1, 1));
 
-    Optional<float> actualLossScalingFactor = crossEntropy.getLossScalingFactor();
-    ASSERT_TRUE(actualLossScalingFactor.isPresent() == lossScalingFactor.isPresent());
-    if (lossScalingFactor.isPresent())
-        assert(lossScalingFactor.get() == actualLossScalingFactor.get());
-
     shared_ptr<Layer> cloneLayer = crossEntropy.clone();
     CategoricalCrossEntropyLoss *clone = dynamic_cast<CategoricalCrossEntropyLoss *>(cloneLayer.get());
     assert(clone != nullptr);
@@ -88,11 +76,6 @@ TEST(CategoricalCrossEntropyLoss, Builds) {
     ASSERT_TRUE(cloneLoss.isPresent());
     ASSERT_EQ(cloneLoss.get().getDataType(), Tensor::DataType::FP32);
     ASSERT_EQ(cloneLoss.get().getDimensions(), vector<uint64_t>(1, 1));
-
-    Optional<float> cloneLossScalingFactor = clone->getLossScalingFactor();
-    ASSERT_TRUE(cloneLossScalingFactor.isPresent() == lossScalingFactor.isPresent());
-    if (lossScalingFactor.isPresent())
-        assert(lossScalingFactor.get() == cloneLossScalingFactor.get());
 
     ASSERT_EQ(crossEntropy.getId(), clone->getId());
     ASSERT_GT(crossEntropy.getId(), 1u);

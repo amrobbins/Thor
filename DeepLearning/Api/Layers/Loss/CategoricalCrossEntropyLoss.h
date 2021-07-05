@@ -14,8 +14,6 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalCrossEntropyLoss>(*this); }
 
-    virtual Optional<float> getLossScalingFactor() { return lossScalingFactor; }
-
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
@@ -25,8 +23,7 @@ class CategoricalCrossEntropyLoss : public Loss {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
 
-        ThorImplementation::CategoricalCrossEntropyLoss *categoricalCrossEntropy =
-            new ThorImplementation::CategoricalCrossEntropyLoss(lossScalingFactor);
+        ThorImplementation::CategoricalCrossEntropyLoss *categoricalCrossEntropy = new ThorImplementation::CategoricalCrossEntropyLoss();
         Thor::Layer::connectTwoLayers(drivingLayer, categoricalCrossEntropy, drivingApiLayer, this, connectingApiTensor);
         return categoricalCrossEntropy;
     }

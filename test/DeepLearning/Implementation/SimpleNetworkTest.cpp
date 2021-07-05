@@ -89,7 +89,7 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     FullyConnected *fullyConnectedLayer = new FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, true);
     Relu *relu = new Relu();
     FullyConnected *logitsLayer = new FullyConnected(NUM_CLASSES, true);
-    CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss(1.0f);
+    CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss();
     NetworkOutput *predictionsOutput = new NetworkOutput(cpuPlacement);
     NetworkOutput *lossOutput = new NetworkOutput(cpuPlacement);
 
@@ -140,16 +140,16 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
 
     constexpr bool PRINT = true;
 
-    fullyConnectedLayer->setLearningRate(0.01);
-    logitsLayer->setLearningRate(0.01);
+    fullyConnectedLayer->setLearningRate(0.32);
+    logitsLayer->setLearningRate(0.32);
     for (int i = 0; i < 405; ++i) {
         if (i == 200) {
-            fullyConnectedLayer->setLearningRate(0.001);
-            logitsLayer->setLearningRate(0.001);
+            fullyConnectedLayer->setLearningRate(0.032);
+            logitsLayer->setLearningRate(0.032);
         }
         if (i == 300) {
-            fullyConnectedLayer->setLearningRate(0.0003);
-            logitsLayer->setLearningRate(0.0003);
+            fullyConnectedLayer->setLearningRate(0.0096);
+            logitsLayer->setLearningRate(0.0096);
         }
         createLabeledFeatures(featureIn, labelsIn, featuresPerClass);
         featureInput->forward(featureIn);
