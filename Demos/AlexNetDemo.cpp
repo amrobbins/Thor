@@ -42,7 +42,7 @@ int main() {
     tensorsToReturn.insert("predictions");
     tensorsToReturn.insert("loss");
 
-    executor->trainEpochs(2, tensorsToReturn);
+    executor->trainEpochs(1, tensorsToReturn);
 
     // executor->createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
 
