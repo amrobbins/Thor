@@ -121,6 +121,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                     Tensor(featureInputs.front().get().getPlacement(),
                            TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardWeightsSizeInBytes}));
         }
+
+        if (hasBias) {
+            createFeatureOutputCudnnTensorDescriptor();
+            createBiasesCudnnTensorDescriptor();
+        }
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {
@@ -159,9 +164,16 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
         if (hasBias) {
             assert(biases.isPresent());
+            assert(cudnnBiasDescriptor.isPresent());
+            assert(cudnnFeatureOutputDescriptor.isPresent());
 
-            launchAdd1dBias<half>(
-                (half *)outputTensor.get().getMemPtr(), (half *)biases.get().getMemPtr(), batchSize, numOutputFeatures, stream);
+            cudnnAddTensor(stream.getCudnnHandle(),
+                           &ALPHA_NO_SCALE,
+                           cudnnBiasDescriptor.get(),
+                           biases.get().getMemPtr(),
+                           &BETA_ACCUMULATE,
+                           cudnnFeatureOutputDescriptor.get(),
+                           outputTensor.get().getMemPtr());
         }
     }
 
@@ -252,7 +264,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     static const float BETA_CLEAR;
     static const float BETA_ACCUMULATE;
 
-    void createBiasesTensorDescriptor() {
+    void createBiasesCudnnTensorDescriptor() {
         cudnnStatus_t cudnnStatus;
         cudnnTensorDescriptor_t descriptor;
 
@@ -265,6 +277,21 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         cudnnBiasDescriptor = descriptor;
+    }
+
+    void createFeatureOutputCudnnTensorDescriptor() {
+        cudnnStatus_t cudnnStatus;
+        cudnnTensorDescriptor_t descriptor;
+
+        cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureOutput.isPresent());
+        vector<uint64_t> dimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
+        cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, dimensions[0], dimensions[1], 1, 1);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+
+        cudnnFeatureOutputDescriptor = descriptor;
     }
 
     uint32_t numInputFeatures;
