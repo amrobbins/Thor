@@ -125,6 +125,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Exponentiation.o \
                    build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o \
                    build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o \
+                   build/Utilities/TensorOperations/Arithmetic/Scale.o \
                    build/Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.o \
                    build/Utilities/TensorOperations/Misc/Map.o \
                    build/Utilities/TensorOperations/Misc/Split.o \
@@ -329,6 +330,10 @@ build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o: Utilities/Ten
 build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o: Utilities/TensorOperations/Arithmetic/MultiplyByScalar.h Utilities/TensorOperations/Arithmetic/MultiplyByScalar.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/MultiplyByScalar.cu
+
+build/Utilities/TensorOperations/Arithmetic/Scale.o: Utilities/TensorOperations/Arithmetic/Scale.h Utilities/TensorOperations/Arithmetic/Scale.cu
+	mkdir -p build/Utilities/TensorOperations/Arithmetic
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Scale.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Scale.cu
 
 build/Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.o: Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.h Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.cu
 	mkdir -p build/Utilities/TensorOperations/DeepLearning

@@ -252,9 +252,30 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     static const float BETA_CLEAR;
     static const float BETA_ACCUMULATE;
 
+    /*
+        void createBiasesTensorDescriptor() {
+            assert(!uninitialized());
+
+            if (*ppBiasesDescriptor != nullptr)
+                return **ppBiasesDescriptor;
+            *ppBiasesDescriptor = new cudnnTensorDescriptor_t;
+
+            cudnnStatus_t cudnnStatus;
+
+            cudnnStatus = cudnnCreateTensorDescriptor(*ppBiasesDescriptor);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            cudnnStatus = cudnnSetTensor4dDescriptor(**ppBiasesDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputChannels, 1, 1);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+
+            return **ppBiasesDescriptor;
+        }
+
+        cudnnTensorDescriptor_t getBiasesTensorDescriptor()
+    */
+
     uint32_t numInputFeatures;
     const uint32_t numOutputFeatures;
-    int batchSize;
+    uint32_t batchSize;
 
     Optional<Tensor> workspaceForward;
     Optional<Tensor> workspaceBackwardData;

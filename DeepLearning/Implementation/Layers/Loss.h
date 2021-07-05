@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "Utilities/TensorOperations/Arithmetic/Scale.h"
 #include "Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.h"
 
 namespace ThorImplementation {
@@ -51,13 +52,6 @@ class Loss : public Layer {
 
         // Allocates this->featureInput and this->errorOutput
         Layer::connectToPreviousLayer(predictionsInputLayer, featureInput, stream, backPropagateError);
-
-        // Allocate scaling factor tensor
-        Tensor lossScalingFactorTensorCpu =
-            Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
-        ((float *)lossScalingFactorTensorCpu.getMemPtr())[0] = lossScalingFactor;
-        lossScalingFactorTensor = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
-        lossScalingFactorTensor.copyFromAsync(lossScalingFactorTensorCpu, stream);
 
         return errorOutput;
     }
@@ -269,8 +263,7 @@ class Loss : public Layer {
     Optional<Tensor> elementwiseLossOutput;
     Optional<Tensor> batchLossOutput;
 
-    float lossScalingFactor;
-    Tensor lossScalingFactorTensor;
+    float lossScalingFactor = 1.0f;
     Stream labelsStream;
 
     bool featureInputReceived;

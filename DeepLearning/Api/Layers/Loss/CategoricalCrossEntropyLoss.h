@@ -39,9 +39,6 @@ class CategoricalCrossEntropyLoss : public Loss {
 
         return standardLossBytes + batchSize * (lossWorkspaceBytes + inverseSumOfExponentials);
     }
-
-   private:
-    Optional<float> lossScalingFactor;
 };
 
 class CategoricalCrossEntropyLoss::Builder {
@@ -54,7 +51,6 @@ class CategoricalCrossEntropyLoss::Builder {
         assert(_lossType.isPresent());
 
         CategoricalCrossEntropyLoss categoricalCrossEntropyLoss;
-        categoricalCrossEntropyLoss.lossScalingFactor = _lossScalingFactor;
         categoricalCrossEntropyLoss.featureInput = _featureInput;
         categoricalCrossEntropyLoss.labelsTensor = _labels;
         categoricalCrossEntropyLoss.predictionsTensor = _featureInput.get().clone(Tensor::DataType::FP32);
@@ -90,13 +86,6 @@ class CategoricalCrossEntropyLoss::Builder {
         return *this;
     }
 
-    virtual CategoricalCrossEntropyLoss::Builder &lossScalingFactor(float lossScalingFactor) {
-        assert(!_lossScalingFactor.isPresent());
-        assert(lossScalingFactor > 0.0);
-        this->_lossScalingFactor = lossScalingFactor;
-        return *this;
-    }
-
     virtual CategoricalCrossEntropyLoss::Builder &lossType(ThorImplementation::Loss::ConnectionType _lossType) {
         // FIXME: temp
         assert(_lossType == ThorImplementation::Loss::ConnectionType::BATCH_LOSS ||
@@ -111,7 +100,6 @@ class CategoricalCrossEntropyLoss::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
     Optional<Tensor> _labels;
-    Optional<float> _lossScalingFactor;
     Optional<ThorImplementation::Loss::ConnectionType> _lossType;
 };
 

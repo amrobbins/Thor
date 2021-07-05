@@ -156,12 +156,11 @@ class CategoricalCrossEntropyLoss : public Loss {
                                           lossGradient.getDescriptor().getTotalNumElements(),
                                           stream);
             }
-            launchMultiplyByScalar((float*)errorOutputWorkspace.get().getMemPtr(),
-                                   (float*)lossScalingFactorTensor.getMemPtr(),
-                                   (half*)lossGradient.getMemPtr(),
-                                   lossGradient.getDescriptor().getTotalNumElements(),
-                                   1,
-                                   stream);
+            launchScale((float*)errorOutputWorkspace.get().getMemPtr(),
+                        lossScalingFactor,
+                        (half*)lossGradient.getMemPtr(),
+                        lossGradient.getDescriptor().getTotalNumElements(),
+                        stream);
         }
     }
 

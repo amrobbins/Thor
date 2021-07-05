@@ -201,12 +201,17 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         Stream stream, Tensor weights, Tensor weightsGradient, Optional<Tensor> biases, Optional<Tensor> biasesGradient) {
         assert(learningRate.isPresent());
 
+        Optional<Tensor> anInputTensor = getFirstPresentTensor(featureInputs);
+        assert(anInputTensor.isPresent());
+        uint32_t batchSize = anInputTensor.get().getDescriptor().getDimensions()[0];
+
         if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
             weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
             sumScale((half *)weights.getMemPtr(),
                      (half *)weights.getMemPtr(),
                      (half *)weightsGradient.getMemPtr(),
-                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
+                     (-1.0f * learningRate) /
+                         (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
@@ -214,7 +219,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             sumScale((half *)weights.getMemPtr(),
                      (half *)weights.getMemPtr(),
                      (float *)weightsGradient.getMemPtr(),
-                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
+                     (-1.0f * learningRate) /
+                         (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
@@ -222,7 +228,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             sumScale((float *)weights.getMemPtr(),
                      (float *)weights.getMemPtr(),
                      (float *)weightsGradient.getMemPtr(),
-                     -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the weights
+                     (-1.0f * learningRate) /
+                         (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
         } else {
@@ -236,7 +243,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 sumScale((half *)biases.get().getMemPtr(),
                          (half *)biases.get().getMemPtr(),
                          (half *)biasesGradient.get().getMemPtr(),
-                         -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
+                         (-1.0f * learningRate) /
+                             (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                          biases.get().getDescriptor().getTotalNumElements(),
                          stream);
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
@@ -244,7 +252,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 sumScale((half *)biases.get().getMemPtr(),
                          (half *)biases.get().getMemPtr(),
                          (float *)biasesGradient.get().getMemPtr(),
-                         -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
+                         (-1.0f * learningRate) /
+                             (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                          biases.get().getDescriptor().getTotalNumElements(),
                          stream);
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
@@ -252,7 +261,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 sumScale((float *)biases.get().getMemPtr(),
                          (float *)biases.get().getMemPtr(),
                          (float *)biasesGradient.get().getMemPtr(),
-                         -1.0f * learningRate,  // subtract the gradient, scaled by the learning rate, from the biases
+                         (-1.0f * learningRate) /
+                             (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                          biases.get().getDescriptor().getTotalNumElements(),
                          stream);
             } else {
@@ -307,6 +317,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    private:
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
+
+    float lossScalingFactor = 1.0f;
 };
 
 }  // namespace ThorImplementation
