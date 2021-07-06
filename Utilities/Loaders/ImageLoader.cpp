@@ -59,33 +59,37 @@ bool ImageLoader::resizeImage(
     return true;
 }
 
-bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray, bool toHWCLayout) {
+// FIXME support uint8_t also.
+bool ImageLoader::toRgbArray(Image &image, half *rgbPixelArray, bool toHWCLayout) {
     uint64_t numPixels = 3 * image.rows() * image.columns();
     uint8_t *buffer1 = new uint8_t[3 * image.rows() * image.columns()];
-    uint8_t *buffer2 = new uint8_t[3 * image.rows() * image.columns()];
+    uint8_t *buffer2 = nullptr;
     try {
         if (toHWCLayout) {
             image.getConstPixels(0, 0, image.columns(), image.rows());
             image.writePixels(RGBQuantum, buffer1);
-            for(uint64_t i = 0; i < numPixels; ++i) {
-                rgbPixelArray[i] = (uint8_t)buffer1[i];
+            for (uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = (half)(float)buffer1[i];
             }
         } else {
+            buffer2 = new uint8_t[3 * image.rows() * image.columns()];
             image.getConstPixels(0, 0, image.columns(), image.rows());
             image.writePixels(RGBQuantum, buffer1);
             convertRGB_HWCtoCHW(buffer1, buffer2, image.rows(), image.columns());
-            for(uint64_t i = 0; i < numPixels; ++i) {
-                rgbPixelArray[i] = (uint8_t)buffer2[i];
+            for (uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = (half)(float)buffer2[i];
             }
         }
     } catch (Exception &e) {
         delete[] buffer1;
-        delete[] buffer2;
+        if (buffer2 != nullptr)
+            delete[] buffer2;
         return false;
     }
 
     delete[] buffer1;
-    delete[] buffer2;
+    if (buffer2 != nullptr)
+        delete[] buffer2;
     return true;
 }
 
