@@ -3,6 +3,8 @@
 #include "Utilities/Loaders/ImageLoader.h"
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 
+#include <cuda_fp16.h>
+
 #include <memory>
 #include <mutex>
 
@@ -12,11 +14,12 @@ class ImageProcessor : public DataProcessor {
                    double maxAspectRatio,
                    uint32_t outputImageRows,
                    uint32_t outputImageColumns,
-                   bool (*customProcessor)(uint8_t *regularlyProcessedImage) = nullptr,
+                   bool (*customProcessor)(half *regularlyProcessedImage) = nullptr,
                    bool display = false);
     virtual ~ImageProcessor() {}
 
     virtual uint64_t outputTensorSizeInBytes();
+    virtual uint64_t outputTensorSizeInPixels();
 
     virtual DataElement operator()(DataElement &input);
 
@@ -26,7 +29,7 @@ class ImageProcessor : public DataProcessor {
     double cropCenterToAspectRatio;
     uint32_t outputImageRows;
     uint32_t outputImageColumns;
-    bool (*customProcessor)(uint8_t *regularlyProcessedImage);
+    bool (*customProcessor)(half *regularlyProcessedImage);
     bool display;
 
     std::mutex mutex;
