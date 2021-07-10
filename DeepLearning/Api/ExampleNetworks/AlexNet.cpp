@@ -158,7 +158,7 @@ Network buildAlexNet() {
     Glorot::Builder glorot = Glorot::Builder();
 
     NetworkInput imagesInput =
-        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::FP16).build();
+        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();
 
     Tensor topPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
     Tensor bottomPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
