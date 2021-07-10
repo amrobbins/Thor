@@ -238,6 +238,27 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     remove_all(tempDirectoryPath);
 }
 
+bool alexnetImagePreproccessorUint8(uint8_t *rgbPixelArray) {
+    for (uint32_t row = 0; row < 224; ++row) {
+        for (uint32_t col = 0; col < 224; ++col) {
+            rgbPixelArray[row * 224 + col] = rgbPixelArray[row * 224 + col] - 124;
+            rgbPixelArray[224 * 224 + row * 224 + col] = rgbPixelArray[224 * 224 + row * 224 + col] - 117;
+            rgbPixelArray[2 * 224 * 224 + row * 224 + col] = rgbPixelArray[2 * 224 * 224 + row * 224 + col] - 104;
+        }
+    }
+    return true;
+}
+
+bool alexnetImagePreproccessorHalf(half *rgbPixelArray) {
+    for (uint32_t row = 0; row < 224; ++row) {
+        for (uint32_t col = 0; col < 224; ++col) {
+            rgbPixelArray[row * 224 + col] = (rgbPixelArray[row * 224 + col] - 124.0f) / 255.0f;
+            rgbPixelArray[224 * 224 + row * 224 + col] = (rgbPixelArray[224 * 224 + row * 224 + col] - 117.0f) / 255.0f;
+            rgbPixelArray[2 * 224 * 224 + row * 224 + col] = (rgbPixelArray[2 * 224 * 224 + row * 224 + col] - 104.0f) / 255.0f;
+        }
+    }
+    return true;
+}
 /*
 TEST(ShardedRawDatasetCreator, createImagenet) {
     string baseFilename = "ImageNet2012";

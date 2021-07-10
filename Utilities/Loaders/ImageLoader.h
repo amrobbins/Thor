@@ -1,6 +1,9 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+
 #include <Magick++.h>
+#include <cuda_fp16.h>
 
 #include <assert.h>
 #include <math.h>
@@ -9,6 +12,8 @@
 
 class ImageLoader {
    public:
+    enum class Layout { HWC = 9, CHW };
+
     // static bool loadImage(const std::string &filename, Magick::Image &loadedImage);
     static bool loadImage(const std::string &filename, Magick::Image &image);
 
@@ -18,8 +23,8 @@ class ImageLoader {
     static bool resizeImage(
         double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Magick::Image &image);
 
-    // Returns 1 byte for each of rgb in CHW format, for example [r0, g0, b0, r1, g1, b1, ...]
-    static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray, bool toHWCLayout = false);
+    static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray, Layout layout);
+    static bool toRgbArray(Magick::Image &image, half *rgbPixelArray, Layout layout);
 
    private:
     ImageLoader() {}

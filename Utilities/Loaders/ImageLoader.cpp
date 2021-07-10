@@ -59,21 +59,69 @@ bool ImageLoader::resizeImage(
     return true;
 }
 
-bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray, bool toHWCLayout) {
+bool ImageLoader::toRgbArray(Image &image, uint8_t *rgbPixelArray, Layout layout) {
+    uint64_t numPixels = 3 * image.rows() * image.columns();
+    uint8_t *buffer1 = new uint8_t[3 * image.rows() * image.columns()];
+    uint8_t *buffer2 = nullptr;
     try {
-        if (toHWCLayout) {
+        if (layout == Layout::HWC) {
             image.getConstPixels(0, 0, image.columns(), image.rows());
-            image.writePixels(RGBQuantum, rgbPixelArray);
+            image.writePixels(RGBQuantum, buffer1);
+            for (uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = buffer1[i];
+            }
         } else {
-            uint8_t *buffer = new uint8_t[3 * image.rows() * image.columns()];
+            buffer2 = new uint8_t[3 * image.rows() * image.columns()];
             image.getConstPixels(0, 0, image.columns(), image.rows());
-            image.writePixels(RGBQuantum, buffer);
-            convertRGB_HWCtoCHW(buffer, rgbPixelArray, image.rows(), image.columns());
-            delete[] buffer;
+            image.writePixels(RGBQuantum, buffer1);
+            convertRGB_HWCtoCHW(buffer1, buffer2, image.rows(), image.columns());
+            for (uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = buffer2[i];
+            }
         }
     } catch (Exception &e) {
+        delete[] buffer1;
+        if (buffer2 != nullptr)
+            delete[] buffer2;
         return false;
     }
+
+    delete[] buffer1;
+    if (buffer2 != nullptr)
+        delete[] buffer2;
+    return true;
+}
+
+bool ImageLoader::toRgbArray(Image &image, half *rgbPixelArray, Layout layout) {
+    uint64_t numPixels = 3 * image.rows() * image.columns();
+    uint8_t *buffer1 = new uint8_t[3 * image.rows() * image.columns()];
+    uint8_t *buffer2 = nullptr;
+    try {
+        if (layout == Layout::HWC) {
+            image.getConstPixels(0, 0, image.columns(), image.rows());
+            image.writePixels(RGBQuantum, buffer1);
+            for (uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = (half)(float)buffer1[i];
+            }
+        } else {
+            buffer2 = new uint8_t[3 * image.rows() * image.columns()];
+            image.getConstPixels(0, 0, image.columns(), image.rows());
+            image.writePixels(RGBQuantum, buffer1);
+            convertRGB_HWCtoCHW(buffer1, buffer2, image.rows(), image.columns());
+            for (uint64_t i = 0; i < numPixels; ++i) {
+                rgbPixelArray[i] = (half)(float)buffer2[i];
+            }
+        }
+    } catch (Exception &e) {
+        delete[] buffer1;
+        if (buffer2 != nullptr)
+            delete[] buffer2;
+        return false;
+    }
+
+    delete[] buffer1;
+    if (buffer2 != nullptr)
+        delete[] buffer2;
     return true;
 }
 
