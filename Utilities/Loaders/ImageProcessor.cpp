@@ -6,7 +6,7 @@ ImageProcessor::ImageProcessor(double minAspectRatio,
                                double maxAspectRatio,
                                uint32_t outputImageRows,
                                uint32_t outputImageColumns,
-                               bool (*customProcessor)(uint8_t *regularlyProcessedImage),
+                               bool (*customProcessor)(Magick::Image &regularlyProcessedImage),
                                bool display) {
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;
@@ -35,12 +35,12 @@ DataElement ImageProcessor::operator()(DataElement &input) {
         return output;
 
     unique_ptr<uint8_t> data(new uint8_t[outputTensorSizeInBytes()]);
-    success = ImageLoader::toRgbArray(image, data.get(), true);
+    success = ImageLoader::toRgbArray(image, data.get());
     if (!success)
         return output;
 
     if (customProcessor != nullptr) {
-        bool useImage = customProcessor(data.get());
+        bool useImage = customProcessor(image);
         if (!useImage)
             return output;
     }
