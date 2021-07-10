@@ -208,6 +208,24 @@ class MultiConnectionLayer : public Layer {
 
     // compute the fan in for one element of a batch
     virtual uint64_t getFanIn() {
+        uint64_t totalFanIn = 0;
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (featureInputs[i].isPresent()) {
+                Tensor aFeatureInput = featureInputs[i];
+                vector<uint64_t> inputDimensions = aFeatureInput.getDescriptor().getDimensions();
+                uint64_t fanIn = 1;
+                for (uint32_t j = 1; j < inputDimensions.size(); ++j) {
+                    fanIn *= inputDimensions[j];
+                }
+                totalFanIn += fanIn;
+            }
+        }
+        if (totalFanIn == 0) {
+            // return a 1 to avoid possible divide by 0
+            totalFanIn = 1;
+        }
+        return totalFanIn;
+
         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
         assert(anyFeatureInput.isPresent());
         vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
@@ -220,14 +238,24 @@ class MultiConnectionLayer : public Layer {
 
     // compute the fan out for one element of a batch
     virtual uint64_t getFanOut() {
-        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
-        assert(anyFeatureOutput.isPresent());
-        vector<uint64_t> outputDimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
-        uint64_t fanOut = 1;
-        for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
-            fanOut *= outputDimensions[i];
+        uint64_t totalFanOut = 0;
+        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+            if (featureOutputs[i].isPresent()) {
+                Tensor aFeatureOutput = featureOutputs[i];
+                vector<uint64_t> outputDimensions = aFeatureOutput.getDescriptor().getDimensions();
+                uint64_t fanOut = 1;
+                for (uint32_t j = 1; j < outputDimensions.size(); ++j)
+                    fanOut *= outputDimensions[j];
+                if (nextLayers[i].isPresent())
+                    fanOut *= nextLayers[i].get()->getDownStreamFanoutMultiplier();
+                totalFanOut += fanOut;
+            }
         }
-        return fanOut;
+        if (totalFanOut == 0) {
+            // return a 1 to avoid possible divide by 0
+            totalFanOut = 1;
+        }
+        return totalFanOut;
     }
 
    protected:

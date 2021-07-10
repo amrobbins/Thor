@@ -252,7 +252,7 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, false)), shards);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224)), shards);
 }
 */
 

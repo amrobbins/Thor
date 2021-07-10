@@ -263,8 +263,13 @@ class Layer {
         for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
             fanOut *= outputDimensions[i];
         }
+        if (nextLayer.isPresent()) {
+            fanOut *= nextLayer.get()->getDownStreamFanoutMultiplier();
+        }
         return fanOut;
     }
+
+    virtual uint32_t getDownStreamFanoutMultiplier() { return 1; }
 
    protected:
     Optional<Tensor> featureInput;

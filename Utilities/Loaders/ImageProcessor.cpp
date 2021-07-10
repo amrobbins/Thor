@@ -35,7 +35,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
         return output;
 
     unique_ptr<uint8_t> data(new uint8_t[outputTensorSizeInBytes()]);
-    success = ImageLoader::toRgbArray(image, data.get());
+    success = ImageLoader::toRgbArray(image, data.get(), false);
     if (!success)
         return output;
 

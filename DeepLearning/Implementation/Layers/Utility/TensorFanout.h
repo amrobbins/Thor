@@ -137,6 +137,20 @@ class TensorFanout : public MultiConnectionLayer {
         previousLayers[0].get()->backward(errorOutputs[0]);
     }
 
+    virtual uint32_t getDownStreamFanoutMultiplier() {
+        uint32_t multiplier = 0;
+        for (uint32_t i = 0; i < nextLayers.size(); ++i) {
+            if (nextLayers[i].isPresent()) {
+                multiplier += nextLayers[i].get()->getDownStreamFanoutMultiplier();
+            }
+        }
+        if (multiplier == 0) {
+            // return a 1 to avoid possible divide by 0
+            multiplier = 1;
+        }
+        return multiplier;
+    }
+
    protected:
     half **errorInputArray_d;
 };
