@@ -33,45 +33,45 @@ class TestDataProcessor : public DataProcessor {
 };
 
 void verifyImages(Shard &shard) {
-    half buffer[224 * 224 * 3];
+    uint8_t buffer[224 * 224 * 3];
     string label;
     string filename;
     for (int exampleTypeInt = (int)ExampleType::TRAIN; exampleTypeInt <= (int)ExampleType::TEST; ++exampleTypeInt) {
         ExampleType exampleType = (ExampleType)exampleTypeInt;
         set<string> exampleNames;
         for (uint32_t i = 0; i < shard.getNumExamples(exampleType); ++i) {
-            shard.loadExample((uint8_t *)buffer, label, filename, exampleType, i);
+            shard.loadExample(buffer, label, filename, exampleType, i);
             string qualifiedExampleName = label + '/' + filename;
             ASSERT_EQ(exampleNames.count(qualifiedExampleName), 0u);
             exampleNames.insert(qualifiedExampleName);
 
-            half pixel[3];
+            uint8_t pixel[3];
             if (filename == "white.png") {
-                pixel[0] = 255.0f;
-                pixel[1] = 255.0f;
-                pixel[2] = 255.0f;
+                pixel[0] = 255;
+                pixel[1] = 255;
+                pixel[2] = 255;
             } else if (filename == "black.png") {
-                pixel[0] = 0.0f;
-                pixel[1] = 0.0f;
-                pixel[2] = 0.0f;
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 0;
             } else if (filename == "red.png") {
-                pixel[0] = 255.0f;
-                pixel[1] = 0.0f;
-                pixel[2] = 0.0f;
+                pixel[0] = 255;
+                pixel[1] = 0;
+                pixel[2] = 0;
             } else if (filename == "green.png") {
-                pixel[0] = 0.0f;
-                pixel[1] = 255.0f;
-                pixel[2] = 0.0f;
+                pixel[0] = 0;
+                pixel[1] = 255;
+                pixel[2] = 0;
             } else if (filename == "blue.png") {
-                pixel[0] = 0.0f;
-                pixel[1] = 0.0f;
-                pixel[2] = 255.0f;
+                pixel[0] = 0;
+                pixel[1] = 0;
+                pixel[2] = 255;
             } else {
                 ASSERT_TRUE(false);
             }
 
             for (uint32_t p = 0; p < 3 * 224 * 224; ++p) {
-                ASSERT_EQ(buffer[p], pixel[p % 3]);
+                ASSERT_EQ(buffer[p], pixel[p%3]);
             }
         }
     }
@@ -102,42 +102,42 @@ void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTen
             ASSERT_EQ(oneHotFound, true);
 
             string imageColor = "";
-            half *image = (half *)batchTensors[i].getMemPtr();
+            uint8_t *image = (uint8_t *)batchTensors[i].getMemPtr();
             image += j * 224 * 224 * 3;
             if (image[0] == 255 && image[1] == 255 && image[2] == 255) {
                 imageColor = "white";
                 for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 255.0f);
-                    ASSERT_EQ(image[1 + k], 255.0f);
-                    ASSERT_EQ(image[2 + k], 255.0f);
+                    ASSERT_EQ(image[k], 255);
+                    ASSERT_EQ(image[1 + k], 255);
+                    ASSERT_EQ(image[2 + k], 255);
                 }
             } else if (image[0] == 0 && image[1] == 0 && image[2] == 0) {
                 imageColor = "black";
                 for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 0.0f);
-                    ASSERT_EQ(image[1 + k], 0.0f);
-                    ASSERT_EQ(image[2 + k], 0.0f);
+                    ASSERT_EQ(image[k], 0);
+                    ASSERT_EQ(image[1 + k], 0);
+                    ASSERT_EQ(image[2 + k], 0);
                 }
             } else if (image[0] == 255 && image[1] == 0 && image[2] == 0) {
                 imageColor = "red";
                 for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 255.0f);
-                    ASSERT_EQ(image[1 + k], 0.0f);
-                    ASSERT_EQ(image[2 + k], 0.0f);
+                    ASSERT_EQ(image[k], 255);
+                    ASSERT_EQ(image[1 + k], 0);
+                    ASSERT_EQ(image[2 + k], 0);
                 }
             } else if (image[0] == 0 && image[1] == 255 && image[2] == 0) {
                 imageColor = "green";
                 for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 0.0f);
-                    ASSERT_EQ(image[1 + k], 255.0f);
-                    ASSERT_EQ(image[2 + k], 0.0f);
+                    ASSERT_EQ(image[k], 0);
+                    ASSERT_EQ(image[1 + k], 255);
+                    ASSERT_EQ(image[2 + k], 0);
                 }
             } else if (image[0] == 0 && image[1] == 0 && image[2] == 255) {
                 imageColor = "blue";
                 for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 0.0f);
-                    ASSERT_EQ(image[1 + k], 0.0f);
-                    ASSERT_EQ(image[2 + k], 255.0f);
+                    ASSERT_EQ(image[k], 0);
+                    ASSERT_EQ(image[1 + k], 0);
+                    ASSERT_EQ(image[2 + k], 255);
                 }
             }
             ASSERT_GT(imageColor.size(), 0u);
@@ -163,10 +163,11 @@ void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
 
     uint64_t batchSize = (rand() % 3) + 1;
 
-    BatchAssembler batchAssembler(shards,
-                                  ExampleType::TEST,
-                                  ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {3, 224, 224}),
-                                  batchSize);
+    BatchAssembler batchAssembler(
+        shards,
+        ExampleType::TEST,
+        ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224}),
+        batchSize);
 
     ASSERT_EQ(batchAssembler.getNumBatchesPerEpoch(), (7 + (batchSize - 1)) / batchSize);
 
@@ -234,226 +235,18 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     remove_all(tempDirectoryPath);
 }
 
-void verifyImages2(Shard &shard) {
-    half buffer[224 * 224 * 3];
-    string label;
-    string filename;
-    for (int exampleTypeInt = (int)ExampleType::TRAIN; exampleTypeInt <= (int)ExampleType::TEST; ++exampleTypeInt) {
-        ExampleType exampleType = (ExampleType)exampleTypeInt;
-        set<string> exampleNames;
-        for (uint32_t i = 0; i < shard.getNumExamples(exampleType); ++i) {
-            shard.loadExample((uint8_t *)buffer, label, filename, exampleType, i);
-            string qualifiedExampleName = label + '/' + filename;
-            ASSERT_EQ(exampleNames.count(qualifiedExampleName), 0u);
-            exampleNames.insert(qualifiedExampleName);
-
-            half pixel[3];
-            if (filename == "white.png") {
-                pixel[0] = 256.0f;
-                pixel[1] = 257.0f;
-                pixel[2] = 254.0f;
-            } else if (filename == "black.png") {
-                pixel[0] = 1.0f;
-                pixel[1] = 2.0f;
-                pixel[2] = -1.0f;
-            } else if (filename == "red.png") {
-                pixel[0] = 256.0f;
-                pixel[1] = 2.0f;
-                pixel[2] = -1.0f;
-            } else if (filename == "green.png") {
-                pixel[0] = 1.0f;
-                pixel[1] = 257.0f;
-                pixel[2] = -1.0f;
-            } else if (filename == "blue.png") {
-                pixel[0] = 1.0f;
-                pixel[1] = 2.0f;
-                pixel[2] = 254.0f;
-            } else {
-                ASSERT_TRUE(false);
-            }
-
-            for (uint32_t p = 0; p < 3 * 224 * 224; ++p) {
-                ASSERT_EQ(buffer[p], pixel[p % 3]);
-            }
-        }
-    }
-}
-
-void verifyBatch2(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTensors, vector<ThorImplementation::Tensor> labelTensors) {
-    const uint64_t NUM_CLASSES = 4;
-    uint64_t numMiniBatches = batchTensors.size();
-    ASSERT_GT(batchSize, 0u);
-    ASSERT_GT(numMiniBatches, 0u);
-
-    uint64_t globalCount = 0;
-    map<string, uint64_t> colorCount;
-
-    for (uint64_t i = 0; i < batchTensors.size(); ++i) {
-        ASSERT_EQ(batchTensors[i].getDescriptor().getTotalNumElements(), batchSize * 224 * 224 * 3);
-        ASSERT_EQ(labelTensors[i].getDescriptor().getTotalNumElements(), batchSize * NUM_CLASSES);
-
-        for (uint64_t j = 0; j < batchSize; ++j) {
-            bool oneHotFound = false;
-            float *oneHotLabelArray = (float *)labelTensors[i].getMemPtr();
-            for (uint64_t k = 0; k < NUM_CLASSES; ++k) {
-                if (oneHotLabelArray[j * NUM_CLASSES + k] != 0) {
-                    ASSERT_EQ(oneHotFound, false);
-                    oneHotFound = true;
-                }
-            }
-            ASSERT_EQ(oneHotFound, true);
-
-            string imageColor = "";
-            half *image = (half *)batchTensors[i].getMemPtr();
-            image += j * 224 * 224 * 3;
-            if (image[0] == 256 && image[1] == 257 && image[2] == 254) {
-                imageColor = "white";
-                for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 256.0f);
-                    ASSERT_EQ(image[1 + k], 257.0f);
-                    ASSERT_EQ(image[2 + k], 254.0f);
-                }
-            } else if (image[0] == 1 && image[1] == 2 && image[2] == -1) {
-                imageColor = "black";
-                for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 1.0f);
-                    ASSERT_EQ(image[1 + k], 2.0f);
-                    ASSERT_EQ(image[2 + k], -1.0f);
-                }
-            } else if (image[0] == 256 && image[1] == 2 && image[2] == -1) {
-                imageColor = "red";
-                for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 256.0f);
-                    ASSERT_EQ(image[1 + k], 2.0f);
-                    ASSERT_EQ(image[2 + k], -1.0f);
-                }
-            } else if (image[0] == 1 && image[1] == 257 && image[2] == -1) {
-                imageColor = "green";
-                for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 1.0f);
-                    ASSERT_EQ(image[1 + k], 257.0f);
-                    ASSERT_EQ(image[2 + k], -1.0f);
-                }
-            } else if (image[0] == 1 && image[1] == 2 && image[2] == 254) {
-                imageColor = "blue";
-                for (int k = 0; k < 3 * 224 * 224; k += 3) {
-                    ASSERT_EQ(image[k], 1.0f);
-                    ASSERT_EQ(image[1 + k], 2.0f);
-                    ASSERT_EQ(image[2 + k], 254.0f);
-                }
-            }
-            ASSERT_GT(imageColor.size(), 0u);
-
-            // printf("%s\n", imageColor.c_str());
-
-            globalCount += 1;
-            colorCount[imageColor] += 1;
-            if (globalCount % 7 == 0) {
-                ASSERT_EQ(colorCount["white"], 1u);
-                ASSERT_EQ(colorCount["green"], 1u);
-                ASSERT_EQ(colorCount["red"], 1u);
-                ASSERT_EQ(colorCount["black"], 2u);
-                ASSERT_EQ(colorCount["blue"], 2u);
-                colorCount.clear();
-            }
-        }
-    }
-}
-
-void verifyBatchAssembler2(std::vector<shared_ptr<Shard>> shards) {
-    srand(time(nullptr));
-
-    uint64_t batchSize = (rand() % 3) + 1;
-
-    BatchAssembler batchAssembler(shards,
-                                  ExampleType::TEST,
-                                  ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {3, 224, 224}),
-                                  batchSize);
-
-    ASSERT_EQ(batchAssembler.getNumBatchesPerEpoch(), (7 + (batchSize - 1)) / batchSize);
-
-    ThorImplementation::Tensor batchTensor;
-    ThorImplementation::Tensor labelTensor;
-    vector<ThorImplementation::Tensor> batchTensors;
-    vector<ThorImplementation::Tensor> labelTensors;
-    uint64_t batchNum;
-
-    batchAssembler.getBatch(batchTensor, labelTensor, batchNum);
-    do {
-        batchTensors.push_back(batchTensor);
-        labelTensors.push_back(labelTensor);
-        batchAssembler.getBatch(batchTensor, labelTensor, batchNum);
-    } while (batchNum != 1);
-    do {
-        batchTensors.push_back(batchTensor);
-        labelTensors.push_back(labelTensor);
-        batchAssembler.getBatch(batchTensor, labelTensor, batchNum);
-    } while (batchNum != 1);
-
-    verifyBatch2(batchSize, batchTensors, labelTensors);
-
-    // Next line just to cover that function, does not return all buffers.
-    batchAssembler.returnBuffer(batchTensor, labelTensor);
-}
-
-bool testImagePreprocessor(half *rgbPixelArray) {
-    for (uint32_t row = 0; row < 224; ++row) {
-        for (uint32_t col = 0; col < 224; ++col) {
-            rgbPixelArray[row * 224 * 3 + col * 3 + 0] = rgbPixelArray[row * 224 * 3 + col * 3 + 0] + 1;
-            rgbPixelArray[row * 224 * 3 + col * 3 + 1] = rgbPixelArray[row * 224 * 3 + col * 3 + 1] + 2;
-            rgbPixelArray[row * 224 * 3 + col * 3 + 2] = rgbPixelArray[row * 224 * 3 + col * 3 + 2] - 1;
-        }
-    }
-    return true;
-}
-
-TEST(ShardedRawDatasetCreator, evaluatesDatasetWithPreprocessor) {
-    string baseFilename = "testDataset";
-    string testDatasetDir("test/DeepLearning/DataSet");
-
-    path tempDirectoryPath = temp_directory_path();
-    tempDirectoryPath /= "ThorFrameworkDatasetTest";
-    remove_all(tempDirectoryPath);
-    create_directory(tempDirectoryPath);
-
-    unordered_set<string> sourceDirectories;
-    unordered_set<string> destDirectories;
-
-    sourceDirectories.insert(testDatasetDir);
-    destDirectories.insert(tempDirectoryPath.native());
-
-    std::vector<shared_ptr<Shard>> shards;
-    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224, testImagePreprocessor)), shards);
-
-    // load the dataset, ensure it contains the expected contents
-    ASSERT_EQ(shards.size(), 1u);
-    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TRAIN), 3u);
-    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::VALIDATE), 1u);
-    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TEST), 7u);
-
-    verifyBatchAssembler2(shards);
-
-    if (rand() % 2 == 0)
-        shards.clear();
-
-    Shard reopenedShard;
-    path shardPath;
-    shardPath = tempDirectoryPath;
-    shardPath /= (baseFilename + "_1_of_1.shard");
-    reopenedShard.openShard(shardPath.native());
-    verifyImages2(reopenedShard);
-
-    remove_all(tempDirectoryPath);
-}
-
 /*
-bool alexnetImagePreproccessor(half *rgbPixelArray) {
+// Takes in an 224x224x3 array representing an 
+bool alexnetImagePreproccessor(uint8_t *rgbPixelArray) {
     for (uint32_t row = 0; row < 224; ++row) {
         for (uint32_t col = 0; col < 224; ++col) {
-            rgbPixelArray[row*224*3 + col*3 + 0] = (rgbPixelArray[row*224*3 + col*3 + 0] - 123.68f) / 255.0f;
-            rgbPixelArray[row*224*3 + col*3 + 1] = (rgbPixelArray[row*224*3 + col*3 + 1] - 116.779f) / 255.0f;
-            rgbPixelArray[row*224*3 + col*3 + 2] = (rgbPixelArray[row*224*3 + col*3 + 2] - 103.939f) / 255.0f;
+            rgbPixelArray[row*224*3 + col*3 + 0] = (rgbPixelArray[row*224*3 + col*3 + 0] - 124;
+            rgbPixelArray[row*224*3 + col*3 + 1] = (rgbPixelArray[row*224*3 + col*3 + 1] - 117;
+            rgbPixelArray[row*224*3 + col*3 + 2] = (rgbPixelArray[row*224*3 + col*3 + 2] - 104;
+
+            //rgbPixelArray[row*224*3 + col*3 + 0] = (rgbPixelArray[row*224*3 + col*3 + 0] - 123.68f) / 255.0f; 
+            //rgbPixelArray[row*224*3 + col*3 + 1] = (rgbPixelArray[row*224*3 + col*3 + 1] - 116.779) / 255.0f;
+            //rgbPixelArray[row*224*3 + col*3 + 2] = (rgbPixelArray[row*224*3 + col*3 + 2] - 103.939) / 255.0f;
         }
     }
     return true;
@@ -467,11 +260,30 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
     unordered_set<string> destDirectories;
 
     sourceDirectories.insert(testDatasetDir);
+    destDirectories.insert("/media/andrew/SSD_Storage/");
     destDirectories.insert("/media/andrew/PCIE_SSD/");
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
     creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, alexnetImagePreproccessor)), shards);
+}
+*/
+
+/*
+TEST(ShardedRawDatasetCreator, createImagenet) {
+    string baseFilename = "ImageNet2012";
+    string testDatasetDir("/media/andrew/SSD_Storage/ImageNet_2012");
+
+    unordered_set<string> sourceDirectories;
+    unordered_set<string> destDirectories;
+
+    sourceDirectories.insert(testDatasetDir);
+    destDirectories.insert("/media/andrew/SSD_Storage/");
+    destDirectories.insert("/media/andrew/PCIE_SSD/");
+
+    std::vector<shared_ptr<Shard>> shards;
+    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, false)), shards);
 }
 */
 
