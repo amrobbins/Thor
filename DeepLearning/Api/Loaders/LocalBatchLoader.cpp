@@ -16,27 +16,8 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths, ThorImplementation::T
         string shardPath = *it;
         shards.back()->openShard(shardPath);
         assert(shards.back()->getExampleSizeInBytes() == exampleSizeInBytes);
-
-        /*
-        printf("%ld %ld %ld %ld\n",
-               shards.back()->getNumExamples(ExampleType::TRAIN),
-               shards.back()->getNumExamples(ExampleType::VALIDATE),
-               shards.back()->getNumExamples(ExampleType::TEST),
-               shards.back()->getExampleSizeInBytes());
-        */
+        assert(shards.back()->getDataType() == exampleDescriptor.getDataType());
     }
-
-    /*
-    vector<file_string_vector_t*> allClasses;
-    for(uint64_t i = 0; i < shards.size(); ++i) {
-        allClasses.push_back(shards[i]->getAllClasses());
-        assert(allClasses.back()->size() == allClasses[0]->size()); // TEMP, not true generally. Just for testing.
-    }
-
-    for(uint64_t i = 0; i < allClasses[0]->size(); ++i) {
-        printf("%s\n", (*allClasses[0])[i].c_str());
-    }
-    */
 
     batchAssemblerTrain = make_shared<BatchAssembler>(
         shards,

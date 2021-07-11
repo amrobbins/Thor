@@ -513,7 +513,8 @@ void ConsoleVisualizer::drawProgressRows() {
         wmove((WINDOW *)win1, i, 95);
         waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].batchLoss).c_str());
         wmove((WINDOW *)win1, i, 110);
-        waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].accuracy).c_str());
+        // waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].accuracy).c_str());
+        waddstr((WINDOW *)win1, "not connected");
     }
 }
 

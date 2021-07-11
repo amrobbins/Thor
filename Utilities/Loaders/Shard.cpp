@@ -14,6 +14,7 @@ void Shard::createShard(string filename,
                         uint64_t numValidateExamples,
                         uint64_t numTestExamples,
                         uint64_t exampleSizeInBytes,
+                        ThorImplementation::TensorDescriptor::DataType dataType,
                         uint64_t maxFilenameChars,
                         std::vector<std::string> &allClassesVector,
                         uint64_t maxClassNameChars) {
@@ -29,6 +30,7 @@ void Shard::createShard(string filename,
 
     shardMetadata = mappedFile.construct<ShardMetadata>("shardMetadata")();
     shardMetadata->exampleSizeInBytes = exampleSizeInBytes;
+    shardMetadata->dataType = dataType;
 
     file_vector_allocator_t trainDataAllocator(mappedFile.get_segment_manager());
     trainData = mappedFile.construct<file_vector_t>("train")(trainDataAllocator);
@@ -95,8 +97,9 @@ void Shard::openShard(string filename) {
     validateFilenames = mappedFile.find<file_string_vector_t>("validateFilenames").first;
     testFilenames = mappedFile.find<file_string_vector_t>("testFilenames").first;
     shardMetadata = mappedFile.find<ShardMetadata>("shardMetadata").first;
-    allClasses = mappedFile.find<file_string_vector_t>("allClasses").first;
     exampleSizeInBytes = shardMetadata->exampleSizeInBytes;
+    dataType = shardMetadata->dataType;
+    allClasses = mappedFile.find<file_string_vector_t>("allClasses").first;
 
     assert(trainData->size() % exampleSizeInBytes == 0);
     assert(testData->size() % exampleSizeInBytes == 0);
@@ -115,7 +118,6 @@ bool Shard::isOpen() { return open; }
 
 void Shard::writeExample(uint8_t *buffer, const string &label, const string &filename, ExampleType exampleType) {
     assert(buffer != nullptr);
-
     std::unique_lock<std::mutex> lck(*mtx);
 
     if (exampleType == ExampleType::TRAIN) {
@@ -247,6 +249,8 @@ void Shard::shrinkToFit() {
 string Shard::getFilename() { return filename; }
 
 uint64_t Shard::getExampleSizeInBytes() { return exampleSizeInBytes; }
+
+ThorImplementation::TensorDescriptor::DataType Shard::getDataType() { return dataType; }
 
 uint64_t Shard::getNumExamples(ExampleType exampleType) {
     if (exampleType == ExampleType::TRAIN) {
