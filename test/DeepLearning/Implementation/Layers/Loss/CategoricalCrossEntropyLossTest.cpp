@@ -84,7 +84,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult) {
         Stream stream = activationsInput->getStream();
         Stream labelsStream = labelsInput->getStream();
 
-        labelsGpu.copyFromAsync(labelsCpu, stream);
+        labelsGpu.copyFromAsync(labelsCpu, labelsStream);
         activationsGpu.copyFromAsync(activationsCpu, stream);
 
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
@@ -267,7 +267,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult) {
         Stream stream = activationsInput->getStream();
         Stream labelsStream = labelsInput->getStream();
 
-        labelsGpu.copyFromAsync(labelsCpu, stream);
+        labelsGpu.copyFromAsync(labelsCpu, labelsStream);
         activationsGpu.copyFromAsync(activationsCpu, stream);
 
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
@@ -346,17 +346,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult) {
             if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
                 printf("%d   cpu %f gpu %f\n", i, exponentialsMem[i], predictionsGpuMem[i]);
         }
-
-        /*
-                // Verify the loss output
-                float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
-                for (int b = 0; b < batchSize; ++b) {
-                    float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
-                    EXPECT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
-                    if (abs(lossMem[b] - lossMemFromGpu[b]) >= thresh)
-                        printf("cpuF %f gpuF %f    %d\n", lossMem[b], lossMemFromGpu[b], b);
-                }
-        */
 
         // Verify the loss output
         float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
