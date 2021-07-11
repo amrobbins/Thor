@@ -184,6 +184,84 @@ TEST(Tanh, Works) {
     }
 }
 
+TEST(Linear, Works) {
+    srand(time(NULL));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    cudaError_t cudaStatus;
+
+    for (int test = 0; test < 10; ++test) {
+        int numDimensions = (rand() % 5) + 1;
+        vector<unsigned long> dimensions;
+        int numElements = 1;
+        for (int i = 0; i < numDimensions; ++i) {
+            dimensions.push_back((rand() % 5) + 1);
+            numElements *= dimensions.back();
+        }
+
+        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        Tensor featureInCpu(cpuPlacement, descriptor);
+        Tensor featureInGpu(gpuPlacement, descriptor);
+        Tensor destCpu(cpuPlacement, descriptor);
+
+        half *featureInMem = (half *)featureInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(featureInGpu));
+        layers.push_back(new NoOpLayer());
+        Linear *linear = new Linear();
+        layers.push_back(linear);
+        layers.push_back(new NoOpLayer());
+        layers.push_back(new NetworkOutput(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        featureInGpu.copyFromAsync(featureInCpu, stream);
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor outputGpu = layers.back()->getFeatureOutput();
+
+        // Network is runnable here
+        layers[0]->forward(featureInGpu, false);
+        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        destCpu.copyFromAsync(outputGpu, stream);
+
+        cudaStatus = cudaStreamSynchronize(stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        half *destMem = (half *)destCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            ASSERT_EQ((float)destMem[i], featureInMem[i]);
+        }
+
+        // Backward pass
+        Tensor errorInCpu(cpuPlacement, descriptor);
+        Tensor errorOutCpu(cpuPlacement, descriptor);
+        Tensor errorInGpu(gpuPlacement, descriptor);
+        Tensor errorOutGpu = linear->getErrorOutput();
+
+        half *errorInMem = (half *)errorInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            errorInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+        errorInGpu.copyFromAsync(errorInCpu, stream);
+
+        linear->backProp(featureInGpu, errorInGpu, errorOutGpu, stream);
+        errorOutCpu.copyFromAsync(errorOutGpu, stream);
+        stream.synchronize();
+
+        half *errorOutMem = (half *)errorOutCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            ASSERT_EQ((float)errorInMem[i], (float)errorOutMem[i]);
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

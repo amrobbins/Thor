@@ -260,6 +260,7 @@ bool alexnetImagePreproccessorHalf(half *rgbPixelArray) {
     return true;
 }
 
+/*
 TEST(ShardedRawDatasetCreator, createImagenet) {
     string baseFilename = "ImageNet2012";
     string testDatasetDir("/media/andrew/SSD_Storage/ImageNet_2012");
@@ -275,6 +276,7 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
     creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, alexnetImagePreproccessorUint8)), shards);
 }
+*/
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

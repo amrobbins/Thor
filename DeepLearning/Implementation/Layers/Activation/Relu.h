@@ -1,11 +1,12 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Arithmetic/Relu.h"
 
 namespace ThorImplementation {
 
-class Relu : public Layer {
+class Relu : public Activation {
    public:
     virtual ~Relu() {}
 
