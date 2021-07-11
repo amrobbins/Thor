@@ -75,7 +75,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     unique_ptr<uint8_t> data(new uint8_t[outputTensorSizeInBytes()]);
 
     if (bytesPerPixel == 1) {
-        // output.dataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
+        output.dataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
 
         success = ImageLoader::toRgbArray(image, data.get(), ImageLoader::Layout::CHW);
         if (!success)
@@ -87,7 +87,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
                 return output;
         }
     } else {
-        // output.dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
+        output.dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
 
         success = ImageLoader::toRgbArray(image, (half *)data.get(), ImageLoader::Layout::CHW);
         if (!success)

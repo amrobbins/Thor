@@ -5,6 +5,7 @@
 //       https://github.com/NVIDIA/DALI#compiling-dali-from-source-bare-metal
 //       Will need a C++ api, currently that is experimental. Will need to talk to nVidia.
 
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Loaders/MemMappedFileTypes.h"
 #include "Utilities/Loaders/Shard.h"
@@ -39,6 +40,7 @@ class DataProcessor : public WorkQueueExecutorBase<DataElement, DataElement> {
      * returns true on success.
      */
     virtual uint64_t outputTensorSizeInBytes() = 0;
+    virtual ThorImplementation::TensorDescriptor::DataType getDataType() = 0;
 };
 
 /**

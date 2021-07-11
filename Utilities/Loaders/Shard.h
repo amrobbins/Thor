@@ -5,6 +5,7 @@
 //       https://github.com/NVIDIA/DALI#compiling-dali-from-source-bare-metal
 //       Will need a C++ api, currently that is experimental. Will need to talk to nVidia.
 
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Loaders/MemMappedFileTypes.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
@@ -35,10 +36,13 @@ struct DataElement {
 
     uint64_t numDataBytes;
     std::shared_ptr<uint8_t> data;
+
+    ThorImplementation::TensorDescriptor::DataType dataType;
 };
 
 struct ShardMetadata {
     uint64_t exampleSizeInBytes;
+    ThorImplementation::TensorDescriptor::DataType dataType;
 };
 
 class Shard {
@@ -50,6 +54,7 @@ class Shard {
                      uint64_t numValidateExamples,
                      uint64_t numTestExamples,
                      uint64_t exampleSizeInBytes,
+                     ThorImplementation::TensorDescriptor::DataType dataType,
                      uint64_t maxFilenameChars,
                      std::vector<std::string> &allClassesVector,
                      uint64_t maxClassNameChars);
@@ -63,12 +68,14 @@ class Shard {
     void shrinkToFit();
     std::string getFilename();
     uint64_t getExampleSizeInBytes();
+    ThorImplementation::TensorDescriptor::DataType getDataType();
     uint64_t getNumExamples(ExampleType exampleType);
     file_string_vector_t *getAllClasses();
 
    private:
     std::string filename;
     uint64_t exampleSizeInBytes;
+    ThorImplementation::TensorDescriptor::DataType dataType;
     boost::interprocess::managed_mapped_file mappedFile;
     bool open;
 
