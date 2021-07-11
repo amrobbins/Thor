@@ -1,11 +1,12 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Arithmetic/Tanh.h"
 
 namespace ThorImplementation {
 
-class Tanh : public Layer {
+class Tanh : public Activation {
    public:
     virtual ~Tanh() {}
 
@@ -37,6 +38,13 @@ class Tanh : public Layer {
                            errorOut.get().getDescriptor().getTotalNumElements(),
                            stream);
     }
+
+    virtual uint64_t floatingPointOperationsPerExampleForward() {
+        // https://stackoverflow.com/questions/41251698/how-many-flops-does-tanh-need#:~:text=for%20very%20small%20x%20%2C%20(let's,floating%20point%20operations%20are%20needed.
+        return 8 * Activation::floatingPointOperationsPerExampleForward();
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleBackward() { return 11 * Activation::floatingPointOperationsPerExampleForward(); }
 
    private:
     bool uninitialized;

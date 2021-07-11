@@ -171,9 +171,6 @@ class Layer {
 
     virtual bool hasFeatureInput() { return true; }
 
-    // FIXME: If there is a layer that does not breaks the backprop path, I should not allocate back prop tensors downstream from the
-    // breakage.
-
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int loaderConnectionType = 0) {
         assert(!compiled);
@@ -270,6 +267,10 @@ class Layer {
     }
 
     virtual uint32_t getDownStreamFanoutMultiplier() { return 1; }
+
+    virtual uint64_t floatingPointOperationsPerExampleForward() { return 0; }
+
+    virtual uint64_t floatingPointOperationsPerExampleBackward() { return 0; }
 
    protected:
     Optional<Tensor> featureInput;
