@@ -33,4 +33,6 @@ struct ExecutionState {
     double batchLoss;
     std::vector<float> lossPerExamplePerClass;
     double epochAccuracy;
+
+    uint64_t flopsPerExample;
 };

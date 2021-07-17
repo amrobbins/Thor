@@ -56,6 +56,9 @@ class StampedNetwork {
     uint64_t bytesRequired;
     uint64_t batchSize;
 
+    uint64_t floatingPointOperationsPerExampleForward;
+    uint64_t floatingPointOperationsPerExampleBackward;
+
     void initialize() {
         for (uint32_t i = 0; i < initializers.size(); ++i)
             initializers[i]->initialize();

@@ -21,6 +21,7 @@ using namespace Thor;
 
 int main() {
     Thor::Network alexNet = buildAlexNet();
+    //Thor::Network alexNet = buildDeepFullyConnected();
 
     set<string> shardPaths;
 

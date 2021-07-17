@@ -210,6 +210,21 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     void printBackwardFilterKernelInfo() { GpuConvolution::instance().printBackwardFilterKernelInfo(convolutionKernelRequirement); }
 
+    virtual uint64_t floatingPointOperationsPerExampleForward() {
+        Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureInput.isPresent());
+        assert(anyFeatureOutput.isPresent());
+        uint64_t flops = 2 * filterHeight * filterWidth * numInputChannels - 1;
+        if (hasBias)
+            flops += 1;
+        flops *= numOutputRows * numOutputColumns * numOutputChannels;
+
+        return flops;
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleBackward() { return 2 * floatingPointOperationsPerExampleForward(); }
+
    private:
     const int filterWidth;
     const int filterHeight;

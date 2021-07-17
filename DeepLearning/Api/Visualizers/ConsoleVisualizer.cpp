@@ -438,7 +438,7 @@ void ConsoleVisualizer::drawProgressRows() {
                           mostRecentExecutionState.batchNum,
                           mostRecentExecutionState.batchesPerEpoch,
                           totalEpochLoss / mostRecentExecutionState.batchNum,
-                          5.0);
+                          mostRecentExecutionState.epochAccuracy);
     } else {
         rows.back().curBatch = mostRecentExecutionState.batchNum;
         rows.back().batchLoss = totalEpochLoss / mostRecentExecutionState.batchNum;
@@ -513,8 +513,7 @@ void ConsoleVisualizer::drawProgressRows() {
         wmove((WINDOW *)win1, i, 95);
         waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].batchLoss).c_str());
         wmove((WINDOW *)win1, i, 110);
-        // waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].accuracy).c_str());
-        waddstr((WINDOW *)win1, "not connected");
+        waddstr((WINDOW *)win1, std::to_string(rows[firstToDisplay + i].accuracy).c_str());
     }
 }
 
@@ -561,7 +560,6 @@ void ConsoleVisualizer::drawFooter() {
         examplesPerHourString[1] = 0;
     } else {
         examplesPerHour = (1.0 / mostRecentExecutionState.runningAverageTimePerTrainingBatch) * mostRecentExecutionState.batchSize * 3600;
-        snprintf(examplesPerHourString, 31, "%0.1lf %s", examplesPerHour, exampleUnits.c_str());
         if (examplesPerHour > 1.0e15) {
             examplesPerHour /= 1.0e15;
             exampleUnits = "Quadrillion";
@@ -581,21 +579,64 @@ void ConsoleVisualizer::drawFooter() {
         snprintf(examplesPerHourString, 31, "%0.1lf %s", examplesPerHour, exampleUnits.c_str());
     }
 
+    char flopsString[31];
+    double flops = 0;
+    string flopsUnits;
+    if (mostRecentExecutionState.batchSize == 0) {
+        flopsString[0] = '0';
+        flopsString[1] = 0;
+    } else {
+        double examplesPerSecond = (1.0 / mostRecentExecutionState.runningAverageTimePerTrainingBatch) * mostRecentExecutionState.batchSize;
+        flops = examplesPerSecond * mostRecentExecutionState.flopsPerExample;
+        if (flops > 1.0e24) {
+            flops /= 1.0e24;
+            flopsUnits = "YFLOPS";
+        } else if (flops > 1.0e21) {
+            flops /= 1.0e21;
+            flopsUnits = "ZFLOPS";
+        } else if (flops > 1.0e18) {
+            flops /= 1.0e18;
+            flopsUnits = "EFLOPS";
+        } else if (flops > 1.0e15) {
+            flops /= 1.0e15;
+            flopsUnits = "PFLOPS";
+        } else if (flops > 1.0e12) {
+            flops /= 1.0e12;
+            flopsUnits = "TFLOPS";
+        } else if (flops > 1.0e9) {
+            flops /= 1.0e9;
+            flopsUnits = "BGFLOPS";
+        } else if (flops > 1.0e6) {
+            flops /= 1.0e6;
+            flopsUnits = "MFLOPS";
+        } else if (flops > 1.0e3) {
+            flops /= 1.0e3;
+            flopsUnits = "KFLOPS";
+        } else {
+            flopsUnits = "FLOPS";
+        }
+        snprintf(flopsString, 31, "%0.1lf %s", flops, flopsUnits.c_str());
+    }
+
     wmove((WINDOW *)win2, 2, 70);
     waddstr((WINDOW *)win2, "Training examples per hour:");
     wmove((WINDOW *)win2, 2, 105);
     waddstr((WINDOW *)win2, examplesPerHourString);
     wmove((WINDOW *)win2, 3, 70);
-    waddstr((WINDOW *)win2, "GPUs:");
+    waddstr((WINDOW *)win2, "Effective FLOPS:");
     wmove((WINDOW *)win2, 3, 105);
-    waddstr((WINDOW *)win2, cudaDevicesString.c_str());
+    waddstr((WINDOW *)win2, flopsString);
     wmove((WINDOW *)win2, 4, 70);
-    waddstr((WINDOW *)win2, "Parallelization strategy:");
+    waddstr((WINDOW *)win2, "GPUs:");
     wmove((WINDOW *)win2, 4, 105);
-    waddstr((WINDOW *)win2, "Replicate and reduce");
+    waddstr((WINDOW *)win2, cudaDevicesString.c_str());
     wmove((WINDOW *)win2, 5, 70);
-    waddstr((WINDOW *)win2, "Output directory:");
+    waddstr((WINDOW *)win2, "Parallelization strategy:");
     wmove((WINDOW *)win2, 5, 105);
+    waddstr((WINDOW *)win2, "Replicate and reduce");
+    wmove((WINDOW *)win2, 6, 70);
+    waddstr((WINDOW *)win2, "Output directory:");
+    wmove((WINDOW *)win2, 6, 105);
     waddstr((WINDOW *)win2, mostRecentExecutionState.outputDirectory.c_str());
 }
 

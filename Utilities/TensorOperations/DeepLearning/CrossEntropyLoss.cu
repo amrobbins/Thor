@@ -113,3 +113,19 @@ template void launchCrossEntropyLoss<float, float>(float *labels_d,
                                                    uint32_t elementsPerBatch,
                                                    uint32_t batchSize,
                                                    Stream stream);
+
+template void launchCrossEntropyLoss<uint8_t, half>(uint8_t *labels_d,
+                                                    half *probabilities_d,
+                                                    float *workspace_d,
+                                                    float *loss_d,
+                                                    uint32_t elementsPerBatch,
+                                                    uint32_t batchSize,
+                                                    Stream stream);
+
+template void launchCrossEntropyLoss<uint8_t, float>(uint8_t *labels_d,
+                                                     float *probabilities_d,
+                                                     float *workspace_d,
+                                                     float *loss_d,
+                                                     uint32_t elementsPerBatch,
+                                                     uint32_t batchSize,
+                                                     Stream stream);
