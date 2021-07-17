@@ -32,12 +32,27 @@ class CategoricalCrossEntropyLoss : public Loss {
             assert(labelsInput.get().isInitialized());
             assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
             assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-            assert(labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
-                   labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+
+            vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
+            vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
+            TensorDescriptor::DataType labelsDataType = labelsInput.get().getDescriptor().getDataType();
+            perClassLabels = featureInputDimensions == labelDimensions &&
+                             (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
+                              labelsDataType == TensorDescriptor::DataType::FP32);
+            classIndexLabels =
+                labelDimensions.size() == 2 && featureInputDimensions[0] == labelDimensions[0] && labelDimensions[1] == 1 &&
+                (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
+                 labelsDataType == TensorDescriptor::DataType::UINT32);
+            assert(perClassLabels || classIndexLabels);
         }
         assert(featureInput.isPresent());
         assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
+        assert(featureInput.get().getDescriptor().getDimensions().size() > 1);
+        uint32_t numClasses = featureInput.get().getDescriptor().getDimensions()[1];
+        // When there are two classes and the label is a single 1 or 0, binary cross entropy can be used, instead of categorical cross
+        // entropy.
+        assert(numClasses >= 2);
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
@@ -102,22 +117,35 @@ class CategoricalCrossEntropyLoss : public Loss {
     // normalizedPredictions is featureOutput and loss is errorOutput
     virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictions, Tensor loss, Stream stream) {
         // Cross Entropy Loss
-        if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchCrossEntropyLoss((half*)labels.getMemPtr(),
-                                   (float*)normalizedPredictions.getMemPtr(),
-                                   (float*)lossWorkspace.getMemPtr(),
-                                   (float*)loss.getMemPtr(),
-                                   elementsPerBatch,
-                                   batchSize,
-                                   stream);
-        } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            launchCrossEntropyLoss((float*)labels.getMemPtr(),
-                                   (float*)normalizedPredictions.getMemPtr(),
-                                   (float*)lossWorkspace.getMemPtr(),
-                                   (float*)loss.getMemPtr(),
-                                   elementsPerBatch,
-                                   batchSize,
-                                   stream);
+        if (perClassLabels) {
+            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+                launchCrossEntropyLoss((uint8_t*)labels.getMemPtr(),
+                                       (float*)normalizedPredictions.getMemPtr(),
+                                       (float*)lossWorkspace.getMemPtr(),
+                                       (float*)loss.getMemPtr(),
+                                       elementsPerBatch,
+                                       batchSize,
+                                       stream);
+            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                launchCrossEntropyLoss((half*)labels.getMemPtr(),
+                                       (float*)normalizedPredictions.getMemPtr(),
+                                       (float*)lossWorkspace.getMemPtr(),
+                                       (float*)loss.getMemPtr(),
+                                       elementsPerBatch,
+                                       batchSize,
+                                       stream);
+            } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
+                launchCrossEntropyLoss((float*)labels.getMemPtr(),
+                                       (float*)normalizedPredictions.getMemPtr(),
+                                       (float*)lossWorkspace.getMemPtr(),
+                                       (float*)loss.getMemPtr(),
+                                       elementsPerBatch,
+                                       batchSize,
+                                       stream);
+            } else {
+                assert(false);
+            }
+        } else if (classIndexLabels) {
         } else {
             assert(false);
         }
@@ -128,45 +156,66 @@ class CategoricalCrossEntropyLoss : public Loss {
     }
 
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {
-        if (lossScalingFactor == 1) {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
-                                          (half*)labels.getMemPtr(),
-                                          (half*)lossGradient.getMemPtr(),
-                                          lossGradient.getDescriptor().getTotalNumElements(),
-                                          stream);
+        if (perClassLabels) {
+            if (lossScalingFactor == 1) {
+                if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+                    launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
+                                              (uint8_t*)labels.getMemPtr(),
+                                              (half*)lossGradient.getMemPtr(),
+                                              lossGradient.getDescriptor().getTotalNumElements(),
+                                              stream);
+                } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                    launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
+                                              (half*)labels.getMemPtr(),
+                                              (half*)lossGradient.getMemPtr(),
+                                              lossGradient.getDescriptor().getTotalNumElements(),
+                                              stream);
+                } else {
+                    launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
+                                              (float*)labels.getMemPtr(),
+                                              (half*)lossGradient.getMemPtr(),
+                                              lossGradient.getDescriptor().getTotalNumElements(),
+                                              stream);
+                }
             } else {
-                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
-                                          (float*)labels.getMemPtr(),
-                                          (half*)lossGradient.getMemPtr(),
-                                          lossGradient.getDescriptor().getTotalNumElements(),
-                                          stream);
+                if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+                    launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
+                                              (uint8_t*)labels.getMemPtr(),
+                                              (float*)errorOutputWorkspace.get().getMemPtr(),
+                                              lossGradient.getDescriptor().getTotalNumElements(),
+                                              stream);
+                } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                    launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
+                                              (half*)labels.getMemPtr(),
+                                              (float*)errorOutputWorkspace.get().getMemPtr(),
+                                              lossGradient.getDescriptor().getTotalNumElements(),
+                                              stream);
+                } else {
+                    launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
+                                              (float*)labels.getMemPtr(),
+                                              (float*)errorOutputWorkspace.get().getMemPtr(),
+                                              lossGradient.getDescriptor().getTotalNumElements(),
+                                              stream);
+                }
+                launchScale((float*)errorOutputWorkspace.get().getMemPtr(),
+                            (float)lossScalingFactor,
+                            (half*)lossGradient.getMemPtr(),
+                            lossGradient.getDescriptor().getTotalNumElements(),
+                            stream);
             }
+        } else if (classIndexLabels) {
         } else {
-            if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
-                                          (half*)labels.getMemPtr(),
-                                          (float*)errorOutputWorkspace.get().getMemPtr(),
-                                          lossGradient.getDescriptor().getTotalNumElements(),
-                                          stream);
-            } else {
-                launchElementwiseSubtract((float*)normalizedPredictions.getMemPtr(),
-                                          (float*)labels.getMemPtr(),
-                                          (float*)errorOutputWorkspace.get().getMemPtr(),
-                                          lossGradient.getDescriptor().getTotalNumElements(),
-                                          stream);
-            }
-            launchScale((float*)errorOutputWorkspace.get().getMemPtr(),
-                        (float)lossScalingFactor,
-                        (half*)lossGradient.getMemPtr(),
-                        lossGradient.getDescriptor().getTotalNumElements(),
-                        stream);
+            assert(false);
         }
     }
 
     virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) {
         assert(lossGradient.isPresent());
     }
+
+   protected:
+    bool perClassLabels;
+    bool classIndexLabels;
 
    private:
     unsigned int batchSize;

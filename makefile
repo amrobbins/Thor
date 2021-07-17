@@ -59,6 +59,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/WorkQueue/AsyncTensorQueueTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest && \
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
+                build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
                 build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
                 build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest && \
@@ -88,6 +89,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
             build/test/Utilities/TensorOperations/Misc/MiscTest \
+            build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
             build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest \
             build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest \
@@ -122,6 +124,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/DeepLearning/Add1dBias.o \
                    build/Utilities/TensorOperations/Arithmetic/SumScale.o \
                    build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o \
+                   build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o \
                    build/Utilities/TensorOperations/Arithmetic/Exponentiation.o \
                    build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o \
                    build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o \
@@ -170,6 +173,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Utility/DropOut.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
+                   build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
                    build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
@@ -322,6 +326,10 @@ build/Utilities/TensorOperations/Arithmetic/SumScale.o: Utilities/TensorOperatio
 build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o: Utilities/TensorOperations/Arithmetic/SumManyToOne.h Utilities/TensorOperations/Arithmetic/SumManyToOne.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SumManyToOne.cu
+
+build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o: Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
+	mkdir -p build/Utilities/TensorOperations/Misc
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
 
 build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o: Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
@@ -516,6 +524,10 @@ build/DeepLearning/Api/ExampleNetworks/AlexNet.o: DeepLearning/Api/ExampleNetwor
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/AlexNet.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/AlexNet.o
 
+build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o: DeepLearning/Api/ExampleNetworks/DeepFullyConnected.h DeepLearning/Api/ExampleNetworks/DeepFullyConnected.cpp
+	mkdir -p build/DeepLearning/Api/ExampleNetworks
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/DeepFullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o
+
 build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNetworks/InceptionV3.h DeepLearning/Api/ExampleNetworks/InceptionV3.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
@@ -616,6 +628,10 @@ build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest: build/test/goog
 build/test/Utilities/TensorOperations/Misc/MiscTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/MiscTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/Misc/
 	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/MiscTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/MiscTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest.cpp $(THOR)
+	mkdir -p build/test/Utilities/TensorOperations/Misc/
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest: build/test/googletest/libgtest.a test/Utilities/Loaders/ShardedRawDatasetCreatorTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/Loaders/

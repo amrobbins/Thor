@@ -265,6 +265,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
         executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
         executionState.batchesPerEpoch = batchesPerEpoch;
+        executionState.flopsPerExample =
+            stampedNetworks[0].floatingPointOperationsPerExampleForward + stampedNetworks[0].floatingPointOperationsPerExampleBackward;
 
         std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 
@@ -323,6 +325,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
         executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
         executionState.batchesPerEpoch = batchesPerEpoch;
+        executionState.flopsPerExample = stampedNetworks[0].floatingPointOperationsPerExampleForward;
 
         start = std::chrono::high_resolution_clock::now();
 

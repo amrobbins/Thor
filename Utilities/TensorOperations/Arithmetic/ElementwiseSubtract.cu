@@ -49,3 +49,12 @@ template void launchElementwiseSubtract<half, float, half>(
     half *source0_d, float *source1_d, half *dest_d, uint64_t numElements, Stream stream);
 template void launchElementwiseSubtract<float, float, half>(
     float *source0_d, float *source1_d, half *dest_d, uint64_t numElements, Stream stream);
+
+template void launchElementwiseSubtract<half, uint8_t, half>(
+    half *source0_d, uint8_t *source1_d, half *dest_d, uint64_t numElements, Stream stream);
+template void launchElementwiseSubtract<half, uint8_t, float>(
+    half *source0_d, uint8_t *source1_d, float *dest_d, uint64_t numElements, Stream stream);
+template void launchElementwiseSubtract<float, uint8_t, half>(
+    float *source0_d, uint8_t *source1_d, half *dest_d, uint64_t numElements, Stream stream);
+template void launchElementwiseSubtract<float, uint8_t, float>(
+    float *source0_d, uint8_t *source1_d, float *dest_d, uint64_t numElements, Stream stream);

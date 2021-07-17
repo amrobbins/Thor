@@ -259,6 +259,19 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
     }
 
+    virtual uint64_t floatingPointOperationsPerExampleForward() {
+        Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureInput.isPresent());
+        assert(anyFeatureOutput.isPresent());
+        uint64_t flops = 2 * batchSize * numInputFeatures * numOutputFeatures - batchSize * numOutputFeatures;
+        if (hasBias)
+            flops += batchSize * numOutputFeatures;
+        return flops;
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleBackward() { return 2 * floatingPointOperationsPerExampleForward(); }
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;
