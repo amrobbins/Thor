@@ -73,7 +73,6 @@ Network buildDeepFullyConnected() {
                                                 .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
                                                 .build();
 
-    latestOutputTensor = lossLayer.getFeatureInput();
     labelsTensor = lossLayer.getLabels();
 
     NetworkOutput predictions = NetworkOutput::Builder()
