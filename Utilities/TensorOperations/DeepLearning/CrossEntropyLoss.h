@@ -9,10 +9,27 @@
 #include <limits>
 
 template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
-void launchCrossEntropyLoss(LABEL_TYPE *labels_d,
-                            PROBABILITY_TYPE *probabilities_d,
-                            float *workspace_d,
-                            float *loss_d,
-                            uint32_t elementsPerBatch,
-                            uint32_t batchSize,
-                            Stream stream);
+void launchCrossEntropyLoss_perClassLabels(LABEL_TYPE *labels_d,
+                                           PROBABILITY_TYPE *probabilities_d,
+                                           float *workspace_d,
+                                           float *loss_d,
+                                           uint32_t numClasses,
+                                           uint32_t batchSize,
+                                           Stream stream);
+
+template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
+void launchCrossEntropyLoss_classIndexLabels(LABEL_TYPE *labels_d,
+                                             PROBABILITY_TYPE *probabilities_d,
+                                             float *workspace_d,
+                                             float *loss_d,
+                                             uint32_t numClasses,
+                                             uint32_t batchSize,
+                                             Stream stream);
+
+template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_GRADIENT_TYPE>
+void launchLossGradient_classIndexLabels(LABEL_TYPE *labels_d,
+                                         PROBABILITY_TYPE *probabilities_d,
+                                         LOSS_GRADIENT_TYPE *lossGradient_d,
+                                         uint64_t numClasses,
+                                         uint64_t batchSize,
+                                         Stream stream);
