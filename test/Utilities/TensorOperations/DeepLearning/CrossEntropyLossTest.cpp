@@ -7,6 +7,8 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+using namespace ThorImplementation;
+
 TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
     srand(time(NULL));
 
@@ -220,6 +222,74 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
     assert(cudaStatus == cudaSuccess);
     cudaStatus = cudaFree(loss_d);
     assert(cudaStatus == cudaSuccess);
+}
+
+TEST(LossGradient, ComputesCorrectAnswer_classIndexLabels) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    for (uint32_t t = 0; t < 10; ++t) {
+        uint32_t batchSize = (rand() % 1500) + 1;
+        uint32_t numClasses = (rand() % 100) + 1;
+        Tensor labels_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT32, {batchSize, 1}));
+        Tensor probabilities_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        Tensor lossGradient_h(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
+        uint32_t *labelsMem = (uint32_t *)labels_h.getMemPtr();
+        float *probabilitiesMem = (float *)probabilities_h.getMemPtr();
+        float *lossGradientMem = (float *)lossGradient_h.getMemPtr();
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            labelsMem[b] = rand() % numClasses;
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                probabilitiesMem[c + b * numClasses] = (rand() % 1000) / 1000.0f;
+                lossGradientMem[c + b * numClasses] = probabilitiesMem[c + b * numClasses] - (labelsMem[b] == c ? 1.0f : 0.0f);
+            }
+        }
+
+        Stream stream(0);
+        Tensor labels_d = labels_h.clone(gpuPlacement);
+        Tensor probabilities_d = probabilities_h.clone();
+        labels_d.copyFromAsync(labels_h, stream);
+        probabilities_d.copyFromAsync(probabilities_h, stream);
+
+        Tensor lossGradient_d = lossGradient_h.clone(gpuPlacement);
+        Tensor lossGradientGpu_h = lossGradient_h.clone();
+
+        launchLossGradient_classIndexLabels((uint32_t *)labels_d.getMemPtr(),
+                                            (float *)probabilities_d.getMemPtr(),
+                                            (float *)lossGradient_d.getMemPtr(),
+                                            numClasses,
+                                            batchSize,
+                                            stream);
+        lossGradientGpu_h.copyFromAsync(lossGradient_d, stream);
+        stream.synchronize();
+
+        float *lossGradientGpuMem = (float *)lossGradientGpu_h.getMemPtr();
+        float thresh = 0.001;
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                float diff = abs(lossGradientMem[c + b * numClasses] - lossGradientGpuMem[c + b * numClasses]);
+                if (diff >= thresh || !isfinite(diff)) {
+                    printf("numClasses %d batchItem %d %f %f\n",
+                           numClasses,
+                           b,
+                           lossGradientMem[c + b * numClasses],
+                           lossGradientGpuMem[c + b * numClasses]);
+                }
+                EXPECT_LT(diff, thresh);
+            }
+        }
+    }
+
+    /*
+    template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_GRADIENT_TYPE>
+    void launchLossGradient_classIndexLabels(LABEL_TYPE *labels_d,
+                                             PROBABILITY_TYPE *probabilities_d,
+                                             LOSS_GRADIENT_TYPE *lossGradient_d,
+                                             uint64_t numClasses,
+                                             uint64_t batchSize,
+                                             Stream stream)
+    */
 }
 
 int main(int argc, char **argv) {
