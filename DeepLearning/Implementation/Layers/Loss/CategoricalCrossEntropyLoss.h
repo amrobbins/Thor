@@ -47,12 +47,7 @@ class CategoricalCrossEntropyLoss : public Loss {
         }
         assert(featureInput.isPresent());
         assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
-        assert(featureInput.get().getDescriptor().getDimensions().size() > 1);
-        uint32_t numClasses = featureInput.get().getDescriptor().getDimensions()[1];
-        // When there are two classes and the label is a single 1 or 0, binary cross entropy can be used, instead of categorical cross
-        // entropy.
-        assert(numClasses >= 2);
+        assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
 
         ScopedGpu scopedGpu(featureInput.get().getPlacement().getDeviceNum());
 
@@ -61,7 +56,11 @@ class CategoricalCrossEntropyLoss : public Loss {
 
         assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
         batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-        elementsPerBatch = featureInput.get().getDescriptor().getTotalNumElements() / batchSize;
+        numClasses = featureInput.get().getDescriptor().getDimensions()[1];
+
+        // When there are two classes and the label is a single 1 or 0, binary cross entropy can be used, instead of categorical cross
+        // entropy.
+        assert(numClasses >= 2);
 
         inverseSumOfInputExponentials =
             Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
@@ -99,7 +98,7 @@ class CategoricalCrossEntropyLoss : public Loss {
         // sum the exponentials per batch item
         launchSumManyToOne((float*)normalizedPredictionsOut.get().getMemPtr(),
                            (float*)inverseSumOfInputExponentials.getMemPtr(),
-                           elementsPerBatch,
+                           numClasses,
                            batchSize,
                            true,
                            false,
@@ -109,7 +108,7 @@ class CategoricalCrossEntropyLoss : public Loss {
         launchMultiplyByScalar((float*)normalizedPredictionsOut.get().getMemPtr(),
                                (float*)inverseSumOfInputExponentials.getMemPtr(),
                                (float*)normalizedPredictionsOut.get().getMemPtr(),
-                               elementsPerBatch,
+                               numClasses,
                                batchSize,
                                stream);
     }
@@ -123,7 +122,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                                       (float*)normalizedPredictions.getMemPtr(),
                                                       (float*)lossWorkspace.getMemPtr(),
                                                       (float*)loss.getMemPtr(),
-                                                      elementsPerBatch,
+                                                      numClasses,
                                                       batchSize,
                                                       stream);
             } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
@@ -131,7 +130,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                                       (float*)normalizedPredictions.getMemPtr(),
                                                       (float*)lossWorkspace.getMemPtr(),
                                                       (float*)loss.getMemPtr(),
-                                                      elementsPerBatch,
+                                                      numClasses,
                                                       batchSize,
                                                       stream);
             } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
@@ -139,7 +138,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                                       (float*)normalizedPredictions.getMemPtr(),
                                                       (float*)lossWorkspace.getMemPtr(),
                                                       (float*)loss.getMemPtr(),
-                                                      elementsPerBatch,
+                                                      numClasses,
                                                       batchSize,
                                                       stream);
             } else {
@@ -151,7 +150,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                                         (float*)normalizedPredictions.getMemPtr(),
                                                         (float*)lossWorkspace.getMemPtr(),
                                                         (float*)loss.getMemPtr(),
-                                                        elementsPerBatch,
+                                                        numClasses,
                                                         batchSize,
                                                         stream);
             } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
@@ -159,7 +158,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                                         (float*)normalizedPredictions.getMemPtr(),
                                                         (float*)lossWorkspace.getMemPtr(),
                                                         (float*)loss.getMemPtr(),
-                                                        elementsPerBatch,
+                                                        numClasses,
                                                         batchSize,
                                                         stream);
             } else if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
@@ -167,7 +166,7 @@ class CategoricalCrossEntropyLoss : public Loss {
                                                         (float*)normalizedPredictions.getMemPtr(),
                                                         (float*)lossWorkspace.getMemPtr(),
                                                         (float*)loss.getMemPtr(),
-                                                        elementsPerBatch,
+                                                        numClasses,
                                                         batchSize,
                                                         stream);
             } else {
@@ -307,7 +306,7 @@ class CategoricalCrossEntropyLoss : public Loss {
 
    private:
     unsigned int batchSize;
-    unsigned int elementsPerBatch;
+    unsigned int numClasses;
 
     Tensor inverseSumOfInputExponentials;
     Tensor lossWorkspace;
