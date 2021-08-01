@@ -605,7 +605,7 @@ void ConsoleVisualizer::drawFooter() {
             flopsUnits = "TFLOPS";
         } else if (flops > 1.0e9) {
             flops /= 1.0e9;
-            flopsUnits = "BGFLOPS";
+            flopsUnits = "GFLOPS";
         } else if (flops > 1.0e6) {
             flops /= 1.0e6;
             flopsUnits = "MFLOPS";
@@ -702,7 +702,7 @@ void ConsoleVisualizer::drawOverallStatusBar() {
 
         // guess before have a measurement
         if (mostRecentExecutionState.epochNum == 0)
-            timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerTrainingBatch / 3;
+            timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerTrainingBatch / 4;
         else
             timePerValidationBatch = mostRecentExecutionState.runningAverageTimePerValidationBatch;
     } else if (mostRecentExecutionState.executionMode == ExampleType::VALIDATE) {

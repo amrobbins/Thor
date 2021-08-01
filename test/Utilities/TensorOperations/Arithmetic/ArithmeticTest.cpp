@@ -159,7 +159,135 @@ TEST(Sum, SumsCorrectly) {
     assert(cudaStatus == cudaSuccess);
 }
 
-TEST(SumScale, ComputesCorrectAnswer) {
+TEST(SumScaleTemplate, ComputesCorrectAnswer) {
+    srand(time(NULL));
+
+    float source0[4096];
+    float source1[4096];
+    float dest[4096];
+    float dest_cpu[4096];
+
+    cudaError_t cudaStatus;
+
+    float *source0_d;
+    float *source1_d;
+    float *dest_d;
+
+    Stream stream(0);
+
+    cudaStatus = cudaMalloc(&dest_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&source0_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&source1_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+
+    for (int t = 0; t < 50; ++t) {
+        int numElements = (rand() % 4096) + 1;
+        float scale = ((rand() % 100) / 10.0f) - 5.0f;
+        for (int i = 0; i < numElements; ++i) {
+            source0[i] = ((rand() % 100) / 10.0f) - 5.0f;
+            source1[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+        cudaStatus = cudaMemcpyAsync(source0_d, source0, numElements * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(source1_d, source1, numElements * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        launchSumScale(dest_d, source0_d, source1_d, scale, numElements, stream);
+
+        cudaStatus = cudaMemcpyAsync(dest, dest_d, numElements * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        for (int i = 0; i < numElements; ++i)
+            dest_cpu[i] = ((float)source0[i] + scale * (float)source1[i]);
+
+        cudaStatus = cudaStreamSynchronize(stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        float thresh = 0.1;
+        for (int i = 0; i < numElements; ++i) {
+            float diff = abs((float)dest[i] - (float)dest_cpu[i]);
+            if (diff >= thresh) {
+                printf("numElements %d element %d %f %f", numElements, i, (float)dest[i], (float)dest_cpu[i]);
+            }
+            ASSERT_LT(diff, thresh);
+        }
+    }
+
+    cudaStatus = cudaFree(source0_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(source1_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(dest_d);
+    assert(cudaStatus == cudaSuccess);
+}
+
+TEST(SumScaleHalfSourceDest, ComputesCorrectAnswer) {
+    srand(time(NULL));
+
+    half source0[4096];
+    float source1[4096];
+    half dest[4096];
+    float dest_cpu[4096];
+
+    cudaError_t cudaStatus;
+
+    half *source0_d;
+    float *source1_d;
+    half *dest_d;
+
+    Stream stream(0);
+
+    cudaStatus = cudaMalloc(&dest_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&source0_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&source1_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+
+    for (int t = 0; t < 50; ++t) {
+        int numElements = (rand() % 4096) + 1;
+        float scale = ((rand() % 100) / 10.0f) - 5.0f;
+        for (int i = 0; i < numElements; ++i) {
+            source0[i] = ((rand() % 100) / 10.0f) - 5.0f;
+            source1[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+        cudaStatus = cudaMemcpyAsync(source0_d, source0, numElements * sizeof(half), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(source1_d, source1, numElements * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        launchSumScaleHalfSourceDest(dest_d, source0_d, source1_d, scale, numElements, stream);
+
+        cudaStatus = cudaMemcpyAsync(dest, dest_d, numElements * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        for (int i = 0; i < numElements; ++i)
+            dest_cpu[i] = ((float)source0[i] + scale * source1[i]);
+
+        cudaStatus = cudaStreamSynchronize(stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        float thresh = 0.1;
+        for (int i = 0; i < numElements; ++i) {
+            float diff = abs((float)dest[i] - (float)(half)dest_cpu[i]);
+            if (diff >= thresh) {
+                printf("numElements %d element %d %f %f\n", numElements, i, (float)dest[i], (float)(half)dest_cpu[i]);
+            }
+            EXPECT_LT(diff, thresh);
+        }
+    }
+
+    cudaStatus = cudaFree(source0_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(source1_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(dest_d);
+    assert(cudaStatus == cudaSuccess);
+}
+
+TEST(SumScaleHalfSourceDestScaleSource, ComputesCorrectAnswer) {
     srand(time(NULL));
 
     half source0[4096];
@@ -194,7 +322,71 @@ TEST(SumScale, ComputesCorrectAnswer) {
         cudaStatus = cudaMemcpyAsync(source1_d, source1, numElements * sizeof(half), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchSumScale(dest_d, source0_d, source1_d, scale, numElements, stream);
+        launchSumScaleHalfSourceDestScaleSource(dest_d, source0_d, source1_d, scale, numElements, stream);
+
+        cudaStatus = cudaMemcpyAsync(dest, dest_d, numElements * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        for (int i = 0; i < numElements; ++i)
+            dest_cpu[i] = ((float)source0[i] + scale * (float)source1[i]);
+
+        cudaStatus = cudaStreamSynchronize(stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        float thresh = 0.1;
+        for (int i = 0; i < numElements; ++i) {
+            float diff = abs((float)dest[i] - (float)(half)dest_cpu[i]);
+            if (diff >= thresh) {
+                printf("numElements %d element %d %f %f", numElements, i, (float)dest[i], (float)(half)dest_cpu[i]);
+            }
+            ASSERT_LT(diff, thresh);
+        }
+    }
+
+    cudaStatus = cudaFree(source0_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(source1_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(dest_d);
+    assert(cudaStatus == cudaSuccess);
+}
+
+TEST(SumScaleHalfAll, ComputesCorrectAnswer) {
+    srand(time(NULL));
+
+    half source0[4096];
+    half source1[4096];
+    half dest[4096];
+    float dest_cpu[4096];
+
+    cudaError_t cudaStatus;
+
+    half *source0_d;
+    half *source1_d;
+    half *dest_d;
+
+    Stream stream(0);
+
+    cudaStatus = cudaMalloc(&dest_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&source0_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&source1_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+
+    for (int t = 0; t < 50; ++t) {
+        int numElements = (rand() % 4096) + 1;
+        half scale = ((rand() % 100) / 10.0f) - 5.0f;
+        for (int i = 0; i < numElements; ++i) {
+            source0[i] = ((rand() % 100) / 10.0f) - 5.0f;
+            source1[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+        cudaStatus = cudaMemcpyAsync(source0_d, source0, numElements * sizeof(half), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(source1_d, source1, numElements * sizeof(half), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        launchSumScaleHalfAll(dest_d, source0_d, source1_d, scale, numElements, stream);
 
         cudaStatus = cudaMemcpyAsync(dest, dest_d, numElements * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);

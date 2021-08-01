@@ -210,7 +210,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     void printBackwardFilterKernelInfo() { GpuConvolution::instance().printBackwardFilterKernelInfo(convolutionKernelRequirement); }
 
-    virtual uint64_t floatingPointOperationsPerExampleForward() {
+    uint64_t flopsPerConnectionPerExample() {
         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
         assert(anyFeatureInput.isPresent());
@@ -219,11 +219,49 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         if (hasBias)
             flops += 1;
         flops *= numOutputRows * numOutputColumns * numOutputChannels;
-
         return flops;
     }
 
-    virtual uint64_t floatingPointOperationsPerExampleBackward() { return 2 * floatingPointOperationsPerExampleForward(); }
+    uint64_t flopsPerWeightUpdate() {
+        uint64_t flops = 2 * filterHeight * filterWidth * numInputChannels - 1;
+        return flops;
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleForward() {
+        uint32_t connectionMultiplier = 0;
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (featureInputs[i].isPresent())
+                connectionMultiplier += 1;
+        }
+
+        return connectionMultiplier * flopsPerConnectionPerExample();
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleBackward() {
+        if (!isInferenceOnly())
+            return 0;
+
+        uint32_t connectionMultiplier = 0;
+        uint32_t sums = 0;
+        for (uint32_t i = 0; i < errorInputs.size(); ++i) {
+            if (errorInputs[i].isPresent()) {
+                if (connectionMultiplier == 0)
+                    connectionMultiplier += 2;
+                else
+                    sums += 1;
+            }
+        }
+        for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
+            if (errorOutputs[i].isPresent())
+                connectionMultiplier += 1;
+        }
+
+        Optional<Tensor> anyErrorInput = getFirstPresentTensor(errorInputs);
+        assert(anyErrorInput.isPresent());
+
+        return connectionMultiplier * flopsPerConnectionPerExample() +
+               (sums * anyErrorInput.get().getDescriptor().getTotalNumElements()) / batchSize + flopsPerWeightUpdate();
+    }
 
    private:
     const int filterWidth;

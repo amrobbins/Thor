@@ -291,8 +291,10 @@ class Loss : public Layer {
             }
 
             // Compute loss gradient, for backward direction
-            if (errorOutput.isPresent())
-                computeLossGradient(labelsInput, featureOutput, errorOutput, stream);
+            if (!(isInferenceOnly() || validationPass)) {
+                if (errorOutput.isPresent())
+                    computeLossGradient(labelsInput, featureOutput, errorOutput, stream);
+            }
 
             featureInputReceived = false;
             labelsReceived = false;

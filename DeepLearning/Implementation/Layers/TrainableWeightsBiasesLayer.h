@@ -153,6 +153,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             assert(connectionNumber != errorInputs.size());
         }
 
+        gradientUpdateStream.waitEvent(streams[connectionNumber].putEvent());
+
         backProp(featureInputs[connectionNumber],
                  errorInputs[connectionNumber],
                  errorOutputs[connectionNumber],
@@ -191,7 +193,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             assert(!featureInputs.empty());
             if (!usingSharedWeights) {
                 // gradient upate streams have low priority so that this type of parallel work tends to build up
-                gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::LOW);
+                gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::REGULAR);
             }
         }
     }
@@ -207,22 +209,24 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
             weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            sumScale((half *)weights.getMemPtr(),
-                     (half *)weights.getMemPtr(),
-                     (half *)weightsGradient.getMemPtr(),
-                     (-1.0f * learningRate) /
-                         (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                     weights.getDescriptor().getTotalNumElements(),
-                     stream);
+            sumScaleHalfSourceDestScaleSource(
+                (half *)weights.getMemPtr(),
+                (half *)weights.getMemPtr(),
+                (half *)weightsGradient.getMemPtr(),
+                (float)((-1.0f * learningRate) /
+                        (lossScalingFactor * batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
+                weights.getDescriptor().getTotalNumElements(),
+                stream);
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                    weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            sumScale((half *)weights.getMemPtr(),
-                     (half *)weights.getMemPtr(),
-                     (float *)weightsGradient.getMemPtr(),
-                     (-1.0f * learningRate) /
-                         (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                     weights.getDescriptor().getTotalNumElements(),
-                     stream);
+            sumScaleHalfSourceDest(
+                (half *)weights.getMemPtr(),
+                (half *)weights.getMemPtr(),
+                (float *)weightsGradient.getMemPtr(),
+                (-1.0f * learningRate) /
+                    (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
+                weights.getDescriptor().getTotalNumElements(),
+                stream);
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
                    weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
             sumScale((float *)weights.getMemPtr(),
@@ -240,22 +244,24 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             assert(biasesGradient.isPresent());
             if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                 biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                sumScale((half *)biases.get().getMemPtr(),
-                         (half *)biases.get().getMemPtr(),
-                         (half *)biasesGradient.get().getMemPtr(),
-                         (-1.0f * learningRate) /
-                             (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                         biases.get().getDescriptor().getTotalNumElements(),
-                         stream);
+                sumScaleHalfSourceDestScaleSource(
+                    (half *)biases.get().getMemPtr(),
+                    (half *)biases.get().getMemPtr(),
+                    (half *)biasesGradient.get().getMemPtr(),
+                    (float)((-1.0f * learningRate) /
+                            (lossScalingFactor * batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
+                    biases.get().getDescriptor().getTotalNumElements(),
+                    stream);
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                        biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-                sumScale((half *)biases.get().getMemPtr(),
-                         (half *)biases.get().getMemPtr(),
-                         (float *)biasesGradient.get().getMemPtr(),
-                         (-1.0f * learningRate) /
-                             (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                         biases.get().getDescriptor().getTotalNumElements(),
-                         stream);
+                sumScaleHalfSourceDest(
+                    (half *)biases.get().getMemPtr(),
+                    (half *)biases.get().getMemPtr(),
+                    (float *)biasesGradient.get().getMemPtr(),
+                    (-1.0f * learningRate) /
+                        (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
+                    biases.get().getDescriptor().getTotalNumElements(),
+                    stream);
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
                        biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
                 sumScale((float *)biases.get().getMemPtr(),

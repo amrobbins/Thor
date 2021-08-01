@@ -227,16 +227,23 @@ class Layer {
         launchSum<half>(result_d, sources_d, numSources, numElements, stream);
     }
 
-    void sumScale(half result_d[], half nonScaledSource_d[], half scaledSource_d[], float scale, int numElements, Stream stream) {
+    void sumScale(float result_d[], float nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
         launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
-    void sumScale(half result_d[], half nonScaledSource_d[], float scaledSource_d[], float scale, int numElements, Stream stream) {
-        launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
+    void sumScaleHalfSourceDest(
+        half result_d[], half nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
+        launchSumScaleHalfSourceDest(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
-    void sumScale(float result_d[], float nonScaledSource_d[], float scaledSource_d[], float scale, int numElements, Stream stream) {
-        launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
+    void sumScaleHalfSourceDestScaleSource(
+        half result_d[], half nonScaledSource_d[], half scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
+        launchSumScaleHalfSourceDestScaleSource(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
+    }
+
+    void sumScaleHalfAll(
+        half result_d[], half nonScaledSource_d[], half scaledSource_d[], half scale, uint64_t numElements, Stream stream) {
+        launchSumScaleHalfAll(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
     uint64_t getId() { return id; }

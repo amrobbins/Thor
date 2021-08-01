@@ -32,17 +32,17 @@ Network buildDeepFullyConnected() {
     expectedDimensions = {512};
     assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
-    for (uint32_t i = 0; i < 10; ++i) {
+    for (uint32_t i = 0; i < 50; ++i) {
         latestOutputTensor = FullyConnected::Builder()
                                  .network(deepFullyConnected)
                                  .featureInput(latestOutputTensor)
-                                 .numOutputFeatures(1024)
+                                 .numOutputFeatures(8192)
                                  .hasBias(true)
                                  .weightsInitializerBuilder(glorot)
                                  .biasInitializerBuilder(glorot)
                                  .build()
                                  .getFeatureOutput();
-        expectedDimensions = {1024};
+        expectedDimensions = {8192};
         assert(latestOutputTensor.getDimensions() == expectedDimensions);
     }
 
