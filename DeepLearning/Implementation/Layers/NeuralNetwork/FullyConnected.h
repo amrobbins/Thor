@@ -259,18 +259,63 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
     }
 
-    virtual uint64_t floatingPointOperationsPerExampleForward() {
+    uint64_t flopsPerConnectionPerExample() {
         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
         assert(anyFeatureInput.isPresent());
         assert(anyFeatureOutput.isPresent());
-        uint64_t flops = 2 * batchSize * numInputFeatures * numOutputFeatures - batchSize * numOutputFeatures;
+        uint64_t flops = 2 * numInputFeatures * numOutputFeatures - numOutputFeatures;
         if (hasBias)
-            flops += batchSize * numOutputFeatures;
+            flops += numOutputFeatures;
         return flops;
     }
 
-    virtual uint64_t floatingPointOperationsPerExampleBackward() { return 2 * floatingPointOperationsPerExampleForward(); }
+    uint64_t flopsPerGradientUpdatePerExample() {
+        Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
+        assert(anyFeatureInput.isPresent());
+        assert(anyFeatureOutput.isPresent());
+        uint64_t flops = numInputFeatures * numOutputFeatures;
+        if (hasBias)
+            flops += numOutputFeatures;
+        return flops;
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleForward() {
+        uint32_t connectionMultiplier = 0;
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (featureInputs[i].isPresent())
+                connectionMultiplier += 1;
+        }
+
+        return connectionMultiplier * flopsPerConnectionPerExample();
+    }
+
+    virtual uint64_t floatingPointOperationsPerExampleBackward() {
+        if (!isInferenceOnly())
+            return 0;
+
+        uint32_t connectionMultiplier = 0;
+        uint32_t sums = 0;
+        for (uint32_t i = 0; i < errorInputs.size(); ++i) {
+            if (errorInputs[i].isPresent()) {
+                if (connectionMultiplier == 0)
+                    connectionMultiplier += 1;
+                else
+                    sums += 1;
+            }
+        }
+        for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
+            if (errorOutputs[i].isPresent())
+                connectionMultiplier += 1;
+        }
+
+        Optional<Tensor> anyErrorInput = getFirstPresentTensor(errorInputs);
+        assert(anyErrorInput.isPresent());
+
+        return connectionMultiplier * flopsPerConnectionPerExample() +
+               (sums * anyErrorInput.get().getDescriptor().getTotalNumElements()) / batchSize + flopsPerGradientUpdatePerExample();
+    }
 
    private:
     static const float ALPHA_NO_SCALE;

@@ -61,13 +61,12 @@ TEST(InOut, NoOpWorks) {
         half *sourceMem = (half *)cpuSource.getMemPtr();
         for (unsigned int i = 0; i < numElements; ++i)
             sourceMem[i] = (half)(float)i;
-        gpuSource.copyFromAsync(cpuSource, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor gpuOutput = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(gpuSource, false);
+        layers[0]->forward(cpuSource, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         cpuDest.copyFromAsync(gpuOutput, stream);
 
@@ -122,7 +121,6 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
         layers.push_back(new NetworkInput(sourceGpu));
 
         Stream stream = layers.front()->getStream();
-        sourceGpu.copyFromAsync(sourceCpu, stream);
         mappingGpu.copyFromAsync(mappingCpu, stream);
         stream.synchronize();
 
@@ -133,7 +131,7 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu, false);
+        layers[0]->forward(sourceCpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
@@ -193,7 +191,6 @@ TEST(Map, MapsCorrectlyToFewerElements) {
     layers.push_back(new NetworkInput(sourceGpu));
 
     Stream stream = layers.front()->getStream();
-    sourceGpu.copyFromAsync(sourceCpu, stream);
     mappingGpu.copyFromAsync(mappingCpu, stream);
     stream.synchronize();
 
@@ -204,7 +201,7 @@ TEST(Map, MapsCorrectlyToFewerElements) {
     Tensor outputGpu = layers.back()->getFeatureOutput();
 
     // Network is runnable here
-    layers[0]->forward(sourceGpu, false);
+    layers[0]->forward(sourceCpu, false);
     stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
     destCpu.copyFromAsync(outputGpu, stream);
 
@@ -262,7 +259,6 @@ TEST(Map, MapsCorrectlyToMoreElements) {
     layers.push_back(new NetworkInput(sourceGpu));
 
     Stream stream = layers.front()->getStream();
-    sourceGpu.copyFromAsync(sourceCpu, stream);
     mappingGpu.copyFromAsync(mappingCpu, stream);
     stream.synchronize();
 
@@ -273,7 +269,7 @@ TEST(Map, MapsCorrectlyToMoreElements) {
     Tensor outputGpu = layers.back()->getFeatureOutput();
 
     // Network is runnable here
-    layers[0]->forward(sourceGpu, false);
+    layers[0]->forward(sourceCpu, false);
     stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
     destCpu.copyFromAsync(outputGpu, stream);
 
@@ -334,13 +330,12 @@ TEST(Flatten, FlattensCorrectly) {
         layers.push_back(new NetworkOutput(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
-        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu, false);
+        layers[0]->forward(sourceCpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
@@ -393,13 +388,12 @@ TEST(Reshape, ReshapesCorrectly) {
     layers.push_back(new NetworkOutput(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
-    sourceGpu.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
 
     // Network is runnable here
-    layers[0]->forward(sourceGpu, false);
+    layers[0]->forward(sourceCpu, false);
     stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
     destCpu.copyFromAsync(outputGpu, stream);
 
@@ -450,13 +444,12 @@ TEST(TypeConversion, Converts) {
         layers.push_back(new NetworkOutput(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
-        sourceGpu.copyFromAsync(sourceCpu, stream);
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu, false);
+        layers[0]->forward(sourceCpu, false);
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -500,7 +493,6 @@ TEST(TensorFanout, CreatesFanout) {
     layers.push_back(new NetworkOutput(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
-    sourceGpu.copyFromAsync(sourceCpu, stream);
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
@@ -516,7 +508,7 @@ TEST(TensorFanout, CreatesFanout) {
     Tensor outputGpu1 = layers[3]->getFeatureOutput();
 
     // Network is runnable here
-    layers[0]->forward(sourceGpu, false);
+    layers[0]->forward(sourceCpu, false);
     stream.waitEvent(((NetworkOutput *)layers[2])->getOutputReadyEvent());
     stream.waitEvent(((NetworkOutput *)layers[3])->getOutputReadyEvent());
     destCpu0.copyFromAsync(outputGpu0, stream);
@@ -636,8 +628,7 @@ TEST(Concatenate, Concatenates) {
             for (int i = 0; i < numElements; ++i) {
                 mem[i] = ((rand() % 100) / 10.0f) - 5.0f;
             }
-            partsGpu[i].copyFromAsync(partsCpu[i], layers[i]->getStream());
-            layers[i]->forward(partsGpu[i], false);
+            layers[i]->forward(partsCpu[i], false);
         }
 
         layers[0]->getStream().waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
@@ -752,7 +743,6 @@ TEST(Split, Splits) {
         for (int i = 0; i < numElements; ++i) {
             mem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
-        wholeGpu.copyFromAsync(wholeCpu, stream);
 
         vector<unsigned long> axisElements;
         for (int i = 0; i < numSplitTensors; ++i)
@@ -776,7 +766,7 @@ TEST(Split, Splits) {
         LayerTestHelper::initializeNetwork(layers);
 
         // Network is runnable here
-        layers[0]->forward(wholeGpu, false);
+        layers[0]->forward(wholeCpu, false);
 
         for (unsigned int i = 0; i < partsGpu.size(); ++i) {
             stream.waitEvent(((NetworkOutput *)outputLayers[i])->getOutputReadyEvent());
@@ -854,14 +844,12 @@ TEST(DeviceCrossing, Crosses) {
     layers.push_back(networkOutput);
     Stream stream = layers.front()->getStream();
 
-    sourceGpu0.copyFromAsync(sourceCpu, stream);
-
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
     Tensor outputGpu = layers.back()->getFeatureOutput();
 
     // Network is runnable here
-    layers[0]->forward(sourceGpu0, false);
+    layers[0]->forward(sourceCpu, false);
     Stream outputStream = networkOutput->getStream();
     destCpu.copyFromAsync(outputGpu, outputStream);
     outputStream.synchronize();
@@ -905,8 +893,6 @@ TEST(Pad, Pads) {
         layers.push_back(new NetworkInput(sourceGpu));
         Stream stream = layers.front()->getStream();
 
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         map<unsigned int, pair<unsigned int, unsigned int>> paddingAmount;
         vector<unsigned long> outputDimensions = inputDimensions;
         for (int i = 0; i < numDimensions; ++i) {
@@ -935,7 +921,7 @@ TEST(Pad, Pads) {
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu, false);
+        layers[0]->forward(sourceCpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
         stream.synchronize();
@@ -1036,8 +1022,6 @@ TEST(Extract, Extracts) {
         layers.push_back(new NetworkInput(sourceGpu));
         Stream stream = layers.front()->getStream();
 
-        sourceGpu.copyFromAsync(sourceCpu, stream);
-
         vector<pair<unsigned int, unsigned int>> dimensionSpans;
         vector<unsigned long> outputDimensions;
         for (int i = 0; i < numDimensions; ++i) {
@@ -1057,7 +1041,7 @@ TEST(Extract, Extracts) {
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(sourceGpu, false);
+        layers[0]->forward(sourceCpu, false);
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
         stream.synchronize();

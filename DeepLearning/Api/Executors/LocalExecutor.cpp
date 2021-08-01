@@ -203,12 +203,12 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
             // Execute the stamp, noting the time taken using events.
             Event startBatchletEvent = stream.putEvent(true, false);
-            stampedNetworks[nextStampToProcess].sendBatch(bufferStampTensorsParams->batchletInput,
-                                                          bufferStampTensorsParams->batchletOutput,
-                                                          outputReadyEvents[nextStampToProcess],
-                                                          validationPass);
-            Event doneBatchletEvent = stream.putEvent(true, false);
-            batchletTimingEvents[nextStampToProcess].emplace_back(startBatchletEvent, doneBatchletEvent);
+            Event doneBatchletEvent = stampedNetworks[nextStampToProcess].sendBatch(bufferStampTensorsParams->batchletInput,
+                                                                                    bufferStampTensorsParams->batchletOutput,
+                                                                                    outputReadyEvents[nextStampToProcess],
+                                                                                    validationPass);
+            // FIXME: use to distribute batchlets:
+            // batchletTimingEvents[nextStampToProcess].emplace_back(startBatchletEvent, doneBatchletEvent);
 
             // Copy all data to buffers at the end of the work stream
             cudaStatus = cudaLaunchHostFunc(stream, bufferStampTensors, bufferStampTensorsParams);

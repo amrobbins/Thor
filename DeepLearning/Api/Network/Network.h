@@ -103,12 +103,14 @@ class StampedNetwork {
             inputs[0]->getStream().waitEvent(outputReadyEvent);
         }
 
-        // The stream from input 0 waits for all gradient updates to finish
-        for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-            trainableLayers[i]->updateWeightsAndBiasesWithScaledGradient();
-            assert(trainableLayers[i]->getGradientUpdateStream().isInitialized());
-            Event gradientUpdateFinishedEvent = trainableLayers[i]->getGradientUpdateStream().putEvent();
-            inputs[0]->getStream().waitEvent(gradientUpdateFinishedEvent);
+        if (!isInferenceOnly) {
+            // The stream from input 0 waits for all gradient updates to finish
+            for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+                trainableLayers[i]->updateWeightsAndBiasesWithScaledGradient();
+                assert(trainableLayers[i]->getGradientUpdateStream().isInitialized());
+                Event gradientUpdateFinishedEvent = trainableLayers[i]->getGradientUpdateStream().putEvent();
+                inputs[0]->getStream().waitEvent(gradientUpdateFinishedEvent);
+            }
         }
 
         // Processing is finished when the stream from input 0 is ready

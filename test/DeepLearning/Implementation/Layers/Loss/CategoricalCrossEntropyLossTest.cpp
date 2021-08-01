@@ -85,9 +85,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         Stream stream = activationsInput->getStream();
         Stream labelsStream = labelsInput->getStream();
 
-        labelsGpu.copyFromAsync(labelsCpu, labelsStream);
-        activationsGpu.copyFromAsync(activationsCpu, stream);
-
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
@@ -103,8 +100,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
-        activationsInput->forward(activationsGpu, false);
-        labelsInput->forward(labelsGpu, false);
+        activationsInput->forward(activationsCpu, false);
+        labelsInput->forward(labelsCpu, false);
 
         labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
         lossGpu_h.copyFromAsync(outputGpu, labelsStream);
@@ -158,7 +155,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         float thresh = 0.01f;
         float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
-            EXPECT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
+            ASSERT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
             if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
                 printf("%d   cpu %f gpu %f\n", i, exponentialsMem[i], predictionsGpuMem[i]);
         }
@@ -167,7 +164,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
             float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
-            EXPECT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
+            ASSERT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
             if (abs(lossMem[b] - lossMemFromGpu[b]) >= thresh)
                 printf("cpuF %f gpuF %f    %d\n", lossMem[b], lossMemFromGpu[b], b);
         }
@@ -193,7 +190,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
         thresh = 0.01f;
         for (int i = 0; i < numElements; ++i) {
-            EXPECT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+            ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
             if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
                 printf("cpu %f gpu %f\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i]);
                 fflush(stdout);
@@ -268,9 +265,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_perClassLabels) {
         Stream stream = activationsInput->getStream();
         Stream labelsStream = labelsInput->getStream();
 
-        labelsGpu.copyFromAsync(labelsCpu, labelsStream);
-        activationsGpu.copyFromAsync(activationsCpu, stream);
-
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
@@ -286,8 +280,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_perClassLabels) {
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
-        activationsInput->forward(activationsGpu, false);
-        labelsInput->forward(labelsGpu, false);
+        activationsInput->forward(activationsCpu, false);
+        labelsInput->forward(labelsCpu, false);
 
         labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
         lossGpu_h.copyFromAsync(outputGpu, labelsStream);
@@ -445,9 +439,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
         Stream stream = activationsInput->getStream();
         Stream labelsStream = labelsInput->getStream();
 
-        labelsGpu.copyFromAsync(labelsCpu, labelsStream);
-        activationsGpu.copyFromAsync(activationsCpu, stream);
-
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
@@ -463,8 +454,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
-        activationsInput->forward(activationsGpu, false);
-        labelsInput->forward(labelsGpu, false);
+        activationsInput->forward(activationsCpu, false);
+        labelsInput->forward(labelsCpu, false);
 
         labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
         lossGpu_h.copyFromAsync(outputGpu, labelsStream);
@@ -512,12 +503,12 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
         }
 
         // Verify the softmax output (predictions)
-        float thresh = 0.01f;
+        float thresh = 0.00001f;
         float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
         for (uint32_t i = 0; i < numElements; ++i) {
-            if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
+            if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh || !isfinite(exponentialsMem[i] - predictionsGpuMem[i]))
                 printf("%d   cpu %f gpu %f\n", i, exponentialsMem[i], predictionsGpuMem[i]);
-            EXPECT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
+            ASSERT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
         }
 
         // Verify the loss output
@@ -526,7 +517,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
             float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
             if (abs(lossMem[b] - lossMemFromGpu[b]) >= thresh)
                 printf("cpuF %f gpuF %f    %d\n", lossMem[b], lossMemFromGpu[b], b);
-            EXPECT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
+            ASSERT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
         }
 
         if (inferenceOnly) {
@@ -554,7 +545,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
                 printf("cpu %f gpu %f   %d\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i], i);
                 fflush(stdout);
             }
-            EXPECT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+            ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
         }
 
         LayerTestHelper::tearDownNetwork(layers);
@@ -622,9 +613,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
         Stream stream = activationsInput->getStream();
         Stream labelsStream = labelsInput->getStream();
 
-        labelsGpu.copyFromAsync(labelsCpu, labelsStream);
-        activationsGpu.copyFromAsync(activationsCpu, stream);
-
         LayerTestHelper::connectTwoLayers(activationsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
@@ -640,8 +628,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
         Tensor outputGpu = lossOutput->getFeatureOutput();
 
         // Network is runnable here
-        activationsInput->forward(activationsGpu, false);
-        labelsInput->forward(labelsGpu, false);
+        activationsInput->forward(activationsCpu, false);
+        labelsInput->forward(labelsCpu, false);
 
         labelsStream.waitEvent(lossOutput->getOutputReadyEvent());
         lossGpu_h.copyFromAsync(outputGpu, labelsStream);
@@ -695,7 +683,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
         for (uint32_t i = 0; i < numElements; ++i) {
             if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
                 printf("%d   cpu %f gpu %f\n", i, exponentialsMem[i], predictionsGpuMem[i]);
-            EXPECT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
+            ASSERT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
         }
 
         // Verify the loss output
@@ -703,7 +691,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
         thresh = std::max(lossMem[0] / 320000.0f, 0.001f);
         if (abs(lossMem[0] - lossMemFromGpu[0]) >= thresh)
             printf("cpuF %f gpuF %f    %d\n", lossMem[0], lossMemFromGpu[0], 0);
-        EXPECT_LT(abs(lossMem[0] - lossMemFromGpu[0]), thresh);
+        ASSERT_LT(abs(lossMem[0] - lossMemFromGpu[0]), thresh);
 
         if (inferenceOnly) {
             LayerTestHelper::tearDownNetwork(layers);
@@ -730,7 +718,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
                 printf("cpu %f gpu %f   %d\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i], i);
                 fflush(stdout);
             }
-            EXPECT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+            ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
         }
 
         LayerTestHelper::tearDownNetwork(layers);

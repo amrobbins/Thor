@@ -32,6 +32,7 @@ class NetworkInput : public Layer {
         if (networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU)
             gpuNum = networkPlacement.getDeviceNum();
         this->stream = Stream(gpuNum);
+        this->loadStream = Stream(gpuNum);
     }
 
     virtual bool isInput() { return true; }
@@ -41,6 +42,7 @@ class NetworkInput : public Layer {
 
         this->nextLayer = nextLayer;
 
+        outputBuffer = createFeatureOutputTensor();
         featureOutput = createFeatureOutputTensor();
 
         nextLayer->connectToPreviousLayer(this, featureOutput, stream, false, loaderConnectionType);
@@ -72,7 +74,12 @@ class NetworkInput : public Layer {
 
         if (contentDimensions.isPresent()) {
             assert(featureOutput.isPresent());
-            featureOutput.get().copyFromAsync(featureInput, stream);
+
+            outputBuffer.copyFromAsync(featureInput, loadStream);
+            stream.waitEvent(loadStream.putEvent());
+
+            featureOutput.get().copyFromAsync(outputBuffer, stream);
+            loadStream.waitEvent(stream.putEvent());
         }
 
         nextLayer.get()->forward(featureOutput, validationPass);
@@ -84,6 +91,9 @@ class NetworkInput : public Layer {
     Optional<vector<unsigned long>> contentDimensions;
     TensorPlacement networkPlacement;
     Optional<TensorDescriptor::DataType> contentDataType;
+
+    Tensor outputBuffer;
+    Stream loadStream;
 };
 
 }  // namespace ThorImplementation
