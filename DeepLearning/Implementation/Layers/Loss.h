@@ -222,11 +222,11 @@ class Loss : public Layer {
     }
 
     virtual void ensureNoDeviceCrossing() {
-        if (featureInput.isPresent() && errorOutput.isPresent())
-            assert(featureInput.get().getPlacement() == errorOutput.get().getPlacement());
         if (featureInput.isPresent()) {
             if (labelsInput.isPresent())
                 assert(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
+            if (featureOutput.isPresent())
+                assert(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
             if (errorOutput.isPresent())
                 assert(errorOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
