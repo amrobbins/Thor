@@ -6,6 +6,14 @@ namespace ThorImplementation {
  * Returns the proportion of the predictions where the class with the highest prediction probability is the true class.
  */
 
+class CategoricalAccuracy : public Metric {
+   public:
+    virtual ~CategoricalAccuracy() {}
+    CategoricalAccuracy() {}
+
+    virtual void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) {}
+};
+
 /*
 class CategoricalAccuracy : public Metric {
    public:
