@@ -25,8 +25,7 @@ class Metric : public Layer {
 
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
-
-        if (connectionType == (int)ConnectionType::FORWARD_BACKWARD) {
+        if (connectionType == (int)ConnectionType::FORWARD) {
             return connectToPredictionsInputLayer(previousLayer, featureInput, stream, backPropagateError);
         } else if (connectionType == (int)ConnectionType::LABELS) {
             return connectToLabelsInputLayer(previousLayer, featureInput, stream);
@@ -130,70 +129,52 @@ class Metric : public Layer {
         advanceDataIfReady(validationPass);
     }
 
-    virtual void backward(Optional<Tensor> errorInput) {
-        assert(false);
-    }
+    virtual void backward(Optional<Tensor> errorInput) { assert(false); }
 
     virtual void ensureNoDeviceCrossing() {
         if (featureInput.isPresent()) {
             if (labelsInput.isPresent())
                 assert(labelsInput.get().getPlacement() == featureInput.get().getPlacement());
-            if (feaureOutput.isPresent())
+            if (featureOutput.isPresent())
                 assert(featureOutput.get().getPlacement() == featureInput.get().getPlacement());
         }
     }
 
     virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
 
-    virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictionsOut, Tensor loss, Stream stream) = 0;
-    virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) = 0;
+    virtual void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) = 0;
 
-    enum class ConnectionType {
-        FORWARD = 12,
-        LABELS,
-        METRIC
-    };
+    /**
+     * Warning:
+     *
+     * resizeMetricBuffer causes synchronization and should be done maybe one time if 1024 bytes is not enough for the metric's output
+     */
+    virtual void resizeMetricBuffer(uint64_t numBytes) {
+        assert(featureOutput.isPresent());
+
+        stream.synchronize();
+        featureOutput.get().resize({numBytes});
+    }
+
+    enum class ConnectionType { FORWARD = 12, LABELS, METRIC };
 
    protected:
-    Optional<Layer *> lossOutputLayer;
-
     Optional<Tensor> labelsInput;
-    Optional<Tensor> elementwiseLossOutput;
-    Optional<Tensor> batchLossOutput;
-
-    uint32_t lossScalingFactor = 1;
     Stream labelsStream;
 
     bool predictionsInputReceived;
     bool labelsReceived;
 
+    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
+        // Metrics use computeMetric(...) instead, due to different parameter requirements.
+    }
+
     virtual void advanceDataIfReady(bool validationPass) {
         if (predictionsInputReceived && labelsReceived) {
-            // Normalize predictions
-            infer(featureInput, featureOutput, stream);
-
             // DataStream waits for labels to arrive,
-            // Labels stream waits for infer to finish
-            if (labelsStream.isInitialized() && stream != labelsStream) {
-                stream.waitEvent(labelsStream.putEvent());
-                labelsStream.waitEvent(stream.putEvent());
-            }
+            stream.waitEvent(labelsStream.putEvent());
 
-            // Compute loss, for forward direction
-            if (elementwiseLossOutput.isPresent()) {
-                computeElementwiseLoss(labelsInput, featureOutput, elementwiseLossOutput, labelsStream);
-            }
-
-            if (batchLossOutput.isPresent()) {
-                assert(elementwiseLossOutput.isPresent());
-                computeBatchLoss(elementwiseLossOutput, batchLossOutput, labelsStream);
-            }
-
-            // Compute loss gradient, for backward direction
-            if (!(isInferenceOnly() || validationPass)) {
-                if (errorOutput.isPresent())
-                    computeLossGradient(labelsInput, featureOutput, errorOutput, stream);
-            }
+            computeMetric(labelsInput, featureInput, featureOutput, stream);
 
             predictionsInputReceived = false;
             labelsReceived = false;
@@ -203,35 +184,6 @@ class Metric : public Layer {
 
         if (nextLayer.isPresent())
             nextLayer.get()->forward(featureOutput, validationPass);
-        if (lossOutputLayer.isPresent()) {
-            if (batchLossOutput.isPresent())
-                lossOutputLayer.get()->forward(batchLossOutput, validationPass);
-            else if (elementwiseLossOutput.isPresent())
-                lossOutputLayer.get()->forward(elementwiseLossOutput, validationPass);
-            else
-                assert(false);
-        }
-        if (isInferenceOnly() || validationPass)
-            return;
-
-        // Initiate back propagation
-        assert(previousLayer.isPresent());
-        previousLayer.get()->backward(errorOutput);
-    }
-
-    void computeBatchLoss(Tensor loss, Tensor batchLoss, Stream stream) {
-        assert(loss.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(batchLoss.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-        uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-
-        if (loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            launchSumManyToOne((float *)loss.getMemPtr(), (float *)batchLoss.getMemPtr(), batchSize, 1, false, false, stream);
-        } else if (loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchSumManyToOne((half *)loss.getMemPtr(), (half *)batchLoss.getMemPtr(), batchSize, 1, false, false, stream);
-        } else {
-            assert(false);
-        }
     }
 };
 

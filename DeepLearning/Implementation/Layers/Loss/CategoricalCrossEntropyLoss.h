@@ -40,10 +40,9 @@ class CategoricalCrossEntropyLoss : public Loss {
         perClassLabels = featureInputDimensions == labelDimensions &&
                          (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
                           labelsDataType == TensorDescriptor::DataType::FP32);
-        classIndexLabels =
-            labelDimensions.size() == 2 && featureInputDimensions[0] == labelDimensions[0] && labelDimensions[1] == 1 &&
-            (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
-             labelsDataType == TensorDescriptor::DataType::UINT32);
+        classIndexLabels = labelDimensions.size() == 2 && featureInputDimensions[0] == labelDimensions[0] && labelDimensions[1] == 1 &&
+                           (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
+                            labelsDataType == TensorDescriptor::DataType::UINT32);
         assert(perClassLabels ^ classIndexLabels);
 
         assert(featureInput.isPresent());
