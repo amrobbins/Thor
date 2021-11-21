@@ -1,34 +1,25 @@
-#pragma once
-
-#include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Layer.h"
 
 namespace ThorImplementation {
 
 /**
- * This is equivalent to a softmax activation layer followed by a cross entropy loss.
- *
- * The input predicted values to the loss layer will sum to 1.0 since they are put through a softmax activation first.
- * Those values are clamped to a minimum value of 10e-15, to avoid log(0.0f).
- *
- * https://gombru.github.io/2018/05/23/cross_entropy_loss/
+ * Returns the proportion of the predictions where the class with the highest prediction probability is the true class.
  */
 
-class CategoricalCrossEntropyLoss : public Loss {
+/*
+class CategoricalAccuracy : public Metric {
    public:
-    virtual ~CategoricalCrossEntropyLoss(){};
+    virtual ~CategoricalAccuracy() {}
 
-    CategoricalCrossEntropyLoss() : Loss() {}
+    CategoricalAccuracy() {}
+
+    virtual Optional<Tensor> createFeatureOutputTensor() {
+        assert(featureInput.isPresent());
+        return Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
+    }
 
     virtual void compile() {
-        if (!isInferenceOnly()) {
-            assert(labelsInput.isPresent());
-            assert(errorOutput.isPresent());
-            assert(errorOutput.get().isInitialized());
-            assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-            assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-        }
-
+        assert(errorOutput.isEmpty());
         assert(labelsInput.isPresent());
         assert(labelsInput.get().isInitialized());
         assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -50,24 +41,13 @@ class CategoricalCrossEntropyLoss : public Loss {
         assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
 
-        lossWorkspace = Tensor(featureInput.get().getPlacement(),
-                               TensorDescriptor(TensorDescriptor::DataType::FP32, featureInput.get().getDescriptor().getDimensions()));
+        batchSize = featureInputDimensions[0];
+        numClasses = featureInputDimensions[1];
 
-        assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
-        batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-        numClasses = featureInput.get().getDescriptor().getDimensions()[1];
+        workspace = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
 
-        // When there are two classes and the label is a single 1 or 0, binary cross entropy can be used, instead of categorical cross
-        // entropy.
+        // When there are two classes and the label is a single 1 or 0, binary accuracy can be used, instead of categorical accuracy
         assert(numClasses >= 2);
-
-        inverseSumOfInputExponentials =
-            Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
-
-        if (lossScalingFactor == 1) {
-        } else if (!isInferenceOnly()) {
-            errorOutputWorkspace = errorOutput.get().clone(TensorDescriptor::DataType::FP32);
-        }
     }
 
     virtual void cleanup() {}
@@ -307,10 +287,7 @@ class CategoricalCrossEntropyLoss : public Loss {
     unsigned int batchSize;
     unsigned int numClasses;
 
-    Tensor inverseSumOfInputExponentials;
-    Tensor lossWorkspace;
-
-    Optional<Tensor> errorOutputWorkspace;
+    Tensor workspace;
 };
-
+*/
 }  // namespace ThorImplementation

@@ -19,11 +19,11 @@ vector<pair<string, string>> HyperparameterController::getCurrentEpochInfo(Execu
     vector<pair<string, string>> displayInfo;
     string rate;
     if (executionState.epochNum < 5)
-        rate = "0.001";
+        rate = "0.01";
     else if (executionState.epochNum < 10)
         rate = "0.003";
     else
-        rate = "0.01";
+        rate = "0.001";
 
     displayInfo.emplace_back("Learning Rate", rate);
     return displayInfo;
