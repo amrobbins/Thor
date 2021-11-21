@@ -7,6 +7,15 @@
 
 #include <algorithm>
 
+/**
+ * Note:
+ * perClass labels mean that there is one variable sent per class per batch item that indicates whether the batch item belongs to the class.
+ * classIndex labels mean that there is one variable sent per batch item that carries the numerical value of the class of that batch item.
+ *
+ * Note:
+ * workspace required is TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}) for both cases.
+ */
+
 template <typename PREDICTION_TYPE, typename LABEL_TYPE>
 void launchComputeCategoricalAccuracy_perClassLabels(float *accuracy_d,
                                                      PREDICTION_TYPE *predictions_d,

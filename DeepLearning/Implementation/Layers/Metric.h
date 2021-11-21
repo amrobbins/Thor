@@ -77,9 +77,11 @@ class Metric : public Layer {
             return Optional<Tensor>::empty();
         } else {
             assert(featureInput.isPresent());
-            return Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {1024}));
+            return Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP32, {1}));
         }
     }
+
+    virtual std::string toDisplayString(Tensor metric_h) = 0;
 
     virtual ~Metric() {}
 
@@ -143,18 +145,6 @@ class Metric : public Layer {
     virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
 
     virtual void computeMetric(Tensor labels, Tensor predictions, Tensor metric, Stream stream) = 0;
-
-    /**
-     * Warning:
-     *
-     * resizeMetricBuffer causes synchronization and should be done maybe one time if 1024 bytes is not enough for the metric's output
-     */
-    virtual void resizeMetricBuffer(uint64_t numBytes) {
-        assert(featureOutput.isPresent());
-
-        stream.synchronize();
-        featureOutput.get().resize({numBytes});
-    }
 
     enum class ConnectionType { FORWARD = 12, LABELS, METRIC };
 
