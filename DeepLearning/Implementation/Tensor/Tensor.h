@@ -77,6 +77,7 @@ class Tensor : private ReferenceCounted {
     void moveFromAsync(Tensor source, Stream stream);
 
     void reshape(vector<unsigned long> dimensions);
+    void resize(vector<unsigned long> dimensions);
     void concatenateFrom(vector<Tensor> sources);
     void splitInto(vector<Tensor> destinations);
 
@@ -106,6 +107,8 @@ class Tensor : private ReferenceCounted {
     void deallocate();
 
     static atomic<unsigned long> nextInstanceId;
+
+    void allocateMemory();
 
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();

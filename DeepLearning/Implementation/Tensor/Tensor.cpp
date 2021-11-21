@@ -48,8 +48,6 @@ bool Tensor::operator<(const Tensor &other) const {
 void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory) {
     ReferenceCounted::initialize();
 
-    cudaError_t cudaStatus;
-
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(placement.getDeviceNum() >= 0);
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU)
@@ -68,15 +66,23 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, v
 
     instanceId = nextInstanceId.fetch_add(1);
 
+    if (usingExternallyManagedMemory) {
+        mem = externallyManagedMemory;
+    } else {
+        allocateMemory();
+    }
+}
+
+void Tensor::allocateMemory() {
+    cudaError_t cudaStatus;
+
     unsigned long numElements = descriptor.getTotalNumElements();
     assert(numElements > 0);
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
 
-    if (usingExternallyManagedMemory) {
-        mem = externallyManagedMemory;
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
         assert(cudaStatus == cudaSuccess);
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
@@ -128,6 +134,16 @@ bool Tensor::isUsingExternallyManagedMemory() { return usingExternallyManagedMem
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
 void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
+
+// Change the dimensions of the tensor, possibly changing the amount of memory used.
+// Frees the old memory and uses a new, uninitialized block of memory.
+void Tensor::resize(vector<unsigned long> dimensions) {
+    assert(!usingExternallyManagedMemory);
+
+    descriptor = TensorDescriptor(descriptor.getDataType(), dimensions);
+    destroy();
+    allocateMemory();
+}
 
 // Stream is on either the source or dest device
 void Tensor::copyFromAsync(Tensor source, Stream stream) {
