@@ -6,11 +6,14 @@
 namespace ThorImplementation {
 
 /**
- * A metric layer may have 1 input and 1 output, the output of a metric layer is the a tensor that contains a c-style
- * string that describes the metric value.
+ * A metric layer has a predictions input, a labels input and a metric output.
+ *
+ * A metric must implement toDisplayString(Tensor metric_h), that carries a host tensor with the metric output,
+ * and returns a descriptive string representing the metric.
  *
  * Metric layers do not connect an errorInput from the next layer, so they are a point at which
- * back propagation will terminate if connected at the output to a back-propagable layer.
+ * back propagation will terminate if connected at the output to a back-propagable layer (which would be a legal but
+ * unusual use of a metric).
  *
  * featureInput: The prediction probabilities
  * labelsInput: ground truth labels
@@ -97,8 +100,6 @@ class Metric : public Layer {
 
         assert(labelsStream.isInitialized());
         assert(labelsInput.isPresent());
-        assert(errorOutput.isPresent());
-        assert(errorOutput.get().isInitialized());
         assert(labelsStream.isInitialized());
         assert(labelsInput.get().isInitialized());
         assert(featureOutput.isPresent());
@@ -175,6 +176,8 @@ class Metric : public Layer {
         if (nextLayer.isPresent())
             nextLayer.get()->forward(featureOutput, validationPass);
     }
+
+    virtual void backProp(Optional<Tensor>, Optional<Tensor>, Optional<Tensor>, Stream) { assert(false); }
 };
 
 }  // namespace ThorImplementation
