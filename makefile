@@ -52,6 +52,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
                 build/test/Utilities/TensorOperations/DeepLearning/CrossEntropyLossTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
+                build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
                 build/test/Utilities/Common/OptionalTest && \
                 build/test/Utilities/Random/FullPeriodRandomTest && \
@@ -107,6 +108,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
             build/test/Utilities/Common/OptionalTest \
             build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
+            build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest \
             build/test/DeepLearning/Implementation/SimpleNetworkTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
             build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
@@ -652,6 +654,10 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest: build/t
 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/Metric
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Visualizers/
