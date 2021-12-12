@@ -19,8 +19,8 @@ void Layer::connectTwoLayers(ThorImplementation::Layer *drivingLayer,
                              const Thor::Layer *drivingApiLayer,
                              const Thor::Layer *loadingApiLayer,
                              const Thor::Tensor connectingApiTensor) {
-    int drivingConnectionType = drivingApiLayer == nullptr ? 0 : drivingApiLayer->getConnectionType(connectingApiTensor);
-    int loadingConnectionType = loadingApiLayer == nullptr ? 0 : loadingApiLayer->getConnectionType(connectingApiTensor);
+    int drivingLayerConnectionType = drivingApiLayer == nullptr ? 0 : drivingApiLayer->getConnectionType(connectingApiTensor);
+    int loadingLayerConnectionType = loadingApiLayer == nullptr ? 0 : loadingApiLayer->getConnectionType(connectingApiTensor);
 
-    drivingLayer->connectToNextLayer(loadingLayer, drivingConnectionType, loadingConnectionType);
+    drivingLayer->connectToNextLayer(loadingLayer, drivingLayerConnectionType, loadingLayerConnectionType);
 }

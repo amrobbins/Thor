@@ -17,7 +17,7 @@ namespace ThorImplementation {
  *
  * featureInput: The prediction probabilities
  * labelsInput: ground truth labels
- * featureOutput: The string that holds the metric value
+ * featureOutput: The value of the metric
  * errorOutput: not created
  *
  * Usually you will connect a metric to a NetworkOutput.
@@ -29,7 +29,7 @@ class Metric : public Layer {
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
         if (connectionType == (int)ConnectionType::FORWARD) {
-            return connectToPredictionsInputLayer(previousLayer, featureInput, stream, backPropagateError);
+            return connectToFeatureInputLayer(previousLayer, featureInput, stream, backPropagateError);
         } else if (connectionType == (int)ConnectionType::LABELS) {
             return connectToLabelsInputLayer(previousLayer, featureInput, stream);
         } else {
@@ -37,10 +37,10 @@ class Metric : public Layer {
         }
     }
 
-    virtual Optional<Tensor> connectToPredictionsInputLayer(Layer *predictionsInputLayer,
-                                                            Optional<Tensor> featureInput,
-                                                            Stream stream,
-                                                            bool backPropagateError) {
+    virtual Optional<Tensor> connectToFeatureInputLayer(Layer *featureInputLayer,
+                                                        Optional<Tensor> featureInput,
+                                                        Stream stream,
+                                                        bool backPropagateError) {
         assert(featureInput.isPresent());
         assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
         assert(this->featureInput.isEmpty());
@@ -52,7 +52,7 @@ class Metric : public Layer {
         }
 
         // Allocates this->featureInput and sets this->errorOutput to empty
-        Layer::connectToPreviousLayer(predictionsInputLayer, featureInput, stream, false);
+        Layer::connectToPreviousLayer(featureInputLayer, featureInput, stream, false);
 
         // Metrics do not back propagate
         return Optional<Tensor>::empty();
@@ -89,7 +89,7 @@ class Metric : public Layer {
     virtual ~Metric() {}
 
     virtual void initialize() {
-        predictionsInputReceived = false;
+        featureInputReceived = false;
         labelsReceived = false;
     }
 
@@ -117,8 +117,8 @@ class Metric : public Layer {
     virtual void forwardFeatures(Tensor featureInput, bool validationPass) {
         assert(this->featureInput.get() == featureInput);
 
-        assert(predictionsInputReceived == false);
-        predictionsInputReceived = true;
+        assert(featureInputReceived == false);
+        featureInputReceived = true;
 
         advanceDataIfReady(validationPass);
     }
@@ -153,7 +153,7 @@ class Metric : public Layer {
     Optional<Tensor> labelsInput;
     Stream labelsStream;
 
-    bool predictionsInputReceived;
+    bool featureInputReceived;
     bool labelsReceived;
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
@@ -161,13 +161,13 @@ class Metric : public Layer {
     }
 
     virtual void advanceDataIfReady(bool validationPass) {
-        if (predictionsInputReceived && labelsReceived) {
+        if (featureInputReceived && labelsReceived) {
             // DataStream waits for labels to arrive,
             stream.waitEvent(labelsStream.putEvent());
 
             computeMetric(labelsInput, featureInput, featureOutput, stream);
 
-            predictionsInputReceived = false;
+            featureInputReceived = false;
             labelsReceived = false;
         } else {
             return;

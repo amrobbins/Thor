@@ -205,6 +205,24 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
+        Metric *metric = dynamic_cast<Metric *>(layer);
+        if (metric) {
+            Tensor inputTensor = metric->getFeatureInput();
+            Tensor labelsTensor = metric->getLabels();
+            Tensor outputTensor = metric->getFeatureOutput();
+            allTensors.insert(inputTensor);
+            allTensors.insert(labelsTensor);
+            allTensors.insert(outputTensor);
+            apiTensorToApiLoadingLayers[inputTensor].push_back(metric);
+            apiTensorToApiLoadingLayers[labelsTensor].push_back(metric);
+            apiLayerToApiInputTensors[metric].push_back(inputTensor);
+            apiLayerToApiInputTensors[metric].push_back(labelsTensor);
+            assert(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
+            apiTensorToApiDrivingLayer[outputTensor] = metric;
+            apiLayerToApiOutputTensors[metric].push_back(outputTensor);
+            continue;
+        }
+
         MultiConnectionLayer *multiConnectionLayer = dynamic_cast<MultiConnectionLayer *>(layer);
         if (multiConnectionLayer) {
             vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();

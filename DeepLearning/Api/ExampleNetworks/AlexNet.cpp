@@ -239,5 +239,15 @@ Network buildAlexNet() {
     NetworkOutput loss =
         NetworkOutput::Builder().network(alexNet).name("loss").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP32).build();
 
+    CategoricalAccuracy accuracyLayer =
+        CategoricalAccuracy::Builder().network(alexNet).predictions(lossLayer.getPredictions()).labels(labelsTensor).build();
+
+    NetworkOutput accuracy = NetworkOutput::Builder()
+                                 .network(alexNet)
+                                 .name("accuracy")
+                                 .inputTensor(accuracyLayer.getMetric())
+                                 .dataType(Tensor::DataType::FP32)
+                                 .build();
+
     return alexNet;
 }
