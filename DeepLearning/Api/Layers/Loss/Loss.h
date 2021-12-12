@@ -23,7 +23,6 @@ class Loss : public Layer {
         assert(numInputConnectionsMade < 3);
     }
 
-    // virtual Optional<Tensor> getFeatureInput() const { return Layer::getFeatureInput(); }
     virtual Tensor getPredictions() const { return predictionsTensor; }
     virtual Tensor getLabels() const { return labelsTensor; }
 

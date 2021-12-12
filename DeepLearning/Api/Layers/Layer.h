@@ -69,8 +69,7 @@ class Layer {
     Optional<Tensor> featureOutput;
 
     // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
-    // physical layers
-    //       that are direct replacements for API layers.
+    // physical layers that are direct replacements for API layers.
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
@@ -83,8 +82,7 @@ class Layer {
     virtual void addToNetwork(Network *network);
 
     // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
-    // physical layers
-    //       that are direct replacements for API layers.
+    // physical layers that are direct replacements for API layers.
     static void connectTwoLayers(ThorImplementation::Layer *drivingLayer,
                                  ThorImplementation::Layer *loadingLayer,
                                  const Thor::Layer *drivingApiLayer = nullptr,

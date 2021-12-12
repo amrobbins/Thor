@@ -537,9 +537,9 @@ TEST(Network, AlexnetIsProperlyFormed) {
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.inputs.size(), 2u);
-    ASSERT_EQ(stampedNetwork.outputs.size(), 2u);
+    ASSERT_EQ(stampedNetwork.outputs.size(), 3u);
     ASSERT_EQ(stampedNetwork.trainableLayers.size(), 13u);
-    ASSERT_EQ(stampedNetwork.otherLayers.size(), 25u);
+    ASSERT_EQ(stampedNetwork.otherLayers.size(), 28u);
 
     ThorImplementation::NetworkInput *images;
     ThorImplementation::NetworkInput *labels;
@@ -555,19 +555,43 @@ TEST(Network, AlexnetIsProperlyFormed) {
         ASSERT_EQ(images->getName(), "examples");
     }
 
-    ThorImplementation::NetworkOutput *predictions;
-    ThorImplementation::NetworkOutput *loss;
-    if (stampedNetwork.outputs[0]->getName() == "predictions") {
+    set<string> outputs;
+    outputs.insert(stampedNetwork.outputs[0]->getName());
+    outputs.insert(stampedNetwork.outputs[1]->getName());
+    outputs.insert(stampedNetwork.outputs[2]->getName());
+    ASSERT_EQ(outputs.size(), 3u);
+    ASSERT_EQ(outputs.count("predictions"), 1u);
+    ASSERT_EQ(outputs.count("loss"), 1u);
+    ASSERT_EQ(outputs.count("accuracy"), 1u);
+
+    ThorImplementation::NetworkOutput *predictions = nullptr;
+    ThorImplementation::NetworkOutput *loss = nullptr;
+    ThorImplementation::NetworkOutput *accuracy = nullptr;
+
+    if (stampedNetwork.outputs[0]->getName() == "predictions")
         predictions = stampedNetwork.outputs[0];
-        ASSERT_EQ(predictions->getName(), "predictions");
-        loss = stampedNetwork.outputs[1];
-        ASSERT_EQ(loss->getName(), "loss");
-    } else {
+    else if (stampedNetwork.outputs[0]->getName() == "loss")
         loss = stampedNetwork.outputs[0];
-        ASSERT_EQ(loss->getName(), "loss");
+    else if (stampedNetwork.outputs[0]->getName() == "accuracy")
+        accuracy = stampedNetwork.outputs[0];
+
+    if (stampedNetwork.outputs[1]->getName() == "predictions")
         predictions = stampedNetwork.outputs[1];
-        ASSERT_EQ(predictions->getName(), "predictions");
-    }
+    else if (stampedNetwork.outputs[1]->getName() == "loss")
+        loss = stampedNetwork.outputs[1];
+    else if (stampedNetwork.outputs[1]->getName() == "accuracy")
+        accuracy = stampedNetwork.outputs[1];
+
+    if (stampedNetwork.outputs[2]->getName() == "predictions")
+        predictions = stampedNetwork.outputs[2];
+    else if (stampedNetwork.outputs[2]->getName() == "loss")
+        loss = stampedNetwork.outputs[2];
+    else if (stampedNetwork.outputs[2]->getName() == "accuracy")
+        accuracy = stampedNetwork.outputs[2];
+
+    ASSERT_NE(predictions, nullptr);
+    ASSERT_NE(loss, nullptr);
+    ASSERT_NE(accuracy, nullptr);
 
     vector<ThorImplementation::Convolution2d *> cv;
     for (int i = 0; i < 10; ++i) {
@@ -591,8 +615,9 @@ TEST(Network, AlexnetIsProperlyFormed) {
     vector<ThorImplementation::CategoricalCrossEntropyLoss *> ccl;
     vector<ThorImplementation::TensorFanout *> fo;
     vector<ThorImplementation::Concatenate *> cat;
+    vector<ThorImplementation::CategoricalAccuracy *> acc;
 
-    for (int i = 0; i < 25; ++i) {
+    for (uint64_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
         if (dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[i]) != nullptr)
             tc.push_back(dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[i]));
         else if (dynamic_cast<ThorImplementation::Relu *>(stampedNetwork.otherLayers[i]) != nullptr)
@@ -609,6 +634,8 @@ TEST(Network, AlexnetIsProperlyFormed) {
             fo.push_back(dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]));
         else if (dynamic_cast<ThorImplementation::Concatenate *>(stampedNetwork.otherLayers[i]) != nullptr)
             cat.push_back(dynamic_cast<ThorImplementation::Concatenate *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::CategoricalAccuracy *>(stampedNetwork.otherLayers[i]) != nullptr)
+            acc.push_back(dynamic_cast<ThorImplementation::CategoricalAccuracy *>(stampedNetwork.otherLayers[i]));
         else {
             ASSERT_EQ(dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]), nullptr);
             ASSERT_EQ(dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.otherLayers[i]), nullptr);
@@ -620,13 +647,14 @@ TEST(Network, AlexnetIsProperlyFormed) {
     }
 
     ASSERT_EQ(tc.size(), 1u);
-    ASSERT_EQ(fo.size(), 1u);
+    ASSERT_EQ(fo.size(), 3u);
     ASSERT_EQ(r.size(), 12u);
     ASSERT_EQ(p.size(), 6u);
     ASSERT_EQ(cat.size(), 1u);
     ASSERT_EQ(f.size(), 1u);
     ASSERT_EQ(d.size(), 2u);
     ASSERT_EQ(ccl.size(), 1u);
+    ASSERT_EQ(acc.size(), 1u);
 
     // Forward
     ASSERT_EQ(images->getFeatureOutput().get(), tc[0]->getFeatureInput().get());
@@ -673,6 +701,10 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(labels->getFeatureOutput().get(), ccl[0]->getLabelsInput().get());
     ASSERT_EQ(ccl[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
     ASSERT_EQ(ccl[0]->getLossOutput().get(), loss->getFeatureInput().get());
+
+    ASSERT_EQ(ccl[0]->getFeatureOutput().get(), acc[0]->getFeatureInput().get());
+    ASSERT_EQ(labels->getFeatureOutput().get(), acc[0]->getLabelsInput().get());
+    ASSERT_EQ(acc[0]->getFeatureOutput().get(), accuracy->getFeatureInput().get());
 
     // Backward
     ASSERT_TRUE(tc[0]->getErrorOutput().isEmpty());

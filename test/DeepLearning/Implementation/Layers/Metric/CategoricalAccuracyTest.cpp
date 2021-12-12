@@ -99,8 +99,6 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
             continue;
         }
 
-        Tensor outputGpu = accuracyOutput->getFeatureOutput();
-
         // Network is runnable here
         predictionsInput->forward(predictionsCpu, false);
         labelsInput->forward(labelsCpu, false);
@@ -212,8 +210,6 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
             assert(categoricalAccuracy->getFeatureOutput().isEmpty());
             continue;
         }
-
-        Tensor outputGpu = accuracyOutput->getFeatureOutput();
 
         // Network is runnable here
         predictionsInput->forward(predictionsCpu, false);

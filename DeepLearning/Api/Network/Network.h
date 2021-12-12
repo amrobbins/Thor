@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
+#include "DeepLearning/Api/Layers/Metrics/Metric.h"
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
@@ -12,6 +13,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Layers/Metric.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
