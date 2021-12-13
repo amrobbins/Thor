@@ -99,6 +99,7 @@ class ConsoleVisualizer : public Visualizer {
     static vector<ProgressRow> rows;
     static std::chrono::high_resolution_clock::time_point start;
     static double totalEpochLoss;
+    static double totalEpochAccuracy;
 
     static string cudaDevicesString;
 

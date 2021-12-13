@@ -53,6 +53,7 @@ string ConsoleVisualizer::cudaDevicesString;
 vector<ProgressRow> ConsoleVisualizer::rows;
 std::chrono::high_resolution_clock::time_point ConsoleVisualizer::start;
 double ConsoleVisualizer::totalEpochLoss = 0;
+double ConsoleVisualizer::totalEpochAccuracy = 0;
 
 void (*ConsoleVisualizer::originalResizeHandler)(int) = nullptr;
 void (*ConsoleVisualizer::originalInterruptHandler)(int) = nullptr;
@@ -161,13 +162,16 @@ void ConsoleVisualizer::inputHandler() {
             newStateArrived = true;
             mostRecentExecutionState = executionState;
 
-            if (mostRecentExecutionState.batchSize <= 0)
+            if (mostRecentExecutionState.batchSize <= 0) {
                 totalEpochLoss = 0;
-            else if (rows.empty() || rows.back().epochNum != mostRecentExecutionState.epochNum ||
-                     rows.back().executionMode != mostRecentExecutionState.executionMode) {
+                totalEpochAccuracy = 0;
+            } else if (rows.empty() || rows.back().epochNum != mostRecentExecutionState.epochNum ||
+                       rows.back().executionMode != mostRecentExecutionState.executionMode) {
                 totalEpochLoss = mostRecentExecutionState.batchLoss;
+                totalEpochAccuracy = mostRecentExecutionState.batchAccuracy;
             } else {
                 totalEpochLoss += mostRecentExecutionState.batchLoss;
+                totalEpochAccuracy += mostRecentExecutionState.batchAccuracy;
             }
 
             updateLog();
@@ -438,10 +442,11 @@ void ConsoleVisualizer::drawProgressRows() {
                           mostRecentExecutionState.batchNum,
                           mostRecentExecutionState.batchesPerEpoch,
                           totalEpochLoss / mostRecentExecutionState.batchNum,
-                          mostRecentExecutionState.epochAccuracy);
+                          totalEpochAccuracy / mostRecentExecutionState.batchNum);
     } else {
         rows.back().curBatch = mostRecentExecutionState.batchNum;
         rows.back().batchLoss = totalEpochLoss / mostRecentExecutionState.batchNum;
+        rows.back().accuracy = totalEpochAccuracy / mostRecentExecutionState.batchNum;
     }
 
     if ((int)rows.size() <= heightW1) {
