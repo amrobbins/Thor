@@ -42,6 +42,7 @@ int main() {
     set<string> tensorsToReturn;
     tensorsToReturn.insert("predictions");
     tensorsToReturn.insert("loss");
+    tensorsToReturn.insert("accuracy");
 
     executor->trainEpochs(5, tensorsToReturn);
 

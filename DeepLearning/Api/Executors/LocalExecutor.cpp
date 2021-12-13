@@ -290,7 +290,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 executionState.runningAverageTimePerTrainingBatch = averageTrainingBatchTime;
                 float *batchLoss = (float *)(batchData["loss"].data());
                 executionState.batchLoss = *batchLoss;
-                executionState.epochAccuracy = 2.0f;  // FIXME
+                float *batchAccuracy = (float *)(batchData["accuracy"].data());
+                executionState.batchAccuracy = *batchAccuracy;
                 for (uint32_t i = 0; i < visualizers.size(); ++i) {
                     visualizerExecutionState[i]->push(executionState);
                 }
@@ -349,7 +350,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 executionState.runningAverageTimePerValidationBatch = averageValidationBatchTime;
                 float *batchLoss = (float *)(batchData["loss"].data());
                 executionState.batchLoss = *batchLoss;
-                executionState.epochAccuracy = 2.0f;  // FIXME
+                float *batchAccuracy = (float *)(batchData["accuracy"].data());
+                executionState.batchAccuracy = *batchAccuracy;
                 for (uint32_t i = 0; i < visualizers.size(); ++i) {
                     visualizerExecutionState[i]->push(executionState);
                 }
