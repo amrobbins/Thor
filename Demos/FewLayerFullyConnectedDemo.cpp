@@ -20,8 +20,7 @@ using std::vector;
 using namespace Thor;
 
 int main() {
-    Thor::Network alexNet = buildAlexNet();
-    // Thor::Network alexNet = buildDeepFullyConnected();
+    Thor::Network fewLayerFullyConnected = buildFewLayerFullyConnected();
 
     set<string> shardPaths;
 
@@ -36,8 +35,12 @@ int main() {
 
     std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01).decay(0.6).momentum(0.0).build();
 
-    shared_ptr<Thor::LocalExecutor> executor =
-        LocalExecutor::Builder().network(alexNet).loader(batchLoader).optimizer(sgd).visualizer(&ConsoleVisualizer::instance()).build();
+    shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
+                                                   .network(fewLayerFullyConnected)
+                                                   .loader(batchLoader)
+                                                   .optimizer(sgd)
+                                                   .visualizer(&ConsoleVisualizer::instance())
+                                                   .build();
 
     set<string> tensorsToReturn;
     tensorsToReturn.insert("predictions");
@@ -45,8 +48,6 @@ int main() {
     tensorsToReturn.insert("accuracy");
 
     executor->trainEpochs(15, tensorsToReturn);
-
-    // executor->createSnapshot("/media/andrew/PCIE_SSD/alexnetSnapshot_epoch5");
 
     return 0;
 }

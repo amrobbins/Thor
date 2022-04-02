@@ -157,8 +157,14 @@ Network buildAlexNet() {
 
     Glorot::Builder glorot = Glorot::Builder();
 
+    // All tensors are converted to FP16 at the output of a network input
+    // For the ImageNet dataset, the average pixel values are subtracted from each color channel during dataset
+    // creation (in commented out code in ShardedRawDatasetCreatorTest.cpp)
     NetworkInput imagesInput =
         NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();
+
+    // FIXME: put back once divide is implemented
+    // imagesInput = Divide::Builder.network(alexNet).numerator(imagesInput).denominator({255});
 
     Tensor topPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
     Tensor bottomPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
