@@ -164,6 +164,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
                    build/Utilities/Loaders/ImageLoader.o \
                    build/Utilities/Loaders/ImageProcessor.o \
+                   build/Utilities/Loaders/NoOpDataProcessor.o \
                    build/Utilities/Loaders/BatchAssembler.o \
                    build/DeepLearning/Api/Loaders/LocalBatchLoader.o \
                    build/Utilities/WorkQueue/AsyncTensorQueue.o \
@@ -176,6 +177,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
                    build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
+                   build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
+                   build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o \
                    build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
@@ -191,7 +194,9 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o \
 
 
-ALL_DEMOS = build/Demos/AlexNetDemo
+ALL_DEMOS = build/Demos/AlexNetDemo \
+			build/Demos/FewLayerFullyConnectedDemo \
+			build/Demos/SingleLayerFullyConnectedDemo
 
 ML_DEV = libThor.a Thor.h
 
@@ -482,6 +487,10 @@ build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Uti
 	mkdir -p build/Utilities/Loaders
 	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/ImageProcessor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageProcessor.o
 
+build/Utilities/Loaders/NoOpDataProcessor.o: Utilities/Loaders/NoOpDataProcessor.h Utilities/Loaders/NoOpDataProcessor.cpp
+	mkdir -p build/Utilities/Loaders
+	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/NoOpDataProcessor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/NoOpDataProcessor.o
+
 build/Utilities/Loaders/BatchAssembler.o: Utilities/Loaders/BatchAssembler.h Utilities/Loaders/BatchAssembler.cpp
 	mkdir -p build/Utilities/Loaders
 	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/BatchAssembler.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/BatchAssembler.o
@@ -530,6 +539,14 @@ build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o: DeepLearning/Api/Ex
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/DeepFullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o
 
+build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o: DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.h DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.cpp
+	mkdir -p build/DeepLearning/Api/ExampleNetworks
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o
+
+build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o: DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.h DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.cpp
+	mkdir -p build/DeepLearning/Api/ExampleNetworks
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o
+
 build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNetworks/InceptionV3.h DeepLearning/Api/ExampleNetworks/InceptionV3.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
@@ -537,6 +554,15 @@ build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNe
 build/Demos/AlexNetDemo: build/test/googletest/libgtest.a Demos/AlexNetDemo.cpp $(THOR)
 	mkdir -p build/Demos
 	$(Gpp) -o build/Demos/AlexNetDemo -O3 -std=c++11 -pthread Demos/AlexNetDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/Demos/FewLayerFullyConnectedDemo: build/test/googletest/libgtest.a Demos/FewLayerFullyConnectedDemo.cpp $(THOR)
+	mkdir -p build/Demos
+	$(Gpp) -o build/Demos/FewLayerFullyConnectedDemo -O3 -std=c++11 -pthread Demos/FewLayerFullyConnectedDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/Demos/SingleLayerFullyConnectedDemo: build/test/googletest/libgtest.a Demos/SingleLayerFullyConnectedDemo.cpp $(THOR)
+	mkdir -p build/Demos
+	$(Gpp) -o build/Demos/SingleLayerFullyConnectedDemo -O3 -std=c++11 -pthread Demos/SingleLayerFullyConnectedDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
 
 # Test Framework
 

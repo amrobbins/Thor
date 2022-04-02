@@ -7,6 +7,7 @@
 #include "gtest/gtest.h"
 
 #include <memory.h>
+#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -274,7 +275,58 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, alexnetImagePreproccessorUint8)), shards);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, CleanestImagePreproccessorUint8)), shards);
+}
+*/
+
+/*
+class MnistDataProcessor : public DataProcessor {
+   public:
+    MnistDataProcessor(uint64_t numOutputTensorBytes, ThorImplementation::TensorDescriptor::DataType dataType) {
+        this->numOutputTensorBytes = numOutputTensorBytes;
+        this->dataType = dataType;
+    }
+
+    virtual ~MnistDataProcessor() {}
+
+    virtual uint64_t outputTensorSizeInBytes() { return numOutputTensorBytes; }
+    virtual ThorImplementation::TensorDescriptor::DataType getDataType() { return dataType; }
+
+    virtual DataElement operator()(DataElement &input) {
+        const uint64_t numElements = outputTensorSizeInBytes() / 4;
+        assert(input.numDataBytes == numElements);
+        DataElement output = input;
+        output.numDataBytes *= 4;
+        output.data = shared_ptr<uint8_t>(new uint8_t[numElements * 4]);
+        float *outputDataFloat = (float *)output.data.get();
+        for (uint32_t i = 0; i < numElements; ++i) {
+            outputDataFloat[i] = ((float)(input.data.get()[i]) - 128.0f) / 255.0f;
+        }
+        return output;
+    }
+
+   private:
+    uint64_t numOutputTensorBytes;
+    ThorImplementation::TensorDescriptor::DataType dataType;
+};
+
+TEST(ShardedRawDatasetCreator, createMnist) {
+    constexpr uint64_t NUM_GRAYSCALE_PIXELS_PER_IMAGE = 28 * 28;
+
+    string baseFilename = "Mnist";
+    string testDatasetDir("/home/andrew/mnist/rawHierarchicallyLabeled");
+
+    unordered_set<string> sourceDirectories;
+    unordered_set<string> destDirectories;
+
+    sourceDirectories.insert(testDatasetDir);
+    destDirectories.insert("/media/andrew/PCIE_SSD/");
+
+    std::vector<shared_ptr<Shard>> shards;
+    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
+    creator.createDataset(unique_ptr<MnistDataProcessor>(new MnistDataProcessor(NUM_GRAYSCALE_PIXELS_PER_IMAGE * sizeof(float),
+                                                                                ThorImplementation::TensorDescriptor::DataType::FP32)),
+                          shards);
 }
 */
 

@@ -84,6 +84,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
         if (customProcessorUint8 != nullptr) {
             bool useImage = customProcessorUint8(data.get());
             if (!useImage)
+                // In this case, output is a copy of input but with a null data pointer
                 return output;
         }
     } else {
@@ -96,6 +97,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
         if (customProcessorHalf != nullptr) {
             bool useImage = customProcessorHalf((half *)data.get());
             if (!useImage)
+                // In this case, output is a copy of input but with a null data pointer
                 return output;
         }
     }

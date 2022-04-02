@@ -57,7 +57,7 @@ double ConsoleVisualizer::totalEpochAccuracy = 0;
 
 void (*ConsoleVisualizer::originalResizeHandler)(int) = nullptr;
 void (*ConsoleVisualizer::originalInterruptHandler)(int) = nullptr;
-void (*ConsoleVisualizer::originalAbortHandler)(int) = nullptr;
+// void (*ConsoleVisualizer::originalAbortHandler)(int) = nullptr;
 
 void ConsoleVisualizer::resizeHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
@@ -65,6 +65,7 @@ void ConsoleVisualizer::resizeHandler(int sig) {
     display();
 }
 
+/*
 void ConsoleVisualizer::abortHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
 
@@ -79,6 +80,7 @@ void ConsoleVisualizer::abortHandler(int sig) {
     else
         interruptHandler(SIGINT);
 }
+*/
 
 void ConsoleVisualizer::interruptHandler(int sig) {
     unique_lock<recursive_mutex> lck(mtx);
@@ -91,7 +93,7 @@ void ConsoleVisualizer::interruptHandler(int sig) {
     if (boost::iequals(response, "yes")) {
         signal(SIGWINCH, originalResizeHandler);
         signal(SIGINT, originalInterruptHandler);
-        signal(SIGABRT, originalAbortHandler);
+        // signal(SIGABRT, originalAbortHandler);
         printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
         endwin();
         originalInterruptHandler(sig);
@@ -116,8 +118,8 @@ void ConsoleVisualizer::inputHandler() {
     if (originalInterruptHandler == nullptr)
         originalInterruptHandler = signal(SIGINT, interruptHandler);
     assert(originalInterruptHandler != nullptr);
-    if (originalAbortHandler == nullptr)
-        originalAbortHandler = signal(SIGABRT, abortHandler);
+    // if (originalAbortHandler == nullptr)
+    //    originalAbortHandler = signal(SIGABRT, abortHandler);
 
     uint32_t delayMicroseconds = 10000;
 
@@ -264,7 +266,7 @@ ConsoleVisualizer::~ConsoleVisualizer() {
     if (originalResizeHandler != nullptr)
         signal(SIGWINCH, originalResizeHandler);
     signal(SIGINT, originalInterruptHandler);
-    signal(SIGABRT, originalAbortHandler);
+    // signal(SIGABRT, originalAbortHandler);
     deleteWindows();
 
     stopUI();
