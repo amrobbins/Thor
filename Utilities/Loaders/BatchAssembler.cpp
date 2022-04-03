@@ -7,9 +7,12 @@ using std::shared_ptr;
 using std::thread;
 using std::unique_ptr;
 
+const half BatchAssembler::HALF_ONE = (half)1.0f;
+
 BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
                                ExampleType exampleType,
                                TensorDescriptor exampleDescriptor,
+                               TensorDescriptor labelDescriptor,
                                uint64_t batchSize) {
     assert(!shards.empty());
     assert(batchSize > 0);
@@ -40,12 +43,24 @@ BatchAssembler::BatchAssembler(vector<std::shared_ptr<Shard>> shards,
     for (uint64_t c = 0; c < allClasses->size(); ++c) {
         string className = (*allClasses)[c].c_str();
         if (classIndexes.count(className) == 0) {
-            classIndexes[className] = classIndexes.size();
+            uint64_t curNumClasses = classIndexes.size();
+            classIndexes[className] = curNumClasses;
         }
     }
 
-    // FIXME: datatype
-    batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, classIndexes.size()});
+    vector<uint64_t> labelDimensions = labelDescriptor.getDimensions();
+    TensorDescriptor::DataType labelsDataType = labelDescriptor.getDataType();
+    vector<uint64_t> exampleDimensions = exampleDescriptor.getDimensions();
+    assert(labelDimensions.size() == 1);
+    perClassLabels = labelDimensions[0] == classIndexes.size() &&
+                     (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
+                      labelsDataType == TensorDescriptor::DataType::FP32);
+    classIndexLabels = labelDimensions[0] == 1 &&
+                       (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
+                        labelsDataType == TensorDescriptor::DataType::UINT32);
+    assert(perClassLabels ^ classIndexLabels);
+
+    batchLabelTensorDescriptor = ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), {batchSize, labelDimensions[0]});
 
     batchesPerEpoch = (numExamples + (batchSize - 1)) / batchSize;
 
@@ -176,11 +191,49 @@ void BatchAssembler::batchAssemblerThread() {
         batchSlotOffset = exampleSizeInBytes * batchSlot;
         memcpy((uint8_t *)batchDataBuffer.getMemPtr() + batchSlotOffset, labeledExample.data.data(), exampleSizeInBytes);
 
-        // Load one-hot labels to pinned memory buffer
-        batchSlotOffset = classIndexes.size() * batchSlot;
-        float *batchLabels = (float *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
-        memset(batchLabels, 0, sizeof(float) * classIndexes.size());
-        batchLabels[classIndexes[labeledExample.label]] = 1.0f;
+        // Load labels to pinned memory buffer.
+        // There is support for one-hot or soft labels, and also for single number label
+        TensorDescriptor::DataType labelsDataType = batchLabelTensorDescriptor.getDataType();
+        if (perClassLabels) {
+            assert(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||
+                   labelsDataType == TensorDescriptor::DataType::FP32);
+
+            batchSlotOffset = classIndexes.size() * batchSlot;
+            if (labelsDataType == TensorDescriptor::DataType::UINT8) {
+                uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
+                memset(batchLabels, 0, sizeof(uint8_t) * classIndexes.size());
+                batchLabels[classIndexes[labeledExample.label]] = (uint8_t)1;
+            } else if (labelsDataType == TensorDescriptor::DataType::FP16) {
+                half *batchLabels = (half *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
+                memset(batchLabels, 0, sizeof(half) * classIndexes.size());
+                batchLabels[classIndexes[labeledExample.label]] = HALF_ONE;
+            } else if (labelsDataType == TensorDescriptor::DataType::FP32) {
+                float *batchLabels = (float *)batchLabelsBuffer.getMemPtr() + batchSlotOffset;
+                memset(batchLabels, 0, sizeof(float) * classIndexes.size());
+                batchLabels[classIndexes[labeledExample.label]] = 1.0f;
+                // printf("\n\rwrote %f to %ld for label %s\n", batchLabels[classIndexes[labeledExample.label]],
+                // classIndexes[labeledExample.label], labeledExample.label.c_str()); for(auto it = classIndexes.begin(); it !=
+                // classIndexes.end(); ++it)
+                //    printf("\r%s:%ld\n", it->first.c_str(), it->second);
+            } else {
+                assert(false);
+            }
+        } else {  // class index labels
+            assert(labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::UINT16 ||
+                   labelsDataType == TensorDescriptor::DataType::UINT32);
+            if (labelsDataType == TensorDescriptor::DataType::UINT8) {
+                uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
+                batchLabels[batchSlot] = (uint8_t)classIndexes[labeledExample.label];
+            } else if (labelsDataType == TensorDescriptor::DataType::UINT16) {
+                uint16_t *batchLabels = (uint16_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
+                batchLabels[batchSlot] = (uint16_t)classIndexes[labeledExample.label];
+            } else if (labelsDataType == TensorDescriptor::DataType::UINT32) {
+                uint32_t *batchLabels = (uint32_t *)batchLabelsBuffer.getMemPtr() + batchSlot;
+                batchLabels[batchSlot] = (uint32_t)classIndexes[labeledExample.label];
+            } else {
+                assert(false);
+            }
+        }
 
         currentExampleNum += 1;
 

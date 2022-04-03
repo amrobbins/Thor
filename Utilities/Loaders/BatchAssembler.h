@@ -6,6 +6,8 @@
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/AsyncTensorQueue.h"
 
+#include <cuda_fp16.h>
+
 #include <memory>
 #include <thread>
 #include <vector>
@@ -33,6 +35,7 @@ class BatchAssembler {
     BatchAssembler(std::vector<std::shared_ptr<Shard>> shards,
                    ExampleType exampleType,
                    ThorImplementation::TensorDescriptor exampleDescriptor,
+                   ThorImplementation::TensorDescriptor labelDescriptor,
                    uint64_t batchSize);
     virtual ~BatchAssembler();
 
@@ -73,4 +76,9 @@ class BatchAssembler {
 
     void shardReaderThread(uint64_t shard);
     void batchAssemblerThread();
+
+    bool perClassLabels;
+    bool classIndexLabels;
+
+    static const half HALF_ONE;
 };
