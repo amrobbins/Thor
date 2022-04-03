@@ -6,7 +6,10 @@ using std::make_shared;
 using std::string;
 using ThorImplementation::Tensor;
 
-LocalBatchLoader::LocalBatchLoader(set<string> shardPaths, ThorImplementation::TensorDescriptor exampleDescriptor, uint64_t batchSize) {
+LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
+                                   ThorImplementation::TensorDescriptor exampleDescriptor,
+                                   ThorImplementation::TensorDescriptor labelDescriptor,
+                                   uint64_t batchSize) {
     this->batchSize = batchSize;
 
     uint64_t exampleSizeInBytes = exampleDescriptor.getArraySizeInBytes();
@@ -23,16 +26,19 @@ LocalBatchLoader::LocalBatchLoader(set<string> shardPaths, ThorImplementation::T
         shards,
         ExampleType::TRAIN,
         ThorImplementation::TensorDescriptor(exampleDescriptor.getDataType(), exampleDescriptor.getDimensions()),
+        ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), labelDescriptor.getDimensions()),
         batchSize);
     batchAssemblerValidate = make_shared<BatchAssembler>(
         shards,
         ExampleType::VALIDATE,
         ThorImplementation::TensorDescriptor(exampleDescriptor.getDataType(), exampleDescriptor.getDimensions()),
+        ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), labelDescriptor.getDimensions()),
         batchSize);
     batchAssemblerTest = make_shared<BatchAssembler>(
         shards,
         ExampleType::TEST,
         ThorImplementation::TensorDescriptor(exampleDescriptor.getDataType(), exampleDescriptor.getDimensions()),
+        ThorImplementation::TensorDescriptor(labelDescriptor.getDataType(), labelDescriptor.getDimensions()),
         batchSize);
 }
 

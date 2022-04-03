@@ -22,18 +22,6 @@ Network buildSingleLayerFullyConnected() {
     latestOutputTensor = FullyConnected::Builder()
                              .network(singleLayerFullyConnected)
                              .featureInput(imagesInput.getFeatureOutput())
-                             .numOutputFeatures(128)
-                             .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
-                             .build()
-                             .getFeatureOutput();
-    expectedDimensions = {128};
-    assert(latestOutputTensor.getDimensions() == expectedDimensions);
-
-    latestOutputTensor = FullyConnected::Builder()
-                             .network(singleLayerFullyConnected)
-                             .featureInput(latestOutputTensor)
                              .numOutputFeatures(10)
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
@@ -48,7 +36,7 @@ Network buildSingleLayerFullyConnected() {
                               .network(singleLayerFullyConnected)
                               .name("labels")
                               .dimensions({10})
-                              .dataType(Tensor::DataType::FP16)
+                              .dataType(Tensor::DataType::FP32)
                               .build()
                               .getFeatureOutput();
 

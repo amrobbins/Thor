@@ -99,6 +99,7 @@ void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTen
             float *oneHotLabelArray = (float *)labelTensors[i].getMemPtr();
             for (uint64_t k = 0; k < NUM_CLASSES; ++k) {
                 if (oneHotLabelArray[j * NUM_CLASSES + k] != 0) {
+                    ASSERT_EQ(oneHotLabelArray[j * NUM_CLASSES + k], 1.0f);
                     ASSERT_EQ(oneHotFound, false);
                     oneHotFound = true;
                 }
@@ -162,7 +163,7 @@ void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTen
     }
 }
 
-void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
+void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards, const uint32_t numClasses) {
     srand(time(nullptr));
 
     uint64_t batchSize = (rand() % 3) + 1;
@@ -171,6 +172,7 @@ void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards) {
         shards,
         ExampleType::TEST,
         ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224}),
+        ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP32, {numClasses}),
         batchSize);
 
     ASSERT_EQ(batchAssembler.getNumBatchesPerEpoch(), (7 + (batchSize - 1)) / batchSize);
@@ -224,7 +226,8 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     ASSERT_EQ(shards[0]->getNumExamples(ExampleType::VALIDATE), 1u);
     ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TEST), 7u);
 
-    verifyBatchAssembler(shards);
+    uint32_t NUM_CLASSES = 4;
+    verifyBatchAssembler(shards, NUM_CLASSES);
 
     if (rand() % 2 == 0)
         shards.clear();
