@@ -24,7 +24,7 @@ class ImageLoader {
         double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, Magick::Image &image);
 
     static bool toRgbArray(Magick::Image &image, uint8_t *rgbPixelArray, Layout layout);
-    static bool toRgbArray(Magick::Image &image, half *rgbPixelArray, Layout layout);
+    static bool toRgbArray(Magick::Image &image, half *rgbPixelArray, Layout layout, bool centerAndScale);
 
    private:
     ImageLoader() {}

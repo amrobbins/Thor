@@ -100,6 +100,38 @@ class TensorFanout : public MultiConnectionLayer {
 
         for (unsigned int i = 0; i < nextLayers.size(); ++i)
             nextLayers[i].get()->forward(featureInput, validationPass);
+
+        // FIXME: TEMP
+        /*
+        Tensor labels_h = featureInput.get().clone(TensorPlacement::MemDevices::CPU);
+        labels_h.copyFromAsync(featureInput.get(), streams[0]);
+        uint8_t *labelArray = (uint8_t *)labels_h.getMemPtr();
+        streams[0].synchronize();
+
+        vector<uint32_t> labelVector;
+        vector<uint8_t> bestLabelVector;
+        uint32_t numClasses = 10;
+        for (uint32_t b = 0; b < 6; ++b) {
+            uint8_t bestLabel = labelArray[b * numClasses];
+            labelVector.push_back(0);
+            for (uint32_t c = 1; c < numClasses; ++c) {
+                uint8_t classLabel = labelArray[b * numClasses + c];
+                if (classLabel > bestLabel) {
+                    labelVector.pop_back();
+                    labelVector.push_back(c);
+                    bestLabel = classLabel;
+                }
+            }
+            bestLabelVector.push_back(bestLabel);
+        }
+        printf("\rLabels:      ");
+        for (uint32_t i = 0; i < labelVector.size(); ++i)
+            printf("%d(%d) ", labelVector[i], (uint32_t)bestLabelVector[i]);
+        printf(" data type %d", (int)labels_h.getDescriptor().getDataType());
+        printf("\n\n");
+        fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        */
     }
 
     virtual void backward(Optional<Tensor> errorInput) {

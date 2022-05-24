@@ -20,7 +20,7 @@ using std::vector;
 using namespace Thor;
 
 int main() {
-    Network singleLayerFullyConnected = buildSingleLayerFullyConnected();
+    Network singleLayerConvolution2d = buildSingleLayerConvolution2d();
 
     cudaDeviceReset();
 
@@ -33,7 +33,7 @@ int main() {
 
     assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/Mnist_1_of_1.shard"));
     shardPaths.insert("/media/andrew/PCIE_SSD/Mnist_1_of_1.shard");
-    ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP32, {28 * 28});
+    ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP32, {1, 28, 28});
     ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {10});
 
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 48);
@@ -42,7 +42,7 @@ int main() {
     std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.1).decay(0.6).momentum(0.0).build();
 
     shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
-                                                   .network(singleLayerFullyConnected)
+                                                   .network(singleLayerConvolution2d)
                                                    .loader(batchLoader)
                                                    .optimizer(sgd)
                                                    .visualizer(&ConsoleVisualizer::instance())

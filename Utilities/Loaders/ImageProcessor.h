@@ -11,8 +11,13 @@
 
 class ImageProcessor : public DataProcessor {
    public:
-    ImageProcessor(
-        double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, bool display = false);
+    ImageProcessor(double minAspectRatio,
+                   double maxAspectRatio,
+                   uint32_t outputImageRows,
+                   uint32_t outputImageColumns,
+                   uint32_t bytesPerPixelChannel = 2,
+                   bool centerAndScale = true,
+                   bool display = false);
 
     ImageProcessor(double minAspectRatio,
                    double maxAspectRatio,
@@ -26,6 +31,7 @@ class ImageProcessor : public DataProcessor {
                    uint32_t outputImageRows,
                    uint32_t outputImageColumns,
                    bool (*customProcessor)(half *regularlyProcessedImage),
+                   bool centerAndScale = true,
                    bool display = false);
 
     virtual ~ImageProcessor() {}
@@ -45,7 +51,8 @@ class ImageProcessor : public DataProcessor {
     bool (*customProcessorUint8)(uint8_t *regularlyProcessedImage);
     bool (*customProcessorHalf)(half *regularlyProcessedImage);
     bool display;
-    uint32_t bytesPerPixel;
+    uint32_t bytesPerPixelChannel;
+    bool centerAndScale;
 
     std::mutex mutex;
 };

@@ -161,7 +161,7 @@ Network buildAlexNet() {
     // For the ImageNet dataset, the average pixel values are subtracted from each color channel during dataset
     // creation (in commented out code in ShardedRawDatasetCreatorTest.cpp)
     NetworkInput imagesInput =
-        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::UINT8).build();
+        NetworkInput::Builder().network(alexNet).name("examples").dimensions({3, 224, 224}).dataType(Tensor::DataType::FP16).build();
 
     // FIXME: put back once divide is implemented
     // imagesInput = Divide::Builder.network(alexNet).numerator(imagesInput).denominator({255});
@@ -223,7 +223,7 @@ Network buildAlexNet() {
                               .network(alexNet)
                               .name("labels")
                               .dimensions({1000})
-                              .dataType(Tensor::DataType::FP16)
+                              .dataType(Tensor::DataType::UINT8)
                               .build()
                               .getFeatureOutput();
 
