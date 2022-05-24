@@ -179,6 +179,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
                    build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
                    build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o \
+                   build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o \
                    build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
                    #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
@@ -196,7 +197,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
 
 ALL_DEMOS = build/Demos/AlexNetDemo \
 			build/Demos/FewLayerFullyConnectedDemo \
-			build/Demos/SingleLayerFullyConnectedDemo
+			build/Demos/SingleLayerFullyConnectedDemo \
+			build/Demos/SingleLayerConvolution2dDemo
 
 ML_DEV = libThor.a Thor.h
 
@@ -547,6 +549,10 @@ build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o: DeepLearning
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o
 
+build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o: DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.h DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.cpp
+	mkdir -p build/DeepLearning/Api/ExampleNetworks
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o
+
 build/DeepLearning/Api/ExampleNetworks/InceptionV3.o: DeepLearning/Api/ExampleNetworks/InceptionV3.h DeepLearning/Api/ExampleNetworks/InceptionV3.cpp
 	mkdir -p build/DeepLearning/Api/ExampleNetworks
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/ExampleNetworks/InceptionV3.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/ExampleNetworks/InceptionV3.o
@@ -562,6 +568,10 @@ build/Demos/FewLayerFullyConnectedDemo: build/test/googletest/libgtest.a Demos/F
 build/Demos/SingleLayerFullyConnectedDemo: build/test/googletest/libgtest.a Demos/SingleLayerFullyConnectedDemo.cpp $(THOR)
 	mkdir -p build/Demos
 	$(Gpp) -o build/Demos/SingleLayerFullyConnectedDemo -O3 -std=c++11 -pthread Demos/SingleLayerFullyConnectedDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/Demos/SingleLayerConvolution2dDemo: build/test/googletest/libgtest.a Demos/SingleLayerConvolution2dDemo.cpp $(THOR)
+	mkdir -p build/Demos
+	$(Gpp) -o build/Demos/SingleLayerConvolution2dDemo -O3 -std=c++11 -pthread Demos/SingleLayerConvolution2dDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 # Test Framework

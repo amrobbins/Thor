@@ -36,7 +36,7 @@ Network buildSingleLayerFullyConnected() {
                               .network(singleLayerFullyConnected)
                               .name("labels")
                               .dimensions({10})
-                              .dataType(Tensor::DataType::FP32)
+                              .dataType(Tensor::DataType::UINT8)
                               .build()
                               .getFeatureOutput();
 
@@ -75,5 +75,6 @@ Network buildSingleLayerFullyConnected() {
                                  .dataType(Tensor::DataType::FP32)
                                  .build();
 
+    // Return the assembled network
     return singleLayerFullyConnected;
 }

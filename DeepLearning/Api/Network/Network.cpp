@@ -457,8 +457,12 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput] = networkInput->getId();
 
     // Stamp type converter if needed
+    // Currently all FP32's are automatically converted to FP16's.
+    // How to handle non-floating point types
+    // FIXME: Think about this for the permanent implementation
     ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
-    if (networkInput->getDataType() != Tensor::DataType::FP16) {
+    // FIXME: TEMP CONDITION HERE
+    if (networkInput->getDataType() == Tensor::DataType::FP32) {
         implementationTypeConversion = new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP16);
         implementationNetworkInput->connectToNextLayer(implementationTypeConversion);
         outputLayer = implementationTypeConversion;

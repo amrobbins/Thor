@@ -2,16 +2,25 @@
 
 using namespace std;
 
-ImageProcessor::ImageProcessor(
-    double minAspectRatio, double maxAspectRatio, uint32_t outputImageRows, uint32_t outputImageColumns, bool display) {
+ImageProcessor::ImageProcessor(double minAspectRatio,
+                               double maxAspectRatio,
+                               uint32_t outputImageRows,
+                               uint32_t outputImageColumns,
+                               uint32_t bytesPerPixelChannel,
+                               bool centerAndScale,
+                               bool display) {
+    this->bytesPerPixelChannel = bytesPerPixelChannel;
+    if (centerAndScale)
+        assert(bytesPerPixelChannel == 2);
+
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;
     this->outputImageRows = outputImageRows;
     this->outputImageColumns = outputImageColumns;
+    this->centerAndScale = centerAndScale;
     this->display = display;
     customProcessorUint8 = nullptr;
     customProcessorHalf = nullptr;
-    bytesPerPixel = 1;
 }
 
 ImageProcessor::ImageProcessor(double minAspectRatio,
@@ -20,14 +29,15 @@ ImageProcessor::ImageProcessor(double minAspectRatio,
                                uint32_t outputImageColumns,
                                bool (*customProcessor)(uint8_t *regularlyProcessedImage),
                                bool display) {
+    bytesPerPixelChannel = 1;
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;
     this->outputImageRows = outputImageRows;
     this->outputImageColumns = outputImageColumns;
+    this->centerAndScale = false;
     this->display = display;
     customProcessorUint8 = customProcessor;
     customProcessorHalf = nullptr;
-    bytesPerPixel = 1;
 }
 
 ImageProcessor::ImageProcessor(double minAspectRatio,
@@ -35,22 +45,24 @@ ImageProcessor::ImageProcessor(double minAspectRatio,
                                uint32_t outputImageRows,
                                uint32_t outputImageColumns,
                                bool (*customProcessor)(half *regularlyProcessedImage),
+                               bool centerAndScale,
                                bool display) {
+    bytesPerPixelChannel = 2;
     this->minAspectRatio = minAspectRatio;
     this->maxAspectRatio = maxAspectRatio;
     this->outputImageRows = outputImageRows;
     this->outputImageColumns = outputImageColumns;
+    this->centerAndScale = centerAndScale;
     this->display = display;
     customProcessorUint8 = nullptr;
     customProcessorHalf = customProcessor;
-    bytesPerPixel = 2;
 }
 
-uint64_t ImageProcessor::outputTensorSizeInPixels() { return 3 * outputImageRows * outputImageColumns; }
-uint64_t ImageProcessor::outputTensorSizeInBytes() { return bytesPerPixel * outputTensorSizeInPixels(); }
+uint64_t ImageProcessor::outputTensorSizeInPixels() { return outputImageRows * outputImageColumns; }
+uint64_t ImageProcessor::outputTensorSizeInBytes() { return 3 * outputTensorSizeInPixels() * bytesPerPixelChannel; }
 
 ThorImplementation::TensorDescriptor::DataType ImageProcessor::getDataType() {
-    if (bytesPerPixel == 1)
+    if (bytesPerPixelChannel == 1)
         return ThorImplementation::TensorDescriptor::DataType::UINT8;
     else
         return ThorImplementation::TensorDescriptor::DataType::FP16;
@@ -74,7 +86,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
 
     unique_ptr<uint8_t> data(new uint8_t[outputTensorSizeInBytes()]);
 
-    if (bytesPerPixel == 1) {
+    if (bytesPerPixelChannel == 1) {
         output.dataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
 
         success = ImageLoader::toRgbArray(image, data.get(), ImageLoader::Layout::CHW);
@@ -90,7 +102,7 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     } else {
         output.dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
 
-        success = ImageLoader::toRgbArray(image, (half *)data.get(), ImageLoader::Layout::CHW);
+        success = ImageLoader::toRgbArray(image, (half *)data.get(), ImageLoader::Layout::CHW, centerAndScale);
         if (!success)
             return output;
 
