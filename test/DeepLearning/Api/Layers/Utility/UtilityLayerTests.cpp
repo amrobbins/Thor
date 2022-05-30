@@ -35,7 +35,7 @@ TEST(NetworkInput, Builds) {
 
     Optional<Tensor> actualOutput = networkInput.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
     ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
 
     shared_ptr<Layer> cloneLayer = networkInput.clone();
@@ -51,7 +51,7 @@ TEST(NetworkInput, Builds) {
 
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
     ASSERT_EQ(networkInput.getId(), clone->getId());
@@ -321,7 +321,7 @@ TEST(BatchNormalizationSingleFeatureInput, Builds) {
 
     Optional<Tensor> actualOutput = batchNormalization.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
 
     double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
@@ -343,7 +343,7 @@ TEST(BatchNormalizationSingleFeatureInput, Builds) {
 
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
     double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();
@@ -406,10 +406,10 @@ TEST(BatchNormalizationMultipleFeatureInputs, Builds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[0].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[1].getDimensions(), dimensions);
 
     double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
@@ -444,10 +444,10 @@ TEST(BatchNormalizationMultipleFeatureInputs, Builds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[0].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[1].getDimensions(), dimensions);
 
     double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();

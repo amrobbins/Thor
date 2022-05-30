@@ -175,6 +175,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Learning/Convolution2d.o \
                    build/DeepLearning/Api/Layers/Utility/BatchNormalization.o \
                    build/DeepLearning/Api/Layers/Utility/DropOut.o \
+                   build/DeepLearning/Api/Layers/Utility/NetworkOutput.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
                    build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
@@ -533,6 +534,10 @@ build/DeepLearning/Api/Layers/Utility/BatchNormalization.o: DeepLearning/Api/Lay
 build/DeepLearning/Api/Layers/Utility/DropOut.o: DeepLearning/Api/Layers/Utility/DropOut.h DeepLearning/Api/Layers/Utility/DropOut.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Utility
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Utility/DropOut.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Utility/DropOut.o
+
+build/DeepLearning/Api/Layers/Utility/NetworkOutput.o: DeepLearning/Api/Layers/Utility/NetworkOutput.h DeepLearning/Api/Layers/Utility/NetworkOutput.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Utility
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Utility/NetworkOutput.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Utility/NetworkOutput.o
 
 build/DeepLearning/Api/Layers/Learning/Inception.o: DeepLearning/Api/Layers/Learning/Inception.h DeepLearning/Api/Layers/Learning/Inception.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Learning

@@ -650,6 +650,17 @@ TEST(Network, AlexnetIsProperlyFormed) {
         }
     }
 
+    ThorImplementation::TensorFanout *imagesFO = nullptr;
+    for (uint64_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
+        if (dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]) != nullptr) {
+            if (images->getFeatureOutput().get() ==
+                dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i])->getFeatureInputs()[0].get()) {
+                imagesFO = dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]);
+            }
+        }
+    }
+    ASSERT_NE(imagesFO, nullptr);
+
     ASSERT_EQ(tc.size(), 0u);
     ASSERT_EQ(fo.size(), 3u);
     ASSERT_EQ(r.size(), 12u);
@@ -661,8 +672,8 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(acc.size(), 1u);
 
     // Forward
-    ASSERT_EQ(images->getFeatureOutput().get(), fo[0]->getFeatureInputs()[0].get());
-    ASSERT_EQ(fo[0]->getFeatureOutputs()[0].get(), cv[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(images->getFeatureOutput().get(), imagesFO->getFeatureInputs()[0].get());
+    ASSERT_EQ(imagesFO->getFeatureOutputs()[0].get(), cv[0]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
     ASSERT_EQ(r[0]->getFeatureOutput().get(), cv[1]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[1]->getFeatureOutputs()[0].get(), r[1]->getFeatureInput().get());

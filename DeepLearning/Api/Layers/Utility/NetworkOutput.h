@@ -22,6 +22,14 @@ class NetworkOutput : public Layer {
 
     virtual string getLayerType() const { return "NetworkOutput"; }
 
+    virtual bool isMultiLayer() const {
+        assert(featureInput.isPresent());
+        assert(featureOutput.isPresent());
+        return featureInput.get().getDataType() != dataType;
+    }
+
+    virtual void convertToSingleLayersAndAddToNetwork();
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
@@ -38,15 +46,14 @@ class NetworkOutput : public Layer {
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
-        uint64_t totalBytes = 0;
-        if (featureInput.get().getDataType() != dataType)
-            totalBytes += featureInput.get().clone(dataType).getTotalSizeInBytes();
-        return totalBytes;
+        // If there is a type conversion required, the memory requirement is reported by the TypeConverter layer
+        return 0;
     }
 
    private:
     string name;
     Tensor::DataType dataType;
+    Network *network;
 };
 
 class NetworkOutput::Builder {
@@ -61,11 +68,13 @@ class NetworkOutput::Builder {
         if (_name.isPresent())
             networkOutput.name = _name;
         else
-            networkOutput.name = string("NetworkOutput") + to_string(networkOutput.getId());
+            networkOutput.name = string("NetworkOutput") + std::to_string(networkOutput.getId());
         networkOutput.dataType = _dataType;
         networkOutput.featureInput = _inputTensor;
-        networkOutput.featureOutput = Tensor(_dataType, _inputTensor.get().getDimensions());
+        // A type converter will be stamped where the new data type will take effect, when it is needed.
+        networkOutput.featureOutput = Tensor(_inputTensor.get().getDataType(), _inputTensor.get().getDimensions());
         networkOutput.initialized = true;
+        networkOutput.network = _network.get();
         networkOutput.addToNetwork(_network.get());
         return networkOutput;
     }
