@@ -13,6 +13,8 @@ class CategoricalAccuracy : public Metric {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalAccuracy>(*this); }
 
+    virtual string getLayerType() const { return "CategoricalAccuracy"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,

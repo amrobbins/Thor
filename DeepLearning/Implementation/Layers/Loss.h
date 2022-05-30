@@ -255,6 +255,8 @@ class Loss : public Layer {
         ELEMENTWISE_LOSS
     };
 
+    static uint32_t getLossScalingFactor() { return lossScalingFactor; }
+
    protected:
     Optional<Layer *> lossOutputLayer;
 
@@ -262,7 +264,8 @@ class Loss : public Layer {
     Optional<Tensor> elementwiseLossOutput;
     Optional<Tensor> batchLossOutput;
 
-    uint32_t lossScalingFactor = 1;
+    // FIXME: only const for now for convenience
+    static const uint32_t lossScalingFactor = 1;
     Stream labelsStream;
 
     bool featureInputReceived;

@@ -59,6 +59,8 @@ class Concatenate : public TrainableWeightsBiasesLayer {
         assert(numInputConnectionsMade <= featureInputs.size());
     }
 
+    virtual string getLayerType() const { return "Concatenate"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,

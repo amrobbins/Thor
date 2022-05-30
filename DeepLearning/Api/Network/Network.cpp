@@ -450,30 +450,28 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
 
     // Stamp network input
     ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize, stampedNetwork.initializers);
+    if (DEBUG_STAMP) {
+        printf("stamped network input\n");
+        fflush(stdout);
+    }
     stampedNetwork.inputs.push_back(implementationNetworkInput);
     stampedNetwork.inputNamed[implementationNetworkInput->getName()] = implementationNetworkInput;
     outputLayer = implementationNetworkInput;
     stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput;
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput] = networkInput->getId();
 
-    // Stamp type converter if needed
-    // Currently all FP32's are automatically converted to FP16's.
-    // How to handle non-floating point types
-    // FIXME: Think about this for the permanent implementation
-    ThorImplementation::TypeConversion *implementationTypeConversion = nullptr;
-    // FIXME: TEMP CONDITION HERE
-    if (networkInput->getDataType() == Tensor::DataType::FP32) {
-        implementationTypeConversion = new ThorImplementation::TypeConversion(ThorImplementation::TensorDescriptor::DataType::FP16);
-        implementationNetworkInput->connectToNextLayer(implementationTypeConversion);
-        outputLayer = implementationTypeConversion;
-
-        stampedNetwork.otherLayers.push_back(implementationTypeConversion);
-
-        outputTensor.setDataType(Tensor::DataType::FP16);
-    }
-
     // Map the api tensor to its physical driving layer
     stampedNetwork.apiTensorToPhysicalDrivingLayer[outputTensor] = outputLayer;
+}
+
+void Network::addToNetwork(Layer *layer) {
+    frozen = false;
+
+    if (layer->isMultiLayer()) {
+        layer->convertToSingleLayersAndAddToNetwork();
+    } else {
+        addSingleLayerToNetwork(layer);
+    }
 }
 
 void Network::stampLayer(
@@ -495,6 +493,11 @@ void Network::stampLayer(
         stampedNetwork.otherLayers.push_back(implementationTensorFanout);
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
+
+        if (DEBUG_STAMP) {
+            printf("stamped tensor fanout - network input\n");
+            fflush(stdout);
+        }
     }
 
     // Stamp the layer
@@ -509,6 +512,11 @@ void Network::stampLayer(
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers);
         stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer;
         stampedNetwork.physicalLayerToApiLayer[implementationLayer] = layer->getId();
+
+        if (DEBUG_STAMP) {
+            printf("stamped %s\n", layer->getLayerType().c_str());
+            fflush(stdout);
+        }
     }
 
     vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
@@ -548,6 +556,10 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         stampedNetwork.otherLayers.push_back(implementationTensorFanout);
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
+        if (DEBUG_STAMP) {
+            printf("stamped tensor fanout - network output\n");
+            fflush(stdout);
+        }
     }
 
     // Stamp type converter if needed
@@ -559,6 +571,10 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         inputTensor.setDataType(networkOutput->getDataType());
 
         stampedNetwork.otherLayers.push_back(implementationTypeConversion);
+        if (DEBUG_STAMP) {
+            printf("stamped type conversion\n");
+            fflush(stdout);
+        }
 
         apiDrivingLayer = nullptr;
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
@@ -575,6 +591,10 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     assert(implementationNetworkOutput != nullptr);
     stampedNetwork.outputs.push_back(implementationNetworkOutput);
     stampedNetwork.outputNamed[implementationNetworkOutput->getName()] = implementationNetworkOutput;
+    if (DEBUG_STAMP) {
+        printf("stamped network output\n");
+        fflush(stdout);
+    }
 
     stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput;
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput] = networkOutput->getId();

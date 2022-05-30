@@ -7,7 +7,10 @@
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Stream.h"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #include "Utilities/Loaders/MemMappedFileTypes.h"
+#pragma GCC diagnostic pop
 #include "Utilities/WorkQueue/AsyncQueue.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 

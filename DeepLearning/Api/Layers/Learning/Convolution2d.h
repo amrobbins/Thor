@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
 #include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
@@ -31,8 +32,13 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual uint32_t getVerticalPadding() { return verticalPadding; }
     virtual uint32_t getHoriztonalPadding() { return horizontalPadding; }
 
+    virtual string getLayerType() const { return "Convolution2d"; }
+
    protected:
-    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder; }
+    virtual bool isMultiLayer() const {
+        return useBatchNormalization || dropProportion > 0.0f || activationBuilder ||
+               featureInputs.front().getDataType() != Tensor::DataType::FP16;
+    }
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
@@ -202,8 +208,7 @@ class Convolution2d::Builder {
                                                       convolution2d.horizontalPadding);
 
         for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
-            convolution2d.featureOutputs.push_back(
-                Tensor(convolution2d.featureInputs[0].getDataType(), {_numOutputChannels, outputHeight, outputWidth}));
+            convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels, outputHeight, outputWidth}));
             convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
             convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
         }

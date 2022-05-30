@@ -20,6 +20,8 @@ class NetworkOutput : public Layer {
 
     Tensor::DataType getDataType() const { return dataType; }
 
+    virtual string getLayerType() const { return "NetworkOutput"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
