@@ -8,6 +8,20 @@ using namespace Thor;
 void Inception::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());
 
+    vector<Tensor> currentFeatureInputs;
+
+    // Force the input tensor to this type of layer to be FP16
+    if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            TypeConverter typeConverter = TypeConverter::Builder()
+                                              .network(*network)
+                                              .featureInput(currentFeatureInputs[i])
+                                              .newDataType(Tensor::DataType::FP16)
+                                              .build();
+            currentFeatureInputs[i] = typeConverter.getFeatureOutput();
+        }
+    }
+
     Convolution2d::Builder convolution1x1Builder;
     convolution1x1Builder.network(*network)
         .numOutputChannels(outputChannels1x1)
@@ -90,14 +104,14 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
     vector<Pooling> poolingLayers;
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        convolution1x1Builder.featureInput(featureInputs[i]);
-        convolution3x3ReduceBuilder.featureInput(featureInputs[i]);
-        convolution5x5ReduceBuilder.featureInput(featureInputs[i]);
+        convolution1x1Builder.featureInput(currentFeatureInputs[i]);
+        convolution3x3ReduceBuilder.featureInput(currentFeatureInputs[i]);
+        convolution5x5ReduceBuilder.featureInput(currentFeatureInputs[i]);
 
         Pooling::Builder pooling3x3Builder;
         Pooling pooling = Pooling::Builder()
                               .network(*network)
-                              .featureInput(featureInputs[i])
+                              .featureInput(currentFeatureInputs[i])
                               .type(Pooling::Type::MAX)
                               .windowHeight(3)
                               .windowWidth(3)
@@ -139,7 +153,7 @@ void Inception::convertToSingleLayersAndAddToNetwork() {
     inputTensorFromOutputTensor.clear();
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
         featureOutputs.push_back(concatenateLayers[i].getFeatureOutput());
-        outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
-        inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
+        outputTensorFromInputTensor[currentFeatureInputs[i]] = featureOutputs[i];
+        inputTensorFromOutputTensor[featureOutputs[i]] = currentFeatureInputs[i];
     }
 }

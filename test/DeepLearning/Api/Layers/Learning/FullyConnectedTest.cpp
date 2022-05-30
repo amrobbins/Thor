@@ -57,7 +57,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
     vector<uint64_t> outputDimensions = {numOutputFeatures};
     Optional<Tensor> actualOutput = fullyConnected.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(actualOutput.get().getDimensions(), outputDimensions);
 
     shared_ptr<Layer> cloneLayer = fullyConnected.clone();
@@ -73,7 +73,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
 
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(cloneOutput.get().getDimensions(), outputDimensions);
 
     ASSERT_EQ(fullyConnected.getId(), clone->getId());
@@ -135,10 +135,10 @@ TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[1].getDimensions(), outputDimensions);
 
     shared_ptr<Layer> cloneLayer = fullyConnected.clone();
@@ -167,10 +167,10 @@ TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[1].getDimensions(), outputDimensions);
 
     ASSERT_EQ(fullyConnected.getId(), clone->getId());

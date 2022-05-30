@@ -14,6 +14,8 @@ class Relu : public Activation {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Relu>(*this); }
 
+    virtual string getLayerType() const { return "Relu"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,

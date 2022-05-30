@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Api/Layers/Utility/Pooling.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
@@ -18,6 +19,8 @@ class Inception : public TrainableWeightsBiasesLayer {
     virtual ~Inception() {}
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Inception>(*this); }
+
+    virtual string getLayerType() const { return "Inception"; }
 
    protected:
     virtual bool isMultiLayer() const { return true; }

@@ -17,6 +17,8 @@ class DropOut : public Layer {
 
     virtual float getDropProportion() { return dropProportion; }
 
+    virtual string getLayerType() const { return "DropOut"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
 
@@ -16,6 +17,12 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual Optional<double> getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
     virtual Optional<double> getEpsilon() { return epsilon; }
+
+    virtual string getLayerType() const { return "BatchNormalization"; }
+
+    virtual bool isMultiLayer() const { return featureInputs.front().getDataType() != Tensor::DataType::FP16; }
+
+    virtual void convertToSingleLayersAndAddToNetwork();
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -59,6 +66,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
    private:
     Optional<double> exponentialRunningAverageFactor;
     Optional<double> epsilon;
+
+    Network *network;
 };
 
 class BatchNormalization::Builder {
@@ -76,6 +85,7 @@ class BatchNormalization::Builder {
         }
         batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
         batchNormalization.epsilon = _epsilon;
+        batchNormalization.network = _network.get();
         batchNormalization.initialized = true;
         batchNormalization.addToNetwork(_network.get());
         return batchNormalization;

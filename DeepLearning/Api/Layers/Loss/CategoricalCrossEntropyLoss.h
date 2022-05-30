@@ -14,6 +14,8 @@ class CategoricalCrossEntropyLoss : public Loss {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalCrossEntropyLoss>(*this); }
 
+    virtual string getLayerType() const { return "CategoricalCrossEntropyLoss"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,

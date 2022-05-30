@@ -70,7 +70,7 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
     vector<uint64_t> outputDimensions = {numOutputChannels, outputHeight, outputWidth};
     Optional<Tensor> actualOutput = convolution2d.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(actualOutput.get().getDimensions(), outputDimensions);
 
     ASSERT_EQ(convolution2d.getFilterHeight(), filterHeight);
@@ -93,7 +93,7 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
 
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(cloneOutput.get().getDimensions(), outputDimensions);
 
     ASSERT_EQ(clone->getFilterHeight(), filterHeight);
@@ -175,7 +175,7 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
     vector<uint64_t> outputDimensions = {numOutputChannels, outputHeight, outputWidth};
     Optional<Tensor> actualOutput = convolution2d.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(actualOutput.get().getDimensions(), outputDimensions);
 
     ASSERT_EQ(convolution2d.getFilterHeight(), filterHeight);
@@ -198,7 +198,7 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
 
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(cloneOutput.get().getDimensions(), outputDimensions);
 
     ASSERT_EQ(clone->getFilterHeight(), filterHeight);
@@ -270,7 +270,7 @@ TEST(Convolution2dSingleFeatureInputSamePadding, Builds) {
         uint32_t horizontalPadding = Convolution2d::Builder::computeSamePadding(dimensions[2], horizontalStride, filterWidth);
         Optional<Tensor> actualOutput = convolution2d.getFeatureOutput();
         ASSERT_TRUE(actualOutput.isPresent());
-        ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+        ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
         ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
         ASSERT_EQ(actualOutput.get().getDimensions()[0], numOutputChannels);
         for (uint32_t d = 1; d < dimensions.size(); ++d) {
@@ -299,7 +299,7 @@ TEST(Convolution2dSingleFeatureInputSamePadding, Builds) {
 
         Optional<Tensor> cloneOutput = clone->getFeatureOutput();
         ASSERT_TRUE(cloneOutput.isPresent());
-        ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+        ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
         ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
         ASSERT_EQ(cloneOutput.get().getDimensions()[0], numOutputChannels);
         for (uint32_t d = 1; d < dimensions.size(); ++d) {
@@ -377,7 +377,7 @@ TEST(Convolution2dSingleFeatureInputDefaultPadding, Builds) {
         uint32_t horizontalPadding = Convolution2d::Builder::computeSamePadding(dimensions[2], horizontalStride, filterWidth);
         Optional<Tensor> actualOutput = convolution2d.getFeatureOutput();
         ASSERT_TRUE(actualOutput.isPresent());
-        ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+        ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
         ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
         ASSERT_EQ(actualOutput.get().getDimensions()[0], numOutputChannels);
         for (uint32_t d = 1; d < dimensions.size(); ++d) {
@@ -406,7 +406,7 @@ TEST(Convolution2dSingleFeatureInputDefaultPadding, Builds) {
 
         Optional<Tensor> cloneOutput = clone->getFeatureOutput();
         ASSERT_TRUE(cloneOutput.isPresent());
-        ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+        ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
         ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
         ASSERT_EQ(cloneOutput.get().getDimensions()[0], numOutputChannels);
         for (uint32_t d = 1; d < dimensions.size(); ++d) {
@@ -486,7 +486,7 @@ TEST(Convolution2dSingleFeatureInputSamePaddingV2, Builds) {
         uint32_t horizontalPadding = Convolution2d::Builder::computeSamePadding(dimensions[2], horizontalStride, filterWidth);
         Optional<Tensor> actualOutput = convolution2d.getFeatureOutput();
         ASSERT_TRUE(actualOutput.isPresent());
-        ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+        ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
         ASSERT_EQ(actualOutput.get().getDimensions().size(), dimensions.size());
         ASSERT_EQ(actualOutput.get().getDimensions()[0], numOutputChannels);
         for (uint32_t d = 1; d < dimensions.size(); ++d) {
@@ -515,7 +515,7 @@ TEST(Convolution2dSingleFeatureInputSamePaddingV2, Builds) {
 
         Optional<Tensor> cloneOutput = clone->getFeatureOutput();
         ASSERT_TRUE(cloneOutput.isPresent());
-        ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
+        ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
         ASSERT_EQ(cloneOutput.get().getDimensions().size(), dimensions.size());
         ASSERT_EQ(cloneOutput.get().getDimensions()[0], numOutputChannels);
         for (uint32_t d = 1; d < dimensions.size(); ++d) {
@@ -618,7 +618,7 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[0].getDimensions().size(), dimensions.size());
     ASSERT_EQ(featureOutputs[0].getDimensions()[0], outputDimensions[0]);
     ASSERT_EQ(featureOutputs[0].getDimensions()[1], outputDimensions[1]);
@@ -626,7 +626,7 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
     ASSERT_GE(diff, 0u);
     ASSERT_LE(diff, 1u);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[1].getDimensions().size(), dimensions.size());
     ASSERT_EQ(featureOutputs[1].getDimensions()[0], outputDimensions[0]);
     ASSERT_EQ(featureOutputs[1].getDimensions()[1], outputDimensions[1]);
@@ -667,7 +667,7 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[0].getDimensions().size(), dimensions.size());
     ASSERT_EQ(featureOutputs[0].getDimensions()[0], outputDimensions[0]);
     ASSERT_EQ(featureOutputs[0].getDimensions()[1], outputDimensions[1]);
@@ -675,7 +675,7 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
     ASSERT_GE(diff, 0u);
     ASSERT_LE(diff, 1u);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
     ASSERT_EQ(featureOutputs[1].getDimensions().size(), dimensions.size());
     ASSERT_EQ(featureOutputs[1].getDimensions()[0], outputDimensions[0]);
     ASSERT_EQ(featureOutputs[1].getDimensions()[1], outputDimensions[1]);

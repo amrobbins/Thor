@@ -22,6 +22,8 @@ class Pooling : public Layer {
     uint32_t getVerticalPadding() { return verticalPadding; }
     uint32_t getHorizontalPadding() { return horizontalPadding; }
 
+    virtual string getLayerType() const { return "Pooling"; }
+
     enum class Type { AVERAGE = 3, MAX };
 
    protected:

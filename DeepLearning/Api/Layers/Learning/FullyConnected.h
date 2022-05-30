@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -30,7 +31,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual shared_ptr<Layer> clone() const { return make_shared<FullyConnected>(*this); }
 
    protected:
-    virtual bool isMultiLayer() const { return useBatchNormalization || dropProportion > 0.0f || activationBuilder; }
+    virtual bool isMultiLayer() const {
+        assert(featureInputs.size() > 0);
+        return useBatchNormalization || dropProportion > 0.0f || activationBuilder || featureInputs.front().getDimensions().size() > 1 ||
+               featureInputs.front().getDataType() != Tensor::DataType::FP16;
+    }
 
     virtual void convertToSingleLayersAndAddToNetwork();
 
@@ -38,7 +43,13 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         vector<uint64_t> inputDimensions = inputTensor.getDimensions();
         int gpuNum = stream.getGpuNum();
         assert(!inputDimensions.empty());
-        uint64_t numInputFeatures = inputDimensions[0];
+
+        // No matter the incoming shape, the tensor is treated as a one dimensional tensor for fully connected purposes
+        // It becomes a matrix when the batch dimension is included.
+        assert(inputDimensions.size() >= 1);
+        uint64_t numInputFeatures = 1;
+        for (uint32_t i = 0; i < inputDimensions.size(); ++i)
+            numInputFeatures *= inputDimensions[i];
 
         ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
                                                                                  batchSize,
@@ -95,7 +106,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     // mem requirements are the weights
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
         // FIXME: workspace? Or do I assume no workspace at first and can add one later if have extra mem?
-        uint64_t numInputFeatures = featureInputs[0].getDimensions()[0];
+        assert(featureInputs.size() > 0);
+        assert(featureInputs[0].getDimensions().size() > 0);
+        uint64_t numInputFeatures = 1;
+        for (uint32_t i = 0; i < featureInputs[0].getDimensions().size(); ++i)
+            numInputFeatures *= featureInputs[0].getDimensions()[i];
         uint64_t numWeights = numInputFeatures * numOutputFeatures;
         uint64_t numBiases = numOutputFeatures;
         // have weights and gradient accumulators, as FP16 elements
@@ -111,6 +126,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;
     }
+
+    virtual string getLayerType() const { return "FullyConnected"; }
 
    private:
     uint32_t numOutputFeatures;
@@ -158,8 +175,7 @@ class FullyConnected::Builder {
         fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
         for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
-            fullyConnected.featureOutputs.push_back(
-                Tensor(fullyConnected.featureInputs[0].getDataType(), {fullyConnected.numOutputFeatures}));
+            fullyConnected.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {fullyConnected.numOutputFeatures}));
             fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
             fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
         }

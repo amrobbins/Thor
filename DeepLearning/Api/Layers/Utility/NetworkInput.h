@@ -27,21 +27,13 @@ class NetworkInput : public Layer {
 
     virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {featureOutput}; }
 
+    virtual string getLayerType() const { return "NetworkInput"; }
+
    protected:
     virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement,
                                                     uint32_t batchSize,
                                                     vector<shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
-
-        ThorImplementation::TensorDescriptor::DataType implementationDataType;
-        if (dataType == Tensor::DataType::FP32)
-            implementationDataType = ThorImplementation::TensorDescriptor::DataType::FP32;
-        else if (dataType == Tensor::DataType::FP16)
-            implementationDataType = ThorImplementation::TensorDescriptor::DataType::FP16;
-        else if (dataType == Tensor::DataType::UINT8)
-            implementationDataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
-        else
-            assert(false);
 
         vector<uint64_t> batchDimensions;
         batchDimensions.push_back(batchSize);
@@ -49,7 +41,7 @@ class NetworkInput : public Layer {
             batchDimensions.push_back(dimensions[i]);
 
         ThorImplementation::NetworkInput *networkInput =
-            new ThorImplementation::NetworkInput(placement, implementationDataType, batchDimensions);
+            new ThorImplementation::NetworkInput(placement, Tensor::convertToImplementationDataType(dataType), batchDimensions);
         networkInput->setName(name);
 
         return networkInput;
@@ -64,19 +56,8 @@ class NetworkInput : public Layer {
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
-        uint64_t elements = featureInput.get().getTotalNumElements();
-
-        uint32_t bytesPerElement;
-        if (dataType == Tensor::DataType::FP32)
-            bytesPerElement = 6;  // original + converted
-        else if (dataType == Tensor::DataType::FP16)
-            bytesPerElement = 2;
-        else if (dataType == Tensor::DataType::UINT8)
-            bytesPerElement = 3;  // original + converted
-        else
-            assert(false);
-
-        return batchSize * elements * bytesPerElement;
+        // Input has a prefetch buffer in addition to storing the output tensor
+        return 2 * featureOutput.get().getTotalSizeInBytes();
     }
 
    private:
@@ -102,7 +83,7 @@ class NetworkInput::Builder {
         networkInput.dimensions = _dimensions;
         networkInput.dataType = _dataType;
         networkInput.featureInput = Tensor(_dataType, _dimensions);
-        networkInput.featureOutput = Tensor(Tensor::DataType::FP16, _dimensions);
+        networkInput.featureOutput = Tensor(_dataType, _dimensions);
         networkInput.initialized = true;
         networkInput.addToNetwork(_network.get());
         return networkInput;

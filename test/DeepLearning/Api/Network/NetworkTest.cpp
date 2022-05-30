@@ -263,13 +263,14 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     Tensor latestOutputTensor;
     UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(2).maxValue(3);
 
-    latestOutputTensor = NetworkInput::Builder()
-                             .network(network)
-                             .name("features")
-                             .dimensions({500})
-                             .dataType(Tensor::DataType::UINT8)
-                             .build()
-                             .getFeatureOutput();
+    Tensor networkInputTensor = NetworkInput::Builder()
+                                    .network(network)
+                                    .name("features")
+                                    .dimensions({500})
+                                    .dataType(Tensor::DataType::UINT8)
+                                    .build()
+                                    .getFeatureOutput();
+    latestOutputTensor = networkInputTensor;
     latestOutputTensor = FullyConnected::Builder()
                              .network(network)
                              .featureInput(latestOutputTensor)
@@ -290,6 +291,9 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
                                      .dataType(Tensor::DataType::FP32)
                                      .build()
                                      .getFeatureOutput();
+
+    ASSERT_EQ(networkInputTensor.getDataType(), Tensor::DataType::UINT8);
+    ASSERT_EQ(networkOutputTensor.getDataType(), Tensor::DataType::FP32);
 
     ThorImplementation::StampedNetwork stampedNetwork;
     int gpuNum = 0;
@@ -539,7 +543,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(stampedNetwork.inputs.size(), 2u);
     ASSERT_EQ(stampedNetwork.outputs.size(), 3u);
     ASSERT_EQ(stampedNetwork.trainableLayers.size(), 13u);
-    ASSERT_EQ(stampedNetwork.otherLayers.size(), 28u);
+    ASSERT_EQ(stampedNetwork.otherLayers.size(), 27u);
 
     ThorImplementation::NetworkInput *images;
     ThorImplementation::NetworkInput *labels;
@@ -646,7 +650,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
         }
     }
 
-    ASSERT_EQ(tc.size(), 1u);
+    ASSERT_EQ(tc.size(), 0u);
     ASSERT_EQ(fo.size(), 3u);
     ASSERT_EQ(r.size(), 12u);
     ASSERT_EQ(p.size(), 6u);
@@ -657,8 +661,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(acc.size(), 1u);
 
     // Forward
-    ASSERT_EQ(images->getFeatureOutput().get(), tc[0]->getFeatureInput().get());
-    ASSERT_EQ(tc[0]->getFeatureOutput().get(), fo[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(images->getFeatureOutput().get(), fo[0]->getFeatureInputs()[0].get());
     ASSERT_EQ(fo[0]->getFeatureOutputs()[0].get(), cv[0]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
     ASSERT_EQ(r[0]->getFeatureOutput().get(), cv[1]->getFeatureInputs()[0].get());
@@ -707,9 +710,6 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(acc[0]->getFeatureOutput().get(), accuracy->getFeatureInput().get());
 
     // Backward
-    ASSERT_TRUE(tc[0]->getErrorOutput().isEmpty());
-    ASSERT_TRUE(tc[0]->getErrorInput().isEmpty());
-
     ASSERT_TRUE(fo[0]->getErrorOutputs()[0].isEmpty());
     ASSERT_TRUE(fo[0]->getErrorInputs()[0].isEmpty());
     ASSERT_TRUE(cv[0]->getErrorOutputs()[0].isEmpty());

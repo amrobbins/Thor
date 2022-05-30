@@ -53,7 +53,7 @@ int main() {
     tensorsToReturn.insert("loss");
     tensorsToReturn.insert("accuracy");
 
-    executor->trainEpochs(200, tensorsToReturn);
+    executor->trainEpochs(50, tensorsToReturn);
 
     /*
         for(uint32_t i = 0; i < 200; ++i) {

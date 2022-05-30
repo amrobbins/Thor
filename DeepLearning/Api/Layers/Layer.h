@@ -23,7 +23,7 @@ class Initializer;
 
 class Layer {
    public:
-    Layer() : initialized(false), id(nextId.fetch_add(1)) {}
+    Layer() : initialized(false), id(getUnusedId()) {}
     virtual ~Layer() {}
 
     uint64_t getId() const { return id; }
@@ -63,6 +63,10 @@ class Layer {
     virtual vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().get()}; }
 
     virtual shared_ptr<Layer> clone() const = 0;
+
+    static uint64_t getUnusedId() { return nextId.fetch_add(1); }
+
+    virtual string getLayerType() const = 0;
 
    protected:
     Optional<Tensor> featureInput;

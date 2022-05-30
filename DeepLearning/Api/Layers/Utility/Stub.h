@@ -17,6 +17,8 @@ class Stub : public Layer {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Stub>(*this); }
 
+    virtual string getLayerType() const { return "Stub"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const { assert(false); }
 

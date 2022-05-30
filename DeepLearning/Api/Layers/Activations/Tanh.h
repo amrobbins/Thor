@@ -14,6 +14,8 @@ class Tanh : public Activation {
 
     virtual shared_ptr<Layer> clone() const { return make_shared<Tanh>(*this); }
 
+    virtual string getLayerType() const { return "Tanh"; }
+
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,

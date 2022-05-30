@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
@@ -213,8 +214,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 (half *)weights.getMemPtr(),
                 (half *)weights.getMemPtr(),
                 (half *)weightsGradient.getMemPtr(),
-                (float)((-1.0f * learningRate) /
-                        (lossScalingFactor * batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
+                (float)((-1.0f * learningRate) / (Loss::getLossScalingFactor() *
+                                                  batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
+                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
+                // processing a batch, and each item in the batch provides a share of that update.
                 weights.getDescriptor().getTotalNumElements(),
                 stream);
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
@@ -224,18 +227,22 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                 (half *)weights.getMemPtr(),
                 (float *)weightsGradient.getMemPtr(),
                 (-1.0f * learningRate) /
-                    (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
+                    (Loss::getLossScalingFactor() * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                 weights.getDescriptor().getTotalNumElements(),
                 stream);
+            // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
+            // processing a batch, and each item in the batch provides a share of that update.
         } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
                    weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
             sumScale((float *)weights.getMemPtr(),
                      (float *)weights.getMemPtr(),
                      (float *)weightsGradient.getMemPtr(),
-                     (-1.0f * learningRate) /
-                         (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
+                     (-1.0f * learningRate) / (Loss::getLossScalingFactor() *
+                                               batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                      weights.getDescriptor().getTotalNumElements(),
                      stream);
+            // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
+            // processing a batch, and each item in the batch provides a share of that update.
         } else {
             assert(false);
         }
@@ -248,10 +255,12 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                     (half *)biases.get().getMemPtr(),
                     (half *)biases.get().getMemPtr(),
                     (half *)biasesGradient.get().getMemPtr(),
-                    (float)((-1.0f * learningRate) /
-                            (lossScalingFactor * batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
+                    (float)((-1.0f * learningRate) / (Loss::getLossScalingFactor() *
+                                                      batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
                     biases.get().getDescriptor().getTotalNumElements(),
                     stream);
+                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
+                // processing a batch, and each item in the batch provides a share of that update.
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
                        biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
                 sumScaleHalfSourceDest(
@@ -259,18 +268,22 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                     (half *)biases.get().getMemPtr(),
                     (float *)biasesGradient.get().getMemPtr(),
                     (-1.0f * learningRate) /
-                        (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
+                        (Loss::getLossScalingFactor() * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                     biases.get().getDescriptor().getTotalNumElements(),
                     stream);
+                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
+                // processing a batch, and each item in the batch provides a share of that update.
             } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
                        biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
                 sumScale((float *)biases.get().getMemPtr(),
                          (float *)biases.get().getMemPtr(),
                          (float *)biasesGradient.get().getMemPtr(),
-                         (-1.0f * learningRate) /
-                             (lossScalingFactor * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
+                         (-1.0f * learningRate) / (Loss::getLossScalingFactor() *
+                                                   batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
                          biases.get().getDescriptor().getTotalNumElements(),
                          stream);
+                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
+                // processing a batch, and each item in the batch provides a share of that update.
             } else {
                 assert(false);
             }
@@ -323,8 +336,6 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    private:
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
-
-    uint32_t lossScalingFactor = 1;
 };
 
 }  // namespace ThorImplementation

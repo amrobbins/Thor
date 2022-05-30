@@ -5,15 +5,6 @@ using namespace Thor;
 void Convolution2d::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());
 
-    BatchNormalization::Builder batchNormBuilder;
-    if (useBatchNormalization) {
-        batchNormBuilder.network(*network);
-        if (batchNormExponentialRunningAverageFactor.isPresent())
-            batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor.get());
-        if (batchNormEpsilon.isPresent())
-            batchNormBuilder.epsilon(batchNormEpsilon.get());
-    }
-
     Convolution2d::Builder convolution2dBuilder;
     convolution2dBuilder.network(*network)
         .numOutputChannels(numOutputChannels)
@@ -33,13 +24,29 @@ void Convolution2d::convertToSingleLayersAndAddToNetwork() {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         currentFeatureInputs.push_back(featureInputs[i]);
 
+    // Force the input tensor to this type of layer to be FP16
+    if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            TypeConverter typeConverter = TypeConverter::Builder()
+                                              .network(*network)
+                                              .featureInput(currentFeatureInputs[i])
+                                              .newDataType(Tensor::DataType::FP16)
+                                              .build();
+            currentFeatureInputs[i] = typeConverter.getFeatureOutput();
+        }
+    }
+
     if (useBatchNormalization) {
+        BatchNormalization::Builder batchNormBuilder;
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             batchNormBuilder.featureInput(currentFeatureInputs[i]);
         }
-        BatchNormalization batchNormalization = batchNormBuilder.build();
-        for (uint32_t i = 0; i < featureInputs.size(); ++i)
-            currentFeatureInputs[i] = batchNormalization.getFeatureOutputs()[i];
+        if (batchNormExponentialRunningAverageFactor.isPresent())
+            batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor);
+        if (batchNormEpsilon.isPresent())
+            batchNormBuilder.epsilon(batchNormEpsilon);
+        BatchNormalization batchNormalization = batchNormBuilder.network(*network).build();
+        currentFeatureInputs = batchNormalization.getFeatureOutputs();
     }
 
     if (dropProportion > 0.0f) {
@@ -58,9 +65,11 @@ void Convolution2d::convertToSingleLayersAndAddToNetwork() {
 
     if (activationBuilder) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            activationBuilder->network(*network);
-            activationBuilder->featureInput(currentFeatureInputs[i]);
-            shared_ptr<Layer> activation = activationBuilder->build();
+            shared_ptr<Activation::Builder> activationBuilderClone = activationBuilder->clone();
+            activationBuilderClone->network(*network);
+            activationBuilderClone->featureInput(currentFeatureInputs[i]);
+            // Since activation may be one of many classes, the base class is built and its virtual build function is used.
+            shared_ptr<Layer> activation = activationBuilderClone->build();
             currentFeatureInputs[i] = activation->getFeatureOutput();
         }
     }

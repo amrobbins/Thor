@@ -189,6 +189,9 @@ class Network {
     virtual void setNetworkName(string networkName) { this->networkName = networkName; }
     virtual string getNetworkName() { return networkName; }
 
+   private:
+    static const bool DEBUG_STAMP = false;
+
    protected:
     set<shared_ptr<Layer>> network;
     vector<pair<Optional<Tensor>, Layer *>> orderedNetwork;
@@ -239,14 +242,7 @@ class Network {
     }
 
     // Take a snapshot of layer and add the snapshot to the network
-    void addToNetwork(Layer *layer) {
-        frozen = false;
-        if (layer->isMultiLayer())
-            layer->convertToSingleLayersAndAddToNetwork();
-        else
-            addSingleLayerToNetwork(layer);
-    }
-
+    void addToNetwork(Layer *layer);
     void addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
 
     std::string networkName;
