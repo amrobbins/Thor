@@ -411,6 +411,8 @@ uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, Tensor
 
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
+        // It is only valid to get first instance bytes on single layers
+        assert(!layer->isMultiLayer());
         bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
     return bytes;
@@ -560,24 +562,6 @@ void Network::stampNetworkOutput(Tensor inputTensor,
             printf("stamped tensor fanout - network output\n");
             fflush(stdout);
         }
-    }
-
-    // Stamp type converter if needed
-    if (networkOutput->getDataType() != inputTensor.getDataType()) {
-        ThorImplementation::TypeConversion *implementationTypeConversion =
-            new ThorImplementation::TypeConversion(Tensor::convertToImplementationDataType(networkOutput->getDataType()));
-        Thor::Layer::connectTwoLayers(physicalDrivingLayer, implementationTypeConversion, apiDrivingLayer, nullptr, inputTensor);
-        physicalDrivingLayer = implementationTypeConversion;
-        inputTensor.setDataType(networkOutput->getDataType());
-
-        stampedNetwork.otherLayers.push_back(implementationTypeConversion);
-        if (DEBUG_STAMP) {
-            printf("stamped type conversion\n");
-            fflush(stdout);
-        }
-
-        apiDrivingLayer = nullptr;
-        stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
     }
 
     // Stamp the network output
