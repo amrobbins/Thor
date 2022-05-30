@@ -227,6 +227,107 @@ TEST(Flatten, Builds) {
     ASSERT_FALSE(flatten < *clone);
 }
 
+TEST(Reshape, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> inputDimensions = {2, 6, 4, 1};
+    vector<uint64_t> outputDimensions = {8, 1, 6};
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    Tensor featureInput(dataType, inputDimensions);
+    Reshape reshape = Reshape::Builder().network(network).featureInput(featureInput).newDimensions(outputDimensions).build();
+
+    ASSERT_TRUE(reshape.isInitialized());
+
+    Optional<Tensor> actualInput = reshape.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), dataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), inputDimensions);
+
+    Optional<Tensor> actualOutput = reshape.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(outputDimensions, actualOutput.get().getDimensions());
+
+    shared_ptr<Layer> cloneLayer = reshape.clone();
+    Reshape *clone = dynamic_cast<Reshape *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), inputDimensions);
+
+    ASSERT_EQ(reshape.getId(), clone->getId());
+    ASSERT_GT(reshape.getId(), 1u);
+
+    actualOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
+    ASSERT_EQ(outputDimensions, actualOutput.get().getDimensions());
+
+    ASSERT_TRUE(reshape == *clone);
+    ASSERT_FALSE(reshape != *clone);
+    ASSERT_FALSE(reshape > *clone);
+    ASSERT_FALSE(reshape < *clone);
+}
+
+TEST(TypeConverter, Builds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    vector<uint64_t> dimensions = {2, 6, 4, 1};
+    Tensor::DataType inputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
+    Tensor::DataType outputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
+    while (outputDataType == inputDataType)
+        outputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
+
+    Tensor featureInput(inputDataType, dimensions);
+    TypeConverter typeConverter = TypeConverter::Builder().network(network).featureInput(featureInput).newDataType(outputDataType).build();
+
+    ASSERT_TRUE(typeConverter.isInitialized());
+
+    Optional<Tensor> actualInput = typeConverter.getFeatureInput();
+    ASSERT_TRUE(actualInput.isPresent());
+    ASSERT_EQ(actualInput.get().getDataType(), inputDataType);
+    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+
+    Optional<Tensor> actualOutput = typeConverter.getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), outputDataType);
+    ASSERT_EQ(dimensions, actualOutput.get().getDimensions());
+
+    shared_ptr<Layer> cloneLayer = typeConverter.clone();
+    TypeConverter *clone = dynamic_cast<TypeConverter *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    Optional<Tensor> cloneInput = clone->getFeatureInput();
+    ASSERT_TRUE(cloneInput.isPresent());
+    ASSERT_EQ(cloneInput.get().getDataType(), inputDataType);
+    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+    ASSERT_EQ(typeConverter.getId(), clone->getId());
+    ASSERT_GT(typeConverter.getId(), 1u);
+
+    actualOutput = clone->getFeatureOutput();
+    ASSERT_TRUE(actualOutput.isPresent());
+    ASSERT_EQ(actualOutput.get().getDataType(), outputDataType);
+    ASSERT_EQ(dimensions, actualOutput.get().getDimensions());
+
+    ASSERT_TRUE(typeConverter == *clone);
+    ASSERT_FALSE(typeConverter != *clone);
+    ASSERT_FALSE(typeConverter > *clone);
+    ASSERT_FALSE(typeConverter < *clone);
+}
+
 TEST(DropOut, Builds) {
     srand(time(nullptr));
 

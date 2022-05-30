@@ -45,25 +45,10 @@ class Reshape::Builder {
         assert(_featureInput.isPresent());
         assert(_newDimensions.isPresent());
 
-        uint64_t totalInputElements = 1;
-        vector<uint64_t> inputDimensions = _featureInput.get().getDimensions();
-        assert(inputDimensions.size() > 0);
-        for (uint32_t i = 0; i < inputDimensions.size(); ++i) {
-            assert(inputDimensions[i] > 0);
-            totalInputElements *= inputDimensions[i];
-        }
-        vector<uint64_t> outputDimensions = _newDimensions.get();
-        assert(outputDimensions.size() > 0);
-        uint64_t totalOutputElements = 1;
-        for (uint32_t i = 0; i < outputDimensions.size(); ++i) {
-            assert(outputDimensions[i] > 0);
-            totalOutputElements *= outputDimensions[i];
-        }
-        assert(totalInputElements == totalOutputElements);
-
         Reshape Reshape;
         Reshape.featureInput = _featureInput;
-        Reshape.featureOutput = Tensor(_featureInput.get().getDataType(), outputDimensions);
+        Reshape.featureOutput = Tensor(_featureInput.get().getDataType(), _newDimensions.get());
+        assert(Reshape.featureInput.get().getTotalNumElements() == Reshape.featureOutput.get().getTotalNumElements());
         Reshape.initialized = true;
         Reshape.addToNetwork(_network.get());
         return Reshape;
