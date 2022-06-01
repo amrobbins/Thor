@@ -85,9 +85,6 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
 
         ConvolutionTestHelper::cpuConvolutionBackwardBias(errorInputCpu, biasesGradientCpu, accumulate);
 
-        cudaError_t cudaStatus;
-        cudaStatus = cudaDeviceSynchronize();
-        assert(cudaStatus == cudaSuccess);
         biasesGradientGpu_h.copyFromAsync(biasesGradientGpu, stream);
         stream.synchronize();
 
@@ -201,9 +198,6 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
 
         ConvolutionTestHelper::cpuConvolutionForward(featureInputCpu, weightsCpu, biasCpu, featureOutputCpu, convolutionKernelRequirement);
 
-        cudaError_t cudaStatus;
-        cudaStatus = cudaDeviceSynchronize();
-        assert(cudaStatus == cudaSuccess);
         featureOutputGpu_h.copyFromAsync(featureOutputGpu, stream);
         stream.synchronize();
 
@@ -323,9 +317,6 @@ void backwardFilterTest(bool accumulate) {
         ConvolutionTestHelper::cpuConvolutionBackwardFilter(
             featureInputCpu, errorInputCpu, weightsGradientCpu, convolutionKernelRequirement, accumulate);
 
-        cudaError_t cudaStatus;
-        cudaStatus = cudaDeviceSynchronize();
-        assert(cudaStatus == cudaSuccess);
         weightsGradientGpu_h.copyFromAsync(weightsGradientGpu, stream);
         stream.synchronize();
 
@@ -382,8 +373,6 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
                                                                   numInputRows);
         int numOutputRows = convolutionKernelRequirement.getNumOutputRows();
         int numOutputColumns = convolutionKernelRequirement.getNumOutputColumns();
-
-        // printf("%s\n", convolutionKernelRequirement.toString().c_str()); fflush(stdout);
 
         assert(convolutionKernelRequirement.getNumOutputColumns() ==
                ConvolutionTestHelper::computeOutputDimensionSize(convolutionKernelRequirement.getNumInputColumns(),
@@ -446,9 +435,6 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
 
         ConvolutionTestHelper::cpuConvolutionBackwardData(errorInputCpu, weightsCpu, errorOutputCpu, convolutionKernelRequirement);
 
-        cudaError_t cudaStatus;
-        cudaStatus = cudaDeviceSynchronize();
-        assert(cudaStatus == cudaSuccess);
         errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
         stream.synchronize();
 

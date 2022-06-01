@@ -234,10 +234,6 @@ class CategoricalCrossEntropyLoss : public Loss {
         } else {
             assert(false);
         }
-
-        // FIXME: At the API layer I should offer 3 options: loss per batch, loss per batch item, loss per batch item per class.
-        //        Currently this layer outputs loss per batch item, it should output loss per batch item per class and a subsequent layer
-        //        should reduce as desired.
     }
 
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {
@@ -353,6 +349,10 @@ class CategoricalCrossEntropyLoss : public Loss {
         } else {
             assert(false);
         }
+
+        // FIXME: At the API layer I should offer 3 options: loss per batch, loss per batch item, loss per batch item per class.
+        //        Currently this layer outputs loss per batch item, it should output loss per batch item per class and a subsequent layer
+        //        should reduce as desired.
     }
 
     virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) {
