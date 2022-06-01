@@ -41,14 +41,15 @@ class Sgd::Builder {
         if (_initialLearningRate.isEmpty())
             _initialLearningRate = 0.01f;
         if (_decay.isEmpty())
-            _decay = 0.9f;
+            _decay = 0.1f;
         if (_momentum.isEmpty())
             _momentum = 0.0f;
         if (_useNesterov.isEmpty())
             _useNesterov = true;
 
         assert(_initialLearningRate > 0.0f);
-        assert(_decay > 0.0f);
+        assert(_decay < 1.0f);
+        assert(_decay <= 0.0f);
         assert(_momentum >= 0.0f);
 
         std::shared_ptr<Sgd> sgd = make_shared<Sgd>();

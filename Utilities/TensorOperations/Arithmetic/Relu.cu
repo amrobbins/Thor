@@ -7,10 +7,10 @@ __global__ void relu(half *dest, half *source, int numElements) {
     if (element >= numElements)
         return;
 
-    double *source_half_4 = (double*)source;
+    double *source_half_4 = (double *)source;
     double finBuffer_half_4[1];
     finBuffer_half_4[0] = source_half_4[element / 4];
-    half *finBuffer = (half*)finBuffer_half_4;
+    half *finBuffer = (half *)finBuffer_half_4;
     half foutBuffer[4];
 
     half fin = finBuffer[0];
@@ -44,7 +44,7 @@ __global__ void relu(half *dest, half *source, int numElements) {
 
     double *fout_half_4 = (double *)foutBuffer;
     double *dest_half_4 = (double *)dest;
-    dest_half_4[element/4] = fout_half_4[0];
+    dest_half_4[element / 4] = fout_half_4[0];
 }
 
 __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
@@ -54,10 +54,10 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
     if (element >= numElements)
         return;
 
-    double *featureIn_half_4 = (double*)featureIn;
+    double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
     featureInBuffer_half_4[0] = featureIn_half_4[element / 4];
-    half *featureInBuffer = (half*)featureInBuffer_half_4;
+    half *featureInBuffer = (half *)featureInBuffer_half_4;
     half errorOutBuffer[4];
 
     half eOut;
@@ -100,7 +100,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
     double *errorOut_half_4 = (double *)errorOut;
-    errorOut_half_4[element/4] = errorOutBuffer_half_4[0];
+    errorOut_half_4[element / 4] = errorOutBuffer_half_4[0];
 }
 
 void launchRelu(half *dest_d, half *source_d, int numElements, Stream stream) {
