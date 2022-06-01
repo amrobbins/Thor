@@ -19,6 +19,101 @@ using std::vector;
 
 using namespace Thor;
 
+Network buildSingleLayerConvolution2d() {
+    Network singleLayerConvolution2d;
+    singleLayerConvolution2d.setNetworkName("singleLayerConvolution2d");
+
+    vector<uint64_t> expectedDimensions;
+
+    Glorot::Builder glorot = Glorot::Builder();
+
+    NetworkInput imagesInput = NetworkInput::Builder()
+                                   .network(singleLayerConvolution2d)
+                                   .name("examples")
+                                   .dimensions({1, 28, 28})
+                                   .dataType(Tensor::DataType::FP32)
+                                   .build();
+
+    Tensor latestOutputTensor;
+    latestOutputTensor = Convolution2d::Builder()
+                             .network(singleLayerConvolution2d)
+                             .featureInput(imagesInput.getFeatureOutput())
+                             .numOutputChannels(128)
+                             .filterHeight(28)
+                             .filterWidth(28)
+                             .verticalStride(1)
+                             .horizontalStride(1)
+                             .noPadding()
+                             .hasBias(true)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
+                             .activationBuilder(Relu::Builder())
+                             .build()
+                             .getFeatureOutput();
+    expectedDimensions = {128, 1, 1};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+
+    latestOutputTensor = FullyConnected::Builder()
+                             .network(singleLayerConvolution2d)
+                             .featureInput(latestOutputTensor)
+                             .numOutputFeatures(10)
+                             .hasBias(true)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
+                             .noActivation()
+                             .build()
+                             .getFeatureOutput();
+    expectedDimensions = {10};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+
+    Tensor labelsTensor = NetworkInput::Builder()
+                              .network(singleLayerConvolution2d)
+                              .name("labels")
+                              .dimensions({10})
+                              .dataType(Tensor::DataType::UINT8)
+                              .build()
+                              .getFeatureOutput();
+
+    CategoricalCrossEntropyLoss lossLayer = CategoricalCrossEntropyLoss::Builder()
+                                                .network(singleLayerConvolution2d)
+                                                .featureInput(latestOutputTensor)
+                                                .labels(labelsTensor)
+                                                .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
+                                                .build();
+
+    labelsTensor = lossLayer.getLabels();
+
+    NetworkOutput predictions = NetworkOutput::Builder()
+                                    .network(singleLayerConvolution2d)
+                                    .name("predictions")
+                                    .inputTensor(lossLayer.getPredictions())
+                                    .dataType(Tensor::DataType::FP32)
+                                    .build();
+    NetworkOutput loss = NetworkOutput::Builder()
+                             .network(singleLayerConvolution2d)
+                             .name("loss")
+                             .inputTensor(lossLayer.getLoss())
+                             .dataType(Tensor::DataType::FP32)
+                             .build();
+
+    CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
+                                            .network(singleLayerConvolution2d)
+                                            .predictions(lossLayer.getPredictions())
+                                            .labels(labelsTensor)
+                                            .build();
+
+    NetworkOutput accuracy = NetworkOutput::Builder()
+                                 .network(singleLayerConvolution2d)
+                                 .name("accuracy")
+                                 .inputTensor(accuracyLayer.getMetric())
+                                 .dataType(Tensor::DataType::FP32)
+                                 .build();
+
+    // Return the assembled network
+    return singleLayerConvolution2d;
+}
+
+
 int main() {
     Network singleLayerConvolution2d = buildSingleLayerConvolution2d();
 
@@ -29,7 +124,7 @@ int main() {
     // home/andrew/mnist/raw
     // test_images.bin  test_labels.bin  train_images.bin  train_labels.bin
     // These are raw 1 byte pixels of 28x28 images and raw 1 byte labels
-    // Need to get these into a shard
+    // These have been put into a shard
 
     assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/Mnist_1_of_1.shard"));
     shardPaths.insert("/media/andrew/PCIE_SSD/Mnist_1_of_1.shard");
@@ -54,42 +149,6 @@ int main() {
     tensorsToReturn.insert("accuracy");
 
     executor->trainEpochs(50, tensorsToReturn);
-
-    /*
-        for(uint32_t i = 0; i < 200; ++i) {
-            executor->trainEpochs(1, tensorsToReturn);
-
-            ThorImplementation::NetworkInput *labelsInput = executor->stampedNetworks.back().inputNamed["labels"];
-            ThorImplementation::Tensor labels_d = labelsInput->getFeatureOutput();
-            ThorImplementation::Tensor labels_h = labels_d.clone(TensorPlacement::MemDevices::CPU);
-            labels_h.copyFromAsync(labels_d, labelsInput->getStream());
-            labelsInput->getStream().synchronize();
-
-            uint8_t *labelArray = (uint8_t *)labels_h.getMemPtr();
-            vector<uint32_t> labelVector;
-            vector<uint8_t> bestLabelVector;
-            uint32_t numClasses = 10;
-            for (uint32_t b = 0; b < 6; ++b) {
-                uint8_t bestLabel = labelArray[b * numClasses];
-                labelVector.push_back(0);
-                for (uint32_t c = 1; c < numClasses; ++c) {
-                    uint8_t classLabel = labelArray[b * numClasses + c];
-                    if (classLabel > bestLabel) {
-                        labelVector.pop_back();
-                        labelVector.push_back(c);
-                        bestLabel = classLabel;
-                    }
-                }
-                bestLabelVector.push_back(bestLabel);
-            }
-            printf("\rLabels:      ");
-            for (uint32_t i = 0; i < labelVector.size(); ++i)
-                printf("%d(%d) ", labelVector[i], (uint32_t)bestLabelVector[i]);
-            printf("\n\n");
-            fflush(stdout);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-        }
-    */
 
     return 0;
 }

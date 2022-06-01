@@ -1,86 +1,106 @@
 #include "Relu.h"
 
 __global__ void relu(half *dest, half *source, int numElements) {
-    half fout;
     half zero = half(0.0f);
-    int element = blockIdx.x * 1024 + threadIdx.x;
+    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
-    fout = source[element];
-    if (fout <= zero)
-        fout = zero;
-    dest[element] = fout;
-    element += 256;
 
-    if (element >= numElements)
-        return;
-    fout = source[element];
-    if (fout <= zero)
-        fout = zero;
-    dest[element] = fout;
-    element += 256;
+    double *source_half_4 = (double*)source;
+    double finBuffer_half_4[1];
+    finBuffer_half_4[0] = source_half_4[element / 4];
+    half *finBuffer = (half*)finBuffer_half_4;
+    half foutBuffer[4];
 
-    if (element >= numElements)
-        return;
-    fout = source[element];
-    if (fout <= zero)
-        fout = zero;
-    dest[element] = fout;
-    element += 256;
+    half fin = finBuffer[0];
+    if (fin < zero)
+        fin = zero;
+    foutBuffer[0] = fin;
 
-    if (element >= numElements)
-        return;
-    fout = source[element];
-    if (fout <= zero)
-        fout = zero;
-    dest[element] = fout;
+    element += 1;
+    if (element < numElements) {
+        fin = finBuffer[1];
+        if (fin < zero)
+            fin = zero;
+        foutBuffer[1] = fin;
+    }
+
+    element += 1;
+    if (element < numElements) {
+        fin = finBuffer[2];
+        if (fin < zero)
+            fin = zero;
+        foutBuffer[2] = fin;
+    }
+
+    element += 1;
+    if (element < numElements) {
+        fin = finBuffer[3];
+        if (fin < zero)
+            fin = zero;
+        foutBuffer[3] = fin;
+    }
+
+    double *fout_half_4 = (double *)foutBuffer;
+    double *dest_half_4 = (double *)dest;
+    dest_half_4[element/4] = fout_half_4[0];
 }
 
 __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
-    half fin;
-    half eout;
     half zero = half(0.0f);
+    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
-    int element = blockIdx.x * 1024 + threadIdx.x;
     if (element >= numElements)
         return;
-    fin = featureIn[element];
-    if (fin > zero)
-        eout = errorIn[element];
-    else
-        eout = zero;
-    errorOut[element] = eout;
 
-    element += 256;
-    if (element >= numElements)
-        return;
-    fin = featureIn[element];
-    if (fin > zero)
-        eout = errorIn[element];
-    else
-        eout = zero;
-    errorOut[element] = eout;
+    double *featureIn_half_4 = (double*)featureIn;
+    double featureInBuffer_half_4[1];
+    featureInBuffer_half_4[0] = featureIn_half_4[element / 4];
+    half *featureInBuffer = (half*)featureInBuffer_half_4;
+    half errorOutBuffer[4];
 
-    element += 256;
-    if (element >= numElements)
-        return;
-    fin = featureIn[element];
+    half eOut;
+    half fin = featureInBuffer[0];
     if (fin > zero)
-        eout = errorIn[element];
+        eOut = errorIn[element];
     else
-        eout = zero;
-    errorOut[element] = eout;
+        eOut = zero;
+    errorOutBuffer[0] = eOut;
 
-    element += 256;
-    if (element >= numElements)
-        return;
-    fin = featureIn[element];
-    if (fin > zero)
-        eout = errorIn[element];
-    else
-        eout = zero;
-    errorOut[element] = eout;
+    element += 1;
+    if (element < numElements) {
+        fin = featureInBuffer[1];
+        if (fin > zero)
+            eOut = errorIn[element];
+        else
+            eOut = zero;
+        errorOutBuffer[1] = eOut;
+    }
+
+    element += 1;
+    if (element < numElements) {
+        fin = featureInBuffer[2];
+        if (fin > zero)
+            eOut = errorIn[element];
+        else
+            eOut = zero;
+        errorOutBuffer[2] = eOut;
+    }
+
+    element += 1;
+    if (element < numElements) {
+        fin = featureInBuffer[3];
+        if (fin > zero)
+            eOut = errorIn[element];
+        else
+            eOut = zero;
+        errorOutBuffer[3] = eOut;
+    }
+
+    double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
+    double *errorOut_half_4 = (double *)errorOut;
+    errorOut_half_4[element/4] = errorOutBuffer_half_4[0];
 }
 
 void launchRelu(half *dest_d, half *source_d, int numElements, Stream stream) {
