@@ -39,7 +39,7 @@ int main() {
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 256);
     batchLoader->setDatasetName("ImageNet 2012");
 
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01).decay(0.8).momentum(0.0).build();
+    std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.05).decay(0.2).momentum(0.0).build();
 
     shared_ptr<Thor::LocalExecutor> executor =
         LocalExecutor::Builder().network(alexNet).loader(batchLoader).optimizer(sgd).visualizer(&ConsoleVisualizer::instance()).build();

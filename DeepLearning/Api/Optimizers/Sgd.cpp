@@ -13,7 +13,7 @@ unordered_map<string, float> Sgd::updateParameters(uint64_t epoch, uint64_t batc
 
     assert(network != nullptr);
 
-    if (!parametersInitialized || (epoch != currentEpoch && decay != 1.0)) {
+    if (!parametersInitialized || (epoch != currentEpoch && decay > 0.0)) {
         parametersInitialized = true;
         currentEpoch = epoch;
 
@@ -32,7 +32,7 @@ unordered_map<string, float> Sgd::initializeStampedNetworkParameters(ThorImpleme
                                                                      uint64_t epoch,
                                                                      uint64_t batch,
                                                                      uint64_t batchesPerEpoch) {
-    float currentLearningRate = initialLearningRate * pow((double)decay, (double)epoch);
+    float currentLearningRate = initialLearningRate * pow(1.0 - (double)decay, (double)epoch);
     for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
         ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer = stampedNetwork.trainableLayers[i];
         trainableLayer->setLearningRate(currentLearningRate);
