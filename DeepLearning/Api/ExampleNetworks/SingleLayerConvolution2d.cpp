@@ -21,7 +21,7 @@ Network buildSingleLayerConvolution2d() {
     latestOutputTensor = Convolution2d::Builder()
                              .network(singleLayerConvolution2d)
                              .featureInput(imagesInput.getFeatureOutput())
-                             .numOutputChannels(10)
+                             .numOutputChannels(128)
                              .filterHeight(28)
                              .filterWidth(28)
                              .verticalStride(1)
@@ -30,16 +30,20 @@ Network buildSingleLayerConvolution2d() {
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
-                             .noActivation()
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
-    expectedDimensions = {10, 1, 1};
+    expectedDimensions = {128, 1, 1};
     assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
-    latestOutputTensor = Flatten::Builder()
+    latestOutputTensor = FullyConnected::Builder()
                              .network(singleLayerConvolution2d)
                              .featureInput(latestOutputTensor)
-                             .numOutputDimensions(1)
+                             .numOutputFeatures(10)
+                             .hasBias(true)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
+                             .noActivation()
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {10};

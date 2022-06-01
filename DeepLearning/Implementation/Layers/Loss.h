@@ -265,7 +265,7 @@ class Loss : public Layer {
     Optional<Tensor> batchLossOutput;
 
     // FIXME: only const for now for convenience
-    static const uint32_t lossScalingFactor = 1;
+    static const uint32_t lossScalingFactor = 100;
     Stream labelsStream;
 
     bool featureInputReceived;

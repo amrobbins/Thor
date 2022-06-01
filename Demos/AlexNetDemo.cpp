@@ -11,6 +11,8 @@
 
 #include <unistd.h>
 
+#include <cuda_profiler_api.h>
+
 using std::set;
 using std::shared_ptr;
 using std::string;
@@ -22,6 +24,8 @@ using namespace Thor;
 int main() {
     Thor::Network alexNet = buildAlexNet();
     // Thor::Network alexNet = buildDeepFullyConnected();
+
+    assert(cudaProfilerStop() == cudaSuccess);
 
     cudaDeviceReset();
 
