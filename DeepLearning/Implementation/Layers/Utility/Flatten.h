@@ -32,14 +32,17 @@ class Flatten : public Layer {
         return outputTensor;
     }
 
+    // FIXME: how to avoid needing a new tensor here?
+
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
         // No Op, the output tensor is the same memory as the input tensor, but has a different tensor descriptor representing a flattened
         // output tensor
     }
 
+    // FIXME: How to avoid the unnecessary copy
+    // FIXME: Reshape is broken still
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        // No Op, the output tensor is the same memory as the input tensor, but has a different tensor descriptor representing a the
-        // original feature input tensor
+        errorOut.get().copyFromAsync(errorIn.get(), stream);
     }
 
    private:

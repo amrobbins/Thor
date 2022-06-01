@@ -688,7 +688,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(r[4]->getFeatureOutput().get(), p[2]->getFeatureInput().get());
     ASSERT_EQ(p[2]->getFeatureOutput().get(), cat[0]->getFeatureInputs()[0].get());
 
-    ASSERT_EQ(fo[0]->getFeatureOutputs()[0].get(), cv[5]->getFeatureInputs()[0].get());
+    ASSERT_EQ(imagesFO->getFeatureInputs()[0].get(), cv[5]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[5]->getFeatureOutputs()[0].get(), r[5]->getFeatureInput().get());
     ASSERT_EQ(r[5]->getFeatureOutput().get(), cv[6]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[6]->getFeatureOutputs()[0].get(), r[6]->getFeatureInput().get());

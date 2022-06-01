@@ -22,8 +22,9 @@ class Reshape : public Layer {
         // No op
     }
 
+    // FIXME: How to avoid the unnecessary copy
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        // No Op
+        errorOut.get().copyFromAsync(errorIn.get(), stream);
     }
 
    private:
