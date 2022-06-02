@@ -10,20 +10,21 @@ Network buildSingleLayerConvolution2d() {
 
     Glorot::Builder glorot = Glorot::Builder();
 
-    NetworkInput imagesInput = NetworkInput::Builder()
+    Tensor latestOutputTensor;
+    latestOutputTensor = NetworkInput::Builder()
                                    .network(singleLayerConvolution2d)
                                    .name("examples")
                                    .dimensions({1, 28, 28})
                                    .dataType(Tensor::DataType::FP32)
-                                   .build();
+                                   .build()
+                                   .getFeatureOutput();
 
-    Tensor latestOutputTensor;
     latestOutputTensor = Convolution2d::Builder()
                              .network(singleLayerConvolution2d)
-                             .featureInput(imagesInput.getFeatureOutput())
+                             .featureInput(latestOutputTensor)
                              .numOutputChannels(128)
-                             .filterHeight(28)
-                             .filterWidth(28)
+                             .filterHeight(25)
+                             .filterWidth(25)
                              .verticalStride(1)
                              .horizontalStride(1)
                              .noPadding()
@@ -33,8 +34,29 @@ Network buildSingleLayerConvolution2d() {
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
+    expectedDimensions = {128, 4, 4};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+
+    latestOutputTensor = BatchNormalization::Builder()
+                             .network(singleLayerConvolution2d)
+                             .featureInput(latestOutputTensor)
+                             .build()
+                             .getFeatureOutput();
+    expectedDimensions = {128, 4, 4};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+
+    latestOutputTensor = Pooling::Builder()
+                            .network(singleLayerConvolution2d)
+                            .featureInput(latestOutputTensor)
+                            .type(Pooling::Type::MAX)
+                            .windowHeight(4)
+                            .windowWidth(4)
+                            .noPadding()
+                            .build()
+                            .getFeatureOutput();
     expectedDimensions = {128, 1, 1};
     assert(latestOutputTensor.getDimensions() == expectedDimensions);
+
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(singleLayerConvolution2d)

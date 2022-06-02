@@ -49,7 +49,7 @@ class Sgd::Builder {
 
         assert(_initialLearningRate > 0.0f);
         assert(_decay < 1.0f);
-        assert(_decay <= 0.0f);
+        assert(_decay >= 0.0f);
         assert(_momentum >= 0.0f);
 
         std::shared_ptr<Sgd> sgd = make_shared<Sgd>();
