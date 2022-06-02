@@ -60,10 +60,15 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
     half *featureInBuffer = (half *)featureInBuffer_half_4;
     half errorOutBuffer[4];
 
+    double *errorIn_half_4 = (double *)errorIn;
+    double errorInBuffer_half_4[1];
+    errorInBuffer_half_4[0] = errorIn_half_4[element / 4];
+    half *errorInBuffer = (half *)errorInBuffer_half_4;
+
     half eOut;
     half fin = featureInBuffer[0];
     if (fin > zero)
-        eOut = errorIn[element];
+        eOut = errorInBuffer[0];
     else
         eOut = zero;
     errorOutBuffer[0] = eOut;
@@ -72,7 +77,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
     if (element < numElements) {
         fin = featureInBuffer[1];
         if (fin > zero)
-            eOut = errorIn[element];
+            eOut = errorInBuffer[1];
         else
             eOut = zero;
         errorOutBuffer[1] = eOut;
@@ -82,7 +87,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
     if (element < numElements) {
         fin = featureInBuffer[2];
         if (fin > zero)
-            eOut = errorIn[element];
+            eOut = errorInBuffer[2];
         else
             eOut = zero;
         errorOutBuffer[2] = eOut;
@@ -92,7 +97,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
     if (element < numElements) {
         fin = featureInBuffer[3];
         if (fin > zero)
-            eOut = errorIn[element];
+            eOut = errorInBuffer[3];
         else
             eOut = zero;
         errorOutBuffer[3] = eOut;

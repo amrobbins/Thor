@@ -1,15 +1,14 @@
 #include "Swish.h"
 
-__global__ void swish(half *dest, half *source, int numElements) {
-    half zero = half(0.0f);
+__global__ void swish(half *featureOut, half *featureIn, int numElements) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
 
-    double *source_half_4 = (double *)source;
+    double *featureIn_half_4 = (double *)featureIn;
     double finBuffer_half_4[1];
-    finBuffer_half_4[0] = source_half_4[element / 4];
+    finBuffer_half_4[0] = featureIn_half_4[element / 4];
     half *finBuffer = (half *)finBuffer_half_4;
     half foutBuffer[4];
 
@@ -42,8 +41,8 @@ __global__ void swish(half *dest, half *source, int numElements) {
     }
 
     double *fout_half_4 = (double *)foutBuffer;
-    double *dest_half_4 = (double *)dest;
-    dest_half_4[element / 4] = fout_half_4[0];
+    double *featureOut_half_4 = (double *)featureOut;
+    featureOut_half_4[element / 4] = fout_half_4[0];
 }
 
 // d/dx(x/(1 + exp(-x))) = (e^x (x + e^x + 1))/(e^x + 1)^2
@@ -112,11 +111,11 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
     errorOut_half_4[element / 4] = errorOutBuffer_half_4[0];
 }
 
-void launchSwish(half *dest_d, half *source_d, int numElements, Stream stream) {
+void launchSwish(half *featureOut_d, half *featureIn_d, int numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
-    swish<<<gridSize, blockSize, 0, stream>>>(dest_d, source_d, numElements);
+    swish<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements);
 }
 
 void launchSwishBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
