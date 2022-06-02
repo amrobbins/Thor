@@ -10,18 +10,30 @@ Network buildSingleLayerFullyConnected() {
 
     Glorot::Builder glorot = Glorot::Builder();
 
-    NetworkInput imagesInput = NetworkInput::Builder()
-                                   .network(singleLayerFullyConnected)
-                                   .name("examples")
-                                   .dimensions({28 * 28})
-                                   .dataType(Tensor::DataType::FP32)
-                                   .build();
-
-    Tensor latestOutputTensor;
+    Tensor latestOutputTensor = NetworkInput::Builder()
+                                    .network(singleLayerFullyConnected)
+                                    .name("examples")
+                                    .dimensions({28 * 28})
+                                    .dataType(Tensor::DataType::FP32)
+                                    .build()
+                                    .getFeatureOutput();
 
     latestOutputTensor = FullyConnected::Builder()
                              .network(singleLayerFullyConnected)
-                             .featureInput(imagesInput.getFeatureOutput())
+                             .featureInput(latestOutputTensor)
+                             .numOutputFeatures(128)
+                             .hasBias(true)
+                             .weightsInitializerBuilder(glorot)
+                             .biasInitializerBuilder(glorot)
+                             .activationBuilder(Tanh::Builder())
+                             .build()
+                             .getFeatureOutput();
+    expectedDimensions = {128};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
+
+    latestOutputTensor = FullyConnected::Builder()
+                             .network(singleLayerFullyConnected)
+                             .featureInput(latestOutputTensor)
                              .numOutputFeatures(10)
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
