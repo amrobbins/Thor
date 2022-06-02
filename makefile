@@ -122,6 +122,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Average.o \
                    build/Utilities/TensorOperations/Arithmetic/Tanh.o \
                    build/Utilities/TensorOperations/Arithmetic/Relu.o \
+                   build/Utilities/TensorOperations/Arithmetic/Swish.o \
                    build/Utilities/TensorOperations/Arithmetic/Sum.o \
                    build/Utilities/TensorOperations/DeepLearning/Add1dBias.o \
                    build/Utilities/TensorOperations/Arithmetic/SumScale.o \
@@ -321,6 +322,10 @@ build/Utilities/TensorOperations/Arithmetic/Tanh.o: Utilities/TensorOperations/A
 build/Utilities/TensorOperations/Arithmetic/Relu.o: Utilities/TensorOperations/Arithmetic/Relu.h Utilities/TensorOperations/Arithmetic/Relu.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Relu.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Relu.cu
+
+build/Utilities/TensorOperations/Arithmetic/Swish.o: Utilities/TensorOperations/Arithmetic/Swish.h Utilities/TensorOperations/Arithmetic/Swish.cu
+	mkdir -p build/Utilities/TensorOperations/Arithmetic
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Swish.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Swish.cu
 
 build/Utilities/TensorOperations/Arithmetic/Sum.o: Utilities/TensorOperations/Arithmetic/Sum.h Utilities/TensorOperations/Arithmetic/Sum.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic

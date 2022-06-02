@@ -32,8 +32,10 @@ __global__ void tanh(half *dest, half *source, int numElements) {
 }
 
 __global__ void tanhBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
-    float tanx;
-    float result;
+    float coshx;
+    float fin;
+    float ein;
+    float eout;
 
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
@@ -52,29 +54,37 @@ __global__ void tanhBackward(half *errorOut, half *featureIn, half *errorIn, int
 
     half errorOutBuffer[4];
 
-    tanx = tanhf(featureInBuffer[0]);
-    result = (float)errorInBuffer[0] * (1.0f - tanx * tanx);
-    errorOutBuffer[0] = result;
+    fin = (float)featureInBuffer[0];
+    ein = (float)errorInBuffer[0];
+    coshx = coshf(fin);
+    eout = ein / (coshx * coshx);
+    errorOutBuffer[0] = (half)eout;
 
     element += 1;
     if (element < numElements) {
-        tanx = tanhf(featureInBuffer[1]);
-        result = (float)errorInBuffer[1] * (1.0f - tanx * tanx);
-        errorOutBuffer[1] = result;
+        fin = (float)featureInBuffer[1];
+        ein = (float)errorInBuffer[1];
+        coshx = coshf(fin);
+        eout = ein / (coshx * coshx);
+        errorOutBuffer[1] = (half)eout;
     }
 
     element += 1;
     if (element < numElements) {
-        tanx = tanhf(featureInBuffer[2]);
-        result = (float)errorInBuffer[2] * (1.0f - tanx * tanx);
-        errorOutBuffer[2] = result;
+        fin = (float)featureInBuffer[2];
+        ein = (float)errorInBuffer[2];
+        coshx = coshf(fin);
+        eout = ein / (coshx * coshx);
+        errorOutBuffer[2] = (half)eout;
     }
 
     element += 1;
     if (element < numElements) {
-        tanx = tanhf(featureInBuffer[3]);
-        result = (float)errorInBuffer[3] * (1.0f - tanx * tanx);
-        errorOutBuffer[3] = result;
+        fin = (float)featureInBuffer[3];
+        ein = (float)errorInBuffer[3];
+        coshx = coshf(fin);
+        eout = ein / (coshx * coshx);
+        errorOutBuffer[3] = (half)eout;
     }
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
