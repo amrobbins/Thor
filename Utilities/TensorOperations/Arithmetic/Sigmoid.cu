@@ -1,6 +1,9 @@
-#include "Swish.h"
+#include "Sigmoid.h"
 
-__global__ void swish(half *dest, half *source, int numElements) {
+/**
+ * sigmoid(x) = 1 / (1 + exp(-x))
+ */
+__global__ void sigmoid(half *dest, half *source, int numElements) {
     half zero = half(0.0f);
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
@@ -17,27 +20,27 @@ __global__ void swish(half *dest, half *source, int numElements) {
     half fout;
 
     fin = (float)finBuffer[0];
-    fout = fin / (1.0f + expf(-fin));
+    fout = 1.0f / (1.0f + expf(-fin));
     foutBuffer[0] = fout;
 
     element += 1;
     if (element < numElements) {
-        fin = (float)finBuffer[1];
-        fout = (float)fin / (1.0f + expf(-fin));
+        fin = finBuffer[1];
+        fout = 1.0f / (1.0f + expf(-fin));
         foutBuffer[1] = fout;
     }
 
     element += 1;
     if (element < numElements) {
-        fin = (float)finBuffer[2];
-        fout = fin / (1.0f + expf(-fin));
+        fin = finBuffer[2];
+        fout = 1.0f / (1.0f + expf(-fin));
         foutBuffer[2] = fout;
     }
 
     element += 1;
     if (element < numElements) {
-        fin = (float)finBuffer[3];
-        half fout = fin / (1.0f + expf(-fin));
+        fin = finBuffer[3];
+        fout = 1.0f / (1.0f + expf(-fin));
         foutBuffer[3] = fout;
     }
 
@@ -46,8 +49,8 @@ __global__ void swish(half *dest, half *source, int numElements) {
     dest_half_4[element / 4] = fout_half_4[0];
 }
 
-// d/dx(x/(1 + exp(-x))) = (e^x (x + e^x + 1))/(e^x + 1)^2
-__global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
+// d/dx(1/(1 + exp(-x))) = e^x/(e^x + 1)^2
+__global__ void sigmoidBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
     float fin;
     float ein;
     float e_x;
@@ -74,7 +77,7 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
     ein = errorInBuffer[0];
     e_x = expf(fin);
     e_x_1 = e_x + 1.0f;
-    eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
+    eout = (ein * e_x) / (e_x_1 * e_x_1);
     errorOutBuffer[0] = (half)eout;
 
     element += 1;
@@ -83,7 +86,7 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
         ein = errorInBuffer[1];
         e_x = expf(fin);
         e_x_1 = e_x + 1.0f;
-        eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
+        eout = (ein * e_x) / (e_x_1 * e_x_1);
         errorOutBuffer[1] = (half)eout;
     }
 
@@ -93,7 +96,7 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
         ein = errorInBuffer[2];
         e_x = expf(fin);
         e_x_1 = e_x + 1.0f;
-        eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
+        eout = (ein * e_x) / (e_x_1 * e_x_1);
         errorOutBuffer[2] = (half)eout;
     }
 
@@ -103,7 +106,7 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
         ein = errorInBuffer[3];
         e_x = expf(fin);
         e_x_1 = e_x + 1.0f;
-        eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
+        eout = (ein * e_x) / (e_x_1 * e_x_1);
         errorOutBuffer[3] = (half)eout;
     }
 
@@ -112,16 +115,16 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
     errorOut_half_4[element / 4] = errorOutBuffer_half_4[0];
 }
 
-void launchSwish(half *dest_d, half *source_d, int numElements, Stream stream) {
+void launchSigmoid(half *dest_d, half *source_d, int numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
-    swish<<<gridSize, blockSize, 0, stream>>>(dest_d, source_d, numElements);
+    sigmoid<<<gridSize, blockSize, 0, stream>>>(dest_d, source_d, numElements);
 }
 
-void launchSwishBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
+void launchSigmoidBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
-    swishBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);
+    sigmoidBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);
 }
