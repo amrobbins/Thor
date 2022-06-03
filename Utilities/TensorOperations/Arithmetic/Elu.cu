@@ -25,7 +25,6 @@ __global__ void elu(half *featureOut, half *featureIn, int numElements, float al
         fout = fin;
     else
         fout = alpha * (expf(fin) - 1.0f);
-    fout = 1.0f / (1.0f + expf(-fin));
     foutBuffer[0] = (half)fout;
 
     element += 1;
@@ -98,9 +97,6 @@ __global__ void eluBackward(half *errorOut, half *featureIn, half *errorIn, int 
         eout = ein;
     else
         eout = ein * alpha * expf(fin);
-    e_x = expf(fin);
-    e_x_1 = e_x + 1.0f;
-    eout = (ein * e_x) / (e_x_1 * e_x_1);
     errorOutBuffer[0] = (half)eout;
 
     element += 1;
