@@ -118,64 +118,6 @@ class CategoricalCrossEntropyLoss : public Loss {
     virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictions, Tensor loss, Stream stream) {
         // Cross Entropy Loss
         if (perClassLabels) {
-            // FIXME: temp
-            /*
-            Tensor labels_h = labels.clone(TensorPlacement::MemDevices::CPU);
-            labels_h.copyFromAsync(labels, stream);
-            uint8_t *labelArray = (uint8_t *)labels_h.getMemPtr();
-            Tensor predictions_h = normalizedPredictions.clone(TensorPlacement::MemDevices::CPU);
-            predictions_h.copyFromAsync(normalizedPredictions, stream);
-            float *predictionArray = (float *)predictions_h.getMemPtr();
-            stream.synchronize();
-
-            vector<uint32_t> labelVector;
-            vector<uint32_t> predictionVector;
-            vector<float> bestPredictionVector;
-            vector<uint8_t> bestLabelVector;
-            for (uint32_t b = 0; b < 6; ++b) {
-                uint8_t bestLabel = labelArray[b * numClasses];
-                labelVector.push_back(0);
-                float bestPrediction = predictionArray[b * numClasses];
-                predictionVector.push_back(0);
-                for (uint32_t c = 1; c < numClasses; ++c) {
-                    uint8_t classLabel = labelArray[b * numClasses + c];
-                    if (classLabel > bestLabel) {
-                        labelVector.pop_back();
-                        labelVector.push_back(c);
-                        bestLabel = classLabel;
-                    }
-                    float classPrediction = predictionArray[b * numClasses + c];
-                    if (classPrediction > bestPrediction) {
-                        predictionVector.back() = c;
-                        bestPrediction = classPrediction;
-                    }
-                }
-                bestLabelVector.push_back(bestLabel);
-                bestPredictionVector.push_back(bestPrediction);
-            }
-            printf("\rLabels:      ");
-            for (uint32_t i = 0; i < labelVector.size(); ++i)
-                printf("%d(%d) ", labelVector[i], (uint32_t)bestLabelVector[i]);
-            printf("\n");
-            printf("\rPredictions: ");
-            for (uint32_t i = 0; i < predictionVector.size(); ++i)
-                printf("%d(%.2f) ", predictionVector[i], bestPredictionVector[i]);
-            printf("\n\n");
-            fflush(stdout);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-            */
-
-            /*
-            printf("\r[");
-            TensorDescriptor labelDescriptor = labels.getDescriptor();
-            vector<uint64_t> labelDimensions = labelDescriptor.getDimensions();
-            for(uint32_t i = 0; i < labelDimensions.size(); ++i)
-                printf("%ld ", labelDimensions[i]);
-            printf("]\n\n");
-            fflush(stdout);
-            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-            */
-
             if (labels.getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
                 launchCrossEntropyLoss_perClassLabels((uint8_t*)labels.getMemPtr(),
                                                       (float*)normalizedPredictions.getMemPtr(),

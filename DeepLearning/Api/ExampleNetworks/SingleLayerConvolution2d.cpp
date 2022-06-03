@@ -18,6 +18,8 @@ Network buildSingleLayerConvolution2d() {
                              .dataType(Tensor::DataType::FP32)
                              .build()
                              .getFeatureOutput();
+    expectedDimensions = {1, 28, 28};
+    assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(singleLayerConvolution2d)
@@ -31,7 +33,7 @@ Network buildSingleLayerConvolution2d() {
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
-                             .activationBuilder(Elu::Builder())
+                             .activationBuilder(Selu::Builder())
                              .batchNormalization()
                              .build()
                              .getFeatureOutput();
