@@ -65,7 +65,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
             }
         }
 
-        uint32_t lossScalingFactor = 1;
         vector<Layer *> layers;
         NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
@@ -152,7 +151,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         }
 
         // Verify the softmax output (predictions)
-        float thresh = 0.01f;
+        float thresh = 0.1f;
         float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
             ASSERT_LT(abs(exponentialsMem[i] - predictionsGpuMem[i]), thresh);
@@ -163,7 +162,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         // Verify the loss output
         float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
-            float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
+            float thresh = std::max(lossMem[b] / 32000.0f, 0.01f);
             ASSERT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
             if (abs(lossMem[b] - lossMemFromGpu[b]) >= thresh)
                 printf("cpuF %f gpuF %f    %d\n", lossMem[b], lossMemFromGpu[b], b);
@@ -178,17 +177,21 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
 
         stream.synchronize();
 
+        assert(Loss::getLossScalingFactor() > 0.0f);
+        assert(Loss::getLossScalingFactor() < 1000000.0f);
+
         half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
         for (int b = 0; b < batchSize; ++b) {
             for (int i = 0; i < numElementsPerBatch; ++i) {
                 errorOutputMem[b * numElementsPerBatch + i] =
-                    (lossScalingFactor * (exponentialsMem[b * numElementsPerBatch + i] - labelsMem[b * numElementsPerBatch + i]));
+                    (Loss::getLossScalingFactor() *
+                     (exponentialsMem[b * numElementsPerBatch + i] - labelsMem[b * numElementsPerBatch + i]));
             }
         }
 
         // Verify the loss gradient
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
-        thresh = 0.01f;
+        thresh = 0.1f;
         for (int i = 0; i < numElements; ++i) {
             ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
             if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
@@ -245,7 +248,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_perClassLabels) {
             }
         }
 
-        uint32_t lossScalingFactor = 1;
         vector<Layer *> layers;
         NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
@@ -331,7 +333,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_perClassLabels) {
         }
 
         // Verify the softmax output (predictions)
-        float thresh = 0.01f;
+        float thresh = 0.1f;
         float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
             if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
@@ -359,15 +361,16 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_perClassLabels) {
         for (int b = 0; b < batchSize; ++b) {
             for (int i = 0; i < numElementsPerBatch; ++i) {
                 errorOutputMem[b * numElementsPerBatch + i] =
-                    (lossScalingFactor * (exponentialsMem[b * numElementsPerBatch + i] - labelsMem[b * numElementsPerBatch + i]));
+                    (Loss::getLossScalingFactor() *
+                     (exponentialsMem[b * numElementsPerBatch + i] - labelsMem[b * numElementsPerBatch + i]));
             }
         }
 
         // Verify the loss gradient
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
-        thresh = 0.01f;
+        thresh = 0.1f;
         for (int i = 0; i < numElements; ++i) {
-            ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+            EXPECT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
             if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
                 printf("cpu %f gpu %f\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i]);
                 fflush(stdout);
@@ -419,7 +422,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
             }
         }
 
-        uint32_t lossScalingFactor = 1;
         vector<Layer *> layers;
         NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
@@ -503,7 +505,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
         }
 
         // Verify the softmax output (predictions)
-        float thresh = 0.00001f;
+        float thresh = 0.0001f;
         float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
         for (uint32_t i = 0; i < numElements; ++i) {
             if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh || !isfinite(exponentialsMem[i] - predictionsGpuMem[i]))
@@ -533,13 +535,13 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_classIndexLab
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t i = 0; i < numClasses; ++i) {
                 errorOutputMem[b * numClasses + i] =
-                    (lossScalingFactor * (exponentialsMem[b * numClasses + i] - (labels[b] == i ? 1.0f : 0.0f)));
+                    (Loss::getLossScalingFactor() * (exponentialsMem[b * numClasses + i] - (labels[b] == i ? 1.0f : 0.0f)));
             }
         }
 
         // Verify the loss gradient
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
-        thresh = 0.01f;
+        thresh = 0.1f;
         for (uint32_t i = 0; i < numElements; ++i) {
             if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
                 printf("cpu %f gpu %f   %d\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i], i);
@@ -593,7 +595,6 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
             }
         }
 
-        uint32_t lossScalingFactor = 1;
         vector<Layer *> layers;
         NetworkInput *activationsInput = new NetworkInput(activationsGpu);
         layers.push_back(activationsInput);
@@ -678,7 +679,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
         }
 
         // Verify the softmax output (predictions)
-        float thresh = 0.01f;
+        float thresh = 0.1f;
         float *predictionsGpuMem = (float *)predictionsGpu_h.getMemPtr();
         for (uint32_t i = 0; i < numElements; ++i) {
             if (abs(exponentialsMem[i] - predictionsGpuMem[i]) > thresh)
@@ -688,7 +689,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
 
         // Verify the loss output
         float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
-        thresh = std::max(lossMem[0] / 320000.0f, 0.001f);
+        thresh = std::max(lossMem[0] / 32000.0f, 0.01f);
         if (abs(lossMem[0] - lossMemFromGpu[0]) >= thresh)
             printf("cpuF %f gpuF %f    %d\n", lossMem[0], lossMemFromGpu[0], 0);
         ASSERT_LT(abs(lossMem[0] - lossMemFromGpu[0]), thresh);
@@ -706,13 +707,13 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectBatchResult_classIndexLabels) {
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t i = 0; i < numClasses; ++i) {
                 errorOutputMem[b * numClasses + i] =
-                    (lossScalingFactor * (exponentialsMem[b * numClasses + i] - (labels[b] == i ? 1.0f : 0.0f)));
+                    (Loss::getLossScalingFactor() * (exponentialsMem[b * numClasses + i] - (labels[b] == i ? 1.0f : 0.0f)));
             }
         }
 
         // Verify the loss gradient
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
-        thresh = 0.01f;
+        thresh = 0.1f;
         for (uint32_t i = 0; i < numElements; ++i) {
             if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
                 printf("cpu %f gpu %f   %d\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i], i);

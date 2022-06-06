@@ -128,7 +128,7 @@ TEST(Sgd, SgdUpdatesParameters) {
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
     std::unordered_map<std::string, float> params = sgd->updateParameters(epoch, batch, batchesPerEpoch);
-    float expected = initialLearningRate * pow(decay, epoch);
+    float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
@@ -158,7 +158,7 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
     std::unordered_map<std::string, float> params = sgd->initializeStampedNetworkParameters(stampedNetwork0, epoch, batch, batchesPerEpoch);
-    float expected = initialLearningRate * pow(decay, epoch);
+    float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
@@ -202,13 +202,14 @@ TEST(Sgd, SgdReportsParameters) {
     uint32_t batch = 3;
     uint32_t batchesPerEpoch = 50;
     sgd->updateParameters(epoch, batch, batchesPerEpoch);
-    float expected = initialLearningRate * pow(decay, epoch);
+    float expected = initialLearningRate * pow(1.0f - decay, epoch);
     params.clear();
     params = sgd->getAllParameters(epoch, batch, batchesPerEpoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
+    fflush(stdout);
     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
     ASSERT_EQ(params.count("initialLearningRate"), 1U);
     ASSERT_LT(abs(params["initialLearningRate"] - initialLearningRate), 0.0001);

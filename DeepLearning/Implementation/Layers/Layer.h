@@ -292,6 +292,9 @@ class Layer {
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) = 0;
 
+    static cudnnTensorDescriptor_t createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
+                                                               TensorDescriptor::DataType dataType);
+
     bool running;
     bool compiled;
 

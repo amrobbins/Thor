@@ -93,6 +93,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     }
 
     virtual void compile() {
+        TrainableWeightsBiasesLayer::compile();
+
         int gpuNum;
         assert(!featureInputs.empty());
         assert(featureInputs[0].isPresent());

@@ -123,6 +123,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Tanh.o \
                    build/Utilities/TensorOperations/Arithmetic/Relu.o \
                    build/Utilities/TensorOperations/Arithmetic/Swish.o \
+                   build/DeepLearning/Implementation/Layers/Activation/Softmax.o \
                    build/Utilities/TensorOperations/Arithmetic/Selu.o \
                    build/Utilities/TensorOperations/Arithmetic/Exponential.o \
                    build/Utilities/TensorOperations/Arithmetic/Elu.o \
@@ -462,6 +463,10 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o: DeepLearning/I
 build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o: DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o
+
+build/DeepLearning/Implementation/Layers/Activation/Softmax.o: DeepLearning/Implementation/Layers/Activation/Softmax.h DeepLearning/Implementation/Layers/Activation/Softmax.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/Activation
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Activation/Softmax.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Activation/Softmax.o
 
 build/DeepLearning/Implementation/Initializers/Initializer.o: DeepLearning/Implementation/Initializers/Initializer.h DeepLearning/Implementation/Initializers/Initializer.cpp
 	mkdir -p build/DeepLearning/Implementation/Initializers
