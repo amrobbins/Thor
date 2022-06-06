@@ -290,7 +290,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();
         half *weightsGradientMem = (half *)weightsGradientGpu_h.getMemPtr();
         for (int i = 0; i < numWeights; ++i) {
-            half expected = weightsMem[i] - (learningRate * weightsGradientMem[i]) / batchSize;
+            half expected = weightsMem[i] - (learningRate * weightsGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
             EXPECT_LT(abs((float)expected - (float)weightsGpuMem[i]), maxDiff);
             if (abs((float)expected - (float)weightsGpuMem[i]) >= maxDiff) {
                 printf("%d  cpu %f  gpu %f     weight %f   gradient %f  learningRate %f\n",
@@ -309,7 +309,7 @@ TEST(Convolution2d, Convolution2dWorks) {
             half *biasesGpuMem = (half *)biasesGpu_h.getMemPtr();
             half *biasesGradientMem = (half *)biasesGradientGpu_h.getMemPtr();
             for (int i = 0; i < numBiases; ++i) {
-                half expected = biasesMem[i] - (learningRate * biasesGradientMem[i]) / batchSize;
+                half expected = biasesMem[i] - (learningRate * biasesGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
                 EXPECT_LT(abs((float)expected - (float)biasesGpuMem[i]), maxDiff);
                 if (abs((float)expected - (float)biasesGpuMem[i]) >= maxDiff) {
                     printf("%d  cpu %f  gpu %f     bias %f   gradient %f  learningRate %f\n",

@@ -45,7 +45,7 @@ unordered_map<string, float> Sgd::initializeStampedNetworkParameters(ThorImpleme
 }
 
 std::unordered_map<std::string, float> Sgd::getAllParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
-    float currentLearningRate = initialLearningRate * pow((double)decay, (double)epoch);
+    float currentLearningRate = initialLearningRate * pow(1.0 - (double)decay, (double)epoch);
     unordered_map<string, float> parameters;
     parameters["currentLearningRate"] = currentLearningRate;
     parameters["initialLearningRate"] = initialLearningRate;
