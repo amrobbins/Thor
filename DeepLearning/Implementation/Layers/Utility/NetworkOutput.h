@@ -31,19 +31,46 @@ class NetworkOutput : public Layer {
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isEmpty() == outputPlacement.isEmpty());
-        if (outputPlacement.isEmpty())
+
+        if (outputPlacement.isEmpty()) {
             return Optional<Tensor>::empty();
-        else
-            return featureInput.get().clone(outputPlacement);
+        } else if (outputPlacement.get() != featureInput.get().getPlacement()) {
+            // Create an on device output buffer so that the main stream is not blocked
+            // during offloading of the output across devices
+            outputBuffer = featureInput.get().clone();
+            outputStream = Stream(featureInput.get().getPlacement());
+            outputReadyEvent = outputStream.get().putEvent(false, true);
+            return featureInput.get().clone(outputPlacement.get());
+        } else {
+            return featureInput.get().clone(outputPlacement.get());
+        }
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
         assert(inputTensor.isPresent() == outputTensor.isPresent());
 
-        if (inputTensor.isPresent())
-            outputTensor.get().copyFromAsync(inputTensor, stream);
+        if (inputTensor.isPresent()) {
+            if (outputPlacement.get() == featureInput.get().getPlacement()) {
+                outputTensor.get().copyFromAsync(inputTensor, stream);
+                outputReadyEvent = stream.putEvent(false, true);
+            } else {
+                assert(outputBuffer.isPresent());
+                assert(outputStream.isPresent());
 
-        outputReadyEvent = stream.putEvent(false, true);
+                // Ensure that the previous offload has completed:
+                stream.waitEvent(outputReadyEvent);
+
+                // Copy to the on device buffer, then stream is unblocked
+                outputBuffer.get().copyFromAsync(inputTensor, stream);
+
+                // output stream waits for copy to buffer to complete
+                // output buffer is offloaded to the other device
+                // an event is placed on the output stream to indicate when the offload copy is complete
+                outputStream.get().waitEvent(stream.putEvent());
+                outputTensor.get().copyFromAsync(outputBuffer, outputStream);
+                outputReadyEvent = outputStream.get().putEvent(false, true);
+            }
+        }
     }
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
@@ -54,6 +81,9 @@ class NetworkOutput : public Layer {
     Event outputReadyEvent;
 
     Optional<TensorPlacement> outputPlacement;
+
+    Optional<Tensor> outputBuffer;
+    Optional<Stream> outputStream;
 };
 
 }  // namespace ThorImplementation
