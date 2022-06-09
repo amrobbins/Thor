@@ -209,7 +209,6 @@ TEST(Sgd, SgdReportsParameters) {
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-    fflush(stdout);
     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
     ASSERT_EQ(params.count("initialLearningRate"), 1U);
     ASSERT_LT(abs(params["initialLearningRate"] - initialLearningRate), 0.0001);
