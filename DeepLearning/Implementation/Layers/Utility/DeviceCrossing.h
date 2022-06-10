@@ -21,19 +21,31 @@ class DeviceCrossing : public Layer {
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(!uninitialized);
         assert(featureInput.isPresent());
+        outputBuffer = featureInput.get().clone();
+        finishedCopyEvent = stream.putEvent();
         return Tensor(outputPlacement, featureInput.get().getDescriptor());
     }
 
     // Crosses from source device to dest device
+    // Output is buffered so the stream on the source device is not blocked during copy
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
         assert(!uninitialized);
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
-        outputTensor.get().copyFromAsync(inputTensor, stream);
+        assert(outputPlacement != featureInput.get().getPlacement());
 
-        // Tell the stream on the dest gpu to wait for the copy from source gpu to finish
-        Event finishedCopyEvent = stream.putEvent();
-        otherDeviceStream.waitEvent(finishedCopyEvent);
+        // Ensure the previous data transfer has finished, so the buffer is available
+        stream.waitEvent(finishedCopyEvent);
+
+        // Copy to the on device buffer, then stream is unblocked
+        outputBuffer.copyFromAsync(inputTensor, stream);
+
+        // output stream waits for copy to buffer to complete
+        // output buffer is offloaded to the other device
+        // an event is placed on the output stream to indicate when the offload copy is complete
+        otherDeviceStream.waitEvent(stream.putEvent());
+        outputTensor.get().copyFromAsync(outputBuffer, otherDeviceStream);
+        finishedCopyEvent = otherDeviceStream.putEvent();
     }
 
     // Crosses from dest device to source device
@@ -79,6 +91,8 @@ class DeviceCrossing : public Layer {
     TensorPlacement outputPlacement;
 
     Stream otherDeviceStream;
+    Tensor outputBuffer;
+    Event finishedCopyEvent;
 };
 
 }  // namespace ThorImplementation
