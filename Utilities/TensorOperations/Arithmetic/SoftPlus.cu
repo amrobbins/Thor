@@ -1,9 +1,9 @@
-#include "HardSigmoid.h"
+#include "SoftPlus.h"
 
 /**
- * max( min(0.2 * x + 0.5, 1.0), 0.0)
+ * ln(e(x) + 1)
  */
-__global__ void hardSigmoid(half *featureOut, half *featureIn, int numElements) {
+__global__ void softPlus(half *featureOut, half *featureIn, int numElements) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
@@ -15,10 +15,33 @@ __global__ void hardSigmoid(half *featureOut, half *featureIn, int numElements) 
     half *finBuffer = (half *)finBuffer_half_4;
     half foutBuffer[4];
 
-    const half pointTwo[2] = {(half)0.2f, (half)0.2f};
-    const half pointFive[2] = {(half)0.5f, (half)0.5f};
-    ((half2 *)foutBuffer)[0] = __hfma2_sat(((half2 *)finBuffer)[0], ((half2 *)pointTwo)[0], ((half2 *)pointFive)[0]);
-    ((half2 *)foutBuffer)[1] = __hfma2_sat(((half2 *)finBuffer)[1], ((half2 *)pointTwo)[0], ((half2 *)pointFive)[0]);
+    float fin;
+    float fout;
+
+    fin = (float)finBuffer[0];
+    fout = logf(expf(fin) + 1.0f);
+    foutBuffer[0] = (half)fout;
+
+    element += 1;
+    if (element < numElements) {
+        fin = finBuffer[1];
+        fout = logf(expf(fin) + 1.0f);
+        foutBuffer[1] = (half)fout;
+    }
+
+    element += 1;
+    if (element < numElements) {
+        fin = finBuffer[2];
+        fout = logf(expf(fin) + 1.0f);
+        foutBuffer[2] = (half)fout;
+    }
+
+    element += 1;
+    if (element < numElements) {
+        fin = finBuffer[3];
+        fout = logf(expf(fin) + 1.0f);
+        foutBuffer[3] = (half)fout;
+    }
 
     double *fout_half_4 = (double *)foutBuffer;
     double *featureOut_half_4 = (double *)featureOut;
@@ -26,15 +49,13 @@ __global__ void hardSigmoid(half *featureOut, half *featureIn, int numElements) 
 }
 
 /**
- * d/dx(x) = 0.2 when 1 < x > 0; else 0
+ * d/dx(ln(exp(x) + 1)) = e^x/(e^x + 1)
  */
-__global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
+__global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
     const half zero = half(0.0f);
-    const half one = half(1.0f);
-    const half pointTwo = half(0.2f);
-    half fin;
-    half ein;
-    half eout;
+    float fin;
+    float ein;
+    float eout;
 
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
@@ -52,22 +73,20 @@ __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *error
     half *errorInBuffer = (half *)errorInBuffer_half_4;
     half errorOutBuffer[4];
 
+    float expX;
+
     fin = featureInBuffer[0];
     ein = errorInBuffer[0];
-    if (fin >= one || fin <= zero)
-        eout = zero;
-    else
-        eout = __hmul(ein, pointTwo);
-    errorOutBuffer[0] = eout;
+    expX = expf(fin);
+    fout = ein * (expX / (expX + 1));
+    errorOutBuffer[0] = (half)eout;
 
     element += 1;
     if (element < numElements) {
         fin = featureInBuffer[1];
         ein = errorInBuffer[1];
-        if (fin >= one || fin <= zero)
-            eout = zero;
-        else
-            eout = __hmul(ein, pointTwo);
+        expX = expf(fin);
+        fout = ein * (expX / (expX + 1));
         errorOutBuffer[1] = (half)eout;
     }
 
@@ -75,10 +94,8 @@ __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *error
     if (element < numElements) {
         fin = featureInBuffer[2];
         ein = errorInBuffer[2];
-        if (fin >= one || fin <= zero)
-            eout = zero;
-        else
-            eout = __hmul(ein, pointTwo);
+        expX = expf(fin);
+        fout = ein * (expX / (expX + 1));
         errorOutBuffer[2] = (half)eout;
     }
 
@@ -86,10 +103,8 @@ __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *error
     if (element < numElements) {
         fin = featureInBuffer[3];
         ein = errorInBuffer[3];
-        if (fin >= one || fin <= zero)
-            eout = zero;
-        else
-            eout = __hmul(ein, pointTwo);
+        expX = expf(fin);
+        fout = ein * (expX / (expX + 1));
         errorOutBuffer[3] = (half)eout;
     }
 
@@ -98,16 +113,16 @@ __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *error
     errorOut_half_4[element / 4] = errorOutBuffer_half_4[0];
 }
 
-void launchHardSigmoid(half *featureOut_d, half *featureIn_d, int numElements, Stream stream) {
+void launchSoftPlus(half *featureOut_d, half *featureIn_d, int numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
-    hardSigmoid<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements);
+    softPlus<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements);
 }
 
-void launchHardSigmoidBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
+void launchSoftPlusBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
-    hardSigmoidBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);
+    softPlusBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);
 }

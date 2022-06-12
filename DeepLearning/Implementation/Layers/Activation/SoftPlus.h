@@ -2,13 +2,13 @@
 
 #include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Arithmetic/HardSigmoid.h"
+#include "Utilities/TensorOperations/Arithmetic/SoftPlus.h"
 
 namespace ThorImplementation {
 
-class HardSigmoid : public Activation {
+class SoftPlus : public Activation {
    public:
-    virtual ~HardSigmoid() {}
+    virtual ~SoftPlus() {}
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
@@ -20,10 +20,10 @@ class HardSigmoid : public Activation {
         assert(outputTensor.isPresent());
         TensorPlacement placement = inputTensor.get().getPlacement();
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        launchHardSigmoid((half*)outputTensor.get().getMemPtr(),
-                          (half*)inputTensor.get().getMemPtr(),
-                          inputTensor.get().getDescriptor().getTotalNumElements(),
-                          stream);
+        launchSoftPlus((half*)outputTensor.get().getMemPtr(),
+                       (half*)inputTensor.get().getMemPtr(),
+                       inputTensor.get().getDescriptor().getTotalNumElements(),
+                       stream);
     }
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
@@ -32,11 +32,11 @@ class HardSigmoid : public Activation {
         assert(errorOut.isPresent());
         TensorPlacement placement = errorOut.get().getPlacement();
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-        launchHardSigmoidBackward((half*)errorOut.get().getMemPtr(),
-                                  (half*)dataIn.get().getMemPtr(),
-                                  (half*)errorIn.get().getMemPtr(),
-                                  errorOut.get().getDescriptor().getTotalNumElements(),
-                                  stream);
+        launchSoftPlusBackward((half*)errorOut.get().getMemPtr(),
+                               (half*)dataIn.get().getMemPtr(),
+                               (half*)errorIn.get().getMemPtr(),
+                               errorOut.get().getDescriptor().getTotalNumElements(),
+                               stream);
     }
 };
 
