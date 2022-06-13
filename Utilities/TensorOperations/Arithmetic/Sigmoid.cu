@@ -52,16 +52,16 @@ __global__ void sigmoid(half *dest, half *source, int numElements) {
  * d/dx(1/(1 + exp(-x))) = e^x/(e^x + 1)^2
  */
 __global__ void sigmoidBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
+    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
+
+    if (element >= numElements)
+        return;
+
     float fin;
     float ein;
     float e_x;
     float e_x_1;
     float eout;
-
-    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
-
-    if (element >= numElements)
-        return;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];

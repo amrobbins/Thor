@@ -52,15 +52,15 @@ __global__ void softPlus(half *featureOut, half *featureIn, int numElements) {
  * d/dx(ln(exp(x) + 1)) = e^x/(e^x + 1)
  */
 __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
-    const half zero = half(0.0f);
-    float fin;
-    float ein;
-    float eout;
-
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    const half zero = half(0.0f);
+    float fin;
+    float ein;
+    float eout;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
@@ -78,7 +78,7 @@ __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn,
     fin = featureInBuffer[0];
     ein = errorInBuffer[0];
     expX = expf(fin);
-    fout = ein * (expX / (expX + 1));
+    eout = ein * (expX / (expX + 1));
     errorOutBuffer[0] = (half)eout;
 
     element += 1;
@@ -86,7 +86,7 @@ __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn,
         fin = featureInBuffer[1];
         ein = errorInBuffer[1];
         expX = expf(fin);
-        fout = ein * (expX / (expX + 1));
+        eout = ein * (expX / (expX + 1));
         errorOutBuffer[1] = (half)eout;
     }
 
@@ -95,7 +95,7 @@ __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn,
         fin = featureInBuffer[2];
         ein = errorInBuffer[2];
         expX = expf(fin);
-        fout = ein * (expX / (expX + 1));
+        eout = ein * (expX / (expX + 1));
         errorOutBuffer[2] = (half)eout;
     }
 
@@ -104,7 +104,7 @@ __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn,
         fin = featureInBuffer[3];
         ein = errorInBuffer[3];
         expX = expf(fin);
-        fout = ein * (expX / (expX + 1));
+        eout = ein * (expX / (expX + 1));
         errorOutBuffer[3] = (half)eout;
     }
 

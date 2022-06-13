@@ -126,6 +126,9 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/Activation/Softmax.o \
                    build/Utilities/TensorOperations/Arithmetic/Selu.o \
                    build/Utilities/TensorOperations/Arithmetic/HardSigmoid.o \
+                   build/Utilities/TensorOperations/Arithmetic/Gelu.o \
+                   build/Utilities/TensorOperations/Arithmetic/SoftSign.o \
+                   build/Utilities/TensorOperations/Arithmetic/SoftPlus.o \
                    build/Utilities/TensorOperations/Arithmetic/Exponential.o \
                    build/Utilities/TensorOperations/Arithmetic/Elu.o \
                    build/Utilities/TensorOperations/Arithmetic/Sigmoid.o \
@@ -340,6 +343,18 @@ build/Utilities/TensorOperations/Arithmetic/Selu.o: Utilities/TensorOperations/A
 build/Utilities/TensorOperations/Arithmetic/HardSigmoid.o: Utilities/TensorOperations/Arithmetic/HardSigmoid.h Utilities/TensorOperations/Arithmetic/HardSigmoid.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/HardSigmoid.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/HardSigmoid.cu
+
+build/Utilities/TensorOperations/Arithmetic/Gelu.o: Utilities/TensorOperations/Arithmetic/Gelu.h Utilities/TensorOperations/Arithmetic/Gelu.cu
+	mkdir -p build/Utilities/TensorOperations/Arithmetic
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Gelu.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Gelu.cu
+
+build/Utilities/TensorOperations/Arithmetic/SoftSign.o: Utilities/TensorOperations/Arithmetic/SoftSign.h Utilities/TensorOperations/Arithmetic/SoftSign.cu
+	mkdir -p build/Utilities/TensorOperations/Arithmetic
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SoftSign.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SoftSign.cu
+
+build/Utilities/TensorOperations/Arithmetic/SoftPlus.o: Utilities/TensorOperations/Arithmetic/SoftPlus.h Utilities/TensorOperations/Arithmetic/SoftPlus.cu
+	mkdir -p build/Utilities/TensorOperations/Arithmetic
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SoftPlus.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SoftPlus.cu
 
 build/Utilities/TensorOperations/Arithmetic/Exponential.o: Utilities/TensorOperations/Arithmetic/Exponential.h Utilities/TensorOperations/Arithmetic/Exponential.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic

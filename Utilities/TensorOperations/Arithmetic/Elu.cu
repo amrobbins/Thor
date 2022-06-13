@@ -68,15 +68,15 @@ __global__ void elu(half *featureOut, half *featureIn, int numElements, float al
  * where alpha is a scalar parameter that defaults to 1.0 and must be >= 0.0
  */
 __global__ void eluBackward(half *errorOut, half *featureIn, half *errorIn, int numElements, float alpha) {
-    const half zero = half(0.0f);
-    float fin;
-    float ein;
-    float eout;
-
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    const half zero = half(0.0f);
+    float fin;
+    float ein;
+    float eout;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
