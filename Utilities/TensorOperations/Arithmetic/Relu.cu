@@ -1,11 +1,12 @@
 #include "Relu.h"
 
 __global__ void relu(half *dest, half *source, int numElements) {
-    half zero = half(0.0f);
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    half zero = half(0.0f);
 
     double *source_half_4 = (double *)source;
     double finBuffer_half_4[1];
@@ -48,11 +49,12 @@ __global__ void relu(half *dest, half *source, int numElements) {
 }
 
 __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
-    half zero = half(0.0f);
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    half zero = half(0.0f);
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];

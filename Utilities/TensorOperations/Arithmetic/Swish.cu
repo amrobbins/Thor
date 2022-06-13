@@ -47,16 +47,16 @@ __global__ void swish(half *featureOut, half *featureIn, int numElements) {
 
 // d/dx(x/(1 + exp(-x))) = (e^x (x + e^x + 1))/(e^x + 1)^2
 __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
+    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
+
+    if (element >= numElements)
+        return;
+
     float fin;
     float ein;
     float e_x;
     float e_x_1;
     float eout;
-
-    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
-
-    if (element >= numElements)
-        return;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];

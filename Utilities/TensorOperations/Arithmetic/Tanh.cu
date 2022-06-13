@@ -32,15 +32,15 @@ __global__ void tanh(half *dest, half *source, int numElements) {
 }
 
 __global__ void tanhBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
-    float coshx;
-    float fin;
-    float ein;
-    float eout;
-
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    float coshx;
+    float fin;
+    float ein;
+    float eout;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];

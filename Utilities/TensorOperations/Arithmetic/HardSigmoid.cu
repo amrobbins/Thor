@@ -29,17 +29,17 @@ __global__ void hardSigmoid(half *featureOut, half *featureIn, int numElements) 
  * d/dx(x) = 0.2 when 1 < x > 0; else 0
  */
 __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
+    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
+
+    if (element >= numElements)
+        return;
+
     const half zero = half(0.0f);
     const half one = half(1.0f);
     const half pointTwo = half(0.2f);
     half fin;
     half ein;
     half eout;
-
-    int element = blockIdx.x * 1024 + (4 * threadIdx.x);
-
-    if (element >= numElements)
-        return;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];

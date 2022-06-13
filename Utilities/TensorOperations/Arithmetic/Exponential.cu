@@ -52,15 +52,15 @@ __global__ void exponential(half *featureOut, half *featureIn, int numElements) 
  * d/dx(exp(x)) = exp(x)
  */
 __global__ void exponentialBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
-    const half zero = half(0.0f);
-    float fin;
-    float ein;
-    float eout;
-
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    const half zero = half(0.0f);
+    float fin;
+    float ein;
+    float eout;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
