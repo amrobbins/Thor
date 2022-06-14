@@ -84,6 +84,7 @@ class StampedNetwork {
     }
 
     // Note that all processing is finished at the end of any input stream of the stamp.
+    // Note *input* stream - this is not the case for the loader streams
     Event sendBatch(map<string, Tensor> batchInputs,
                     map<string, Tensor> &batchOutputs,
                     map<string, Event> &outputReadyEvents,

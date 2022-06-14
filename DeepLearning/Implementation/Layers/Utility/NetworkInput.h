@@ -63,6 +63,15 @@ class NetworkInput : public Layer {
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {}
 
     // Only called for input endpoints
+    // When the source tensor that will be sent to the input is loaded via a stream,
+    // then this version of forward is used which causes the loader stream to wait till copy is finished.
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass, Event copyToSourceTensorFinished) {
+        loadStream.waitEvent(copyToSourceTensorFinished);
+        forward(featureInput, validationPass);
+    }
+
+    // Only called for input endpoints
+    // This version of forward expects that the memory in featureInput has already been populated before forward is called.
     virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(contentDimensions.isPresent() == featureInput.isPresent());
 
@@ -75,9 +84,15 @@ class NetworkInput : public Layer {
         if (contentDimensions.isPresent()) {
             assert(featureOutput.isPresent());
 
+            // Wait for previous featureOutput load to finish
+            // Copy into buffer using the load stream
+            // stream waits for all previously scheduled work to finish and for copy to finish - copy tends to finish first
             outputBuffer.copyFromAsync(featureInput, loadStream);
             stream.waitEvent(loadStream.putEvent());
 
+            // Copy from buffer to featureOutput
+            // LoadStream waits for copy to finish.
+            // After this happens the buffer can be loaded with the next payload.
             featureOutput.get().copyFromAsync(outputBuffer, stream);
             loadStream.waitEvent(stream.putEvent());
         }
@@ -94,6 +109,7 @@ class NetworkInput : public Layer {
 
     Tensor outputBuffer;
     Stream loadStream;
+    Event loadReadyEvent;
 };
 
 }  // namespace ThorImplementation

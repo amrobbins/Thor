@@ -2,6 +2,10 @@
 
 #include "Thor.h"
 
+/**
+ * This layer is useful in unit testing to prevent pruning dangling backwards path tensors.
+ * This layer is not meant to be used outside of unit testing.
+ */
 class NoOpLayer : public ThorImplementation::Layer {
    public:
     NoOpLayer() {}
