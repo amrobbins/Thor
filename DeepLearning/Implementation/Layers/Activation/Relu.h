@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Arithmetic/Relu.h"
+#include "Utilities/TensorOperations/Activation/Relu.h"
 
 namespace ThorImplementation {
 
