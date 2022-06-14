@@ -1,6 +1,6 @@
 #include "Relu.h"
 
-__global__ void relu(half *dest, half *source, int numElements) {
+__global__ void relu(half *featureOut, half *featureIn, int numElements) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
@@ -8,9 +8,9 @@ __global__ void relu(half *dest, half *source, int numElements) {
 
     half zero = half(0.0f);
 
-    double *source_half_4 = (double *)source;
+    double *featureIn_half_4 = (double *)featureIn;
     double finBuffer_half_4[1];
-    finBuffer_half_4[0] = source_half_4[element / 4];
+    finBuffer_half_4[0] = featureIn_half_4[element / 4];
     half *finBuffer = (half *)finBuffer_half_4;
     half foutBuffer[4];
 
@@ -19,24 +19,21 @@ __global__ void relu(half *dest, half *source, int numElements) {
         fin = zero;
     foutBuffer[0] = fin;
 
-    element += 1;
-    if (element < numElements) {
+    if (element + 1 < numElements) {
         fin = finBuffer[1];
         if (fin < zero)
             fin = zero;
         foutBuffer[1] = fin;
     }
 
-    element += 1;
-    if (element < numElements) {
+    if (element + 2 < numElements) {
         fin = finBuffer[2];
         if (fin < zero)
             fin = zero;
         foutBuffer[2] = fin;
     }
 
-    element += 1;
-    if (element < numElements) {
+    if (element + 3 < numElements) {
         fin = finBuffer[3];
         if (fin < zero)
             fin = zero;
@@ -44,8 +41,8 @@ __global__ void relu(half *dest, half *source, int numElements) {
     }
 
     double *fout_half_4 = (double *)foutBuffer;
-    double *dest_half_4 = (double *)dest;
-    dest_half_4[element / 4] = fout_half_4[0];
+    double *featureOut_half_4 = (double *)featureOut;
+    featureOut_half_4[element / 4] = fout_half_4[0];
 }
 
 __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
@@ -75,8 +72,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
         eOut = zero;
     errorOutBuffer[0] = eOut;
 
-    element += 1;
-    if (element < numElements) {
+    if (element + 1 < numElements) {
         fin = featureInBuffer[1];
         if (fin > zero)
             eOut = errorInBuffer[1];
@@ -85,8 +81,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
         errorOutBuffer[1] = eOut;
     }
 
-    element += 1;
-    if (element < numElements) {
+    if (element + 2 < numElements) {
         fin = featureInBuffer[2];
         if (fin > zero)
             eOut = errorInBuffer[2];
@@ -95,8 +90,7 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
         errorOutBuffer[2] = eOut;
     }
 
-    element += 1;
-    if (element < numElements) {
+    if (element + 3 < numElements) {
         fin = featureInBuffer[3];
         if (fin > zero)
             eOut = errorInBuffer[3];
@@ -110,11 +104,11 @@ __global__ void reluBackward(half *errorOut, half *featureIn, half *errorIn, int
     errorOut_half_4[element / 4] = errorOutBuffer_half_4[0];
 }
 
-void launchRelu(half *dest_d, half *source_d, int numElements, Stream stream) {
+void launchRelu(half *featureOut_d, half *featureIn_d, int numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
-    relu<<<gridSize, blockSize, 0, stream>>>(dest_d, source_d, numElements);
+    relu<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements);
 }
 
 void launchReluBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {

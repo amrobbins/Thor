@@ -6,6 +6,6 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 
-void launchRelu(half *dest_d, half *source_d, int numElements, Stream stream);
+void launchRelu(half *featureOut_d, half *featureIn_d, int numElements, Stream stream);
 
 void launchReluBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream);

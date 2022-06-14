@@ -241,20 +241,6 @@ void BatchAssembler::batchAssemblerThread() {
         if (batchSlot == batchSize) {
             batchSlot = 0;
 
-            // FIXME: TEMP
-            /*
-            uint8_t *batchLabels = (uint8_t *)batchLabelsBuffer.getMemPtr();
-            printf("\r\nwrote labels: ");
-            for(uint32_t i = 0; i < 6; ++i) {
-                for(uint32_t j = 0; j < 10; ++j) {
-                    printf("%d", (uint32_t)batchLabels[i*10 + j]);
-                }
-                if(i < 5)
-                    printf("_");
-            }
-            printf("\n");
-            */
-
             batchDataQueue.bufferLoaded(batchDataBuffer);
             batchLabelQueue.bufferLoaded(batchLabelsBuffer);
 

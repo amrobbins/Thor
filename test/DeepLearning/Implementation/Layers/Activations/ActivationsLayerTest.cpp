@@ -23,11 +23,9 @@ TEST(Relu, Works) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    cudaError_t cudaStatus;
-
-    for (int test = 0; test < 10; ++test) {
-        int numDimensions = (rand() % 5) + 1;
+    for (int test = 0; test < 100; ++test) {
         vector<unsigned long> dimensions;
+        int numDimensions = (rand() % 5) + 1;
         int numElements = 1;
         for (int i = 0; i < numDimensions; ++i) {
             dimensions.push_back((rand() % 8) + 1);
@@ -36,13 +34,10 @@ TEST(Relu, Works) {
 
         TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
-        Tensor featureInGpu(gpuPlacement, descriptor);
+        Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
 
         half *featureInMem = (half *)featureInCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-        }
         vector<Layer *> layers;
         layers.push_back(new NetworkInput(featureInGpu));
         layers.push_back(new NoOpLayer());
@@ -51,25 +46,26 @@ TEST(Relu, Works) {
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
 
-        Stream stream = layers.front()->getStream();
-        featureInGpu.copyFromAsync(featureInCpu, stream);
-
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(featureInGpu, false);
+        layers[0]->forward(featureInCpu, false);
+        Stream stream = layers.front()->getStream();
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
-        cudaStatus = cudaStreamSynchronize(stream.getStream());
-        assert(cudaStatus == cudaSuccess);
+        stream.synchronize();
 
         half *destMem = (half *)destCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
             half rectified = featureInMem[i];
             if (rectified < 0.0f)
                 rectified = 0.0f;
+            if ((float)destMem[i] != (float)rectified) {
+                printf("%d of %d\n", i, numElements);
+                fflush(stdout);
+            }
             ASSERT_EQ((float)destMem[i], (float)rectified);
         }
 
@@ -85,6 +81,7 @@ TEST(Relu, Works) {
         }
         errorInGpu.copyFromAsync(errorInCpu, stream);
 
+        featureInGpu.copyFromAsync(featureInCpu, stream);
         relu->backProp(featureInGpu, errorInGpu, errorOutGpu, stream);
         errorOutCpu.copyFromAsync(errorOutGpu, stream);
         stream.synchronize();
@@ -107,9 +104,7 @@ TEST(Tanh, Works) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    cudaError_t cudaStatus;
-
-    for (int test = 0; test < 10; ++test) {
+    for (int test = 0; test < 100; ++test) {
         int numDimensions = (rand() % 5) + 1;
         vector<unsigned long> dimensions;
         int numElements = 1;
@@ -120,7 +115,7 @@ TEST(Tanh, Works) {
 
         TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
         Tensor featureInCpu(cpuPlacement, descriptor);
-        Tensor featureInGpu(gpuPlacement, descriptor);
+        Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
         Tensor destCpu(cpuPlacement, descriptor);
 
         half *featureInMem = (half *)featureInCpu.getMemPtr();
@@ -136,19 +131,16 @@ TEST(Tanh, Works) {
         layers.push_back(new NoOpLayer());
         layers.push_back(new NetworkOutput(gpuPlacement));
 
-        Stream stream = layers.front()->getStream();
-        featureInGpu.copyFromAsync(featureInCpu, stream);
-
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
-        layers[0]->forward(featureInGpu, false);
+        layers[0]->forward(featureInCpu, false);
+        Stream stream = layers.front()->getStream();
         stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
-        cudaStatus = cudaStreamSynchronize(stream.getStream());
-        assert(cudaStatus == cudaSuccess);
+        stream.synchronize();
 
         half *destMem = (half *)destCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
