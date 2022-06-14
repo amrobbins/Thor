@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Arithmetic/Scale.h"
-#include "Utilities/TensorOperations/DeepLearning/CrossEntropyLoss.h"
 
 namespace ThorImplementation {
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
 
 #include <chrono>
 #include <thread>

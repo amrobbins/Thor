@@ -2,7 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/Activation/Activation.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Arithmetic/Swish.h"
+#include "Utilities/TensorOperations/Activation/Swish.h"
 
 namespace ThorImplementation {
 
