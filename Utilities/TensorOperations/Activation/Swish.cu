@@ -37,7 +37,7 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
     if (element >= numElements)
         return;
 
-    const half2 one = __float2half(1.0f);
+    const half2 one = __float2half2_rn(1.0f);
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
