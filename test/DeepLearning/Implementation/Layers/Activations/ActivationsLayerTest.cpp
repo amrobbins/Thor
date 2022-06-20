@@ -380,6 +380,88 @@ TEST(Swish, Works) {
     }
 }
 
+TEST(Exponential, Works) {
+    srand(time(NULL));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    for (int test = 0; test < 100; ++test) {
+        int numDimensions = (rand() % 5) + 1;
+        vector<unsigned long> dimensions;
+        int numElements = 1;
+        for (int i = 0; i < numDimensions; ++i) {
+            dimensions.push_back((rand() % 8) + 1);
+            numElements *= dimensions.back();
+        }
+
+        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        Tensor featureInCpu(cpuPlacement, descriptor);
+        Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
+        Tensor destCpu(cpuPlacement, descriptor);
+
+        half *featureInMem = (half *)featureInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            featureInMem[i] = ((rand() % 40) / 10.0f) - 2.0f;
+        }
+
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(featureInGpu));
+        layers.push_back(new NoOpLayer());
+        Exponential *exponentialLayer = new Exponential();
+        layers.push_back(exponentialLayer);
+        layers.push_back(new NoOpLayer());
+        layers.push_back(new NetworkOutput(gpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor outputGpu = layers.back()->getFeatureOutput();
+
+        // Network is runnable here
+        layers[0]->forward(featureInCpu, false);
+        Stream stream = layers.front()->getStream();
+        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        destCpu.copyFromAsync(outputGpu, stream);
+
+        stream.synchronize();
+
+        half *destMem = (half *)destCpu.getMemPtr();
+        float thresh = 0.01;
+        for (int i = 0; i < numElements; ++i) {
+            float expectedValueFloat = (float)(half)exp((float)featureInMem[i]);
+            half expectedValue = (half)expectedValueFloat;
+            half actualValue = destMem[i];
+            ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
+        }
+
+        // Backward pass
+        Tensor errorInCpu(cpuPlacement, descriptor);
+        Tensor errorOutCpu(cpuPlacement, descriptor);
+        Tensor errorInGpu(gpuPlacement, descriptor);
+        Tensor errorOutGpu = exponentialLayer->getErrorOutput();
+
+        half *errorInMem = (half *)errorInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            errorInMem[i] = ((rand() % 40) / 10.0f) - 2.0f;
+        }
+        errorInGpu.copyFromAsync(errorInCpu, stream);
+
+        exponentialLayer->backward(errorInGpu);
+        errorOutCpu.copyFromAsync(errorOutGpu, stream);
+        stream.synchronize();
+
+        half *errorOutMem = (half *)errorOutCpu.getMemPtr();
+        thresh = 0.01;
+        for (int i = 0; i < numElements; ++i) {
+            float expectedValueFloat = (float)errorInMem[i] * exp((float)featureInMem[i]);
+            half expectedValue = (half)expectedValueFloat;
+            half actualValue = errorOutMem[i];
+            EXPECT_LT(abs((float)expectedValue - (float)actualValue), thresh);
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
