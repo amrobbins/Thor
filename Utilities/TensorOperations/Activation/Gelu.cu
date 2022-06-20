@@ -9,7 +9,7 @@ __global__ void gelu(half *featureOut, half *featureIn, int numElements) {
     if (element >= numElements)
         return;
 
-    constexpr float sqrtTwoOverPi = 2.506628274631f;
+    constexpr float sqrtTwoOverPi = 0.797884561f;
     constexpr float c = 0.044715f;
 
     double *featureIn_half_4 = (double *)featureIn;
