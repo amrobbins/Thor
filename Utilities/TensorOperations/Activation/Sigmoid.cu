@@ -9,41 +9,19 @@ __global__ void sigmoid(half *dest, half *source, int numElements) {
     if (element >= numElements)
         return;
 
+    const half2 one = __float2half2_rn(1.0f);
+    const half2 negativeOne = __float2half2_rn(-1.0f);
+
     double *source_half_4 = (double *)source;
-    double finBuffer_half_4[1];
-    finBuffer_half_4[0] = source_half_4[element / 4];
-    half *finBuffer = (half *)finBuffer_half_4;
-    half foutBuffer[4];
+    double featureInBuffer_half_4[1];
+    featureInBuffer_half_4[0] = source_half_4[element / 4];
+    half *featureInBuffer = (half *)featureInBuffer_half_4;
+    half featureOutBuffer[4];
 
-    float fin;
-    half fout;
+    ((half2 *)featureOutBuffer)[0] = __h2div(one, __hadd2(one, h2exp(__hmul2(negativeOne, ((half2 *)featureInBuffer)[0]))));
+    ((half2 *)featureOutBuffer)[1] = __h2div(one, __hadd2(one, h2exp(__hmul2(negativeOne, ((half2 *)featureInBuffer)[1]))));
 
-    fin = (float)finBuffer[0];
-    fout = 1.0f / (1.0f + expf(-fin));
-    foutBuffer[0] = fout;
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[1];
-        fout = 1.0f / (1.0f + expf(-fin));
-        foutBuffer[1] = fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[2];
-        fout = 1.0f / (1.0f + expf(-fin));
-        foutBuffer[2] = fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[3];
-        fout = 1.0f / (1.0f + expf(-fin));
-        foutBuffer[3] = fout;
-    }
-
-    double *fout_half_4 = (double *)foutBuffer;
+    double *fout_half_4 = (double *)featureOutBuffer;
     double *dest_half_4 = (double *)dest;
     dest_half_4[element / 4] = fout_half_4[0];
 }
@@ -57,11 +35,7 @@ __global__ void sigmoidBackward(half *errorOut, half *featureIn, half *errorIn, 
     if (element >= numElements)
         return;
 
-    float fin;
-    float ein;
-    float e_x;
-    float e_x_1;
-    float eout;
+    const half2 one = __float2half2_rn(1.0f);
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
@@ -74,42 +48,19 @@ __global__ void sigmoidBackward(half *errorOut, half *featureIn, half *errorIn, 
     half *errorInBuffer = (half *)errorInBuffer_half_4;
     half errorOutBuffer[4];
 
-    fin = featureInBuffer[0];
-    ein = errorInBuffer[0];
-    e_x = expf(fin);
-    e_x_1 = e_x + 1.0f;
-    eout = (ein * e_x) / (e_x_1 * e_x_1);
-    errorOutBuffer[0] = (half)eout;
+    half2 expX;
+    half2 expX_1;
+    half2 derivative;
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[1];
-        ein = errorInBuffer[1];
-        e_x = expf(fin);
-        e_x_1 = e_x + 1.0f;
-        eout = (ein * e_x) / (e_x_1 * e_x_1);
-        errorOutBuffer[1] = (half)eout;
-    }
+    expX = h2exp(((half2 *)featureInBuffer)[0]);
+    expX_1 = __hadd2(expX, one);
+    derivative = __h2div(expX, __hmul2(expX_1, expX_1));
+    ((half2 *)errorOutBuffer)[0] = __hmul2(((half2 *)errorInBuffer)[0], derivative);
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[2];
-        ein = errorInBuffer[2];
-        e_x = expf(fin);
-        e_x_1 = e_x + 1.0f;
-        eout = (ein * e_x) / (e_x_1 * e_x_1);
-        errorOutBuffer[2] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[3];
-        ein = errorInBuffer[3];
-        e_x = expf(fin);
-        e_x_1 = e_x + 1.0f;
-        eout = (ein * e_x) / (e_x_1 * e_x_1);
-        errorOutBuffer[3] = (half)eout;
-    }
+    expX = h2exp(((half2 *)featureInBuffer)[1]);
+    expX_1 = __hadd2(expX, one);
+    derivative = __h2div(expX, __hmul2(expX_1, expX_1));
+    ((half2 *)errorOutBuffer)[1] = __hmul2(((half2 *)errorInBuffer)[1], derivative);
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
     double *errorOut_half_4 = (double *)errorOut;
