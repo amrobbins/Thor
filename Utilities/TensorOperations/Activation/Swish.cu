@@ -1,10 +1,16 @@
 #include "Swish.h"
 
+/**
+ * swish(x) === x * sigmoid(x) === x / (1 + exp(-x))
+ */
 __global__ void swish(half *featureOut, half *featureIn, int numElements) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    const half one[2] = {(half)1.0f, (half)1.0f};
+    const half negativeOne[2] = {(half)-1.0f, (half)-1.0f};
 
     double *featureIn_half_4 = (double *)featureIn;
     double finBuffer_half_4[1];
@@ -12,51 +18,26 @@ __global__ void swish(half *featureOut, half *featureIn, int numElements) {
     half *finBuffer = (half *)finBuffer_half_4;
     half foutBuffer[4];
 
-    float fin;
-    half fout;
-
-    fin = (float)finBuffer[0];
-    fout = fin / (1.0f + expf(-fin));
-    foutBuffer[0] = fout;
-
-    element += 1;
-    if (element < numElements) {
-        fin = (float)finBuffer[1];
-        fout = (float)fin / (1.0f + expf(-fin));
-        foutBuffer[1] = fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = (float)finBuffer[2];
-        fout = fin / (1.0f + expf(-fin));
-        foutBuffer[2] = fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = (float)finBuffer[3];
-        half fout = fin / (1.0f + expf(-fin));
-        foutBuffer[3] = fout;
-    }
+    ((half2 *)foutBuffer)[0] =
+        __h2div(((half2 *)finBuffer)[0], __hadd2(((half2 *)one)[0], h2exp(__hmul2(((half2 *)finBuffer)[0], ((half2 *)negativeOne)[0]))));
+    ((half2 *)foutBuffer)[1] =
+        __h2div(((half2 *)finBuffer)[1], __hadd2(((half2 *)one)[0], h2exp(__hmul2(((half2 *)finBuffer)[1], ((half2 *)negativeOne)[0]))));
 
     double *fout_half_4 = (double *)foutBuffer;
     double *featureOut_half_4 = (double *)featureOut;
     featureOut_half_4[element / 4] = fout_half_4[0];
 }
 
-// d/dx(x/(1 + exp(-x))) = (e^x (x + e^x + 1))/(e^x + 1)^2
+/**
+ * d/dx(x/(1 + exp(-x))) = (e^x * (x + e^x + 1))/(e^x + 1)^2
+ */
 __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, int numElements) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
 
-    float fin;
-    float ein;
-    float e_x;
-    float e_x_1;
-    float eout;
+    const half2 one = __float2half(1.0f);
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
@@ -69,42 +50,28 @@ __global__ void swishBackward(half *errorOut, half *featureIn, half *errorIn, in
     half *errorInBuffer = (half *)errorInBuffer_half_4;
     half errorOutBuffer[4];
 
-    fin = featureInBuffer[0];
-    ein = errorInBuffer[0];
-    e_x = expf(fin);
-    e_x_1 = e_x + 1.0f;
-    eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
-    errorOutBuffer[0] = (half)eout;
+    half2 ex;
+    half2 ex_1;
+    half2 ex_1_squared;
+    half2 x_ex_1;
+    half2 ex_x_ex_1;
+    half2 derivative;
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[1];
-        ein = errorInBuffer[1];
-        e_x = expf(fin);
-        e_x_1 = e_x + 1.0f;
-        eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
-        errorOutBuffer[1] = (half)eout;
-    }
+    ex = h2exp(((half2 *)featureInBuffer)[0]);
+    ex_1 = __hadd2(one, ex);
+    ex_1_squared = __hmul2(ex_1, ex_1);
+    x_ex_1 = __hadd2(((half2 *)featureInBuffer)[0], ex_1);
+    ex_x_ex_1 = __hmul2(ex, x_ex_1);
+    derivative = __h2div(ex_x_ex_1, ex_1_squared);
+    ((half2 *)errorOutBuffer)[0] = __hmul2(((half2 *)errorInBuffer)[0], derivative);
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[2];
-        ein = errorInBuffer[2];
-        e_x = expf(fin);
-        e_x_1 = e_x + 1.0f;
-        eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
-        errorOutBuffer[2] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[3];
-        ein = errorInBuffer[3];
-        e_x = expf(fin);
-        e_x_1 = e_x + 1.0f;
-        eout = ein * (e_x * ((float)fin + e_x_1)) / (e_x_1 * e_x_1);
-        errorOutBuffer[3] = (half)eout;
-    }
+    ex = h2exp(((half2 *)featureInBuffer)[1]);
+    ex_1 = __hadd2(one, ex);
+    ex_1_squared = __hmul2(ex_1, ex_1);
+    x_ex_1 = __hadd2(((half2 *)featureInBuffer)[1], ex_1);
+    ex_x_ex_1 = __hmul2(ex, x_ex_1);
+    derivative = __h2div(ex_x_ex_1, ex_1_squared);
+    ((half2 *)errorOutBuffer)[1] = __hmul2(((half2 *)errorInBuffer)[1], derivative);
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
     double *errorOut_half_4 = (double *)errorOut;

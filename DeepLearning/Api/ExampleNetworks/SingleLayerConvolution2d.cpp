@@ -33,7 +33,7 @@ Network buildSingleLayerConvolution2d() {
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activationBuilder(Swish::Builder())
                              .batchNormalization()
                              .build()
                              .getFeatureOutput();

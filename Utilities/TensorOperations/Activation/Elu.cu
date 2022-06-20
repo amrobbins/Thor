@@ -63,7 +63,7 @@ __global__ void elu(half *featureOut, half *featureIn, int numElements, float al
 }
 
 /**
- * d/dx(x) = 1 when x >= 0
+ * d/dx(x)elu(x) = 1 when x >= 0
  * d/dx(alpha * (exp(x) - 1)) = alpha * exp(x) when x < 0
  * where alpha is a scalar parameter that defaults to 1.0 and must be >= 0.0
  */

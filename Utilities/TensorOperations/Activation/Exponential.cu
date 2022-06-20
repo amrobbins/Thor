@@ -15,33 +15,8 @@ __global__ void exponential(half *featureOut, half *featureIn, int numElements) 
     half *finBuffer = (half *)finBuffer_half_4;
     half foutBuffer[4];
 
-    float fin;
-    float fout;
-
-    fin = (float)finBuffer[0];
-    fout = expf(fin);
-    foutBuffer[0] = (half)fout;
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[1];
-        fout = expf(fin);
-        foutBuffer[1] = (half)fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[2];
-        fout = expf(fin);
-        foutBuffer[2] = (half)fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[3];
-        fout = expf(fin);
-        foutBuffer[3] = (half)fout;
-    }
+    ((half2 *)foutBuffer)[0] = h2exp(((half2 *)finBuffer)[0]);
+    ((half2 *)foutBuffer)[1] = h2exp(((half2 *)finBuffer)[1]);
 
     double *fout_half_4 = (double *)foutBuffer;
     double *featureOut_half_4 = (double *)featureOut;
@@ -57,11 +32,6 @@ __global__ void exponentialBackward(half *errorOut, half *featureIn, half *error
     if (element >= numElements)
         return;
 
-    const half zero = half(0.0f);
-    float fin;
-    float ein;
-    float eout;
-
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
     featureInBuffer_half_4[0] = featureIn_half_4[element / 4];
@@ -73,34 +43,8 @@ __global__ void exponentialBackward(half *errorOut, half *featureIn, half *error
     half *errorInBuffer = (half *)errorInBuffer_half_4;
     half errorOutBuffer[4];
 
-    fin = featureInBuffer[0];
-    ein = errorInBuffer[0];
-    eout = ein * expf(fin);
-    errorOutBuffer[0] = (half)eout;
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[1];
-        ein = errorInBuffer[1];
-        eout = ein * expf(fin);
-        errorOutBuffer[1] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[2];
-        ein = errorInBuffer[2];
-        eout = ein * expf(fin);
-        errorOutBuffer[2] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[3];
-        ein = errorInBuffer[3];
-        eout = ein * expf(fin);
-        errorOutBuffer[3] = (half)eout;
-    }
+    ((half2 *)errorOutBuffer)[0] = __hmul2(((half2 *)errorInBuffer)[0], h2exp(((half2 *)featureInBuffer)[0]));
+    ((half2 *)errorOutBuffer)[1] = __hmul2(((half2 *)errorInBuffer)[1], h2exp(((half2 *)featureInBuffer)[1]));
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
     double *errorOut_half_4 = (double *)errorOut;
