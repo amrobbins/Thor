@@ -34,12 +34,12 @@ __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *error
     if (element >= numElements)
         return;
 
-    const half zero = half(0.0f);
-    const half one = half(1.0f);
-    const half pointTwo = half(0.2f);
-    half fin;
-    half ein;
-    half eout;
+    const half2 zero = __float2half2_rn(0.0f);
+    const half2 one = __float2half2_rn(1.0f);
+    const half2 pointTwo = __float2half2_rn(0.2f);
+
+    const half singleZero = 0.0f;
+    const half singleOne = 1.0f;
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
@@ -52,45 +52,37 @@ __global__ void hardSigmoidBackward(half *errorOut, half *featureIn, half *error
     half *errorInBuffer = (half *)errorInBuffer_half_4;
     half errorOutBuffer[4];
 
-    fin = featureInBuffer[0];
-    ein = errorInBuffer[0];
-    if (fin >= one || fin <= zero)
-        eout = zero;
-    else
-        eout = __hmul(ein, pointTwo);
-    errorOutBuffer[0] = eout;
+    half2 gteOne;
+    half2 lteZero;
+    half2 bothZero;
+    half2 mulBuf;
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[1];
-        ein = errorInBuffer[1];
-        if (fin >= one || fin <= zero)
-            eout = zero;
-        else
-            eout = __hmul(ein, pointTwo);
-        errorOutBuffer[1] = (half)eout;
+    gteOne = __hge2(((half2 *)featureInBuffer)[0], one);
+    lteZero = __hle2(((half2 *)featureInBuffer)[0], zero);
+    errorOutBuffer[0] = singleZero;
+    bothZero.x = gteOne.x || lteZero.x;
+    errorOutBuffer[1] = singleZero;
+    bothZero.y = gteOne.y || lteZero.y;
+    if (!__hbeq2(bothZero, one)) {
+        mulBuf = __hmul2(((half2 *)errorInBuffer)[0], pointTwo);
+        if (!bothZero.x)
+            errorOutBuffer[0] = mulBuf.x;
+        if (!bothZero.y)
+            errorOutBuffer[1] = mulBuf.y;
     }
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[2];
-        ein = errorInBuffer[2];
-        if (fin >= one || fin <= zero)
-            eout = zero;
-        else
-            eout = __hmul(ein, pointTwo);
-        errorOutBuffer[2] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[3];
-        ein = errorInBuffer[3];
-        if (fin >= one || fin <= zero)
-            eout = zero;
-        else
-            eout = __hmul(ein, pointTwo);
-        errorOutBuffer[3] = (half)eout;
+    gteOne = __hge2(((half2 *)featureInBuffer)[1], one);
+    lteZero = __hle2(((half2 *)featureInBuffer)[1], zero);
+    errorOutBuffer[2] = singleZero;
+    bothZero.x = gteOne.x || lteZero.x;
+    errorOutBuffer[3] = singleZero;
+    bothZero.y = gteOne.y || lteZero.y;
+    if (!__hbeq2(bothZero, one)) {
+        mulBuf = __hmul2(((half2 *)errorInBuffer)[1], pointTwo);
+        if (!bothZero.x)
+            errorOutBuffer[2] = mulBuf.x;
+        if (!bothZero.y)
+            errorOutBuffer[3] = mulBuf.y;
     }
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;

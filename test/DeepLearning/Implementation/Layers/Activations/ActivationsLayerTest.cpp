@@ -13,8 +13,7 @@
 #include <set>
 #include <vector>
 
-using std::set;
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -548,6 +547,103 @@ TEST(SoftSign, Works) {
         thresh = 0.01;
         for (int i = 0; i < numElements; ++i) {
             float expectedValueFloat = softSignBackward(featureInMem[i], errorInMem[i]);
+            half expectedValue = (half)expectedValueFloat;
+            half actualValue = errorOutMem[i];
+            ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+    }
+}
+
+/**
+ * max( min(0.2 * x + 0.5, 1.0), 0.0)
+ */
+float hardSigmoid(float featureIn) { return max(min(0.2 * featureIn + 0.5, 1.0), 0.0); }
+
+/**
+ * d/dx(x) = 0.2 when 1 < x > 0; else 0
+ */
+float hardSigmoidBackward(float featureIn, float errorIn) {
+    if (featureIn < 1.0f && featureIn > 0.0f)
+        return errorIn * 0.2f;
+    else
+        return 0.0f;
+}
+
+TEST(HardSigmoid, Works) {
+    srand(time(NULL));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    for (int test = 0; test < 10000; ++test) {
+        int numDimensions = (rand() % 5) + 1;
+        vector<unsigned long> dimensions;
+        int numElements = 1;
+        for (int i = 0; i < numDimensions; ++i) {
+            dimensions.push_back((rand() % 8) + 1);
+            numElements *= dimensions.back();
+        }
+
+        TensorDescriptor descriptor(TensorDescriptor::DataType::FP16, dimensions);
+        Tensor featureInCpu(cpuPlacement, descriptor);
+        Tensor featureInGpu = featureInCpu.clone(gpuPlacement);
+        Tensor destCpu(cpuPlacement, descriptor);
+
+        half *featureInMem = (half *)featureInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+
+        vector<Layer *> layers;
+        layers.push_back(new NetworkInput(featureInGpu));
+        layers.push_back(new NoOpLayer());
+        HardSigmoid *hardSigmoidLayer = new HardSigmoid();
+        layers.push_back(hardSigmoidLayer);
+        layers.push_back(new NoOpLayer());
+        layers.push_back(new NetworkOutput(gpuPlacement));
+
+        LayerTestHelper::connectAndInitializeNetwork(layers);
+        Tensor outputGpu = layers.back()->getFeatureOutput();
+
+        // Network is runnable here
+        layers[0]->forward(featureInCpu, false);
+        Stream stream = layers.front()->getStream();
+        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        destCpu.copyFromAsync(outputGpu, stream);
+
+        stream.synchronize();
+
+        half *destMem = (half *)destCpu.getMemPtr();
+        float thresh = 0.01;
+        for (int i = 0; i < numElements; ++i) {
+            float expectedValueFloat = (float)(half)hardSigmoid((float)featureInMem[i]);
+            half expectedValue = (half)expectedValueFloat;
+            half actualValue = destMem[i];
+            ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
+        }
+
+        // Backward pass
+        Tensor errorInCpu(cpuPlacement, descriptor);
+        Tensor errorOutCpu(cpuPlacement, descriptor);
+        Tensor errorInGpu(gpuPlacement, descriptor);
+        Tensor errorOutGpu = hardSigmoidLayer->getErrorOutput();
+
+        half *errorInMem = (half *)errorInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            errorInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
+        }
+        errorInGpu.copyFromAsync(errorInCpu, stream);
+
+        hardSigmoidLayer->backward(errorInGpu);
+        errorOutCpu.copyFromAsync(errorOutGpu, stream);
+        stream.synchronize();
+
+        half *errorOutMem = (half *)errorOutCpu.getMemPtr();
+        thresh = 0.01;
+        for (int i = 0; i < numElements; ++i) {
+            float expectedValueFloat = hardSigmoidBackward(featureInMem[i], errorInMem[i]);
             half expectedValue = (half)expectedValueFloat;
             half actualValue = errorOutMem[i];
             ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
