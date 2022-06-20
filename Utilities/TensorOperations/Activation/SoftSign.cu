@@ -1,7 +1,7 @@
 #include "SoftSign.h"
 
 /**
- * x / (abs(x) + 1)
+ * softSign(x) === x / (abs(x) + 1)
  */
 __global__ void softSign(half *featureOut, half *featureIn, int numElements) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
