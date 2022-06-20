@@ -9,41 +9,18 @@ __global__ void softPlus(half *featureOut, half *featureIn, int numElements) {
     if (element >= numElements)
         return;
 
+    const half2 one = __float2half2_rn(1.0f);
+
     double *featureIn_half_4 = (double *)featureIn;
-    double finBuffer_half_4[1];
-    finBuffer_half_4[0] = featureIn_half_4[element / 4];
-    half *finBuffer = (half *)finBuffer_half_4;
-    half foutBuffer[4];
+    double featureInBuffer_half_4[1];
+    featureInBuffer_half_4[0] = featureIn_half_4[element / 4];
+    half *featureInBuffer = (half *)featureInBuffer_half_4;
+    half featureOutBuffer[4];
 
-    float fin;
-    float fout;
+    ((half2 *)featureOutBuffer)[0] = h2log(__hadd2(h2exp(((half2 *)featureInBuffer)[0]), one));
+    ((half2 *)featureOutBuffer)[1] = h2log(__hadd2(h2exp(((half2 *)featureInBuffer)[1]), one));
 
-    fin = (float)finBuffer[0];
-    fout = logf(expf(fin) + 1.0f);
-    foutBuffer[0] = (half)fout;
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[1];
-        fout = logf(expf(fin) + 1.0f);
-        foutBuffer[1] = (half)fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[2];
-        fout = logf(expf(fin) + 1.0f);
-        foutBuffer[2] = (half)fout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = finBuffer[3];
-        fout = logf(expf(fin) + 1.0f);
-        foutBuffer[3] = (half)fout;
-    }
-
-    double *fout_half_4 = (double *)foutBuffer;
+    double *fout_half_4 = (double *)featureOutBuffer;
     double *featureOut_half_4 = (double *)featureOut;
     featureOut_half_4[element / 4] = fout_half_4[0];
 }
@@ -57,10 +34,7 @@ __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn,
     if (element >= numElements)
         return;
 
-    const half zero = half(0.0f);
-    float fin;
-    float ein;
-    float eout;
+    const half2 one = __float2half2_rn(1.0f);
 
     double *featureIn_half_4 = (double *)featureIn;
     double featureInBuffer_half_4[1];
@@ -73,40 +47,13 @@ __global__ void softPlusBackward(half *errorOut, half *featureIn, half *errorIn,
     half *errorInBuffer = (half *)errorInBuffer_half_4;
     half errorOutBuffer[4];
 
-    float expX;
+    half2 expX;
 
-    fin = featureInBuffer[0];
-    ein = errorInBuffer[0];
-    expX = expf(fin);
-    eout = ein * (expX / (expX + 1));
-    errorOutBuffer[0] = (half)eout;
+    expX = h2exp(((half2 *)featureInBuffer)[0]);
+    ((half2 *)errorOutBuffer)[0] = __hmul2(((half2 *)errorInBuffer)[0], __h2div(expX, __hadd2(expX, one)));
 
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[1];
-        ein = errorInBuffer[1];
-        expX = expf(fin);
-        eout = ein * (expX / (expX + 1));
-        errorOutBuffer[1] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[2];
-        ein = errorInBuffer[2];
-        expX = expf(fin);
-        eout = ein * (expX / (expX + 1));
-        errorOutBuffer[2] = (half)eout;
-    }
-
-    element += 1;
-    if (element < numElements) {
-        fin = featureInBuffer[3];
-        ein = errorInBuffer[3];
-        expX = expf(fin);
-        eout = ein * (expX / (expX + 1));
-        errorOutBuffer[3] = (half)eout;
-    }
+    expX = h2exp(((half2 *)featureInBuffer)[1]);
+    ((half2 *)errorOutBuffer)[1] = __hmul2(((half2 *)errorInBuffer)[1], __h2div(expX, __hadd2(expX, one)));
 
     double *errorOutBuffer_half_4 = (double *)errorOutBuffer;
     double *errorOut_half_4 = (double *)errorOut;
