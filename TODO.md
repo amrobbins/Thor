@@ -26,3 +26,5 @@
    1. What would the framework provide?
 1. Expand the list of supported clustering algorithms
 1. Expand the list of signal processing algorithms
+1. Audio decoding / support
+1. Video decoding / support
