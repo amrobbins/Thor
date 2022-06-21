@@ -6,14 +6,7 @@ void swap(int &a, int &b) {
     b = c;
 }
 
-void verifyOperationIsLegal(int rowsA, int colsA, int rowsB, int colsB, int ldA, int ldB, int ldC, int transposeA, int transposeB) {
-    if (transposeA) {
-        swap(rowsA, colsA);
-    }
-    if (transposeB) {
-        swap(rowsB, colsB);
-    }
-
+void verifyOperationIsLegal(int rowsA, int colsA, int rowsB, int colsB, int ldA, int ldB, int ldC) {
     assert(colsA == rowsB);
     assert(ldC >= colsB);
 }
@@ -30,6 +23,42 @@ void transposeHalf(half *A, half *A_t, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             A[j * rows + i] = A_t[i * ld + j];
+        }
+    }
+}
+
+void identity(float *I, uint32_t size) {
+    assert(size >= 1);
+    for (uint32_t row = 0; row < size; ++row) {
+        for (uint32_t col = 0; col < size; ++col) {
+            float val = 0.0f;
+            if (row == col)
+                val = 1.0f;
+            I[row * size + col] = val;
+        }
+    }
+}
+
+void identityHalf(half *I, uint32_t size) {
+    assert(size >= 1);
+    for (uint32_t row = 0; row < size; ++row) {
+        for (uint32_t col = 0; col < size; ++col) {
+            half val = (half)0.0f;
+            if (row == col)
+                val = (half)1.0f;
+            I[row * size + col] = val;
+        }
+    }
+}
+
+void diagonalize(float *A, float *D, uint32_t size) {
+    assert(size >= 1);
+    for (uint32_t row = 0; row < size; ++row) {
+        for (uint32_t col = 0; col < size; ++col) {
+            float val = 0.0f;
+            if (row == col)
+                val = A[col];
+            D[row * size + col] = val;
         }
     }
 }
@@ -70,7 +99,7 @@ void matrixMultiplyCpu(float *A,
         ldb = colsB;
     }
 
-    verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, lda, ldb, ldc, false, false);
+    verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, lda, ldb, ldc);
 
 #pragma omp parallel for schedule(static, 3)
     for (int ra = 0; ra < rowsA; ra++) {
@@ -127,7 +156,7 @@ void matrixMultiplyCpuHalf(half *A,
         ldb = colsB;
     }
 
-    assert(colsA == rowsB);
+    verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, lda, ldb, ldc);
 
 #pragma omp parallel for schedule(static, 3)
     for (int ra = 0; ra < rowsA; ra++) {
@@ -147,6 +176,15 @@ void matrixMultiplyCpuHalf(half *A,
         delete A;
     if (transposeB)
         delete B;
+}
+
+void matrixSubtractCpu(float *A, float *B, float *C, uint32_t rows, uint32_t cols) {
+    for (uint32_t row = 0; row < rows; ++row) {
+        for (uint32_t col = 0; col < cols; ++col) {
+            uint32_t index = row * cols + col;
+            C[index] = A[index] - B[index];
+        }
+    }
 }
 
 void printMatrix(float *matrix, int rows, int cols, int ld) {
