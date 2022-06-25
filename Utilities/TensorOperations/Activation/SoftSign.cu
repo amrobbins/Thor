@@ -66,14 +66,14 @@ __global__ void softSignBackward(half *errorOut, half *featureIn, half *errorIn,
 }
 
 void launchSoftSign(half *featureOut_d, half *featureIn_d, int numElements, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     softSign<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements);
 }
 
 void launchSoftSignBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     softSignBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);

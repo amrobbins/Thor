@@ -136,14 +136,14 @@ __global__ void eluBackward(half *errorOut, half *featureIn, half *errorIn, int 
 }
 
 void launchElu(half *featureOut_d, half *featureIn_d, int numElements, float alpha, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     elu<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements, alpha);
 }
 
 void launchEluBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, float alpha, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     eluBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements, alpha);
