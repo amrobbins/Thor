@@ -52,14 +52,14 @@ __global__ void exponentialBackward(half *errorOut, half *featureIn, half *error
 }
 
 void launchExponential(half *featureOut_d, half *featureIn_d, int numElements, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     exponential<<<gridSize, blockSize, 0, stream>>>(featureOut_d, featureIn_d, numElements);
 }
 
 void launchExponentialBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     exponentialBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);

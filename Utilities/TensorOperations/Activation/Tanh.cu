@@ -93,14 +93,14 @@ __global__ void tanhBackward(half *errorOut, half *featureIn, half *errorIn, int
 }
 
 void launchTanh(half *dest_d, half *source_d, int numElements, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     tanh<<<gridSize, blockSize, 0, stream>>>(dest_d, source_d, numElements);
 }
 
 void launchTanhBackward(half *errorOut_d, half *featureIn_d, half *errorIn_d, int numElements, Stream stream) {
-    dim3 blockSize(256);
+    dim3 blockSize(min(256, numElements));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
     tanhBackward<<<gridSize, blockSize, 0, stream>>>(errorOut_d, featureIn_d, errorIn_d, numElements);
