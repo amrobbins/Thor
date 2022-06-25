@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
+#include "Utilities/TensorOperations/Loss/MeanSquaredError.h"
+#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include <chrono>
 #include <thread>
@@ -19,9 +21,13 @@ namespace ThorImplementation {
 
 class MeanSquaredError : public Loss {
    public:
-    virtual ~MeanSquaredError(){};
+    virtual ~MeanSquaredError() {
+        if (batchReduce)
+            delete batchReduce;
+        batchReduce = nullptr;
+    };
 
-    MeanSquaredError() : Loss() {}
+    MeanSquaredError() : Loss() { batchReduce = nullptr; }
 
     virtual void compile() {
         if (!isInferenceOnly()) {
@@ -50,10 +56,37 @@ class MeanSquaredError : public Loss {
 
         batchSize = featureInput.get().getDescriptor().getDimensions()[0];
 
-        // FIXME: create BatchReduce
+        batchReduce = new BatchReduce(batchSize,
+                                      batchSize,
+                                      featureInput.get().getDescriptor().getDimensions()[1],
+                                      featureInput.get().getDescriptor().getDataType(),
+                                      featureOutput.get().getDescriptor().getDataType(),
+                                      featureOutput.get().getDescriptor().getDataType(),
+                                      stream);
+
+        workspace = ThorImplementation::Tensor(
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+            ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, featureInput.get().getDescriptor().getDimensions()));
     }
 
     virtual void cleanup() {}
+
+    // predictions is featureInput and loss is featureOutput
+    // FIXME: should have featureInput passed in here. figure out how this relates to CCE
+    virtual void computeElementwiseLoss(Tensor labels, Tensor predictions, Tensor loss, Stream stream) {
+        assert(compiled);
+        assert(labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        assert(loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        launchMeanSquaredError<half, half, half>((half *)labels.getMemPtr(),
+                                                 (half *)featureInput.get().getMemPtr(),
+                                                 (half *)loss.getMemPtr(),
+                                                 (half *)workspace.getMemPtr(),
+                                                 featureOutput.get().getDescriptor().getDimensions()[1],
+                                                 batchSize,
+                                                 stream,
+                                                 batchReduce);
+    }
 
     virtual void infer(Optional<Tensor> rawPredictionsIn, Optional<Tensor> normalizedPredictionsOut, Stream stream) {
         assert(rawPredictionsIn.isPresent());
@@ -64,9 +97,6 @@ class MeanSquaredError : public Loss {
         ScopedGpu scopedGpu(rawPredictionsIn.get().getPlacement().getDeviceNum());
     }
 
-    // normalizedPredictions is featureOutput and loss is errorOutput
-    virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictions, Tensor loss, Stream stream) {}
-
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {}
 
     virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) {
@@ -76,6 +106,8 @@ class MeanSquaredError : public Loss {
    private:
     TensorDescriptor::DataType labelsDataType;
     unsigned int batchSize;
+    BatchReduce *batchReduce;
+    Tensor workspace;
 };
 
 }  // namespace ThorImplementation

@@ -236,7 +236,7 @@ void launchMeanSquaredError(LABEL_TYPE *labels_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
                             Stream stream,
-                            BatchReduce &batchReduce) {
+                            BatchReduce *batchReduce) {
     uint32_t numElements = batchSize * numPredictions;
 
     dim3 blockSize(min(256, batchSize * numPredictions));
@@ -247,11 +247,11 @@ void launchMeanSquaredError(LABEL_TYPE *labels_d,
 
     // Ensure that batchReduce stream is synchronized properly
     // It is done this way since the cudnnHandle belongs to the stream that batchReduce uses.
-    Stream batchReduceStream = batchReduce.getStream();
+    Stream batchReduceStream = batchReduce->getStream();
     if (batchReduceStream != stream)
         batchReduceStream.waitEvent(stream.putEvent());
 
-    batchReduce.reduce(workspace_d, loss_d);
+    batchReduce->reduce(workspace_d, loss_d);
 
     if (batchReduceStream != stream)
         stream.waitEvent(batchReduceStream.putEvent());
@@ -266,7 +266,7 @@ template void launchMeanSquaredError<half, half, float>(half *labels_d,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce &batchReduce);
+                                                        BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<half, float, half>(half *labels_d,
                                                         float *predictions_d,
@@ -275,7 +275,7 @@ template void launchMeanSquaredError<half, float, half>(half *labels_d,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce &batchReduce);
+                                                        BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<half, float, float>(half *labels_d,
                                                          float *predictions_d,
@@ -284,7 +284,7 @@ template void launchMeanSquaredError<half, float, float>(half *labels_d,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce &batchReduce);
+                                                         BatchReduce *batchReduce);
 
 // fhh is custom
 
@@ -297,7 +297,7 @@ template void launchMeanSquaredError<float, float, half>(float *labels_d,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce &batchReduce);
+                                                         BatchReduce *batchReduce);
 
 // fff is custom
 
@@ -309,7 +309,7 @@ template void launchMeanSquaredError<uint64_t, half, half>(uint64_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint64_t, half, float>(uint64_t *labels_d,
                                                             half *predictions_d,
@@ -318,7 +318,7 @@ template void launchMeanSquaredError<uint64_t, half, float>(uint64_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint64_t, float, half>(uint64_t *labels_d,
                                                             float *predictions_d,
@@ -327,7 +327,7 @@ template void launchMeanSquaredError<uint64_t, float, half>(uint64_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint64_t, float, float>(uint64_t *labels_d,
                                                              float *predictions_d,
@@ -336,7 +336,7 @@ template void launchMeanSquaredError<uint64_t, float, float>(uint64_t *labels_d,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
                                                              Stream stream,
-                                                             BatchReduce &batchReduce);
+                                                             BatchReduce *batchReduce);
 
 // uint32_t
 template void launchMeanSquaredError<uint32_t, half, half>(uint32_t *labels_d,
@@ -346,7 +346,7 @@ template void launchMeanSquaredError<uint32_t, half, half>(uint32_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint32_t, half, float>(uint32_t *labels_d,
                                                             half *predictions_d,
@@ -355,7 +355,7 @@ template void launchMeanSquaredError<uint32_t, half, float>(uint32_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint32_t, float, half>(uint32_t *labels_d,
                                                             float *predictions_d,
@@ -364,7 +364,7 @@ template void launchMeanSquaredError<uint32_t, float, half>(uint32_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint32_t, float, float>(uint32_t *labels_d,
                                                              float *predictions_d,
@@ -373,7 +373,7 @@ template void launchMeanSquaredError<uint32_t, float, float>(uint32_t *labels_d,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
                                                              Stream stream,
-                                                             BatchReduce &batchReduce);
+                                                             BatchReduce *batchReduce);
 
 // uint16_t
 template void launchMeanSquaredError<uint16_t, half, half>(uint16_t *labels_d,
@@ -383,7 +383,7 @@ template void launchMeanSquaredError<uint16_t, half, half>(uint16_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint16_t, half, float>(uint16_t *labels_d,
                                                             half *predictions_d,
@@ -392,7 +392,7 @@ template void launchMeanSquaredError<uint16_t, half, float>(uint16_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint16_t, float, half>(uint16_t *labels_d,
                                                             float *predictions_d,
@@ -401,7 +401,7 @@ template void launchMeanSquaredError<uint16_t, float, half>(uint16_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint16_t, float, float>(uint16_t *labels_d,
                                                              float *predictions_d,
@@ -410,7 +410,7 @@ template void launchMeanSquaredError<uint16_t, float, float>(uint16_t *labels_d,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
                                                              Stream stream,
-                                                             BatchReduce &batchReduce);
+                                                             BatchReduce *batchReduce);
 
 // uint8_t
 template void launchMeanSquaredError<uint8_t, half, half>(uint8_t *labels_d,
@@ -420,7 +420,7 @@ template void launchMeanSquaredError<uint8_t, half, half>(uint8_t *labels_d,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce &batchReduce);
+                                                          BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint8_t, half, float>(uint8_t *labels_d,
                                                            half *predictions_d,
@@ -429,7 +429,7 @@ template void launchMeanSquaredError<uint8_t, half, float>(uint8_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint8_t, float, half>(uint8_t *labels_d,
                                                            float *predictions_d,
@@ -438,7 +438,7 @@ template void launchMeanSquaredError<uint8_t, float, half>(uint8_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<uint8_t, float, float>(uint8_t *labels_d,
                                                             float *predictions_d,
@@ -447,7 +447,7 @@ template void launchMeanSquaredError<uint8_t, float, float>(uint8_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 // int64_t
 template void launchMeanSquaredError<int64_t, half, half>(int64_t *labels_d,
@@ -457,7 +457,7 @@ template void launchMeanSquaredError<int64_t, half, half>(int64_t *labels_d,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce &batchReduce);
+                                                          BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int64_t, half, float>(int64_t *labels_d,
                                                            half *predictions_d,
@@ -466,7 +466,7 @@ template void launchMeanSquaredError<int64_t, half, float>(int64_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int64_t, float, half>(int64_t *labels_d,
                                                            float *predictions_d,
@@ -475,7 +475,7 @@ template void launchMeanSquaredError<int64_t, float, half>(int64_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int64_t, float, float>(int64_t *labels_d,
                                                             float *predictions_d,
@@ -484,7 +484,7 @@ template void launchMeanSquaredError<int64_t, float, float>(int64_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 // int32_t
 template void launchMeanSquaredError<int32_t, half, half>(int32_t *labels_d,
@@ -494,7 +494,7 @@ template void launchMeanSquaredError<int32_t, half, half>(int32_t *labels_d,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce &batchReduce);
+                                                          BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int32_t, half, float>(int32_t *labels_d,
                                                            half *predictions_d,
@@ -503,7 +503,7 @@ template void launchMeanSquaredError<int32_t, half, float>(int32_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int32_t, float, half>(int32_t *labels_d,
                                                            float *predictions_d,
@@ -512,7 +512,7 @@ template void launchMeanSquaredError<int32_t, float, half>(int32_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int32_t, float, float>(int32_t *labels_d,
                                                             float *predictions_d,
@@ -521,7 +521,7 @@ template void launchMeanSquaredError<int32_t, float, float>(int32_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 // int16_t
 template void launchMeanSquaredError<int16_t, half, half>(int16_t *labels_d,
@@ -531,7 +531,7 @@ template void launchMeanSquaredError<int16_t, half, half>(int16_t *labels_d,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce &batchReduce);
+                                                          BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int16_t, half, float>(int16_t *labels_d,
                                                            half *predictions_d,
@@ -540,7 +540,7 @@ template void launchMeanSquaredError<int16_t, half, float>(int16_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int16_t, float, half>(int16_t *labels_d,
                                                            float *predictions_d,
@@ -549,7 +549,7 @@ template void launchMeanSquaredError<int16_t, float, half>(int16_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int16_t, float, float>(int16_t *labels_d,
                                                             float *predictions_d,
@@ -558,7 +558,7 @@ template void launchMeanSquaredError<int16_t, float, float>(int16_t *labels_d,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce &batchReduce);
+                                                            BatchReduce *batchReduce);
 
 // int8_t
 template void launchMeanSquaredError<int8_t, half, half>(int8_t *labels_d,
@@ -568,7 +568,7 @@ template void launchMeanSquaredError<int8_t, half, half>(int8_t *labels_d,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce &batchReduce);
+                                                         BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int8_t, half, float>(int8_t *labels_d,
                                                           half *predictions_d,
@@ -577,7 +577,7 @@ template void launchMeanSquaredError<int8_t, half, float>(int8_t *labels_d,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce &batchReduce);
+                                                          BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int8_t, float, half>(int8_t *labels_d,
                                                           float *predictions_d,
@@ -586,7 +586,7 @@ template void launchMeanSquaredError<int8_t, float, half>(int8_t *labels_d,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce &batchReduce);
+                                                          BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<int8_t, float, float>(int8_t *labels_d,
                                                            float *predictions_d,
@@ -595,7 +595,7 @@ template void launchMeanSquaredError<int8_t, float, float>(int8_t *labels_d,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce &batchReduce);
+                                                           BatchReduce *batchReduce);
 
 // bool
 template void launchMeanSquaredError<bool, half, half>(bool *labels_d,
@@ -605,7 +605,7 @@ template void launchMeanSquaredError<bool, half, half>(bool *labels_d,
                                                        uint32_t numPredictions,
                                                        uint32_t batchSize,
                                                        Stream stream,
-                                                       BatchReduce &batchReduce);
+                                                       BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<bool, half, float>(bool *labels_d,
                                                         half *predictions_d,
@@ -614,7 +614,7 @@ template void launchMeanSquaredError<bool, half, float>(bool *labels_d,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce &batchReduce);
+                                                        BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<bool, float, half>(bool *labels_d,
                                                         float *predictions_d,
@@ -623,7 +623,7 @@ template void launchMeanSquaredError<bool, float, half>(bool *labels_d,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce &batchReduce);
+                                                        BatchReduce *batchReduce);
 
 template void launchMeanSquaredError<bool, float, float>(bool *labels_d,
                                                          float *predictions_d,
@@ -632,4 +632,4 @@ template void launchMeanSquaredError<bool, float, float>(bool *labels_d,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce &batchReduce);
+                                                         BatchReduce *batchReduce);

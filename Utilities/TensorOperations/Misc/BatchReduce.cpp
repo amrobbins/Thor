@@ -15,7 +15,8 @@
  * We want to reduce across the batch so our resulting tensor size will be 1 X 4,
  * i.e. one reduced element for each feature.
  */
-BatchReduce::BatchReduce(uint32_t batchSize,
+BatchReduce::BatchReduce(uint32_t batchletSize,
+                         uint32_t batchSize,
                          uint32_t featureSize,
                          ThorImplementation::TensorDescriptor::DataType sourceDataType,
                          ThorImplementation::TensorDescriptor::DataType destDataType,
@@ -32,13 +33,13 @@ BatchReduce::BatchReduce(uint32_t batchSize,
         assert(destDataType == ThorImplementation::TensorDescriptor::DataType::FP64);
         zero = new double;
         ((double *)zero)[0] = 0.0;
-        one = new double;
-        ((double *)one)[0] = 1.0;
+        batchScale = new double;
+        ((double *)batchScale)[0] = 1.0 / batchSize;
     } else {
         zero = new float;
         ((float *)zero)[0] = 0.0f;
-        one = new float;
-        ((float *)one)[0] = 1.0f;
+        batchScale = new float;
+        ((float *)batchScale)[0] = 1.0f / batchSize;
     }
 
     cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceTensorDescriptor);
@@ -52,7 +53,7 @@ BatchReduce::BatchReduce(uint32_t batchSize,
                                                  CUDNN_32BIT_INDICES);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    sourceTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({batchSize, featureSize}, sourceDataType);
+    sourceTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({batchletSize, featureSize}, sourceDataType);
     destTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({1, featureSize}, destDataType);
     cudnnGetReductionWorkspaceSize(
         stream.getCudnnHandle(), reduceTensorDescriptor, sourceTensorDescriptor, destTensorDescriptor, &workspaceSizeInBytes);
@@ -71,10 +72,10 @@ BatchReduce::~BatchReduce() {
 
     if (doubleType) {
         delete (double *)zero;
-        delete (double *)one;
+        delete (double *)batchScale;
     } else {
         delete (float *)zero;
-        delete (float *)one;
+        delete (float *)batchScale;
     }
 }
 
@@ -89,7 +90,7 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     0,
                                     workspace.getMemPtr(),
                                     workspaceSizeInBytes,
-                                    one,
+                                    batchScale,
                                     sourceTensorDescriptor,
                                     sourceMem_d,
                                     zero,

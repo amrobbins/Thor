@@ -175,6 +175,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/Loaders/Shard.o \
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
                    build/Utilities/Loaders/ImageLoader.o \
+                   build/Utilities/TensorOperations/Misc/BatchReduce.o \
                    build/Utilities/Loaders/ImageProcessor.o \
                    build/Utilities/Loaders/NoOpDataProcessor.o \
                    build/Utilities/Loaders/BatchAssembler.o \
@@ -378,10 +379,6 @@ build/Utilities/TensorOperations/Loss/MeanSquaredError.o: Utilities/TensorOperat
 	mkdir -p build/Utilities/TensorOperations/Loss
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanSquaredError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanSquaredError.cu
 
-build/Utilities/TensorOperations/Misc/BatchReduce.o: Utilities/TensorOperations/Misc/BatchReduce.h Utilities/TensorOperations/Misc/BatchReduce.cu
-	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Misc/BatchReduce.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/BatchReduce.cu
-
 build/Utilities/TensorOperations/DeepLearning/Add1dBias.o: Utilities/TensorOperations/DeepLearning/Add1dBias.h Utilities/TensorOperations/DeepLearning/Add1dBias.cu
 	mkdir -p build/Utilities/TensorOperations/DeepLearning
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/DeepLearning/Add1dBias.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/DeepLearning/Add1dBias.cu
@@ -546,6 +543,10 @@ build/Utilities/Loaders/ShardedRawDatasetCreator.o: Utilities/Loaders/ShardedRaw
 build/Utilities/Loaders/ImageLoader.o: Utilities/Loaders/ImageLoader.h Utilities/Loaders/ImageLoader.cpp
 	mkdir -p build/Utilities/Loaders
 	$(Gpp) -c -O3 -std=c++11 Utilities/Loaders/ImageLoader.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Loaders/ImageLoader.o
+
+build/Utilities/TensorOperations/Misc/BatchReduce.o: Utilities/TensorOperations/Misc/BatchReduce.h Utilities/TensorOperations/Misc/BatchReduce.cpp
+	mkdir -p build/Utilities/TensorOperations/Misc
+	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/Misc/BatchReduce.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/Misc/BatchReduce.o
 
 build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Utilities/Loaders/ImageProcessor.cpp
 	mkdir -p build/Utilities/Loaders
