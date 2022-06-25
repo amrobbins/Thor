@@ -18,4 +18,4 @@ void launchMeanSquaredError(LABEL_TYPE *labels_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
                             Stream stream,
-                            BatchReduce &batchReduce);
+                            BatchReduce *batchReduce);
