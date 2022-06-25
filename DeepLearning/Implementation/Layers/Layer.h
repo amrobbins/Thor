@@ -35,9 +35,6 @@ using std::unique_lock;
 using std::unordered_multimap;
 using std::vector;
 
-using ::Optional;
-using ::Stream;
-
 namespace ThorImplementation {
 
 class Tensor;
@@ -279,6 +276,9 @@ class Layer {
 
     virtual uint64_t floatingPointOperationsPerExampleBackward() { return 0; }
 
+    static cudnnTensorDescriptor_t createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
+                                                               TensorDescriptor::DataType dataType);
+
    protected:
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;
@@ -291,9 +291,6 @@ class Layer {
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) = 0;
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) = 0;
-
-    static cudnnTensorDescriptor_t createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
-                                                               TensorDescriptor::DataType dataType);
 
     bool running;
     bool compiled;
