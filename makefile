@@ -133,6 +133,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Activation/Sigmoid.o \
                    build/Utilities/TensorOperations/Arithmetic/Average.o \
                    build/Utilities/TensorOperations/Arithmetic/Sum.o \
+                   build/Utilities/TensorOperations/Loss/MeanSquaredError.o \
+                   build/Utilities/TensorOperations/Misc/BatchReduce.o \
                    build/Utilities/TensorOperations/DeepLearning/Add1dBias.o \
                    build/Utilities/TensorOperations/Arithmetic/SumScale.o \
                    build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o \
@@ -371,6 +373,14 @@ build/Utilities/TensorOperations/Arithmetic/Average.o: Utilities/TensorOperation
 build/Utilities/TensorOperations/Arithmetic/Sum.o: Utilities/TensorOperations/Arithmetic/Sum.h Utilities/TensorOperations/Arithmetic/Sum.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Sum.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Sum.cu
+
+build/Utilities/TensorOperations/Loss/MeanSquaredError.o: Utilities/TensorOperations/Loss/MeanSquaredError.h Utilities/TensorOperations/Loss/MeanSquaredError.cu
+	mkdir -p build/Utilities/TensorOperations/Loss
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanSquaredError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanSquaredError.cu
+
+build/Utilities/TensorOperations/Misc/BatchReduce.o: Utilities/TensorOperations/Misc/BatchReduce.h Utilities/TensorOperations/Misc/BatchReduce.cu
+	mkdir -p build/Utilities/TensorOperations/Misc
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Misc/BatchReduce.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/BatchReduce.cu
 
 build/Utilities/TensorOperations/DeepLearning/Add1dBias.o: Utilities/TensorOperations/DeepLearning/Add1dBias.h Utilities/TensorOperations/DeepLearning/Add1dBias.cu
 	mkdir -p build/Utilities/TensorOperations/DeepLearning

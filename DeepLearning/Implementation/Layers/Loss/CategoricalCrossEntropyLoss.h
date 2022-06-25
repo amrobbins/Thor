@@ -34,6 +34,8 @@ class CategoricalCrossEntropyLoss : public Loss {
         }
 
         assert(labelsInput.isPresent());
+        assert(featureInput.isPresent());
+
         assert(labelsInput.get().isInitialized());
         assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
@@ -49,14 +51,12 @@ class CategoricalCrossEntropyLoss : public Loss {
                             labelsDataType == TensorDescriptor::DataType::UINT32);
         assert(perClassLabels ^ classIndexLabels);
 
-        assert(featureInput.isPresent());
         assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
 
         lossWorkspace = Tensor(featureInput.get().getPlacement(),
                                TensorDescriptor(TensorDescriptor::DataType::FP32, featureInput.get().getDescriptor().getDimensions()));
 
-        assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
         batchSize = featureInput.get().getDescriptor().getDimensions()[0];
         numClasses = featureInput.get().getDescriptor().getDimensions()[1];
 
@@ -78,9 +78,9 @@ class CategoricalCrossEntropyLoss : public Loss {
     virtual void infer(Optional<Tensor> rawPredictionsIn, Optional<Tensor> normalizedPredictionsOut, Stream stream) {
         assert(rawPredictionsIn.isPresent());
         assert(normalizedPredictionsOut.isPresent());
+        assert(featureInput.isPresent());
         assert(rawPredictionsIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        if (rawPredictionsIn.get() != featureInput.get())
-            return;
+        assert(rawPredictionsIn.get() == featureInput.get());
         ScopedGpu scopedGpu(rawPredictionsIn.get().getPlacement().getDeviceNum());
 
         // Softmax

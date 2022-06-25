@@ -6,7 +6,15 @@ void swap(int &a, int &b) {
     b = c;
 }
 
-void verifyOperationIsLegal(int rowsA, int colsA, int rowsB, int colsB, int ldA, int ldB, int ldC) {
+void verifyOperationIsLegal(
+    int rowsA, int colsA, int rowsB, int colsB, int ldA, int ldB, int ldC, int transposeA = false, int transposeB = false) {
+    if (transposeA) {
+        swap(rowsA, colsA);
+    }
+    if (transposeB) {
+        swap(rowsB, colsB);
+    }
+
     assert(colsA == rowsB);
     assert(ldC >= colsB);
 }

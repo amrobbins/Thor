@@ -14,21 +14,25 @@ class CudnnHelper {
    public:
     static cudnnDataType_t getCudnnDataType(const TensorDescriptor::DataType dataType) {
         switch (dataType) {
-            case TensorDescriptor::DataType::FP16:
-                return CUDNN_DATA_HALF;
-            case TensorDescriptor::DataType::FP32:
-                return CUDNN_DATA_FLOAT;
-            case TensorDescriptor::DataType::FP64:
+            case ThorImplementation::TensorDescriptor::DataType::FP64:
                 return CUDNN_DATA_DOUBLE;
-            case TensorDescriptor::DataType::INT8:
+            case ThorImplementation::TensorDescriptor::DataType::FP32:
+                return CUDNN_DATA_FLOAT;
+            case ThorImplementation::TensorDescriptor::DataType::FP16:
+                return CUDNN_DATA_HALF;
+            case ThorImplementation::TensorDescriptor::DataType::INT8:
                 return CUDNN_DATA_INT8;
-            case TensorDescriptor::DataType::UINT8:
+            case ThorImplementation::TensorDescriptor::DataType::INT32:
+                return CUDNN_DATA_INT32;
+            case ThorImplementation::TensorDescriptor::DataType::UINT8:
                 return CUDNN_DATA_UINT8;
+            case ThorImplementation::TensorDescriptor::DataType::INT64:
+                return CUDNN_DATA_INT64;
             default:
-                assert(false);  // Requested data type is not supported, see above for supported data types.
+                assert(false);
         }
         assert(false);
-        return CUDNN_DATA_FLOAT;
+        return CUDNN_DATA_HALF;
     }
 
     static cudnnHandle_t getCudnnHandle(uint32_t gpuNum) {
