@@ -19,7 +19,12 @@ using namespace std;
  * through the associated prediction only.
  */
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
-__global__ void meanSquaredError(LABEL_TYPE *labels, PREDICTION_TYPE *predictions, LOSS_TYPE *workspace, uint64_t numElements) {
+__global__ void meanSquaredError(LABEL_TYPE *labels,
+                                 PREDICTION_TYPE *predictions,
+                                 LOSS_TYPE *workspace,
+                                 PREDICTION_TYPE *gradient,
+                                 uint32_t numElements,
+                                 bool computeGradient) {
     int32_t element = blockIdx.x * 1024 + threadIdx.x;
 
     LOSS_TYPE buffer;
@@ -28,31 +33,42 @@ __global__ void meanSquaredError(LABEL_TYPE *labels, PREDICTION_TYPE *prediction
         return;
     buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
     workspace[element] = buffer * buffer;
+    if (computeGradient)
+        gradient[element] = (LOSS_TYPE)2 * buffer;
 
     element += 256;
     if (element >= numElements)
         return;
     buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
     workspace[element] = buffer * buffer;
+    if (computeGradient)
+        gradient[element] = (LOSS_TYPE)2 * buffer;
 
     element += 256;
     if (element >= numElements)
         return;
     buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
     workspace[element] = buffer * buffer;
+    if (computeGradient)
+        gradient[element] = (LOSS_TYPE)2 * buffer;
 
     element += 256;
     if (element >= numElements)
         return;
     buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
     workspace[element] = buffer * buffer;
+    if (computeGradient)
+        gradient[element] = (LOSS_TYPE)2 * buffer;
 }
 
-__global__ void meanSquaredError(half *labels, half *predictions, half *workspace, uint64_t numElements) {
+__global__ void meanSquaredError(
+    half *labels, half *predictions, half *workspace, half *gradient, uint32_t numElements, bool computeGradient) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    const half two[2] = {(half)2.0f, (half)2.0f};
 
     // Always process 4 elements, even when past last element because tensors are always padded to
     // be multiples of 8 bytes (4 half variables) to allow this. This is done for performance reasons.
@@ -66,26 +82,36 @@ __global__ void meanSquaredError(half *labels, half *predictions, half *workspac
     predictionsBuffer_half4[0] = predictions_half4[element / 4];
     half *predictionsBuffer = (half *)predictionsBuffer_half4;
     half workspaceBuffer[4];
+    half gradientBuffer[4];
 
-    half2 buffer;
+    half2 buffer0, buffer1;
 
-    buffer = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
-    ((half2 *)workspaceBuffer)[0] = __hmul2(buffer, buffer);
-    buffer = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
-    ((half2 *)workspaceBuffer)[1] = __hmul2(buffer, buffer);
+    buffer0 = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
+    ((half2 *)workspaceBuffer)[0] = __hmul2(buffer0, buffer0);
+    buffer1 = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
+    ((half2 *)workspaceBuffer)[1] = __hmul2(buffer1, buffer1);
+    if (computeGradient) {
+        ((half2 *)gradientBuffer)[0] = __hmul2(((half2 *)two)[0], buffer0);
+        ((half2 *)gradientBuffer)[1] = __hmul2(((half2 *)two)[0], buffer1);
+        double *gradientBuffer_half4 = (double *)gradientBuffer;
+        double *gradient_half4 = (double *)gradient;
+        gradient_half4[element / 4] = gradientBuffer_half4[0];
+    }
 
     double *workspaceBuffer_half4 = (double *)workspaceBuffer;
     double *workspace_half4 = (double *)workspace;
     workspace_half4[element / 4] = workspaceBuffer_half4[0];
 }
 
-__global__ void meanSquaredError(float *labels, half *predictions, half *workspace, uint64_t numElements) {
+__global__ void meanSquaredError(
+    float *labels, half *predictions, half *workspace, half *gradient, uint32_t numElements, bool computeGradient) {
     int element = blockIdx.x * 1024 + (4 * threadIdx.x);
 
     if (element >= numElements)
         return;
 
     const half zero[2] = {(half)0.0f, (half)0.0f};
+    const half two[2] = {(half)2.0f, (half)2.0f};
 
     // Always process 4 elements, even when past last element because tensors are always padded to
     // be multiples of 8 bytes (4 half variables) to allow this. This is done for performance reasons.
@@ -108,20 +134,29 @@ __global__ void meanSquaredError(float *labels, half *predictions, half *workspa
     predictionsBuffer_half4[0] = predictions_half4[element / 4];
     half *predictionsBuffer = (half *)predictionsBuffer_half4;
     half workspaceBuffer[4];
+    half gradientBuffer[4];
 
-    half2 buffer;
+    half2 buffer0, buffer1;
 
-    buffer = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
-    ((half2 *)workspaceBuffer)[0] = __hmul2(buffer, buffer);
-    buffer = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
-    ((half2 *)workspaceBuffer)[1] = __hmul2(buffer, buffer);
+    buffer0 = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
+    ((half2 *)workspaceBuffer)[0] = __hmul2(buffer0, buffer0);
+    buffer1 = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
+    ((half2 *)workspaceBuffer)[1] = __hmul2(buffer1, buffer1);
+    if (computeGradient) {
+        ((half2 *)gradientBuffer)[0] = __hmul2(((half2 *)two)[0], buffer0);
+        ((half2 *)gradientBuffer)[1] = __hmul2(((half2 *)two)[0], buffer1);
+        double *gradientBuffer_half4 = (double *)gradientBuffer;
+        double *gradient_half4 = (double *)gradient;
+        gradient_half4[element / 4] = gradientBuffer_half4[0];
+    }
 
     double *workspaceBuffer_half4 = (double *)workspaceBuffer;
     double *workspace_half4 = (double *)workspace;
     workspace_half4[element / 4] = workspaceBuffer_half4[0];
 }
 
-__global__ void meanSquaredError(float *labels, float *predictions, float *workspace, uint64_t numElements) {
+__global__ void meanSquaredError(
+    float *labels, float *predictions, float *workspace, float *gradient, uint32_t numElements, bool computeGradient) {
     int element = blockIdx.x * 1024 + (2 * threadIdx.x);
 
     if (element >= numElements)
@@ -136,17 +171,23 @@ __global__ void meanSquaredError(float *labels, float *predictions, float *works
     float2 workspaceBuffer;
     float2 *workspace_float2 = (float2 *)workspace;
 
-    float buffer;
+    float2 gradientBuffer;
+    float2 *gradient_float2 = (float2 *)gradient;
+
+    float buffer0, buffer1;
 
     labelsBuffer = labels_float2[element / 2];
     predictionsBuffer = predictions_float2[element / 2];
 
-    buffer = labelsBuffer.x - predictionsBuffer.x;
-    workspaceBuffer.x = buffer * buffer;
+    buffer0 = labelsBuffer.x - predictionsBuffer.x;
+    workspaceBuffer.x = buffer0 * buffer0;
+    buffer1 = labelsBuffer.y - predictionsBuffer.y;
+    workspaceBuffer.y = buffer1 * buffer1;
 
-    if (element + 1 < numElements) {
-        buffer = labelsBuffer.y - predictionsBuffer.y;
-        workspaceBuffer.y = buffer * buffer;
+    if (computeGradient) {
+        gradientBuffer.x = 2.0f * buffer0;
+        gradientBuffer.y = 2.0f * buffer1;
+        gradient_float2[element / 2] = gradientBuffer;
     }
 
     // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
@@ -160,12 +201,15 @@ __global__ void meanSquaredError(float *labels, float *predictions, float *works
     labelsBuffer = labels_float2[element / 2];
     predictionsBuffer = predictions_float2[element / 2];
 
-    buffer = labelsBuffer.x - predictionsBuffer.x;
-    workspaceBuffer.x = buffer * buffer;
+    buffer0 = labelsBuffer.x - predictionsBuffer.x;
+    workspaceBuffer.x = buffer0 * buffer0;
+    buffer1 = labelsBuffer.y - predictionsBuffer.y;
+    workspaceBuffer.y = buffer1 * buffer1;
 
-    if (element + 1 < numElements) {
-        buffer = labelsBuffer.y - predictionsBuffer.y;
-        workspaceBuffer.y = buffer * buffer;
+    if (computeGradient) {
+        gradientBuffer.x = 2.0f * buffer0;
+        gradientBuffer.y = 2.0f * buffer1;
+        gradient_float2[element / 2] = gradientBuffer;
     }
 
     // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
@@ -173,11 +217,14 @@ __global__ void meanSquaredError(float *labels, float *predictions, float *works
     workspace_float2[element / 2] = workspaceBuffer;
 }
 
-__global__ void meanSquaredError(float *labels, half *predictions, float *workspace, uint64_t numElements) {
+__global__ void meanSquaredError(
+    float *labels, half *predictions, float *workspace, half *gradient, uint32_t numElements, bool computeGradient) {
     int element = blockIdx.x * 1024 + (2 * threadIdx.x);
 
     if (element >= numElements)
         return;
+
+    const half two[2] = {(half)2.0f, (half)2.0f};
 
     float2 *labels_float2 = (float2 *)labels;
     float2 labelsBuffer;
@@ -186,26 +233,34 @@ __global__ void meanSquaredError(float *labels, half *predictions, float *worksp
     half2 predictionsBuffer_half2;
     float2 predictionsBuffer;
 
-    float2 workspaceBuffer;
     float2 *workspace_float2 = (float2 *)workspace;
+    float2 workspaceBuffer;
 
-    float buffer;
+    half2 *gradient_half2 = (half2 *)gradient;
+    half2 gradientBuffer;
+
+    float2 buffer;
 
     labelsBuffer = labels_float2[element / 2];
     predictionsBuffer_half2 = predictions_half2[element / 2];
     predictionsBuffer = __half22float2(predictionsBuffer_half2);
 
-    buffer = labelsBuffer.x - predictionsBuffer.x;
-    workspaceBuffer.x = buffer * buffer;
+    buffer.x = labelsBuffer.x - predictionsBuffer.x;
+    workspaceBuffer.x = buffer.x * buffer.x;
 
     if (element + 1 < numElements) {
-        buffer = labelsBuffer.y - predictionsBuffer.y;
-        workspaceBuffer.y = buffer * buffer;
+        buffer.y = labelsBuffer.y - predictionsBuffer.y;
+        workspaceBuffer.y = buffer.y * buffer.y;
     }
 
     // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
     // of indexing out of bounds.
     workspace_float2[element / 2] = workspaceBuffer;
+
+    if (computeGradient) {
+        gradientBuffer = __hmul2(((half2 *)two)[0], __float22half2_rn(buffer));
+        gradient_half2[element / 2] = gradientBuffer;
+    }
 
     element += 512;
     if (element >= numElements)
@@ -215,35 +270,47 @@ __global__ void meanSquaredError(float *labels, half *predictions, float *worksp
     predictionsBuffer_half2 = predictions_half2[element / 2];
     predictionsBuffer = __half22float2(predictionsBuffer_half2);
 
-    buffer = labelsBuffer.x - predictionsBuffer.x;
-    workspaceBuffer.x = buffer * buffer;
+    buffer.x = labelsBuffer.x - predictionsBuffer.x;
+    workspaceBuffer.x = buffer.x * buffer.x;
 
     if (element + 1 < numElements) {
-        buffer = labelsBuffer.y - predictionsBuffer.y;
-        workspaceBuffer.y = buffer * buffer;
+        buffer.y = labelsBuffer.y - predictionsBuffer.y;
+        workspaceBuffer.y = buffer.y * buffer.y;
     }
 
     // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
     // of indexing out of bounds.
     workspace_float2[element / 2] = workspaceBuffer;
+
+    if (computeGradient) {
+        gradientBuffer = __hmul2(((half2 *)two)[0], __float22half2_rn(buffer));
+        gradient_half2[element / 2] = gradientBuffer;
+    }
 }
 
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
-void launchMeanSquaredError(LABEL_TYPE *labels_d,
-                            PREDICTION_TYPE *predictions_d,
-                            LOSS_TYPE *loss_d,
-                            LOSS_TYPE *workspace_d,
+void launchMeanSquaredError(void *labels_d,
+                            void *predictions_d,
+                            void *loss_d,
+                            void *workspace_d,
+                            void *gradient_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
                             Stream stream,
-                            BatchReduce *batchReduce) {
+                            BatchReduce *batchReduce,
+                            bool computeGradient) {
     uint32_t numElements = batchSize * numPredictions;
 
     dim3 blockSize(min(256, batchSize * numPredictions));
     dim3 gridSize((numElements + 1023) / 1024);
     ScopedGpu scopedGpu(stream.getGpuNum());
 
-    meanSquaredError<<<gridSize, blockSize, 0, stream>>>(labels_d, predictions_d, workspace_d, numElements);
+    meanSquaredError<<<gridSize, blockSize, 0, stream>>>((LABEL_TYPE *)labels_d,
+                                                         (PREDICTION_TYPE *)predictions_d,
+                                                         (LOSS_TYPE *)workspace_d,
+                                                         (PREDICTION_TYPE *)gradient_d,
+                                                         numElements,
+                                                         computeGradient);
 
     // Ensure that batchReduce stream is synchronized properly
     // It is done this way since the cudnnHandle belongs to the stream that batchReduce uses.
@@ -251,7 +318,7 @@ void launchMeanSquaredError(LABEL_TYPE *labels_d,
     if (batchReduceStream != stream)
         batchReduceStream.waitEvent(stream.putEvent());
 
-    batchReduce->reduce(workspace_d, loss_d);
+    batchReduce->reduce((LOSS_TYPE *)workspace_d, (LOSS_TYPE *)loss_d);
 
     if (batchReduceStream != stream)
         stream.waitEvent(batchReduceStream.putEvent());
@@ -259,377 +326,367 @@ void launchMeanSquaredError(LABEL_TYPE *labels_d,
 
 // hhh is custom
 
-template void launchMeanSquaredError<half, half, float>(half *labels_d,
-                                                        half *predictions_d,
-                                                        float *loss_d,
-                                                        float *workspace_d,
+template void launchMeanSquaredError<half, half, float>(void *labels_d,
+                                                        void *predictions_d,
+                                                        void *loss_d,
+                                                        void *workspace_d,
+                                                        void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce *batchReduce);
+                                                        BatchReduce *batchReduce,
+                                                        bool computeGradient);
 
-template void launchMeanSquaredError<half, float, half>(half *labels_d,
-                                                        float *predictions_d,
-                                                        half *loss_d,
-                                                        half *workspace_d,
+template void launchMeanSquaredError<half, float, half>(void *labels_d,
+                                                        void *predictions_d,
+                                                        void *loss_d,
+                                                        void *workspace_d,
+                                                        void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce *batchReduce);
+                                                        BatchReduce *batchReduce,
+                                                        bool computeGradient);
 
-template void launchMeanSquaredError<half, float, float>(half *labels_d,
-                                                         float *predictions_d,
-                                                         float *loss_d,
-                                                         float *workspace_d,
+template void launchMeanSquaredError<half, float, float>(void *labels_d,
+                                                         void *predictions_d,
+                                                         void *loss_d,
+                                                         void *workspace_d,
+                                                         void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce *batchReduce);
+                                                         BatchReduce *batchReduce,
+                                                         bool computeGradient);
 
 // fhh is custom
 
 // fhf is custom
 
-template void launchMeanSquaredError<float, float, half>(float *labels_d,
-                                                         float *predictions_d,
-                                                         half *loss_d,
-                                                         half *workspace_d,
+template void launchMeanSquaredError<float, float, half>(void *labels_d,
+                                                         void *predictions_d,
+                                                         void *loss_d,
+                                                         void *workspace_d,
+                                                         void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce *batchReduce);
+                                                         BatchReduce *batchReduce,
+                                                         bool computeGradient);
 
 // fff is custom
 
-// uint64_t
-template void launchMeanSquaredError<uint64_t, half, half>(uint64_t *labels_d,
-                                                           half *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
-                                                           uint32_t numPredictions,
-                                                           uint32_t batchSize,
-                                                           Stream stream,
-                                                           BatchReduce *batchReduce);
-
-template void launchMeanSquaredError<uint64_t, half, float>(uint64_t *labels_d,
-                                                            half *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
-                                                            uint32_t numPredictions,
-                                                            uint32_t batchSize,
-                                                            Stream stream,
-                                                            BatchReduce *batchReduce);
-
-template void launchMeanSquaredError<uint64_t, float, half>(uint64_t *labels_d,
-                                                            float *predictions_d,
-                                                            half *loss_d,
-                                                            half *workspace_d,
-                                                            uint32_t numPredictions,
-                                                            uint32_t batchSize,
-                                                            Stream stream,
-                                                            BatchReduce *batchReduce);
-
-template void launchMeanSquaredError<uint64_t, float, float>(uint64_t *labels_d,
-                                                             float *predictions_d,
-                                                             float *loss_d,
-                                                             float *workspace_d,
-                                                             uint32_t numPredictions,
-                                                             uint32_t batchSize,
-                                                             Stream stream,
-                                                             BatchReduce *batchReduce);
-
 // uint32_t
-template void launchMeanSquaredError<uint32_t, half, half>(uint32_t *labels_d,
-                                                           half *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
+template void launchMeanSquaredError<uint32_t, half, half>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<uint32_t, half, float>(uint32_t *labels_d,
-                                                            half *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
+template void launchMeanSquaredError<uint32_t, half, float>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
-template void launchMeanSquaredError<uint32_t, float, half>(uint32_t *labels_d,
-                                                            float *predictions_d,
-                                                            half *loss_d,
-                                                            half *workspace_d,
+template void launchMeanSquaredError<uint32_t, float, half>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
-template void launchMeanSquaredError<uint32_t, float, float>(uint32_t *labels_d,
-                                                             float *predictions_d,
-                                                             float *loss_d,
-                                                             float *workspace_d,
+template void launchMeanSquaredError<uint32_t, float, float>(void *labels_d,
+                                                             void *predictions_d,
+                                                             void *loss_d,
+                                                             void *workspace_d,
+                                                             void *gradient,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
                                                              Stream stream,
-                                                             BatchReduce *batchReduce);
+                                                             BatchReduce *batchReduce,
+                                                             bool computeGradient);
 
 // uint16_t
-template void launchMeanSquaredError<uint16_t, half, half>(uint16_t *labels_d,
-                                                           half *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
+template void launchMeanSquaredError<uint16_t, half, half>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<uint16_t, half, float>(uint16_t *labels_d,
-                                                            half *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
+template void launchMeanSquaredError<uint16_t, half, float>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
-template void launchMeanSquaredError<uint16_t, float, half>(uint16_t *labels_d,
-                                                            float *predictions_d,
-                                                            half *loss_d,
-                                                            half *workspace_d,
+template void launchMeanSquaredError<uint16_t, float, half>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
-template void launchMeanSquaredError<uint16_t, float, float>(uint16_t *labels_d,
-                                                             float *predictions_d,
-                                                             float *loss_d,
-                                                             float *workspace_d,
+template void launchMeanSquaredError<uint16_t, float, float>(void *labels_d,
+                                                             void *predictions_d,
+                                                             void *loss_d,
+                                                             void *workspace_d,
+                                                             void *gradient,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
                                                              Stream stream,
-                                                             BatchReduce *batchReduce);
+                                                             BatchReduce *batchReduce,
+                                                             bool computeGradient);
 
 // uint8_t
-template void launchMeanSquaredError<uint8_t, half, half>(uint8_t *labels_d,
-                                                          half *predictions_d,
-                                                          half *loss_d,
-                                                          half *workspace_d,
+template void launchMeanSquaredError<uint8_t, half, half>(void *labels_d,
+                                                          void *predictions_d,
+                                                          void *loss_d,
+                                                          void *workspace_d,
+                                                          void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce *batchReduce);
+                                                          BatchReduce *batchReduce,
+                                                          bool computeGradient);
 
-template void launchMeanSquaredError<uint8_t, half, float>(uint8_t *labels_d,
-                                                           half *predictions_d,
-                                                           float *loss_d,
-                                                           float *workspace_d,
+template void launchMeanSquaredError<uint8_t, half, float>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<uint8_t, float, half>(uint8_t *labels_d,
-                                                           float *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
+template void launchMeanSquaredError<uint8_t, float, half>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<uint8_t, float, float>(uint8_t *labels_d,
-                                                            float *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
+template void launchMeanSquaredError<uint8_t, float, float>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
-
-// int64_t
-template void launchMeanSquaredError<int64_t, half, half>(int64_t *labels_d,
-                                                          half *predictions_d,
-                                                          half *loss_d,
-                                                          half *workspace_d,
-                                                          uint32_t numPredictions,
-                                                          uint32_t batchSize,
-                                                          Stream stream,
-                                                          BatchReduce *batchReduce);
-
-template void launchMeanSquaredError<int64_t, half, float>(int64_t *labels_d,
-                                                           half *predictions_d,
-                                                           float *loss_d,
-                                                           float *workspace_d,
-                                                           uint32_t numPredictions,
-                                                           uint32_t batchSize,
-                                                           Stream stream,
-                                                           BatchReduce *batchReduce);
-
-template void launchMeanSquaredError<int64_t, float, half>(int64_t *labels_d,
-                                                           float *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
-                                                           uint32_t numPredictions,
-                                                           uint32_t batchSize,
-                                                           Stream stream,
-                                                           BatchReduce *batchReduce);
-
-template void launchMeanSquaredError<int64_t, float, float>(int64_t *labels_d,
-                                                            float *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
-                                                            uint32_t numPredictions,
-                                                            uint32_t batchSize,
-                                                            Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
 // int32_t
-template void launchMeanSquaredError<int32_t, half, half>(int32_t *labels_d,
-                                                          half *predictions_d,
-                                                          half *loss_d,
-                                                          half *workspace_d,
+template void launchMeanSquaredError<int32_t, half, half>(void *labels_d,
+                                                          void *predictions_d,
+                                                          void *loss_d,
+                                                          void *workspace_d,
+                                                          void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce *batchReduce);
+                                                          BatchReduce *batchReduce,
+                                                          bool computeGradient);
 
-template void launchMeanSquaredError<int32_t, half, float>(int32_t *labels_d,
-                                                           half *predictions_d,
-                                                           float *loss_d,
-                                                           float *workspace_d,
+template void launchMeanSquaredError<int32_t, half, float>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<int32_t, float, half>(int32_t *labels_d,
-                                                           float *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
+template void launchMeanSquaredError<int32_t, float, half>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<int32_t, float, float>(int32_t *labels_d,
-                                                            float *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
+template void launchMeanSquaredError<int32_t, float, float>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
 // int16_t
-template void launchMeanSquaredError<int16_t, half, half>(int16_t *labels_d,
-                                                          half *predictions_d,
-                                                          half *loss_d,
-                                                          half *workspace_d,
+template void launchMeanSquaredError<int16_t, half, half>(void *labels_d,
+                                                          void *predictions_d,
+                                                          void *loss_d,
+                                                          void *workspace_d,
+                                                          void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce *batchReduce);
+                                                          BatchReduce *batchReduce,
+                                                          bool computeGradient);
 
-template void launchMeanSquaredError<int16_t, half, float>(int16_t *labels_d,
-                                                           half *predictions_d,
-                                                           float *loss_d,
-                                                           float *workspace_d,
+template void launchMeanSquaredError<int16_t, half, float>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<int16_t, float, half>(int16_t *labels_d,
-                                                           float *predictions_d,
-                                                           half *loss_d,
-                                                           half *workspace_d,
+template void launchMeanSquaredError<int16_t, float, half>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
-template void launchMeanSquaredError<int16_t, float, float>(int16_t *labels_d,
-                                                            float *predictions_d,
-                                                            float *loss_d,
-                                                            float *workspace_d,
+template void launchMeanSquaredError<int16_t, float, float>(void *labels_d,
+                                                            void *predictions_d,
+                                                            void *loss_d,
+                                                            void *workspace_d,
+                                                            void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
                                                             Stream stream,
-                                                            BatchReduce *batchReduce);
+                                                            BatchReduce *batchReduce,
+                                                            bool computeGradient);
 
 // int8_t
-template void launchMeanSquaredError<int8_t, half, half>(int8_t *labels_d,
-                                                         half *predictions_d,
-                                                         half *loss_d,
-                                                         half *workspace_d,
+template void launchMeanSquaredError<int8_t, half, half>(void *labels_d,
+                                                         void *predictions_d,
+                                                         void *loss_d,
+                                                         void *workspace_d,
+                                                         void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce *batchReduce);
+                                                         BatchReduce *batchReduce,
+                                                         bool computeGradient);
 
-template void launchMeanSquaredError<int8_t, half, float>(int8_t *labels_d,
-                                                          half *predictions_d,
-                                                          float *loss_d,
-                                                          float *workspace_d,
+template void launchMeanSquaredError<int8_t, half, float>(void *labels_d,
+                                                          void *predictions_d,
+                                                          void *loss_d,
+                                                          void *workspace_d,
+                                                          void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce *batchReduce);
+                                                          BatchReduce *batchReduce,
+                                                          bool computeGradient);
 
-template void launchMeanSquaredError<int8_t, float, half>(int8_t *labels_d,
-                                                          float *predictions_d,
-                                                          half *loss_d,
-                                                          half *workspace_d,
+template void launchMeanSquaredError<int8_t, float, half>(void *labels_d,
+                                                          void *predictions_d,
+                                                          void *loss_d,
+                                                          void *workspace_d,
+                                                          void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
                                                           Stream stream,
-                                                          BatchReduce *batchReduce);
+                                                          BatchReduce *batchReduce,
+                                                          bool computeGradient);
 
-template void launchMeanSquaredError<int8_t, float, float>(int8_t *labels_d,
-                                                           float *predictions_d,
-                                                           float *loss_d,
-                                                           float *workspace_d,
+template void launchMeanSquaredError<int8_t, float, float>(void *labels_d,
+                                                           void *predictions_d,
+                                                           void *loss_d,
+                                                           void *workspace_d,
+                                                           void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
                                                            Stream stream,
-                                                           BatchReduce *batchReduce);
+                                                           BatchReduce *batchReduce,
+                                                           bool computeGradient);
 
 // bool
-template void launchMeanSquaredError<bool, half, half>(bool *labels_d,
-                                                       half *predictions_d,
-                                                       half *loss_d,
-                                                       half *workspace_d,
+template void launchMeanSquaredError<bool, half, half>(void *labels_d,
+                                                       void *predictions_d,
+                                                       void *loss_d,
+                                                       void *workspace_d,
+                                                       void *gradient,
                                                        uint32_t numPredictions,
                                                        uint32_t batchSize,
                                                        Stream stream,
-                                                       BatchReduce *batchReduce);
+                                                       BatchReduce *batchReduce,
+                                                       bool computeGradient);
 
-template void launchMeanSquaredError<bool, half, float>(bool *labels_d,
-                                                        half *predictions_d,
-                                                        float *loss_d,
-                                                        float *workspace_d,
+template void launchMeanSquaredError<bool, half, float>(void *labels_d,
+                                                        void *predictions_d,
+                                                        void *loss_d,
+                                                        void *workspace_d,
+                                                        void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce *batchReduce);
+                                                        BatchReduce *batchReduce,
+                                                        bool computeGradient);
 
-template void launchMeanSquaredError<bool, float, half>(bool *labels_d,
-                                                        float *predictions_d,
-                                                        half *loss_d,
-                                                        half *workspace_d,
+template void launchMeanSquaredError<bool, float, half>(void *labels_d,
+                                                        void *predictions_d,
+                                                        void *loss_d,
+                                                        void *workspace_d,
+                                                        void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
                                                         Stream stream,
-                                                        BatchReduce *batchReduce);
+                                                        BatchReduce *batchReduce,
+                                                        bool computeGradient);
 
-template void launchMeanSquaredError<bool, float, float>(bool *labels_d,
-                                                         float *predictions_d,
-                                                         float *loss_d,
-                                                         float *workspace_d,
+template void launchMeanSquaredError<bool, float, float>(void *labels_d,
+                                                         void *predictions_d,
+                                                         void *loss_d,
+                                                         void *workspace_d,
+                                                         void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
                                                          Stream stream,
-                                                         BatchReduce *batchReduce);
+                                                         BatchReduce *batchReduce,
+                                                         bool computeGradient);

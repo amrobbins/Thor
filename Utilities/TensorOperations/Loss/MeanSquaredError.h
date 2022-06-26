@@ -10,12 +10,17 @@
 #include <limits>
 #include <type_traits>
 
+// Computes mean squared error, which is populated in the loss_d memory
+// When computeGradient is true, the gradient will be populated in the gradient_d memory,
+// when computeGradient is false, gradient_d can be null as it is not used.
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
-void launchMeanSquaredError(LABEL_TYPE *labels_d,
-                            PREDICTION_TYPE *predictions_d,
-                            LOSS_TYPE *loss_d,
-                            LOSS_TYPE *workspace_d,
+void launchMeanSquaredError(void *labels_d,
+                            void *predictions_d,
+                            void *loss_d,
+                            void *workspace_d,
+                            void *gradient_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
                             Stream stream,
-                            BatchReduce *batchReduce);
+                            BatchReduce *batchReduce,
+                            bool computeGradient);
