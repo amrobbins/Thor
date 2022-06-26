@@ -64,44 +64,144 @@ class MeanSquaredError : public Loss {
                                       featureOutput.get().getDescriptor().getDataType(),
                                       stream);
 
-        workspace = ThorImplementation::Tensor(
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
-            ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, featureInput.get().getDescriptor().getDimensions()));
+        workspace = ThorImplementation::Tensor(ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
+                                               ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                                    featureInput.get().getDescriptor().getDimensions()));
     }
 
     virtual void cleanup() {}
 
-    // predictions is featureInput and loss is featureOutput
-    // FIXME: should have featureInput passed in here. figure out how this relates to CCE
-    virtual void computeElementwiseLoss(Tensor labels, Tensor predictions, Tensor loss, Stream stream) {
-        assert(compiled);
-        assert(labels.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-        assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-        assert(loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-        launchMeanSquaredError<half, half, half>((half *)labels.getMemPtr(),
-                                                 (half *)featureInput.get().getMemPtr(),
-                                                 (half *)loss.getMemPtr(),
-                                                 (half *)workspace.getMemPtr(),
-                                                 featureOutput.get().getDescriptor().getDimensions()[1],
-                                                 batchSize,
-                                                 stream,
-                                                 batchReduce);
-    }
-
-    virtual void infer(Optional<Tensor> rawPredictionsIn, Optional<Tensor> normalizedPredictionsOut, Stream stream) {
-        assert(rawPredictionsIn.isPresent());
-        assert(normalizedPredictionsOut.isPresent());
-        assert(featureInput.isPresent());
-        assert(rawPredictionsIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(rawPredictionsIn.get() == featureInput.get());
-        ScopedGpu scopedGpu(rawPredictionsIn.get().getPlacement().getDeviceNum());
-    }
-
+    // Loss and gradient computation are all handled in infer. Gradient is not computed when in inference only mode.
+    virtual void computeElementwiseLoss(Tensor labels, Tensor predictions, Tensor loss, Stream stream) {}
     virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {}
 
-    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream) {
-        assert(lossGradient.isPresent());
+    virtual void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream) {
+        assert(predictions.isPresent());
+        assert(loss.isPresent());
+        assert(labelsInput.isPresent());
+        assert(workspace.getDescriptor().getDimensions() == loss.get().getDescriptor().getDimensions());
+        if (!isInferenceOnly())
+            assert(errorOutput.isPresent());
+
+        ScopedGpu scopedGpu(predictions.get().getPlacement().getDeviceNum());
+
+        assert(compiled);
+        assert(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+
+        if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+            if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                if (loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                    launchMeanSquaredError<half, half, half>(labelsInput.get().getMemPtr(),
+                                                             predictions.get().getMemPtr(),
+                                                             loss.get().getMemPtr(),
+                                                             workspace.getMemPtr(),
+                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                             loss.get().getDescriptor().getDimensions()[1],
+                                                             batchSize,
+                                                             stream,
+                                                             batchReduce,
+                                                             !isInferenceOnly());
+                } else {
+                    assert(loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+                    launchMeanSquaredError<half, half, float>(labelsInput.get().getMemPtr(),
+                                                              predictions.get().getMemPtr(),
+                                                              loss.get().getMemPtr(),
+                                                              workspace.getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                              loss.get().getDescriptor().getDimensions()[1],
+                                                              batchSize,
+                                                              stream,
+                                                              batchReduce,
+                                                              !isInferenceOnly());
+                }
+            } else {
+                assert(labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+                if (loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                    launchMeanSquaredError<float, half, half>(labelsInput.get().getMemPtr(),
+                                                              predictions.get().getMemPtr(),
+                                                              loss.get().getMemPtr(),
+                                                              workspace.getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                              loss.get().getDescriptor().getDimensions()[1],
+                                                              batchSize,
+                                                              stream,
+                                                              batchReduce,
+                                                              !isInferenceOnly());
+                } else {
+                    assert(loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+                    launchMeanSquaredError<float, half, float>(labelsInput.get().getMemPtr(),
+                                                               predictions.get().getMemPtr(),
+                                                               loss.get().getMemPtr(),
+                                                               workspace.getMemPtr(),
+                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                               loss.get().getDescriptor().getDimensions()[1],
+                                                               batchSize,
+                                                               stream,
+                                                               batchReduce,
+                                                               !isInferenceOnly());
+                }
+            }
+        } else {
+            assert(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+            if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                if (loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                    launchMeanSquaredError<half, half, half>(labelsInput.get().getMemPtr(),
+                                                             predictions.get().getMemPtr(),
+                                                             loss.get().getMemPtr(),
+                                                             workspace.getMemPtr(),
+                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                             loss.get().getDescriptor().getDimensions()[1],
+                                                             batchSize,
+                                                             stream,
+                                                             batchReduce,
+                                                             !isInferenceOnly());
+                } else {
+                    assert(loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+                    launchMeanSquaredError<half, half, float>(labelsInput.get().getMemPtr(),
+                                                              predictions.get().getMemPtr(),
+                                                              loss.get().getMemPtr(),
+                                                              workspace.getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                              loss.get().getDescriptor().getDimensions()[1],
+                                                              batchSize,
+                                                              stream,
+                                                              batchReduce,
+                                                              !isInferenceOnly());
+                }
+            } else {
+                assert(labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+                if (loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
+                    launchMeanSquaredError<float, half, half>(labelsInput.get().getMemPtr(),
+                                                              predictions.get().getMemPtr(),
+                                                              loss.get().getMemPtr(),
+                                                              workspace.getMemPtr(),
+                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                              loss.get().getDescriptor().getDimensions()[1],
+                                                              batchSize,
+                                                              stream,
+                                                              batchReduce,
+                                                              !isInferenceOnly());
+                } else {
+                    assert(loss.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+                    launchMeanSquaredError<float, half, float>(labelsInput.get().getMemPtr(),
+                                                               predictions.get().getMemPtr(),
+                                                               loss.get().getMemPtr(),
+                                                               workspace.getMemPtr(),
+                                                               isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                               loss.get().getDescriptor().getDimensions()[1],
+                                                               batchSize,
+                                                               stream,
+                                                               batchReduce,
+                                                               !isInferenceOnly());
+                }
+            }
+        }
     }
+
+    /*    virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream
+       stream) { assert(lossGradient.isPresent());
+        }
+        */
 
    private:
     TensorDescriptor::DataType labelsDataType;

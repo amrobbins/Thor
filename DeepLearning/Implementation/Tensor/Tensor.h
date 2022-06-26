@@ -87,6 +87,13 @@ class Tensor : private ReferenceCounted {
 
     using ReferenceCounted::getReferenceCount;
 
+    // Convenience functions to pass information from the descriptor
+    TensorDescriptor::DataType getDataType() { return descriptor.getDataType(); }
+    vector<unsigned long> getDimensions() { return descriptor.getDimensions(); }
+    unsigned int getNumDimensions() { return descriptor.getNumDimensions(); }
+    unsigned long getTotalNumElements() { return descriptor.getTotalNumElements(); }
+    long unsigned getArraySizeInBytes() { return descriptor.getArraySizeInBytes(); }
+
    private:
     void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);
 

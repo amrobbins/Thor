@@ -251,7 +251,6 @@ class TensorDescriptor {
     vector<unsigned long> getDimensions() { return dimensions; }
     unsigned int getNumDimensions() { return dimensions.size(); }
     unsigned long getTotalNumElements() { return totalNumElements; }
-    unsigned long getNumBytesPerElement() { return dataType == DataType::FP32 ? 4 : 2; }
 
     string toString() const {
         string s = string("DataType ") + getElementTypeName(dataType) + "\nDimensions [";
