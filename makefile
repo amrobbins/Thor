@@ -61,6 +61,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest && \
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
                 build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
+                build/test/Utilities/TensorOperations/Misc/BatchReduceTest && \
                 build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
                 build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest && \
@@ -91,6 +92,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
             build/test/Utilities/TensorOperations/Misc/MiscTest \
             build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
+            build/test/Utilities/TensorOperations/Misc/BatchReduceTest \
             build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest \
             build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest \
@@ -741,6 +743,10 @@ build/test/Utilities/TensorOperations/Misc/MiscTest: build/test/googletest/libgt
 build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/Misc/
 	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/TensorOperations/Misc/BatchReduceTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/BatchReduceTest.cpp $(THOR)
+	mkdir -p build/test/Utilities/TensorOperations/Misc/
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/BatchReduceTest -O3 -std=c++11 -pthread test/Utilities/TensorOperations/Misc/BatchReduceTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest: build/test/googletest/libgtest.a test/Utilities/Loaders/ShardedRawDatasetCreatorTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/Loaders/
