@@ -8,6 +8,15 @@
 
 namespace ThorImplementation {
 
+/*
+FIXME Reconsider the design of this considering Mean Squared Error. Also now that I have soft max with backwards,
+      and I have batchReduce, maybe I should redo this altogether and use those pieces. Then in the API layer
+      there will be an option to include a softmax layer in front of the categorical cross entropy.
+      I do still want to support BATCH_LOSS, CLASSWISE_PER_ELEMENT_LOSS, CLASSWISE_LOSS, ELEMENTWISE_LOSS
+      for analysis purposes. When computing batch loss, element wise loss is computed and then batch reduced.
+      But first test mean squared error and make sure it works.
+*/
+
 /**
  * This is equivalent to a softmax activation layer followed by a cross entropy loss.
  *
