@@ -16,11 +16,10 @@
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
 void launchMeanSquaredError(void *labels_d,
                             void *predictions_d,
-                            void *loss_d,
-                            void *workspace_d,
+                            void *elementLoss_d,
                             void *gradient_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
                             Stream stream,
-                            BatchReduce *batchReduce,
+                            bool computeBatchLoss,
                             bool computeGradient);

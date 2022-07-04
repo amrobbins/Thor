@@ -92,6 +92,12 @@ class Stream : private ReferenceCounted {
         assert(cudaStatus == cudaSuccess);
     }
 
+    static void deviceSynchronize(int gpuNum) {
+        ScopedGpu scopedGpu(gpuNum);
+        cudaError_t cudaStatus = cudaDeviceSynchronize();
+        assert(cudaStatus == cudaSuccess);
+    }
+
     cudaStream_t getStream() {
         assert(!uninitialized());
         return cudaStream;
