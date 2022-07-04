@@ -54,11 +54,10 @@ void LossShaper::compile() {
 
     batchReduce = new BatchReduce(batchSize,
                                   batchSize,
+                                  lossDimSize,
                                   true,
                                   reduceLossDim,
-                                  lossDimSize,
                                   featureInput.get().getDescriptor().getDataType(),
-                                  featureOutput.get().getDescriptor().getDataType(),
                                   featureOutput.get().getDescriptor().getDataType(),
                                   stream);
 

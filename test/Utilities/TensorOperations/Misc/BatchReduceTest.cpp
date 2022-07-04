@@ -36,7 +36,8 @@ TEST(BatchReduce, reduce) {
         BatchReduce batchReduce(dim0,
                                 dim0,
                                 dim1,
-                                ThorImplementation::TensorDescriptor::DataType::FP32,
+                                true,
+                                false,
                                 ThorImplementation::TensorDescriptor::DataType::FP32,
                                 ThorImplementation::TensorDescriptor::DataType::FP32,
                                 stream);
@@ -48,7 +49,6 @@ TEST(BatchReduce, reduce) {
         const float thresh = 0.001;
         for (uint32_t col = 0; col < dim1; ++col) {
             ASSERT_LT(abs(dest[col] / (float)dim0 - brdest[col]), thresh);
-            printf("%f %f\n", dest[col] / (float)dim0, brdest[col]);
         }
     }
 }
@@ -59,9 +59,10 @@ TEST(BatchReduce, getStream) {
     BatchReduce batchReduce(128,
                             256,
                             50,
+                            true,
+                            false,
                             ThorImplementation::TensorDescriptor::DataType::FP32,
                             ThorImplementation::TensorDescriptor::DataType::FP16,
-                            ThorImplementation::TensorDescriptor::DataType::FP32,
                             stream);
 
     assert(stream == batchReduce.getStream());

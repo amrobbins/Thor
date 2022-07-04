@@ -25,8 +25,6 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    srand(1000);
-
     for (uint32_t test = 0; test < 10; ++test) {
         vector<unsigned long> dimensions;
         uint32_t numElements = 1;
