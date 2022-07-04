@@ -18,13 +18,21 @@ class Reshape : public Layer {
         return outputTensor;
     }
 
+    virtual void compile() {
+        // ErrorInput to the previous layer is the errorInput coming to this layer,
+        // then backProp is a no op
+        if (errorInput.isPresent() && errorOutput.isPresent() && previousLayer.isPresent()) {
+            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
+        }
+        errorOutput = errorInput;
+    }
+
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
         // No op
     }
 
-    // FIXME: How to avoid the unnecessary copy
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) {
-        errorOut.get().copyFromAsync(errorIn.get(), stream);
+        // No op
     }
 
    private:

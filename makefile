@@ -160,6 +160,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o \
+                   build/DeepLearning/Implementation/Layers/Utility/LossShaper.o \
                    build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
                    build/Utilities/Common/ReferenceCounted.o \
@@ -482,6 +483,10 @@ build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o: Utiliti
 build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o: DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o
+
+build/DeepLearning/Implementation/Layers/Utility/LossShaper.o: DeepLearning/Implementation/Layers/Utility/LossShaper.h DeepLearning/Implementation/Layers/Utility/LossShaper.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/Utility
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Utility/LossShaper.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Utility/LossShaper.o
 
 build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o: DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h DeepLearning/Implementation/Layers/Loss/MeanSquaredError.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/Loss

@@ -188,6 +188,13 @@ class Layer {
         return errorOutput;
     }
 
+    // For situations where the error input should just pass through to the error output,
+    // this method is used to avoid duplicating the tensor and unnecessary data movement.
+    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
+        assert(oldErrorInput.isPresent());
+        errorInput = newErrorInput;
+    }
+
     virtual void ensureNoDeviceCrossing() {
         if (featureInput.isPresent() && errorOutput.isPresent())
             assert(featureInput.get().getPlacement() == errorOutput.get().getPlacement());

@@ -25,6 +25,19 @@ class MultiConnectionLayer : public Layer {
         }
     }
 
+    // For situations where the error input should just pass through to the error output,
+    // this method is used to avoid duplicating the tensor and unnecessary data movement.
+    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
+        assert(oldErrorInput.isPresent());
+        for (unsigned int i = 0; i < errorInputs.size(); ++i) {
+            if (errorInputs[i].isPresent() && errorInputs[i].get() == oldErrorInput.get()) {
+                errorInputs[i] = newErrorInput;
+                return;
+            }
+        }
+        assert(false);
+    }
+
     virtual void parentInitialize() {
         Layer::parentInitialize();
 
