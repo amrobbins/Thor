@@ -34,7 +34,6 @@ Optional<Tensor> LossShaper::createFeatureOutputTensor() {
         }
     } else if (outputLossType == OutputLossType::CLASSWISE_LOSS) {
         assert(inputLossType == InputLossType::CATEGORICAL_LOSS);
-        outputDimensions.push_back(1);
         outputDimensions.push_back(inputDimensions[1]);
     } else {
         assert(false);
