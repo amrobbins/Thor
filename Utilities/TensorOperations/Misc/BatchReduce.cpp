@@ -56,9 +56,6 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                                                  CUDNN_32BIT_INDICES);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    printf("(%d, %d) -> (%d, %d)\n", batchletSize, lossDimSize, reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize);
-    fflush(stdout);
-
     sourceTensorDescriptor = Layer::createCudnnTensorDescriptor({batchletSize, lossDimSize}, sourceDataType);
     destTensorDescriptor = Layer::createCudnnTensorDescriptor({reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize}, destDataType);
     cudnnStatus = cudnnGetReductionWorkspaceSize(
@@ -68,7 +65,6 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     if (workspaceSizeInBytes > 0)
         workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
                            TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
-    printf("workspace size %ld\n", workspaceSizeInBytes);
 }
 
 BatchReduce::~BatchReduce() {
@@ -103,7 +99,5 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     zero,
                                     destTensorDescriptor,
                                     destMem_d);
-    printf("CUDNN_STATUS = %d\n", cudnnStatus);
-    fflush(stdout);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
