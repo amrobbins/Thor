@@ -1,5 +1,7 @@
 #include "BatchReduce.h"
 
+using namespace ThorImplementation;
+
 /**
  * Cudnn will reduce any dimension of the output tensor that is not equal to the input dimension and is equal to 1.
  * So, to reduce across the batch, the data goes like this:
@@ -20,19 +22,18 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                          uint32_t lossDimSize,
                          bool reduceBatch,
                          bool reduceLoss,
-                         ThorImplementation::TensorDescriptor::DataType sourceDataType,
-                         ThorImplementation::TensorDescriptor::DataType destDataType,
-                         ThorImplementation::TensorDescriptor::DataType computationDataType,
+                         TensorDescriptor::DataType sourceDataType,
+                         TensorDescriptor::DataType destDataType,
                          Stream stream) {
     cudnnStatus_t cudnnStatus;
 
     // stream is kept because the cudnn handle is associated with it.
     this->stream = stream;
 
-    doubleType = sourceDataType == ThorImplementation::TensorDescriptor::DataType::FP64;
+    doubleType = sourceDataType == TensorDescriptor::DataType::FP64;
 
     if (doubleType) {
-        assert(destDataType == ThorImplementation::TensorDescriptor::DataType::FP64);
+        assert(destDataType == TensorDescriptor::DataType::FP64);
         zero = new double;
         ((double *)zero)[0] = 0.0;
         batchScale = new double;
@@ -49,22 +50,25 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
 
     cudnnStatus = cudnnSetReduceTensorDescriptor(reduceTensorDescriptor,
                                                  CUDNN_REDUCE_TENSOR_ADD,
-                                                 ThorImplementation::CudnnHelper::getCudnnDataType(computationDataType),
+                                                 CudnnHelper::getCudnnDataType(TensorDescriptor::DataType::FP32),
                                                  CUDNN_NOT_PROPAGATE_NAN,
                                                  CUDNN_REDUCE_TENSOR_NO_INDICES,
                                                  CUDNN_32BIT_INDICES);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    sourceTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({batchletSize, lossDimSize}, sourceDataType);
-    destTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor(
-        {reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize}, destDataType);
-    cudnnGetReductionWorkspaceSize(
+    printf("(%d, %d) -> (%d, %d)\n", batchletSize, lossDimSize, reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize);
+    fflush(stdout);
+
+    sourceTensorDescriptor = Layer::createCudnnTensorDescriptor({batchletSize, lossDimSize}, sourceDataType);
+    destTensorDescriptor = Layer::createCudnnTensorDescriptor({reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize}, destDataType);
+    cudnnStatus = cudnnGetReductionWorkspaceSize(
         stream.getCudnnHandle(), reduceTensorDescriptor, sourceTensorDescriptor, destTensorDescriptor, &workspaceSizeInBytes);
+    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     if (workspaceSizeInBytes > 0)
-        workspace = ThorImplementation::Tensor(
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::GPU, 0),
-            ThorImplementation::TensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+        workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+                           TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+    printf("workspace size %ld\n", workspaceSizeInBytes);
 }
 
 BatchReduce::~BatchReduce() {
@@ -91,7 +95,7 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     reduceTensorDescriptor,
                                     nullptr,
                                     0,
-                                    workspace.getMemPtr(),
+                                    workspaceSizeInBytes > 0 ? workspace.getMemPtr() : nullptr,
                                     workspaceSizeInBytes,
                                     batchScale,
                                     sourceTensorDescriptor,
@@ -99,5 +103,7 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     zero,
                                     destTensorDescriptor,
                                     destMem_d);
+    printf("CUDNN_STATUS = %d\n", cudnnStatus);
+    fflush(stdout);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }

@@ -47,6 +47,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
+                build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
@@ -106,6 +107,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest \
+            build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest \
             build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
@@ -718,6 +720,10 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest: b
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Utility/LossShaperTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/Utility
+	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest test/DeepLearning/Implementation/Layers/Utility/LossShaperTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss

@@ -20,7 +20,6 @@ class BatchReduce {
                 bool reduceLoss,
                 ThorImplementation::TensorDescriptor::DataType sourceDataType,
                 ThorImplementation::TensorDescriptor::DataType destDataType,
-                ThorImplementation::TensorDescriptor::DataType computationDataType,
                 Stream stream);
 
     virtual ~BatchReduce();
