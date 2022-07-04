@@ -17,7 +17,9 @@
  */
 BatchReduce::BatchReduce(uint32_t batchletSize,
                          uint32_t batchSize,
-                         uint32_t featureSize,
+                         uint32_t lossDimSize,
+                         bool reduceBatch,
+                         bool reduceLoss,
                          ThorImplementation::TensorDescriptor::DataType sourceDataType,
                          ThorImplementation::TensorDescriptor::DataType destDataType,
                          ThorImplementation::TensorDescriptor::DataType computationDataType,
@@ -53,8 +55,9 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                                                  CUDNN_32BIT_INDICES);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    sourceTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({batchletSize, featureSize}, sourceDataType);
-    destTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({1, featureSize}, destDataType);
+    sourceTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor({batchletSize, lossDimSize}, sourceDataType);
+    destTensorDescriptor = ThorImplementation::Layer::createCudnnTensorDescriptor(
+        {reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize}, destDataType);
     cudnnGetReductionWorkspaceSize(
         stream.getCudnnHandle(), reduceTensorDescriptor, sourceTensorDescriptor, destTensorDescriptor, &workspaceSizeInBytes);
 
