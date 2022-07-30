@@ -4,5 +4,5 @@ This framework has been developed to the point where it's core is there and it n
 I have limited time that I am able to work on it, since I have a full time job and so I am looking for
 help to do this from interested developers.
 
-If you are interested in being contributing to this new framework, please contact Andrew Robbbins
+If you are interested in contributing to this new framework, please contact Andrew Robbbins
 at AndrewRobbins@hotmail.com.
