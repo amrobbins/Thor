@@ -10,7 +10,7 @@
    1. GRU
    1. Transformer support
       1. Attention 
-      1. Multi-headed attention
+      1. Multi-headed attention - implemented via CuDNN, possibly can be used for regular Attention also.
 7. Graph Neural Network support
    1. Algorithms like random walk, etc.
    1. Investigate what can be built into the framework to support GNN's
