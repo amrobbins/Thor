@@ -2,21 +2,19 @@
 ## Thor is a work in progress Machine Learning framework that I am developing.
 
 The goals of this project are:
-  1. Create a very high performance AI suite
-  2. Allow convenient workflows for development on a local machine and then running for real on an AWS cluster, just switch from SingleMachineExecutor to your configured AwsExecutor.
-  3. Create a thoughtful and simple API that's not full of spam
-  4. Simplify development by using a compiled, strongly typed, stable programming language - C++.
-  5. C++ is also better suited than java because it is faster, it is able to use all the resources of the machine without having to worry about the limits of a virtual machine, and it can directly interface with cuda.
-  6. The implementation layer will be C++ but an API layer will be supported in 
-     1. C++
+  1. Create a optimally high performance AI suite
+  2. Allow convenient workflows for development on a local machine and then easily transition to running in the cloud by switching your executor.
+  3. Create a thoughtful and easy to use API
+  4. The implementation layer will be C++ and Cuda, but an API layer will be supported in 
+     1. Python
      2. Java
-     3. Python
-  7. Make the defaults the recommended configurations, so that beginners can quickly succeed.
-  8. Keep up to date on the latest research and bring the promising pieces into this framework.
-  9. Educate the users about the different pieces and strategies, tell them for real don't over academize it. Point them to the latest trends and research. Have a newsletter.
+     3. C++
+  5. Make the default settings the recommended configurations, so that beginners can quickly succeed.
+  6. Keep up to date on the latest research and bring the promising pieces into this framework.
+  7. Educate users about the different pieces and strategies in a straightforward and understandable way. Point users to the latest trends and research. Have a newsletter.
 
 
-This framework is for Linux, and has been tested on Ubuntu 18.04.
+This framework is for Linux, and has been tested on Ubuntu 18.04 and 20.04.
 
 Dependencies, with installation directions for Ubuntu:
   1. cuda 11  - can install with 'sudo apt-get install cuda'
