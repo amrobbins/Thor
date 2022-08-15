@@ -13,6 +13,9 @@ namespace Thor {
 
 class Loss : public Layer {
    public:
+    enum class InputLossType { NUMERICAL_LOSS = 5, CATEGORICAL_LOSS };
+    enum class OutputLossType { BATCH_LOSS = 11, CLASSWISE_LOSS };
+
     Loss() { numInputConnectionsMade = 0; }
     virtual ~Loss() {}
 
@@ -25,13 +28,14 @@ class Loss : public Layer {
 
     virtual Tensor getPredictions() const { return predictionsTensor; }
     virtual Tensor getLabels() const { return labelsTensor; }
-
     virtual Tensor getLoss() const { return lossTensor; }
 
+    // getPredictions() and getLoss() are synonyms for getFeatureInput() and getFeatureOutput() in losses:
+    virtual Optional<Tensor> getFeatureInput() { return getPredictions(); }
+    virtual Optional<Tensor> getFeatureOutput() { return getLoss(); }
+
     virtual int getConnectionType(Tensor connectingTensor) const {
-        if (connectingTensor == getFeatureInput())
-            return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
-        else if (connectingTensor == getLabels())
+        if (connectingTensor == getLabels())
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         else if (connectingTensor == getPredictions())
             return (int)ThorImplementation::Loss::ConnectionType::PREDICTIONS;
@@ -73,11 +77,9 @@ class Loss : public Layer {
     }
 
     // Loss type must be set by deriving class
-    ThorImplementation::Loss::ConnectionType lossType;
+    ThorImplementation::Loss::LossType lossType;
 
    private:
-    Tensor getFeatureOutput() { assert(false); }
-
     uint32_t numInputConnectionsMade = 0;
 };
 

@@ -1062,23 +1062,6 @@ TEST(Gelu, Works) {
  */
 float softmax(float featureIn, float sumxj, float maxX) { return exp(featureIn - maxX) / sumxj; }
 
-/**
- * The derivative of softmax is:
- * let sumExj = sum(exp(x_j), j = 1 to N)
- * exp(x_j)/sumExj * (1(i == k) - exp(x_i)/sumExj)
- *
- * Where 1(i == k) equals 1 when i == k and 0 otherwise.
- * N is the number of classes of a training example
- *
- */
-float softmaxBackward(float featureIn, float errorIn) {
-    float xCubed = featureIn * featureIn * featureIn;
-    float sechStuff = 1.0f / cosh(0.797885f * (featureIn + 0.044715f * xCubed));
-    float derivative = 0.5f * tanh(0.797885f * (featureIn + 0.044715f * xCubed)) +
-                       (0.0535161f * xCubed + 0.398942f * featureIn) * sechStuff * sechStuff + 0.5f;
-    return errorIn * derivative;
-}
-
 TEST(Softmax, Works) {
     srand(time(NULL));
 
@@ -1153,6 +1136,7 @@ TEST(Softmax, Works) {
             softmaxForward.back().push_back(expectedValueFloat);
             half expectedValue = (half)expectedValueFloat;
             half actualValue = destMem[i];
+            printf("actual %f expected %f [%d,%d]\n", (float)actualValue, (float)expectedValue, batchItem, element);
             ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
         }
 
@@ -1214,6 +1198,7 @@ TEST(Softmax, Works) {
             for (uint32_t classType = 0; classType < dimensions[1]; ++classType) {
                 half expectedValue = (half)(((float *)expectedEOut.getMemPtr())[classType]);
                 half actualValue = errorOutMem[batchItem * dimensions[1] + classType];
+                printf("expected %f actual %f\n", (float)expectedValue, (float)actualValue);
                 ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
             }
         }

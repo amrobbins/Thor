@@ -295,9 +295,8 @@ void launchMeanSquaredError(void *labels_d,
                             void *gradient_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
-                            Stream stream,
-                            bool computeBatchLoss,
-                            bool computeGradient) {
+                            bool computeGradient,
+                            Stream stream) {
     uint32_t numElements = batchSize * numPredictions;
 
     dim3 blockSize(min(256, numElements));
@@ -318,9 +317,8 @@ template void launchMeanSquaredError<half, half, half>(void *labels_d,
                                                        void *gradient,
                                                        uint32_t numPredictions,
                                                        uint32_t batchSize,
-                                                       Stream stream,
-                                                       bool computeBatchLoss,
-                                                       bool computeGradient);
+                                                       bool computeGradient,
+                                                       Stream stream);
 
 template void launchMeanSquaredError<half, half, float>(void *labels_d,
                                                         void *predictions_d,
@@ -328,9 +326,8 @@ template void launchMeanSquaredError<half, half, float>(void *labels_d,
                                                         void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
-                                                        Stream stream,
-                                                        bool computeBatchLoss,
-                                                        bool computeGradient);
+                                                        bool computeGradient,
+                                                        Stream stream);
 
 template void launchMeanSquaredError<half, float, half>(void *labels_d,
                                                         void *predictions_d,
@@ -338,9 +335,8 @@ template void launchMeanSquaredError<half, float, half>(void *labels_d,
                                                         void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
-                                                        Stream stream,
-                                                        bool computeBatchLoss,
-                                                        bool computeGradient);
+                                                        bool computeGradient,
+                                                        Stream stream);
 
 template void launchMeanSquaredError<half, float, float>(void *labels_d,
                                                          void *predictions_d,
@@ -348,9 +344,8 @@ template void launchMeanSquaredError<half, float, float>(void *labels_d,
                                                          void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
-                                                         Stream stream,
-                                                         bool computeBatchLoss,
-                                                         bool computeGradient);
+                                                         bool computeGradient,
+                                                         Stream stream);
 
 template void launchMeanSquaredError<float, half, half>(void *labels_d,
                                                         void *predictions_d,
@@ -358,9 +353,8 @@ template void launchMeanSquaredError<float, half, half>(void *labels_d,
                                                         void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
-                                                        Stream stream,
-                                                        bool computeBatchLoss,
-                                                        bool computeGradient);
+                                                        bool computeGradient,
+                                                        Stream stream);
 
 template void launchMeanSquaredError<float, half, float>(void *labels_d,
                                                          void *predictions_d,
@@ -368,9 +362,8 @@ template void launchMeanSquaredError<float, half, float>(void *labels_d,
                                                          void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
-                                                         Stream stream,
-                                                         bool computeBatchLoss,
-                                                         bool computeGradient);
+                                                         bool computeGradient,
+                                                         Stream stream);
 
 template void launchMeanSquaredError<float, float, half>(void *labels_d,
                                                          void *predictions_d,
@@ -378,9 +371,8 @@ template void launchMeanSquaredError<float, float, half>(void *labels_d,
                                                          void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
-                                                         Stream stream,
-                                                         bool computeBatchLoss,
-                                                         bool computeGradient);
+                                                         bool computeGradient,
+                                                         Stream stream);
 
 template void launchMeanSquaredError<float, float, float>(void *labels_d,
                                                           void *predictions_d,
@@ -388,9 +380,8 @@ template void launchMeanSquaredError<float, float, float>(void *labels_d,
                                                           void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
-                                                          Stream stream,
-                                                          bool computeBatchLoss,
-                                                          bool computeGradient);
+                                                          bool computeGradient,
+                                                          Stream stream);
 
 // uint32_t
 template void launchMeanSquaredError<uint32_t, half, half>(void *labels_d,
@@ -399,9 +390,8 @@ template void launchMeanSquaredError<uint32_t, half, half>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<uint32_t, half, float>(void *labels_d,
                                                             void *predictions_d,
@@ -409,9 +399,8 @@ template void launchMeanSquaredError<uint32_t, half, float>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 template void launchMeanSquaredError<uint32_t, float, half>(void *labels_d,
                                                             void *predictions_d,
@@ -419,9 +408,8 @@ template void launchMeanSquaredError<uint32_t, float, half>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 template void launchMeanSquaredError<uint32_t, float, float>(void *labels_d,
                                                              void *predictions_d,
@@ -429,9 +417,8 @@ template void launchMeanSquaredError<uint32_t, float, float>(void *labels_d,
                                                              void *gradient,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
-                                                             Stream stream,
-                                                             bool computeBatchLoss,
-                                                             bool computeGradient);
+                                                             bool computeGradient,
+                                                             Stream stream);
 
 // uint16_t
 template void launchMeanSquaredError<uint16_t, half, half>(void *labels_d,
@@ -440,9 +427,8 @@ template void launchMeanSquaredError<uint16_t, half, half>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<uint16_t, half, float>(void *labels_d,
                                                             void *predictions_d,
@@ -450,9 +436,8 @@ template void launchMeanSquaredError<uint16_t, half, float>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 template void launchMeanSquaredError<uint16_t, float, half>(void *labels_d,
                                                             void *predictions_d,
@@ -460,9 +445,8 @@ template void launchMeanSquaredError<uint16_t, float, half>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 template void launchMeanSquaredError<uint16_t, float, float>(void *labels_d,
                                                              void *predictions_d,
@@ -470,9 +454,8 @@ template void launchMeanSquaredError<uint16_t, float, float>(void *labels_d,
                                                              void *gradient,
                                                              uint32_t numPredictions,
                                                              uint32_t batchSize,
-                                                             Stream stream,
-                                                             bool computeBatchLoss,
-                                                             bool computeGradient);
+                                                             bool computeGradient,
+                                                             Stream stream);
 
 // uint8_t
 template void launchMeanSquaredError<uint8_t, half, half>(void *labels_d,
@@ -481,9 +464,8 @@ template void launchMeanSquaredError<uint8_t, half, half>(void *labels_d,
                                                           void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
-                                                          Stream stream,
-                                                          bool computeBatchLoss,
-                                                          bool computeGradient);
+                                                          bool computeGradient,
+                                                          Stream stream);
 
 template void launchMeanSquaredError<uint8_t, half, float>(void *labels_d,
                                                            void *predictions_d,
@@ -491,9 +473,8 @@ template void launchMeanSquaredError<uint8_t, half, float>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<uint8_t, float, half>(void *labels_d,
                                                            void *predictions_d,
@@ -501,9 +482,8 @@ template void launchMeanSquaredError<uint8_t, float, half>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<uint8_t, float, float>(void *labels_d,
                                                             void *predictions_d,
@@ -511,9 +491,8 @@ template void launchMeanSquaredError<uint8_t, float, float>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 // int32_t
 template void launchMeanSquaredError<int32_t, half, half>(void *labels_d,
@@ -522,9 +501,8 @@ template void launchMeanSquaredError<int32_t, half, half>(void *labels_d,
                                                           void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
-                                                          Stream stream,
-                                                          bool computeBatchLoss,
-                                                          bool computeGradient);
+                                                          bool computeGradient,
+                                                          Stream stream);
 
 template void launchMeanSquaredError<int32_t, half, float>(void *labels_d,
                                                            void *predictions_d,
@@ -532,9 +510,8 @@ template void launchMeanSquaredError<int32_t, half, float>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<int32_t, float, half>(void *labels_d,
                                                            void *predictions_d,
@@ -542,9 +519,8 @@ template void launchMeanSquaredError<int32_t, float, half>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<int32_t, float, float>(void *labels_d,
                                                             void *predictions_d,
@@ -552,9 +528,8 @@ template void launchMeanSquaredError<int32_t, float, float>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 // int16_t
 template void launchMeanSquaredError<int16_t, half, half>(void *labels_d,
@@ -563,9 +538,8 @@ template void launchMeanSquaredError<int16_t, half, half>(void *labels_d,
                                                           void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
-                                                          Stream stream,
-                                                          bool computeBatchLoss,
-                                                          bool computeGradient);
+                                                          bool computeGradient,
+                                                          Stream stream);
 
 template void launchMeanSquaredError<int16_t, half, float>(void *labels_d,
                                                            void *predictions_d,
@@ -573,9 +547,8 @@ template void launchMeanSquaredError<int16_t, half, float>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<int16_t, float, half>(void *labels_d,
                                                            void *predictions_d,
@@ -583,9 +556,8 @@ template void launchMeanSquaredError<int16_t, float, half>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 template void launchMeanSquaredError<int16_t, float, float>(void *labels_d,
                                                             void *predictions_d,
@@ -593,9 +565,8 @@ template void launchMeanSquaredError<int16_t, float, float>(void *labels_d,
                                                             void *gradient,
                                                             uint32_t numPredictions,
                                                             uint32_t batchSize,
-                                                            Stream stream,
-                                                            bool computeBatchLoss,
-                                                            bool computeGradient);
+                                                            bool computeGradient,
+                                                            Stream stream);
 
 // int8_t
 template void launchMeanSquaredError<int8_t, half, half>(void *labels_d,
@@ -604,9 +575,8 @@ template void launchMeanSquaredError<int8_t, half, half>(void *labels_d,
                                                          void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
-                                                         Stream stream,
-                                                         bool computeBatchLoss,
-                                                         bool computeGradient);
+                                                         bool computeGradient,
+                                                         Stream stream);
 
 template void launchMeanSquaredError<int8_t, half, float>(void *labels_d,
                                                           void *predictions_d,
@@ -614,9 +584,8 @@ template void launchMeanSquaredError<int8_t, half, float>(void *labels_d,
                                                           void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
-                                                          Stream stream,
-                                                          bool computeBatchLoss,
-                                                          bool computeGradient);
+                                                          bool computeGradient,
+                                                          Stream stream);
 
 template void launchMeanSquaredError<int8_t, float, half>(void *labels_d,
                                                           void *predictions_d,
@@ -624,9 +593,8 @@ template void launchMeanSquaredError<int8_t, float, half>(void *labels_d,
                                                           void *gradient,
                                                           uint32_t numPredictions,
                                                           uint32_t batchSize,
-                                                          Stream stream,
-                                                          bool computeBatchLoss,
-                                                          bool computeGradient);
+                                                          bool computeGradient,
+                                                          Stream stream);
 
 template void launchMeanSquaredError<int8_t, float, float>(void *labels_d,
                                                            void *predictions_d,
@@ -634,9 +602,8 @@ template void launchMeanSquaredError<int8_t, float, float>(void *labels_d,
                                                            void *gradient,
                                                            uint32_t numPredictions,
                                                            uint32_t batchSize,
-                                                           Stream stream,
-                                                           bool computeBatchLoss,
-                                                           bool computeGradient);
+                                                           bool computeGradient,
+                                                           Stream stream);
 
 // bool
 template void launchMeanSquaredError<bool, half, half>(void *labels_d,
@@ -645,9 +612,8 @@ template void launchMeanSquaredError<bool, half, half>(void *labels_d,
                                                        void *gradient,
                                                        uint32_t numPredictions,
                                                        uint32_t batchSize,
-                                                       Stream stream,
-                                                       bool computeBatchLoss,
-                                                       bool computeGradient);
+                                                       bool computeGradient,
+                                                       Stream stream);
 
 template void launchMeanSquaredError<bool, half, float>(void *labels_d,
                                                         void *predictions_d,
@@ -655,9 +621,8 @@ template void launchMeanSquaredError<bool, half, float>(void *labels_d,
                                                         void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
-                                                        Stream stream,
-                                                        bool computeBatchLoss,
-                                                        bool computeGradient);
+                                                        bool computeGradient,
+                                                        Stream stream);
 
 template void launchMeanSquaredError<bool, float, half>(void *labels_d,
                                                         void *predictions_d,
@@ -665,9 +630,8 @@ template void launchMeanSquaredError<bool, float, half>(void *labels_d,
                                                         void *gradient,
                                                         uint32_t numPredictions,
                                                         uint32_t batchSize,
-                                                        Stream stream,
-                                                        bool computeBatchLoss,
-                                                        bool computeGradient);
+                                                        bool computeGradient,
+                                                        Stream stream);
 
 template void launchMeanSquaredError<bool, float, float>(void *labels_d,
                                                          void *predictions_d,
@@ -675,6 +639,5 @@ template void launchMeanSquaredError<bool, float, float>(void *labels_d,
                                                          void *gradient,
                                                          uint32_t numPredictions,
                                                          uint32_t batchSize,
-                                                         Stream stream,
-                                                         bool computeBatchLoss,
-                                                         bool computeGradient);
+                                                         bool computeGradient,
+                                                         Stream stream);

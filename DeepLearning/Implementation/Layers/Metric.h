@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Arithmetic/Scale.h"
 
 namespace ThorImplementation {
 

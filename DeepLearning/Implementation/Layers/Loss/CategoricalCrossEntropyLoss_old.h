@@ -1,3 +1,4 @@
+/*
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
@@ -7,7 +8,7 @@
 #include <thread>
 
 namespace ThorImplementation {
-
+*/
 /*
 FIXME Reconsider the design of this considering Mean Squared Error. Also now that I have soft max with backwards,
       and I have batchReduce, maybe I should redo this altogether and use those pieces. Then in the API layer
@@ -25,7 +26,7 @@ FIXME Reconsider the design of this considering Mean Squared Error. Also now tha
  *
  * https://gombru.github.io/2018/05/23/cross_entropy_loss/
  */
-
+/*
 class CategoricalCrossEntropyLoss : public Loss {
    public:
     virtual ~CategoricalCrossEntropyLoss(){};
@@ -326,3 +327,4 @@ class CategoricalCrossEntropyLoss : public Loss {
 };
 
 }  // namespace ThorImplementation
+*/

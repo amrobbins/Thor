@@ -142,6 +142,8 @@ class Stream : private ReferenceCounted {
     // so just don't destroy the cuDNN handle of a static string.
     void informIsStatic() { isStatic = true; }
 
+    uint64_t getId() { return getReferenceCountedId(); }
+
    private:
     void construct(int gpuNum, Priority priority) {
         ReferenceCounted::initialize();

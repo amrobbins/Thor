@@ -16,6 +16,8 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
     float probabilities[4096];
     float loss[4096];
     float loss_cpu[4096];
+    float gradient[4096];
+    float gradient_cpu[4096];
 
     cudaError_t cudaStatus;
 
@@ -23,6 +25,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
     float *probabilities_d;
     float *workspace_d;
     float *loss_d;
+    float *gradient_d;
 
     Stream stream(0);
 
@@ -34,61 +37,66 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
     assert(cudaStatus == cudaSuccess);
     cudaStatus = cudaMalloc(&loss_d, 4096 * sizeof(float));
     assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&gradient_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
 
     for (int t = 0; t < 50; ++t) {
         int batchSize = (rand() % 8) + 1;
-        int numElementsPerBatch = (rand() % 512) + 1;
+        int numClasses = (rand() % 512) + 1;
         for (int b = 0; b < batchSize; ++b) {
             double totalProb = 0.0;
             while (totalProb < 0.00001) {
                 totalProb = 0.0;
-                for (int i = 0; i < numElementsPerBatch; ++i) {
+                for (int i = 0; i < numClasses; ++i) {
                     if (rand() % 2)
-                        labels[i + b * numElementsPerBatch] = 0.0f;
+                        labels[i + b * numClasses] = 0.0f;
                     else
-                        labels[i + b * numElementsPerBatch] = ((rand() % 1000) / 999.0f);
+                        labels[i + b * numClasses] = ((rand() % 1000) / 999.0f);
                     if (rand() % 50 == 0) {
                         int sel = rand() % 5;
                         if (sel == 0)
-                            probabilities[i + b * numElementsPerBatch] = 0.0f;
+                            probabilities[i + b * numClasses] = 0.0f;
                         else if (sel == 1)
-                            probabilities[i + b * numElementsPerBatch] = -0.0f;
+                            probabilities[i + b * numClasses] = -0.0f;
                         else if (sel == 2)
-                            probabilities[i + b * numElementsPerBatch] = NAN;
+                            probabilities[i + b * numClasses] = NAN;
                         else if (sel == 3)
-                            probabilities[i + b * numElementsPerBatch] = std::numeric_limits<float>::infinity();
+                            probabilities[i + b * numClasses] = std::numeric_limits<float>::infinity();
                         else if (sel == 4)
-                            probabilities[i + b * numElementsPerBatch] = -std::numeric_limits<float>::infinity();
+                            probabilities[i + b * numClasses] = -std::numeric_limits<float>::infinity();
                     } else {
-                        probabilities[i + b * numElementsPerBatch] = rand() % 10000;
-                        totalProb += probabilities[i + b * numElementsPerBatch];
+                        probabilities[i + b * numClasses] = rand() % 10000;
+                        totalProb += probabilities[i + b * numClasses];
                     }
                 }
             }
-            for (int i = 0; i < numElementsPerBatch; ++i) {
-                probabilities[i + b * numElementsPerBatch] /= totalProb;
+            for (int i = 0; i < numClasses; ++i) {
+                probabilities[i + b * numClasses] /= totalProb;
             }
         }
 
-        cudaStatus =
-            cudaMemcpyAsync(labels_d, labels, numElementsPerBatch * batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+        cudaStatus = cudaMemcpyAsync(labels_d, labels, numClasses * batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
         cudaStatus = cudaMemcpyAsync(
-            probabilities_d, probabilities, numElementsPerBatch * batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+            probabilities_d, probabilities, numClasses * batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchCrossEntropyLoss_perClassLabels(labels_d, probabilities_d, workspace_d, loss_d, numElementsPerBatch, batchSize, stream);
+        launchElementWiseCrossEntropyLoss<float, float, float>(
+            labels_d, probabilities_d, loss_d, gradient_d, numClasses, batchSize, true, stream);
 
-        cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
+        cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * numClasses * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus =
+            cudaMemcpyAsync(gradient, gradient_d, batchSize * numClasses * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
         for (int b = 0; b < batchSize; ++b) {
-            loss_cpu[b] = 0.0f;
-            for (int i = 0; i < numElementsPerBatch; ++i) {
-                float probability = probabilities[i + b * numElementsPerBatch];
-                if (probability < 1.0e-15f || !isfinite(probability))
-                    probability = 1.0e-15f;
-                loss_cpu[b] += -labels[i + b * numElementsPerBatch] * log(probability);
+            for (int i = 0; i < numClasses; ++i) {
+                float probability = probabilities[i + b * numClasses];
+                if (probability < 0.001f || !isfinite(probability))
+                    probability = 0.001f;
+                loss_cpu[b * numClasses + i] = -labels[i + b * numClasses] * log(probability);
+                gradient_cpu[b * numClasses + i] = -labels[i + b * numClasses] / probability;
             }
         }
 
@@ -97,11 +105,23 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
 
         float thresh = 0.01;
         for (int b = 0; b < batchSize; ++b) {
-            float diff = abs(loss[b] - loss_cpu[b]);
-            if (diff >= thresh || !isfinite(diff)) {
-                printf("numElementsPerBatch %d element %d %f %f\n", numElementsPerBatch, b, loss[b], loss_cpu[b]);
+            for (int i = 0; i < numClasses; ++i) {
+                float diff = abs(loss[b * numClasses + i] - loss_cpu[b * numClasses + i]);
+                if (diff >= thresh || !isfinite(diff)) {
+                    printf("class %d batchItem, %d %f %f\n", i, b, loss[b * numClasses + i], loss_cpu[b * numClasses + i]);
+                }
+                ASSERT_LT(diff, thresh);
             }
-            ASSERT_LT(diff, thresh);
+        }
+
+        for (int b = 0; b < batchSize; ++b) {
+            for (int i = 0; i < numClasses; ++i) {
+                float diff = abs(gradient[b * numClasses + i] - gradient_cpu[b * numClasses + i]);
+                if (diff >= thresh || !isfinite(diff)) {
+                    printf("class %d batchItem, %d %f %f\n", i, b, loss[b * numClasses + i], loss_cpu[b * numClasses + i]);
+                }
+                ASSERT_LT(diff, thresh);
+            }
         }
     }
 
@@ -113,8 +133,10 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
     assert(cudaStatus == cudaSuccess);
     cudaStatus = cudaFree(loss_d);
     assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(gradient_d);
+    assert(cudaStatus == cudaSuccess);
 }
-
+/*
 TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
     srand(time(NULL));
 
@@ -192,11 +214,11 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
             uint32_t trueClass = labels[b];
             float probability;
             if (labels[b] >= numClasses) {
-                probability = 1.0e-15f;
+                probability = 0.001f;
             } else {
                 probability = probabilities[trueClass + b * numClasses];
-                if (probability < 1.0e-15f || !isfinite(probability))
-                    probability = 1.0e-15f;
+                if (probability < 0.001f || !isfinite(probability))
+                    probability = 0.001f;
             }
             loss_cpu[b] = -log(probability);
         }
@@ -280,17 +302,17 @@ TEST(LossGradient, ComputesCorrectAnswer_classIndexLabels) {
             }
         }
     }
-
-    /*
-    template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_GRADIENT_TYPE>
-    void launchLossGradient_classIndexLabels(LABEL_TYPE *labels_d,
-                                             PROBABILITY_TYPE *probabilities_d,
-                                             LOSS_GRADIENT_TYPE *lossGradient_d,
-                                             uint64_t numClasses,
-                                             uint64_t batchSize,
-                                             Stream stream)
-    */
-}
+*/
+/*
+template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_GRADIENT_TYPE>
+void launchLossGradient_classIndexLabels(LABEL_TYPE *labels_d,
+                                         PROBABILITY_TYPE *probabilities_d,
+                                         LOSS_GRADIENT_TYPE *lossGradient_d,
+                                         uint64_t numClasses,
+                                         uint64_t batchSize,
+                                         Stream stream)
+*/
+//}
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

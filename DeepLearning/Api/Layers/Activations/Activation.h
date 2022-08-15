@@ -22,6 +22,7 @@ class Activation : public Layer {
 class Activation::Builder {
    public:
     virtual ~Builder() {}
+    // Note: the builder functions return void because if they can't return an Activation::Builder because it is abstract.
     virtual void network(Network &_network) = 0;
     virtual void featureInput(Tensor featureInput) = 0;
     virtual shared_ptr<Layer> build() = 0;

@@ -46,11 +46,11 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
         half *elementLoss = (half *)elementLossCpu.getMemPtr();
         half *elementLossGradient = (half *)elementLossGradientCpu.getMemPtr();
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
-            predictions[i] = ((rand() % 10000) / 999.0f);
-            labels[i] = ((rand() % 10000) / 999.0f);
+            predictions[i] = ((rand() % 1500) / 999.0f);
+            labels[i] = ((rand() % 1500) / 999.0f);
             half val = labels[i] - predictions[i];
             elementLoss[i] = val * val;
-            elementLossGradient[i] = (half)2.0f * val;
+            elementLossGradient[i] = (half)2.0f * val * 100;
         }
 
         vector<Layer *> layers;
@@ -74,7 +74,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, meanSquaredError, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, meanSquaredError, 0, (int)Loss::ConnectionType::LABELS);
-        LayerTestHelper::connectTwoLayers(meanSquaredError, elementLossOutput, (int)Loss::ConnectionType::ELEMENTWISE_LOSS);
+        LayerTestHelper::connectTwoLayers(meanSquaredError, elementLossOutput, (int)Loss::ConnectionType::LOSS);
         LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_TRUE(meanSquaredError->getErrorInput().isEmpty());

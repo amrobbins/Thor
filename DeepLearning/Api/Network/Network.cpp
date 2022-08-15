@@ -469,6 +469,8 @@ void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
 void Network::addToNetwork(Layer *layer) {
     frozen = false;
 
+    assert(layer != nullptr);
+
     if (layer->isMultiLayer()) {
         layer->convertToSingleLayersAndAddToNetwork();
     } else {

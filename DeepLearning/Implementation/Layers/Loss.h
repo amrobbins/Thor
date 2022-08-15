@@ -1,7 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
-#include "Utilities/TensorOperations/Arithmetic/Scale.h"
+#include "Utilities/Common/Optional.h"
 
 namespace ThorImplementation {
 
@@ -11,13 +11,23 @@ namespace ThorImplementation {
  * Loss layers do not connect an errorInput from the next layer, so they are a point at which
  * back propagation will terminate if connected at the output to a back-propagable layer.
  *
- * The loss tensor give the loss per element of the batch, so it is a one dimensions array of
- * batchSize elements, the batch loss is the summation of the elements of the loss tensor.
+ * Loss layers compute the loss element wise:
+ *   For categorical losses, this is one loss per batch item per class
+ *   For numerical losses, this is one loss per batch item per output (usually numerical losses have just one output though)
+ * When this is not the final form of the desired loss for reporting purposes, a LossShaper is attached to the output of the loss layer.
+ * The loss shaper can report loss in the following ways:
+ *   For categorical losses:
+ *     1. batchLoss (a single scalar)
+ *     2. classwise loss (a scalar for each class)
+ *   For numerical losses:
+ *     1. batchLoss (a single scalar per output)
  *
- * featureInput: The unnormalized predictions
+ * featureInput: The predictions
+ *   For categorical losses, the predictions should represent a probability distribution (i.e. they sum to 1.0), this is achieved
+ *   by processing the predictions through a SoftMax layer, the output of which is sent as the input to the categorical loss.
  * labelsInput: ground truth labels
- * featureOutput: The normalized predictions (i.e. softmax applied)
- * errorOutput: The loss (per batch item per class, sum it for scalar loss), this value is scaled by lossScalingFactor
+ * featureOutput: The elementwise loss
+ * errorOutput: The loss gradient, scaled by Loss::lossScalingFactor
  */
 class Loss : public Layer {
    public:
@@ -88,18 +98,33 @@ class Loss : public Layer {
             assert(errorOutput.get().isInitialized());
         }
         if (labelsStream.isInitialized()) {
+            assert(labelsInput.isPresent());
             assert(labelsInput.get().isInitialized());
         }
         assert(featureOutput.isPresent());
         assert(featureInput.isPresent());
-        assert(inputTensor.isPresent());
 
-        if (inputTensor.get() == featureInput.get())
-            forwardFeatures(inputTensor, validationPass);
-        else if (inputTensor.get() == labelsInput.get())
-            forwardLabels(inputTensor, validationPass);
-        else
-            assert(false);
+        // After all inputs have been received an empty input tensor is sent to indicate
+        // that the layer is ready to perform the forward pass.
+        if (inputTensor.isPresent()) {
+            if (inputTensor.get() == featureInput.get())
+                forwardFeatures(inputTensor, validationPass);
+            else if (inputTensor.get() == labelsInput.get())
+                forwardLabels(inputTensor, validationPass);
+            else
+                assert(false);
+        } else {
+            assert(inputTensor.isEmpty());
+            assert(featureInputReceived);
+            assert(labelsReceived);
+            featureInputReceived = false;
+            labelsReceived = false;
+
+            infer(featureInput, featureOutput, stream);
+
+            // Labels stream waits for infer to finish
+            labelsStream.waitEvent(stream.putEvent());
+        }
     }
 
     virtual void forwardFeatures(Tensor featureInput, bool validationPass) {
@@ -129,8 +154,11 @@ class Loss : public Layer {
         assert(labelsStream.isInitialized());
         assert(errorInput.isEmpty());
 
-        if (errorOutput.isPresent())
-            backProp(labelsInput, featureOutput, errorOutput, stream);
+        if (errorOutput.isPresent()) {
+            backProp(labelsInput, featureInput, errorOutput, stream);
+            // Labels stream waits for backProp to finish
+            labelsStream.waitEvent(stream.putEvent());
+        }
 
         if (previousLayer.isEmpty())
             return;
@@ -160,18 +188,9 @@ class Loss : public Layer {
             assert(false);
     }
 
-    virtual void computeElementwiseLoss(Tensor labels, Tensor normalizedPredictionsOut, Tensor loss, Stream stream) = 0;
-    virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) = 0;
+    enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS, PREDICTIONS, LOSS };
 
-    enum class ConnectionType {
-        FORWARD_BACKWARD = 5,
-        LABELS,
-        PREDICTIONS,
-        BATCH_LOSS,
-        CLASSWISE_PER_ELEMENT_LOSS,
-        CLASSWISE_LOSS,
-        ELEMENTWISE_LOSS
-    };
+    enum class LossType { BATCH = 8374, CLASSWISE, ELEMENTWISE, RAW };
 
     static uint32_t getLossScalingFactor() { return lossScalingFactor; }
 
@@ -183,7 +202,7 @@ class Loss : public Layer {
     Optional<Tensor> batchLossOutput;
 
     // FIXME: only const for now for convenience
-    static const uint32_t lossScalingFactor = 100;
+    static constexpr uint32_t lossScalingFactor = 32;
     Stream labelsStream;
 
     bool featureInputReceived;
@@ -191,69 +210,22 @@ class Loss : public Layer {
 
     virtual void advanceDataIfReady(bool validationPass) {
         if (featureInputReceived && labelsReceived) {
-            // Normalize predictions
-            infer(featureInput, featureOutput, stream);
-
-            // DataStream waits for labels to arrive,
-            // Labels stream waits for infer to finish
-            if (labelsStream.isInitialized() && stream != labelsStream) {
-                stream.waitEvent(labelsStream.putEvent());
-                labelsStream.waitEvent(stream.putEvent());
-            }
-
-            // Compute loss, for forward direction
-            if (elementwiseLossOutput.isPresent()) {
-                computeElementwiseLoss(labelsInput, featureOutput, elementwiseLossOutput, labelsStream);
-            }
-
-            if (batchLossOutput.isPresent()) {
-                assert(elementwiseLossOutput.isPresent());
-                computeBatchLoss(elementwiseLossOutput, batchLossOutput, labelsStream);
-            }
-
-            // Compute loss gradient, for backward direction
-            if (!(isInferenceOnly() || validationPass)) {
-                if (errorOutput.isPresent())
-                    computeLossGradient(labelsInput, featureOutput, errorOutput, stream);
-            }
-
-            featureInputReceived = false;
-            labelsReceived = false;
+            // DataStream waits for labels to arrive
+            stream.waitEvent(labelsStream.putEvent());
+            forward(Optional<Tensor>::empty(), stream);
         } else {
             return;
         }
 
         if (nextLayer.isPresent())
             nextLayer.get()->forward(featureOutput, validationPass);
-        if (lossOutputLayer.isPresent()) {
-            if (batchLossOutput.isPresent())
-                lossOutputLayer.get()->forward(batchLossOutput, validationPass);
-            else if (elementwiseLossOutput.isPresent())
-                lossOutputLayer.get()->forward(elementwiseLossOutput, validationPass);
-            else
-                assert(false);
-        }
+
         if (isInferenceOnly() || validationPass)
             return;
 
         // Initiate back propagation
         assert(previousLayer.isPresent());
-        previousLayer.get()->backward(errorOutput);
-    }
-
-    void computeBatchLoss(Tensor loss, Tensor batchLoss, Stream stream) {
-        assert(loss.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        assert(batchLoss.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-        uint64_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-
-        if (loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            launchSumManyToOne((float *)loss.getMemPtr(), (float *)batchLoss.getMemPtr(), batchSize, 1, false, false, stream);
-        } else if (loss.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            launchSumManyToOne((half *)loss.getMemPtr(), (half *)batchLoss.getMemPtr(), batchSize, 1, false, false, stream);
-        } else {
-            assert(false);
-        }
+        backward(Optional<Tensor>().empty());
     }
 };
 
