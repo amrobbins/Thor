@@ -61,6 +61,9 @@ class ConsoleVisualizer : public Visualizer {
     virtual void startUI();
     virtual void stopUI();
 
+    static void cursorForward(int32_t spaces) { printf("\033[%dC", spaces); }
+    static void cursorBackward(int32_t spaces) { printf("\033[%dD", spaces); }
+
    private:
     ConsoleVisualizer();
 

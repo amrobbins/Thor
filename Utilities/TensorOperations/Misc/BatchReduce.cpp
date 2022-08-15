@@ -25,8 +25,6 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                          TensorDescriptor::DataType sourceDataType,
                          TensorDescriptor::DataType destDataType,
                          Stream stream) {
-    cudnnStatus_t cudnnStatus;
-
     // stream is kept because the cudnn handle is associated with it.
     this->stream = stream;
 
@@ -45,6 +43,21 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
         ((float *)batchScale)[0] = 1.0f / batchSize;
     }
 
+    workspaceSizeInBytes =
+        computeWorkspaceSizeInBytes(batchletSize, batchSize, lossDimSize, reduceBatch, reduceLoss, sourceDataType, destDataType);
+    if (workspaceSizeInBytes > 0)
+        workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+                           TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+}
+
+uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
+                                                  uint32_t batchSize,
+                                                  uint32_t lossDimSize,
+                                                  bool reduceBatch,
+                                                  bool reduceLoss,
+                                                  TensorDescriptor::DataType sourceDataType,
+                                                  TensorDescriptor::DataType destDataType) {
+    cudnnStatus_t cudnnStatus;
     cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceTensorDescriptor);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
@@ -62,10 +75,10 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
         stream.getCudnnHandle(), reduceTensorDescriptor, sourceTensorDescriptor, destTensorDescriptor, &workspaceSizeInBytes);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    if (workspaceSizeInBytes > 0)
-        workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
-                           TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+    return workspaceSizeInBytes;
 }
+
+uint64_t BatchReduce::getWorkspaceSizeInBytes() { return workspaceSizeInBytes; }
 
 BatchReduce::~BatchReduce() {
     cudnnStatus_t cudnnStatus;
@@ -99,5 +112,6 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     zero,
                                     destTensorDescriptor,
                                     destMem_d);
+
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }

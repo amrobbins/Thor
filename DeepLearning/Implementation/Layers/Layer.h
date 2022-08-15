@@ -203,7 +203,7 @@ class Layer {
     }
 
     virtual bool isInferenceOnly() { return inferenceOnly; }
-    virtual void setConstructForInferenceOnly(bool inferenceOnly) {
+    void setConstructForInferenceOnly(bool inferenceOnly) {
         assert(!compiled);
         this->inferenceOnly = inferenceOnly;
     }

@@ -39,7 +39,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
+				build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
                 build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
                 build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
                 build/test/DeepLearning/Api/Network/NetworkTest && \
@@ -47,12 +48,10 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
-                build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest && \
+                build/test/DeepLearning/Implementation/Layers/Loss/LossShaperTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
-                build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
-                build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
                 build/test/Utilities/Common/OptionalTest && \
                 build/test/Utilities/Random/FullPeriodRandomTest && \
@@ -60,7 +59,6 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/WorkQueue/AsyncTensorQueueTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest && \
                 build/test/Utilities/TensorOperations/Misc/MiscTest && \
-                build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
                 build/test/Utilities/TensorOperations/Misc/BatchReduceTest && \
                 build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest && \
                 build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest && \
@@ -73,16 +71,19 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
+                build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
+                build/test/DeepLearning/Api/Layers/Loss/LossShaperTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest \
+                build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 
 				# FIXME: rebuild and put back
-                #build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest && \
-                #build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest && \
+                #build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
+                #build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
+                #build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
 
-                #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest && \
-                #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest && \
 
-ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
+ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
+			build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/WorkQueue/AsyncQueueTest \
             build/test/Utilities/WorkQueue/AsyncTensorQueueTest \
             build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest \
@@ -91,10 +92,8 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/DeepLearning/Api/Layers/Activations/ActivationsTest \
             build/test/DeepLearning/Api/Network/NetworkTest \
             build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests \
-            build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest \
             build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest \
             build/test/Utilities/TensorOperations/Misc/MiscTest \
-            build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
             build/test/Utilities/TensorOperations/Misc/BatchReduceTest \
             build/test/Utilities/Loaders/ShardedRawDatasetCreatorTest \
             build/test/DeepLearning/Implementation/Layers/Utility/UtilityLayerTest \
@@ -107,7 +106,7 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest \
             build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest \
-            build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest \
+            build/test/DeepLearning/Implementation/Layers/Loss/LossShaperTest \
             build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
@@ -115,19 +114,20 @@ ALL_TESTS = build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/ComputeTopology/machineEvaluatorTest \
             build/test/Utilities/Common/OptionalTest \
             build/test/DeepLearning/Implementation/SimpleNetworkTest \
-            build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
-            build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
             build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest \
             build/test/DeepLearning/Api/Optimizers/SgdTest \
-            build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest \
+            build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest \
+            build/test/DeepLearning/Api/Layers/Loss/LossShaperTest \
+			build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest \
 
 			# FIXME: rebuild and put back
-			#build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest \
-            #build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest \
+			#build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest \
+            #build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
+            #build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest \
+			#build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
+			#build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
 
 
-            #build/test/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiplyTest \
-            #build/test/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyTest \
 
 ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o \
 				   build/DeepLearning/Implementation/Layers/Activation/Softmax.o \
@@ -145,6 +145,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Average.o \
                    build/Utilities/TensorOperations/Arithmetic/Sum.o \
                    build/Utilities/TensorOperations/Loss/MeanSquaredError.o \
+                   build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o \
+                   build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o \
                    build/Utilities/TensorOperations/Misc/BatchReduce.o \
                    build/Utilities/TensorOperations/DeepLearning/Add1dBias.o \
                    build/Utilities/TensorOperations/Arithmetic/SumScale.o \
@@ -152,7 +154,6 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Exponentiation.o \
                    build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o \
                    build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o \
-                   build/Utilities/TensorOperations/Arithmetic/Scale.o \
                    build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o \
                    build/Utilities/TensorOperations/Misc/Map.o \
                    build/Utilities/TensorOperations/Misc/Split.o \
@@ -162,8 +163,9 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o \
-                   build/DeepLearning/Implementation/Layers/Utility/LossShaper.o \
+                   build/DeepLearning/Implementation/Layers/Loss/LossShaper.o \
                    build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o \
+                   build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
                    build/Utilities/Common/ReferenceCounted.o \
                    build/Utilities/Common/CudnnHelper.o \
@@ -202,33 +204,24 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Utility/DropOut.o \
                    build/DeepLearning/Api/Layers/Utility/NetworkOutput.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
-                   build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
-                   build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
-                   build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
-                   build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o \
-                   build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o \
-                   build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
                    # FIXME: rebuild and put back
 				   #build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o \
-
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/gpuMatrixMultiply.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch8Reg64.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch32.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch48.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch64.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch80.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch96.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch112.o \
-                   #build/Utilities/TensorOperations/GpuMatrixMultiply/Reductions.o \
+                   #build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
+                   #build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
+                   #build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
+                   #build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o \
+                   #build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o \
+                   #build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
 
-ALL_DEMOS = build/Demos/AlexNetDemo \
-			build/Demos/FewLayerFullyConnectedDemo \
-			build/Demos/SingleLayerFullyConnectedDemo \
-			build/Demos/SingleLayerConvolution2dDemo
+
+ALL_DEMOS =
+			# FIXME: put back once CCE updated
+			#build/Demos/AlexNetDemo \
+			#build/Demos/FewLayerFullyConnectedDemo \
+			#build/Demos/SingleLayerFullyConnectedDemo \
+			#build/Demos/SingleLayerConvolution2dDemo
 
 ML_DEV = libThor.a Thor.h
 
@@ -422,10 +415,6 @@ build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o: Utilities/Tensor
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/MultiplyByScalar.cu
 
-build/Utilities/TensorOperations/Arithmetic/Scale.o: Utilities/TensorOperations/Arithmetic/Scale.h Utilities/TensorOperations/Arithmetic/Scale.cu
-	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Scale.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Scale.cu
-
 build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o: Utilities/TensorOperations/Loss/CrossEntropyLoss.h Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
@@ -486,13 +475,17 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o: DeepLea
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o
 
-build/DeepLearning/Implementation/Layers/Utility/LossShaper.o: DeepLearning/Implementation/Layers/Utility/LossShaper.h DeepLearning/Implementation/Layers/Utility/LossShaper.cpp
+build/DeepLearning/Implementation/Layers/Loss/LossShaper.o: DeepLearning/Implementation/Layers/Loss/LossShaper.h DeepLearning/Implementation/Layers/Loss/LossShaper.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/Utility
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Utility/LossShaper.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Utility/LossShaper.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Loss/LossShaper.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/LossShaper.o
 
 build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o: DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h DeepLearning/Implementation/Layers/Loss/MeanSquaredError.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Loss/MeanSquaredError.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o
+
+build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o: DeepLearning/Implementation/Layers/Loss/CrossEntropy.h DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/Loss
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o
 
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
@@ -554,7 +547,6 @@ build/DeepLearning/Api/Optimizers/Sgd.o: DeepLearning/Api/Optimizers/Sgd.h DeepL
 	mkdir -p build/DeepLearning/Api/Optimizers/
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Optimizers/Sgd.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Optimizers/Sgd.o
 
-
 build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -O3 -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
@@ -574,6 +566,14 @@ build/Utilities/Loaders/ImageLoader.o: Utilities/Loaders/ImageLoader.h Utilities
 build/Utilities/TensorOperations/Misc/BatchReduce.o: Utilities/TensorOperations/Misc/BatchReduce.h Utilities/TensorOperations/Misc/BatchReduce.cpp
 	mkdir -p build/Utilities/TensorOperations/Misc
 	$(Gpp) -c -O3 -std=c++11 Utilities/TensorOperations/Misc/BatchReduce.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/Misc/BatchReduce.o
+
+build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o: DeepLearning/Api/Layers/Loss/MeanSquaredError.h DeepLearning/Api/Layers/Loss/MeanSquaredError.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Loss
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Loss/MeanSquaredError.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o
+
+build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o: DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Loss
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o
 
 build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Utilities/Loaders/ImageProcessor.cpp
 	mkdir -p build/Utilities/Loaders
@@ -721,9 +721,9 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest: 
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Utility/LossShaperTest.cpp $(THOR)
-	mkdir -p build/test/DeepLearning/Implementation/Layers/Utility
-	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Utility/LossShaperTest test/DeepLearning/Implementation/Layers/Utility/LossShaperTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+build/test/DeepLearning/Implementation/Layers/Loss/LossShaperTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/LossShaperTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
+	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/LossShaperTest test/DeepLearning/Implementation/Layers/Loss/LossShaperTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
@@ -797,10 +797,9 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest: build/t
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-# FIXME: rebuild and put back
-#build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp $(THOR)
-#	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
-#	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Metric
@@ -830,10 +829,18 @@ build/test/DeepLearning/Api/Network/NetworkTest: build/test/googletest/libgtest.
 	mkdir -p build/test/DeepLearning/Api/Network
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Network/NetworkTest test/DeepLearning/Api/Network/NetworkTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-# FIXME: rebuild and put back
-#build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest.cpp $(THOR)
-#	mkdir -p build/test/DeepLearning/Api/Layers/Loss
-#	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyLossTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Loss/LossShaperTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/LossShaperTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/LossShaperTest test/DeepLearning/Api/Layers/Loss/LossShaperTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Utility/UtilityLayerTests.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Utility

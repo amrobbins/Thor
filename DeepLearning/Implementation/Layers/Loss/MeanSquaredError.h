@@ -5,6 +5,8 @@
 #include "Utilities/TensorOperations/Loss/MeanSquaredError.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
+#include <cudnn_ops_infer.h>
+
 #include <chrono>
 #include <thread>
 
@@ -20,18 +22,22 @@ class MeanSquaredError : public Loss {
 
     virtual void cleanup() {}
 
-    // Loss and gradient computation are all handled in infer. Gradient is not computed when in inference only mode.
-    virtual void computeElementwiseLoss(Tensor labels, Tensor predictions, Tensor loss, Stream stream) {}
-    virtual void computeLossGradient(Tensor labels, Tensor normalizedPredictions, Tensor lossGradient, Stream stream) {}
-
     virtual void infer(Optional<Tensor> predictions, Optional<Tensor> loss, Stream stream);
 
     virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream);
 
    private:
-    TensorDescriptor::DataType labelsDataType;
+    void launchMeanSquaredErrorWithFP16Predictions();
+    void launchMeanSquaredErrorWithFP16PredictionsAndFP16Loss();
+    void launchMeanSquaredErrorWithFP16PredictionsAndFP32Loss();
+
+    void launchMeanSquaredErrorWithFP32Predictions();
+    void launchMeanSquaredErrorWithFP32PredictionsAndFP16Loss();
+    void launchMeanSquaredErrorWithFP32PredictionsAndFP32Loss();
+
     unsigned int batchSize;
     BatchReduce *batchReduce;
+    cudnnTensorDescriptor_t errorOutputCudnnTensorDescriptor;
 };
 
 }  // namespace ThorImplementation

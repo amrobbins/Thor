@@ -80,6 +80,8 @@ class Layer {
                                              Thor::Tensor connectingApiTensor,
                                              vector<shared_ptr<Initializer>> &initializers) const = 0;
 
+    // FIXME: Why do I bother calling it a multilayer and then flattening later?
+    // FIXME: I should just override addToNetwork to where it adds all required layers.
     virtual bool isMultiLayer() const { return false; }
     virtual void convertToSingleLayersAndAddToNetwork() { assert(false); }
 

@@ -68,6 +68,14 @@ class TensorFanout : public MultiConnectionLayer {
             cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
         assert(cudaStatus == cudaSuccess);
         delete[] errorInputArray;
+
+        // When there is only one layer that backpropagates (for example if the fanout is just to connect the tensor to a network output),
+        // then the errorInput replaces the errorOutput so that back prop is a nop.
+        if (numPresentTensors(errorInputs) == 1 and numPresentTensors(errorOutputs) == 1) {
+            assert(previousLayers[0].isPresent());
+            previousLayers[0].get()->replaceErrorInput(errorOutputs[0], getFirstPresentTensor(errorInputs));
+            errorOutputs[0] = getFirstPresentTensor(errorInputs);
+        }
     }
 
     // initialize weights using the configured initializer. In general set any initial values.
@@ -106,7 +114,16 @@ class TensorFanout : public MultiConnectionLayer {
         if (errorOutputs[0].isEmpty())
             return;
 
-        if (errorInputs.size() > 1) {
+        if (numPresentTensors(errorInputs) == 1) {
+            // NOP (errorInput[0] is connected to errorOutput[0])
+            // Just sync streams and initiate back prop
+            for (unsigned int i = 1; i < errorInputs.size(); ++i)
+                streams[0].waitEvent(streams[i].putEvent());
+            previousLayers[0].get()->backward(errorOutputs[0]);
+            return;
+        }
+
+        if (errorInput.isPresent()) {
             // Locked section
             unique_lock<mutex> lck(mtx);
 

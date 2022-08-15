@@ -1,326 +1,749 @@
 #include "CrossEntropyLoss.h"
-#include "Utilities/TensorOperations/Arithmetic/SumManyToOne.h"
 
-// compute -label*ln(probability) elementwise
-template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
-__global__ void crossEntropyLossPartOne_perClassLabels(LABEL_TYPE *labels,
-                                                       PROBABILITY_TYPE *probabilities,
-                                                       float *workspace,
-                                                       uint64_t numElements) {
-    float label;
-    float probability;
-    float result;
-
-    int element = blockIdx.x * 1024 + threadIdx.x;
-
-    if (element >= numElements)
+/**
+ * CrossEntropy(predictionProbabilites, labels) = -labels_i * ln(predictionProbabilites_i), for i in numClasses
+ *
+ * In the special and usual case where labels are one hot, let t be the index of the single hot label then:
+ * CrossEntropy(predictionProbabilites, labels) = -ln(predictionProbabilites_t) for class == t
+ * CrossEntropy(predictionProbabilites, labels) = 0 for class != t
+ * This is a bit faster to compute and since this is the common case it is directly implemented.
+ * Also it allows sending labels as an integer array that indicate the true class, rather than a larger array of one-hot vectors.
+ *
+ * The general case allows soft labels. Say you had an aquatic car capable of driving on a lake,
+ * you could then say it's label is 0.5 for the car class and 0.5 for the boat class.
+ *
+ * Gradient of CrossEntropy(predictionProbabilites, labels):
+ * d/dx(-labels_i * log(predictionProbabilites_i)) = -labels_i/predictionProbabilites_i
+ * One hot case:
+ * d/dx(-labels_i * log(predictionProbabilites_i)) = -1/predictionProbabilites_t for class == t
+ * d/dx(-labels_i * log(predictionProbabilites_i)) = 0 for class != t
+ */
+template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
+__global__ void elementWiseCrossEntropyLoss(
+    uint32_t numClasses, uint32_t batchSize, void *labels, void *probabilities, void *loss, void *gradient, bool computeGradient) {
+    uint32_t elementwiseLossIndex = blockIdx.x * 1024 + threadIdx.x;
+    uint32_t batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = (float)labels[element];
-    if (label == 0.0f) {
-        result = 0.0f;
-    } else {
-        probability = (float)probabilities[element];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
-        }
-        result = -label * logf(probability);
+    const PROBABILITY_TYPE MIN_PROBABILITY = 0.001f;
+    LABEL_TYPE label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    workspace[element] = result;
-    element += 256;
+    LOSS_TYPE elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    PROBABILITY_TYPE elementwiseGradient;
+    if (computeGradient) {
+        elementwiseGradient = (float)-label / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 
-    if (element >= numElements)
+    elementwiseLossIndex += 256;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = (float)labels[element];
-    if (label == 0.0f) {
-        result = 0.0f;
-    } else {
-        probability = (float)probabilities[element];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
-        }
-        result = -label * logf(probability);
+    label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    workspace[element] = result;
-    element += 256;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    if (computeGradient) {
+        elementwiseGradient = (float)-label / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 
-    if (element >= numElements)
+    elementwiseLossIndex += 256;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = (float)labels[element];
-    if (label == 0.0f) {
-        result = 0.0f;
-    } else {
-        probability = (float)probabilities[element];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
-        }
-        result = -label * logf(probability);
+    label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    workspace[element] = result;
-    element += 256;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    if (computeGradient) {
+        elementwiseGradient = (float)-label / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 
-    if (element >= numElements)
+    elementwiseLossIndex += 256;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = (float)labels[element];
-    if (label == 0.0f) {
-        result = 0.0f;
-    } else {
-        probability = (float)probabilities[element];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
-        }
-        result = -label * logf(probability);
+    label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    workspace[element] = result;
-    element += 256;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    if (computeGradient) {
+        elementwiseGradient = (float)-label / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 }
 
-// compute -label*ln(probability) elementwise
-// labels are user input and a bad label must not cause a crash.
-template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
-__global__ void crossEntropyLossPartOne_classIndexLabels(
-    LABEL_TYPE *labels, PROBABILITY_TYPE *probabilities, float *loss, uint64_t numClasses, uint64_t batchSize) {
-    uint32_t batchItem;
-    float probability;
-    LABEL_TYPE label;
-
-    batchItem = blockIdx.x * 1024 + threadIdx.x;
-    if (batchItem >= batchSize)
+template <typename INDEX_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
+__global__ void elementWiseCrossEntropyLoss_oneHotSpecialCase(uint32_t numClasses,
+                                                              uint32_t batchSize,
+                                                              void *classOfHotLabels,
+                                                              void *probabilities,
+                                                              void *loss,
+                                                              void *gradient,
+                                                              bool computeGradient) {
+    uint32_t elementwiseLossIndex = blockIdx.x * 1024 + threadIdx.x;
+    uint32_t batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    if (label >= numClasses) {
-        probability = 1.0E-15f;
-    } else {
-        probability = probabilities[batchItem * numClasses + label];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = 0.001f;
+    uint32_t outputClass = elementwiseLossIndex % numClasses;
+    LOSS_TYPE elementwiseLoss = 0.0f;
+    PROBABILITY_TYPE elementwiseGradient = 0.0f;
+    uint32_t classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = ((PROBABILITY_TYPE)-1.0f) / probability;
         }
     }
-    loss[batchItem] = -logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 
-    batchItem += 256;
-    if (batchItem >= batchSize)
+    elementwiseLossIndex += 256;
+    uint32_t oldBatchIndex = batchIndex;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    if (label >= numClasses) {
-        probability = 1.0E-15f;
-    } else {
-        probability = probabilities[batchItem * numClasses + label];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
+    if (oldBatchIndex != batchIndex)
+        classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    outputClass = elementwiseLossIndex % numClasses;
+    elementwiseLoss = 0.0f;
+    elementwiseGradient = 0.0f;
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = ((PROBABILITY_TYPE)-1.0f) / probability;
         }
     }
-    loss[batchItem] = -logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 
-    batchItem += 256;
-    if (batchItem >= batchSize)
+    elementwiseLossIndex += 256;
+    oldBatchIndex = batchIndex;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    if (label >= numClasses) {
-        probability = 1.0E-15f;
-    } else {
-        probability = probabilities[batchItem * numClasses + label];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
+    if (oldBatchIndex != batchIndex)
+        classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    outputClass = elementwiseLossIndex % numClasses;
+    elementwiseLoss = 0.0f;
+    elementwiseGradient = 0.0f;
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = ((PROBABILITY_TYPE)-1.0f) / probability;
         }
     }
-    loss[batchItem] = -logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 
-    batchItem += 256;
-    if (batchItem >= batchSize)
+    elementwiseLossIndex += 256;
+    oldBatchIndex = batchIndex;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    if (label >= numClasses) {
-        probability = 1.0E-15f;
-    } else {
-        probability = probabilities[batchItem * numClasses + label];
-        if (probability < 1.0E-15f || !isfinite(probability)) {
-            probability = 1.0E-15f;
+    if (oldBatchIndex != batchIndex)
+        classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    outputClass = elementwiseLossIndex % numClasses;
+    elementwiseLoss = 0.0f;
+    elementwiseGradient = 0.0f;
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = ((PROBABILITY_TYPE)-1.0f) / probability;
         }
     }
-    loss[batchItem] = -logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 }
 
-// lossGradient[b][i] == normalizedPrediction[b][i] - (label == i);
-template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_GRADIENT_TYPE>
-__global__ void lossGradient_classIndexLabels(
-    LABEL_TYPE *labels, PROBABILITY_TYPE *probabilities, LOSS_GRADIENT_TYPE *lossGradient, uint64_t numClasses, uint64_t batchSize) {
-    uint32_t elementNum;
-    uint32_t batchItem;
-    uint32_t thisClass;
-    float probability;
-    LABEL_TYPE label;
-    LOSS_GRADIENT_TYPE lossGradientBuff;
-
-    elementNum = blockIdx.x * 1024 + threadIdx.x;
-    batchItem = elementNum / numClasses;
-    thisClass = elementNum - (batchItem * numClasses);
-    if (batchItem >= batchSize)
+template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
+__global__ void elementWiseCrossEntropyLoss_withScale(uint32_t numClasses,
+                                                      uint32_t batchSize,
+                                                      void *labels,
+                                                      void *probabilities,
+                                                      void *loss,
+                                                      void *gradient,
+                                                      bool computeGradient,
+                                                      float gradientScale) {
+    uint32_t elementwiseLossIndex = blockIdx.x * 1024 + threadIdx.x;
+    uint32_t batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    probability = probabilities[batchItem * numClasses + thisClass];
-    if (label == thisClass) {
-        lossGradientBuff = (LOSS_GRADIENT_TYPE)probability - (LOSS_GRADIENT_TYPE)1.0f;
-    } else {
-        lossGradientBuff = probability;
+    const PROBABILITY_TYPE MIN_PROBABILITY = 0.001f;
+    LABEL_TYPE label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    lossGradient[batchItem * numClasses + thisClass] = lossGradientBuff;
+    LOSS_TYPE elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    PROBABILITY_TYPE elementwiseGradient;
+    if (computeGradient) {
+        elementwiseGradient = -(gradientScale * (float)label) / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 
-    elementNum += 256;
-    batchItem = elementNum / numClasses;
-    thisClass = elementNum - (batchItem * numClasses);
-    if (batchItem >= batchSize)
+    elementwiseLossIndex += 256;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    probability = probabilities[batchItem * numClasses + thisClass];
-    if (label == thisClass) {
-        lossGradientBuff = (LOSS_GRADIENT_TYPE)probability - (LOSS_GRADIENT_TYPE)1.0f;
-    } else {
-        lossGradientBuff = probability;
+    label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    lossGradient[batchItem * numClasses + thisClass] = lossGradientBuff;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    if (computeGradient) {
+        elementwiseGradient = -(gradientScale * (float)label) / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 
-    elementNum += 256;
-    batchItem = elementNum / numClasses;
-    thisClass = elementNum - (batchItem * numClasses);
-    if (batchItem >= batchSize)
+    elementwiseLossIndex += 256;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
         return;
-    label = labels[batchItem];
-    probability = probabilities[batchItem * numClasses + thisClass];
-    if (label == thisClass) {
-        lossGradientBuff = (LOSS_GRADIENT_TYPE)probability - (LOSS_GRADIENT_TYPE)1.0f;
-    } else {
-        lossGradientBuff = probability;
-    }
-    lossGradient[batchItem * numClasses + thisClass] = lossGradientBuff;
 
-    elementNum += 256;
-    batchItem = elementNum / numClasses;
-    thisClass = elementNum - (batchItem * numClasses);
-    if (batchItem >= batchSize)
-        return;
-    label = labels[batchItem];
-    probability = probabilities[batchItem * numClasses + thisClass];
-    if (label == thisClass) {
-        lossGradientBuff = (LOSS_GRADIENT_TYPE)probability - (LOSS_GRADIENT_TYPE)1.0f;
-    } else {
-        lossGradientBuff = probability;
+    label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
     }
-    lossGradient[batchItem * numClasses + thisClass] = lossGradientBuff;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    if (computeGradient) {
+        elementwiseGradient = -(gradientScale * (float)label) / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
+
+    elementwiseLossIndex += 256;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
+        return;
+    label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    if (computeGradient) {
+        elementwiseGradient = -(gradientScale * (float)label) / (float)probability;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    }
 }
 
-template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
-void launchCrossEntropyLoss_perClassLabels(LABEL_TYPE *labels_d,
-                                           PROBABILITY_TYPE *probabilities_d,
-                                           float *workspace_d,
-                                           float *loss_d,
-                                           uint32_t numClasses,
-                                           uint32_t batchSize,
-                                           Stream stream) {
+template <typename INDEX_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
+__global__ void elementWiseCrossEntropyLoss_oneHotSpecialCase_withScale(uint32_t numClasses,
+                                                                        uint32_t batchSize,
+                                                                        void *classOfHotLabels,
+                                                                        void *probabilities,
+                                                                        void *loss,
+                                                                        void *gradient,
+                                                                        bool computeGradient,
+                                                                        float gradientScale) {
+    uint32_t elementwiseLossIndex = blockIdx.x * 1024 + threadIdx.x;
+    uint32_t batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
+        return;
+    const PROBABILITY_TYPE MIN_PROBABILITY = 0.001f;
+    uint32_t outputClass = elementwiseLossIndex % numClasses;
+    LOSS_TYPE elementwiseLoss = 0.0f;
+    PROBABILITY_TYPE elementwiseGradient = 0.0f;
+    uint32_t classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = -((PROBABILITY_TYPE)gradientScale) / probability;
+        }
+    }
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+
+    elementwiseLossIndex += 256;
+    uint32_t oldBatchIndex = batchIndex;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
+        return;
+    if (oldBatchIndex != batchIndex)
+        classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    outputClass = elementwiseLossIndex % numClasses;
+    elementwiseLoss = 0.0f;
+    elementwiseGradient = 0.0f;
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = -((PROBABILITY_TYPE)gradientScale) / probability;
+        }
+    }
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+
+    elementwiseLossIndex += 256;
+    oldBatchIndex = batchIndex;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
+        return;
+    if (oldBatchIndex != batchIndex)
+        classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    outputClass = elementwiseLossIndex % numClasses;
+    elementwiseLoss = 0.0f;
+    elementwiseGradient = 0.0f;
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = -((PROBABILITY_TYPE)gradientScale) / probability;
+        }
+    }
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+
+    elementwiseLossIndex += 256;
+    oldBatchIndex = batchIndex;
+    batchIndex = elementwiseLossIndex / numClasses;
+    if (batchIndex >= batchSize)
+        return;
+    if (oldBatchIndex != batchIndex)
+        classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    outputClass = elementwiseLossIndex % numClasses;
+    elementwiseLoss = 0.0f;
+    elementwiseGradient = 0.0f;
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
+    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+        probability = MIN_PROBABILITY;
+    }
+    if (outputClass == classOfHotLabel) {
+        elementwiseLoss = -logf(probability);
+        if (computeGradient) {
+            elementwiseGradient = -((PROBABILITY_TYPE)gradientScale) / probability;
+        }
+    }
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    if (computeGradient)
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+}
+
+template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
+void launchElementWiseCrossEntropyLoss(void *labels_d,
+                                       void *probabilities_d,
+                                       void *loss_d,
+                                       void *gradient_d,
+                                       uint32_t numClasses,
+                                       uint32_t batchSize,
+                                       bool computeGradient,
+                                       uint32_t lossScalingFactor,
+                                       Stream stream) {
     uint64_t numElements = (uint64_t)numClasses * (uint64_t)batchSize;
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
-    crossEntropyLossPartOne_perClassLabels<LABEL_TYPE, PROBABILITY_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(labels_d, probabilities_d, workspace_d, numElements);
-    launchSumManyToOne(workspace_d, loss_d, numClasses, batchSize, false, false, stream);
+
+    if (lossScalingFactor == 1) {
+        elementWiseCrossEntropyLoss<LABEL_TYPE, PROBABILITY_TYPE, LOSS_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(
+            numClasses, batchSize, labels_d, probabilities_d, loss_d, gradient_d, computeGradient);
+    } else {
+        elementWiseCrossEntropyLoss_withScale<LABEL_TYPE, PROBABILITY_TYPE, LOSS_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(
+            numClasses, batchSize, labels_d, probabilities_d, loss_d, gradient_d, computeGradient, (float)lossScalingFactor);
+    }
 }
 
-template <typename LABEL_TYPE, typename PROBABILITY_TYPE>
-void launchCrossEntropyLoss_classIndexLabels(LABEL_TYPE *labels_d,
-                                             PROBABILITY_TYPE *probabilities_d,
-                                             float *workspace_d,
-                                             float *loss_d,
-                                             uint32_t numClasses,
-                                             uint32_t batchSize,
-                                             Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize((batchSize + 1023) / 1024);
-    crossEntropyLossPartOne_classIndexLabels<LABEL_TYPE, PROBABILITY_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(labels_d, probabilities_d, loss_d, numClasses, batchSize);
-}
-
-template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_GRADIENT_TYPE>
-void launchLossGradient_classIndexLabels(LABEL_TYPE *labels_d,
-                                         PROBABILITY_TYPE *probabilities_d,
-                                         LOSS_GRADIENT_TYPE *lossGradient_d,
-                                         uint64_t numClasses,
-                                         uint64_t batchSize,
-                                         Stream stream) {
+template <typename INDEX_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
+void launchElementWiseCrossEntropyLoss_oneHotSpecialCase(void *classOfHotLabels_d,
+                                                         void *probabilities_d,
+                                                         void *loss_d,
+                                                         void *gradient_d,
+                                                         uint32_t numClasses,
+                                                         uint32_t batchSize,
+                                                         bool computeGradient,
+                                                         uint32_t lossScalingFactor,
+                                                         Stream stream) {
     uint64_t numElements = (uint64_t)numClasses * (uint64_t)batchSize;
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
 
-    lossGradient_classIndexLabels<LABEL_TYPE, PROBABILITY_TYPE, LOSS_GRADIENT_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(labels_d, probabilities_d, lossGradient_d, numClasses, batchSize);
+    if (lossScalingFactor == 1) {
+        elementWiseCrossEntropyLoss_oneHotSpecialCase<INDEX_TYPE, PROBABILITY_TYPE, LOSS_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(
+                numClasses, batchSize, classOfHotLabels_d, probabilities_d, loss_d, gradient_d, computeGradient);
+    } else {
+        elementWiseCrossEntropyLoss_oneHotSpecialCase_withScale<INDEX_TYPE, PROBABILITY_TYPE, LOSS_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(
+                numClasses, batchSize, classOfHotLabels_d, probabilities_d, loss_d, gradient_d, computeGradient, (float)lossScalingFactor);
+    }
 }
 
-template void launchCrossEntropyLoss_perClassLabels<uint8_t, half>(
-    uint8_t *labels_d, half *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint8_t, half, half>(void *labels_d,
+                                                                     void *probabilities_d,
+                                                                     void *loss_d,
+                                                                     void *gradient_d,
+                                                                     uint32_t numClasses,
+                                                                     uint32_t batchSize,
+                                                                     bool computeGradient,
+                                                                     uint32_t lossScalingFactor,
+                                                                     Stream stream);
 
-template void launchCrossEntropyLoss_perClassLabels<uint8_t, float>(
-    uint8_t *labels_d, float *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint8_t, half, float>(void *labels_d,
+                                                                      void *probabilities_d,
+                                                                      void *loss_d,
+                                                                      void *gradient_d,
+                                                                      uint32_t numClasses,
+                                                                      uint32_t batchSize,
+                                                                      bool computeGradient,
+                                                                      uint32_t lossScalingFactor,
+                                                                      Stream stream);
 
-template void launchCrossEntropyLoss_perClassLabels<half, half>(
-    half *labels_d, half *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint8_t, float, half>(void *labels_d,
+                                                                      void *probabilities_d,
+                                                                      void *loss_d,
+                                                                      void *gradient_d,
+                                                                      uint32_t numClasses,
+                                                                      uint32_t batchSize,
+                                                                      bool computeGradient,
+                                                                      uint32_t lossScalingFactor,
+                                                                      Stream stream);
 
-template void launchCrossEntropyLoss_perClassLabels<half, float>(
-    half *labels_d, float *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint8_t, float, float>(void *labels_d,
+                                                                       void *probabilities_d,
+                                                                       void *loss_d,
+                                                                       void *gradient_d,
+                                                                       uint32_t numClasses,
+                                                                       uint32_t batchSize,
+                                                                       bool computeGradient,
+                                                                       uint32_t lossScalingFactor,
+                                                                       Stream stream);
 
-template void launchCrossEntropyLoss_perClassLabels<float, half>(
-    float *labels_d, half *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint16_t, half, half>(void *labels_d,
+                                                                      void *probabilities_d,
+                                                                      void *loss_d,
+                                                                      void *gradient_d,
+                                                                      uint32_t numClasses,
+                                                                      uint32_t batchSize,
+                                                                      bool computeGradient,
+                                                                      uint32_t lossScalingFactor,
+                                                                      Stream stream);
 
-template void launchCrossEntropyLoss_perClassLabels<float, float>(
-    float *labels_d, float *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint16_t, half, float>(void *labels_d,
+                                                                       void *probabilities_d,
+                                                                       void *loss_d,
+                                                                       void *gradient_d,
+                                                                       uint32_t numClasses,
+                                                                       uint32_t batchSize,
+                                                                       bool computeGradient,
+                                                                       uint32_t lossScalingFactor,
+                                                                       Stream stream);
 
-template void launchCrossEntropyLoss_classIndexLabels<uint8_t, half>(
-    uint8_t *labels_d, half *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint16_t, float, half>(void *labels_d,
+                                                                       void *probabilities_d,
+                                                                       void *loss_d,
+                                                                       void *gradient_d,
+                                                                       uint32_t numClasses,
+                                                                       uint32_t batchSize,
+                                                                       bool computeGradient,
+                                                                       uint32_t lossScalingFactor,
+                                                                       Stream stream);
 
-template void launchCrossEntropyLoss_classIndexLabels<uint8_t, float>(
-    uint8_t *labels_d, float *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint16_t, float, float>(void *labels_d,
+                                                                        void *probabilities_d,
+                                                                        void *loss_d,
+                                                                        void *gradient_d,
+                                                                        uint32_t numClasses,
+                                                                        uint32_t batchSize,
+                                                                        bool computeGradient,
+                                                                        uint32_t lossScalingFactor,
+                                                                        Stream stream);
 
-template void launchCrossEntropyLoss_classIndexLabels<uint16_t, half>(
-    uint16_t *labels_d, half *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint32_t, half, half>(void *labels_d,
+                                                                      void *probabilities_d,
+                                                                      void *loss_d,
+                                                                      void *gradient_d,
+                                                                      uint32_t numClasses,
+                                                                      uint32_t batchSize,
+                                                                      bool computeGradient,
+                                                                      uint32_t lossScalingFactor,
+                                                                      Stream stream);
 
-template void launchCrossEntropyLoss_classIndexLabels<uint16_t, float>(
-    uint16_t *labels_d, float *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint32_t, half, float>(void *labels_d,
+                                                                       void *probabilities_d,
+                                                                       void *loss_d,
+                                                                       void *gradient_d,
+                                                                       uint32_t numClasses,
+                                                                       uint32_t batchSize,
+                                                                       bool computeGradient,
+                                                                       uint32_t lossScalingFactor,
+                                                                       Stream stream);
 
-template void launchCrossEntropyLoss_classIndexLabels<uint32_t, half>(
-    uint32_t *labels_d, half *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint32_t, float, half>(void *labels_d,
+                                                                       void *probabilities_d,
+                                                                       void *loss_d,
+                                                                       void *gradient_d,
+                                                                       uint32_t numClasses,
+                                                                       uint32_t batchSize,
+                                                                       bool computeGradient,
+                                                                       uint32_t lossScalingFactor,
+                                                                       Stream stream);
 
-template void launchCrossEntropyLoss_classIndexLabels<uint32_t, float>(
-    uint32_t *labels_d, float *probabilities_d, float *workspace_d, float *loss_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<uint32_t, float, float>(void *labels_d,
+                                                                        void *probabilities_d,
+                                                                        void *loss_d,
+                                                                        void *gradient_d,
+                                                                        uint32_t numClasses,
+                                                                        uint32_t batchSize,
+                                                                        bool computeGradient,
+                                                                        uint32_t lossScalingFactor,
+                                                                        Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint8_t, half, half>(
-    uint8_t *labels_d, half *probabilities_d, half *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<half, half, half>(void *labels_d,
+                                                                  void *probabilities_d,
+                                                                  void *loss_d,
+                                                                  void *gradient_d,
+                                                                  uint32_t numClasses,
+                                                                  uint32_t batchSize,
+                                                                  bool computeGradient,
+                                                                  uint32_t lossScalingFactor,
+                                                                  Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint8_t, half, float>(
-    uint8_t *labels_d, half *probabilities_d, float *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<half, half, float>(void *labels_d,
+                                                                   void *probabilities_d,
+                                                                   void *loss_d,
+                                                                   void *gradient_d,
+                                                                   uint32_t numClasses,
+                                                                   uint32_t batchSize,
+                                                                   bool computeGradient,
+                                                                   uint32_t lossScalingFactor,
+                                                                   Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint8_t, float, half>(
-    uint8_t *labels_d, float *probabilities_d, half *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<half, float, half>(void *labels_d,
+                                                                   void *probabilities_d,
+                                                                   void *loss_d,
+                                                                   void *gradient_d,
+                                                                   uint32_t numClasses,
+                                                                   uint32_t batchSize,
+                                                                   bool computeGradient,
+                                                                   uint32_t lossScalingFactor,
+                                                                   Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint8_t, float, float>(
-    uint8_t *labels_d, float *probabilities_d, float *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<half, float, float>(void *labels_d,
+                                                                    void *probabilities_d,
+                                                                    void *loss_d,
+                                                                    void *gradient_d,
+                                                                    uint32_t numClasses,
+                                                                    uint32_t batchSize,
+                                                                    bool computeGradient,
+                                                                    uint32_t lossScalingFactor,
+                                                                    Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint16_t, half, half>(
-    uint16_t *labels_d, half *probabilities_d, half *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<float, half, half>(void *labels_d,
+                                                                   void *probabilities_d,
+                                                                   void *loss_d,
+                                                                   void *gradient_d,
+                                                                   uint32_t numClasses,
+                                                                   uint32_t batchSize,
+                                                                   bool computeGradient,
+                                                                   uint32_t lossScalingFactor,
+                                                                   Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint16_t, half, float>(
-    uint16_t *labels_d, half *probabilities_d, float *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<float, half, float>(void *labels_d,
+                                                                    void *probabilities_d,
+                                                                    void *loss_d,
+                                                                    void *gradient_d,
+                                                                    uint32_t numClasses,
+                                                                    uint32_t batchSize,
+                                                                    bool computeGradient,
+                                                                    uint32_t lossScalingFactor,
+                                                                    Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint16_t, float, half>(
-    uint16_t *labels_d, float *probabilities_d, half *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<float, float, half>(void *labels_d,
+                                                                    void *probabilities_d,
+                                                                    void *loss_d,
+                                                                    void *gradient_d,
+                                                                    uint32_t numClasses,
+                                                                    uint32_t batchSize,
+                                                                    bool computeGradient,
+                                                                    uint32_t lossScalingFactor,
+                                                                    Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint16_t, float, float>(
-    uint16_t *labels_d, float *probabilities_d, float *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss<float, float, float>(void *labels_d,
+                                                                     void *probabilities_d,
+                                                                     void *loss_d,
+                                                                     void *gradient_d,
+                                                                     uint32_t numClasses,
+                                                                     uint32_t batchSize,
+                                                                     bool computeGradient,
+                                                                     uint32_t lossScalingFactor,
+                                                                     Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint32_t, half, half>(
-    uint32_t *labels_d, half *probabilities_d, half *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, half, half>(void *labels_d,
+                                                                                       void *probabilities_d,
+                                                                                       void *loss_d,
+                                                                                       void *gradient_d,
+                                                                                       uint32_t numClasses,
+                                                                                       uint32_t batchSize,
+                                                                                       bool computeGradient,
+                                                                                       uint32_t lossScalingFactor,
+                                                                                       Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint32_t, half, float>(
-    uint32_t *labels_d, half *probabilities_d, float *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, half, float>(void *labels_d,
+                                                                                        void *probabilities_d,
+                                                                                        void *loss_d,
+                                                                                        void *gradient_d,
+                                                                                        uint32_t numClasses,
+                                                                                        uint32_t batchSize,
+                                                                                        bool computeGradient,
+                                                                                        uint32_t lossScalingFactor,
+                                                                                        Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint32_t, float, half>(
-    uint32_t *labels_d, float *probabilities_d, half *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, float, half>(void *labels_d,
+                                                                                        void *probabilities_d,
+                                                                                        void *loss_d,
+                                                                                        void *gradient_d,
+                                                                                        uint32_t numClasses,
+                                                                                        uint32_t batchSize,
+                                                                                        bool computeGradient,
+                                                                                        uint32_t lossScalingFactor,
+                                                                                        Stream stream);
 
-template void launchLossGradient_classIndexLabels<uint32_t, float, float>(
-    uint32_t *labels_d, float *probabilities_d, float *lossGradient_d, uint64_t numClasses, uint64_t batchSize, Stream stream);
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, float, float>(void *labels_d,
+                                                                                         void *probabilities_d,
+                                                                                         void *loss_d,
+                                                                                         void *gradient_d,
+                                                                                         uint32_t numClasses,
+                                                                                         uint32_t batchSize,
+                                                                                         bool computeGradient,
+                                                                                         uint32_t lossScalingFactor,
+                                                                                         Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, half, half>(void *labels_d,
+                                                                                        void *probabilities_d,
+                                                                                        void *loss_d,
+                                                                                        void *gradient_d,
+                                                                                        uint32_t numClasses,
+                                                                                        uint32_t batchSize,
+                                                                                        bool computeGradient,
+                                                                                        uint32_t lossScalingFactor,
+                                                                                        Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, half, float>(void *labels_d,
+                                                                                         void *probabilities_d,
+                                                                                         void *loss_d,
+                                                                                         void *gradient_d,
+                                                                                         uint32_t numClasses,
+                                                                                         uint32_t batchSize,
+                                                                                         bool computeGradient,
+                                                                                         uint32_t lossScalingFactor,
+                                                                                         Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, float, half>(void *labels_d,
+                                                                                         void *probabilities_d,
+                                                                                         void *loss_d,
+                                                                                         void *gradient_d,
+                                                                                         uint32_t numClasses,
+                                                                                         uint32_t batchSize,
+                                                                                         bool computeGradient,
+                                                                                         uint32_t lossScalingFactor,
+                                                                                         Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, float, float>(void *labels_d,
+                                                                                          void *probabilities_d,
+                                                                                          void *loss_d,
+                                                                                          void *gradient_d,
+                                                                                          uint32_t numClasses,
+                                                                                          uint32_t batchSize,
+                                                                                          bool computeGradient,
+                                                                                          uint32_t lossScalingFactor,
+                                                                                          Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, half, half>(void *labels_d,
+                                                                                        void *probabilities_d,
+                                                                                        void *loss_d,
+                                                                                        void *gradient_d,
+                                                                                        uint32_t numClasses,
+                                                                                        uint32_t batchSize,
+                                                                                        bool computeGradient,
+                                                                                        uint32_t lossScalingFactor,
+                                                                                        Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, half, float>(void *labels_d,
+                                                                                         void *probabilities_d,
+                                                                                         void *loss_d,
+                                                                                         void *gradient_d,
+                                                                                         uint32_t numClasses,
+                                                                                         uint32_t batchSize,
+                                                                                         bool computeGradient,
+                                                                                         uint32_t lossScalingFactor,
+                                                                                         Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, float, half>(void *labels_d,
+                                                                                         void *probabilities_d,
+                                                                                         void *loss_d,
+                                                                                         void *gradient_d,
+                                                                                         uint32_t numClasses,
+                                                                                         uint32_t batchSize,
+                                                                                         bool computeGradient,
+                                                                                         uint32_t lossScalingFactor,
+                                                                                         Stream stream);
+
+template void launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, float, float>(void *labels_d,
+                                                                                          void *probabilities_d,
+                                                                                          void *loss_d,
+                                                                                          void *gradient_d,
+                                                                                          uint32_t numClasses,
+                                                                                          uint32_t batchSize,
+                                                                                          bool computeGradient,
+                                                                                          uint32_t lossScalingFactor,
+                                                                                          Stream stream);

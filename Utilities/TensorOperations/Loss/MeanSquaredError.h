@@ -20,6 +20,5 @@ void launchMeanSquaredError(void *labels_d,
                             void *gradient_d,
                             uint32_t numPredictions,
                             uint32_t batchSize,
-                            Stream stream,
-                            bool computeBatchLoss,
-                            bool computeGradient);
+                            bool computeGradient,
+                            Stream stream);

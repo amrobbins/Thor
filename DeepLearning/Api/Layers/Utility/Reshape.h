@@ -26,7 +26,7 @@ class Reshape : public Layer {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
-        // Implementation has 1 extra dimension due to having the batchSize dimension
+        // Implementation has 1 extra dimension due to having the batchSize dimension, this is handled by the builder
         ThorImplementation::Reshape *Reshape = new ThorImplementation::Reshape(newDimensions);
         Thor::Layer::connectTwoLayers(drivingLayer, Reshape, drivingApiLayer, this, connectingApiTensor);
         return Reshape;
@@ -45,13 +45,19 @@ class Reshape::Builder {
         assert(_featureInput.isPresent());
         assert(_newDimensions.isPresent());
 
-        Reshape Reshape;
-        Reshape.featureInput = _featureInput;
-        Reshape.featureOutput = Tensor(_featureInput.get().getDataType(), _newDimensions.get());
-        assert(Reshape.featureInput.get().getTotalNumElements() == Reshape.featureOutput.get().getTotalNumElements());
-        Reshape.initialized = true;
-        Reshape.addToNetwork(_network.get());
-        return Reshape;
+        Reshape reshape;
+        reshape.featureInput = _featureInput;
+        reshape.featureOutput = Tensor(_featureInput.get().getDataType(), _newDimensions.get());
+        assert(reshape.featureInput.get().getTotalNumElements() == reshape.featureOutput.get().getTotalNumElements());
+
+        // Implementation layer has one extra (batch) dimension, set to 0 to tell implementation layer to get it from featureIn
+        reshape.newDimensions.push_back(0);
+        for (uint32_t i = 0; i < _newDimensions.get().size(); ++i)
+            reshape.newDimensions.push_back(_newDimensions.get()[i]);
+
+        reshape.initialized = true;
+        reshape.addToNetwork(_network.get());
+        return reshape;
     }
 
     virtual Reshape::Builder &network(Network &_network) {

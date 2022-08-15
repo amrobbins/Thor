@@ -5,16 +5,21 @@
 
 namespace ThorImplementation {
 
+/**
+ * b: batch dimension
+ * c: class dimension (categorical) or output number dimension (numerical)
+ *
+ * Input loss is always raw loss with dimensions [b][c]
+ *
+ * Batch [b][c] -> [1]
+ * Classwise [b][c] -> [c]
+ * Elementwise [b][c] -> [b]
+ */
 class LossShaper : public Layer {
    public:
-    // Numerical losses output elementwise loss
-    // Categorical losses output per element classwise loss
-    // Loss shaper can reshape numerical elementwise loss into batch loss
-    // Loss shaper can reshape per element classwise loss into either batch loss or classwise loss
-    enum class InputLossType { NUMERICAL_LOSS = 5, CATEGORICAL_LOSS };
-    enum class OutputLossType { BATCH_LOSS = 11, CLASSWISE_LOSS };
+    enum class OutputLossType { BATCH = 1107, CLASSWISE, ELEMENTWISE };
 
-    LossShaper(InputLossType inputLossType, OutputLossType outputLossType);
+    LossShaper(OutputLossType outputLossType);
     virtual ~LossShaper();
 
     virtual Optional<Tensor> createFeatureOutputTensor();
@@ -23,10 +28,11 @@ class LossShaper : public Layer {
     virtual void backward(Optional<Tensor> errorInput);
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream);
 
+    static vector<uint64_t> getOutputDimensions(vector<uint64_t> inputDimensions, OutputLossType outputLossType);
+
    private:
     bool uninitialized;
 
-    InputLossType inputLossType;
     OutputLossType outputLossType;
     BatchReduce *batchReduce;
 };

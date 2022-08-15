@@ -17,8 +17,8 @@ TEST(LossShaper, NumericalBatchFp16) {
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         vector<uint64_t> dimensions;
-        dimensions.push_back((rand() % 400) + 1);
-        dimensions.push_back((rand() % 400) + 1);
+        dimensions.push_back((rand() % 400) + 2);
+        dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions;
         reducedDimensions.push_back(dimensions[1]);
 
@@ -93,10 +93,14 @@ TEST(LossShaper, NumericalBatchFp32) {
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         vector<uint64_t> dimensions;
-        dimensions.push_back((rand() % 400) + 1);
-        dimensions.push_back((rand() % 400) + 1);
+        // Minimum size of a dimension that will be reduced is 2, otherwise there is nothing to do
+        // and a bad param exception will be returned.
+        dimensions.push_back((rand() % 400) + 2);
+        dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions;
         reducedDimensions.push_back(dimensions[1]);
+
+        printf("dimensions %ld %ld reduced dimensions %ld\n", dimensions[0], dimensions[1], reducedDimensions[0]);
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
 
@@ -169,8 +173,8 @@ TEST(LossShaper, CategoricalClasswise) {
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         vector<uint64_t> dimensions;
-        dimensions.push_back((rand() % 400) + 1);
-        dimensions.push_back((rand() % 400) + 1);
+        dimensions.push_back((rand() % 400) + 2);
+        dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions;
         reducedDimensions.push_back(dimensions[1]);
 
@@ -245,8 +249,8 @@ TEST(LossShaper, CategoricalBatch) {
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         vector<uint64_t> dimensions;
-        dimensions.push_back((rand() % 400) + 1);
-        dimensions.push_back((rand() % 400) + 1);
+        dimensions.push_back((rand() % 400) + 2);
+        dimensions.push_back((rand() % 400) + 2);
         vector<uint64_t> reducedDimensions;
         reducedDimensions.push_back(1);
 
