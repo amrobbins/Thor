@@ -7,6 +7,10 @@ using namespace ThorImplementation;
 const float Softmax::ALPHA_NO_SCALE = 1.0f;
 const float Softmax::BETA_CLEAR = 0.0f;
 
+Softmax::Softmax() { backwardComputedExternally = false; }
+
+Softmax::Softmax(bool backwardComputedExternally) { this->backwardComputedExternally = backwardComputedExternally; }
+
 Optional<Tensor> Softmax::createFeatureOutputTensor() {
     assert(featureInput.isPresent());
     assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
@@ -16,6 +20,15 @@ Optional<Tensor> Softmax::createFeatureOutputTensor() {
 void Softmax::compile() {
     cudnnTensorDescriptor =
         createCudnnTensorDescriptor(featureInput.get().getDescriptor().getDimensions(), featureInput.get().getDescriptor().getDataType());
+
+    if (backwardComputedExternally) {
+        // ErrorInput to the previous layer is the errorInput coming to this layer,
+        // then backProp is a no op
+        if (errorInput.isPresent() && errorOutput.isPresent() && previousLayer.isPresent()) {
+            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
+        }
+        errorOutput = errorInput;
+    }
 }
 
 void Softmax::cleanup() {
@@ -50,6 +63,9 @@ void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Option
     assert(featureOutput.isPresent());
     TensorPlacement placement = errorOut.get().getPlacement();
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    if (backwardComputedExternally)
+        return;
 
     cudnnStatus_t cudnnStatus;
     cudnnStatus = cudnnSoftmaxBackward(stream.getCudnnHandle(),

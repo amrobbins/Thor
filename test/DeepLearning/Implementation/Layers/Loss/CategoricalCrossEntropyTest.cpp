@@ -80,7 +80,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         NetworkInput *labelsInput = new NetworkInput(labelsGpu);
         labelsInput->setName("Labels");
         layers.push_back(labelsInput);
-        Softmax *softmax = new Softmax();
+        Softmax *softmax = new Softmax(true);
         layers.push_back(softmax);
         TensorFanout *tensorFanout = new TensorFanout();
         layers.push_back(tensorFanout);

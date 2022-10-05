@@ -14,6 +14,9 @@ namespace ThorImplementation {
 
 class CrossEntropy : public Loss {
    public:
+    CrossEntropy();
+    CrossEntropy(bool computeCategoricalCrossEntropyGradient, bool computeBinaryCrossEntropyGradient);
+
     virtual ~CrossEntropy();
 
     CrossEntropy(bool indexLabels);
@@ -49,6 +52,9 @@ class CrossEntropy : public Loss {
     // Either takes an integer index (one per batch item) or a vector of floats (one per class per batch item)
     // to indicate an example's true class
     bool indexLabels;
+
+    bool computeCategoricalCrossEntropyGradient;
+    bool computeBinaryCrossEntropyGradient;
 };
 
 }  // namespace ThorImplementation
