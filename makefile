@@ -155,6 +155,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o \
                    build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o \
                    build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o \
+                   build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o \
                    build/Utilities/TensorOperations/Misc/Map.o \
                    build/Utilities/TensorOperations/Misc/Split.o \
                    build/Utilities/TensorOperations/Misc/Pad.o \
@@ -418,6 +419,10 @@ build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o: Utilities/Tensor
 build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o: Utilities/TensorOperations/Loss/CrossEntropyLoss.h Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
+
+build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o: Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.h Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.cu
+	mkdir -p build/Utilities/TensorOperations/Loss
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.cu
 
 build/Utilities/TensorOperations/Arithmetic/Exponentiation.o: Utilities/TensorOperations/Arithmetic/Exponentiation.h Utilities/TensorOperations/Arithmetic/Exponentiation.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic

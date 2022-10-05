@@ -1,1 +1,0 @@
-// Same cross entropy backward equation as for categorical cross entropy, but the activation is sigmoid, not softmax

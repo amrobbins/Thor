@@ -7,6 +7,9 @@ namespace ThorImplementation {
 
 class Softmax : public Activation {
    public:
+    Softmax();
+    Softmax(bool backwardComputedExternally);
+
     virtual ~Softmax() {}
 
     virtual Optional<Tensor> createFeatureOutputTensor();
@@ -24,6 +27,8 @@ class Softmax : public Activation {
     static const float BETA_CLEAR;
 
     cudnnTensorDescriptor_t cudnnTensorDescriptor;
+
+    bool backwardComputedExternally;
 };
 
 }  // namespace ThorImplementation

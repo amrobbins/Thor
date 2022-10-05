@@ -1,5 +1,7 @@
 #pragma once
 
+#include "BinaryCrossEntropyLoss.h"
+#include "CategoricalCrossEntropyLoss.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cuda.h>
@@ -19,6 +21,8 @@ void launchElementWiseCrossEntropyLoss(void *labels_d,
                                        uint32_t batchSize,
                                        bool computeGradient,
                                        uint32_t lossScalingFactor,
+                                       bool computeCategoricalCrossEntropyGradient,
+                                       bool computeBinaryCrossEntropyGradient,
                                        Stream stream);
 
 // This version takes in an integer per item in the batch that specifies the true class of the example.
@@ -31,4 +35,6 @@ void launchElementWiseCrossEntropyLoss_oneHotSpecialCase(void *classOfHotLabels_
                                                          uint32_t batchSize,
                                                          bool computeGradient,
                                                          uint32_t lossScalingFactor,
+                                                         bool computeCategoricalCrossEntropyGradient,
+                                                         bool computeBinaryCrossEntropyGradient,
                                                          Stream stream);
