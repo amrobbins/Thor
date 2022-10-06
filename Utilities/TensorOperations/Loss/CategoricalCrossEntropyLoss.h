@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 // This version takes in a one-hot vector of labels per class per item in the batch
 // The distinction here about "CategoricalCrossEntropy" is that the gradient is computed
@@ -15,24 +16,24 @@
 // same numerical result but much faster and more stable.
 // The forward pass takes the output of the forward pass of softmax.
 template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
-void launchElementWiseCategoricalCrossEntropyLoss(void *labels_d,
-                                                  void *probabilities_d,
-                                                  void *loss_d,
-                                                  void *gradient_d,
-                                                  uint32_t numClasses,
-                                                  uint32_t batchSize,
-                                                  bool computeGradient,
-                                                  uint32_t lossScalingFactor,
-                                                  Stream stream);
+void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels(void *labels_d,
+                                                               void *probabilities_d,
+                                                               void *loss_d,
+                                                               void *gradient_d,
+                                                               uint32_t numClasses,
+                                                               uint32_t batchSize,
+                                                               bool computeGradient,
+                                                               uint32_t lossScalingFactor,
+                                                               Stream stream);
 
 // This version takes in an integer per item in the batch that specifies the true class of the example.
 template <typename INDEX_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
-void launchElementWiseCategoricalCrossEntropyLoss_oneHotSpecialCase(void *classOfHotLabels_d,
-                                                                    void *probabilities_d,
-                                                                    void *loss_d,
-                                                                    void *gradient_d,
-                                                                    uint32_t numClasses,
-                                                                    uint32_t batchSize,
-                                                                    bool computeGradient,
-                                                                    uint32_t lossScalingFactor,
-                                                                    Stream stream);
+void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels(void *classOfHotLabels_d,
+                                                                   void *probabilities_d,
+                                                                   void *loss_d,
+                                                                   void *gradient_d,
+                                                                   uint32_t numClasses,
+                                                                   uint32_t batchSize,
+                                                                   bool computeGradient,
+                                                                   uint32_t lossScalingFactor,
+                                                                   Stream stream);

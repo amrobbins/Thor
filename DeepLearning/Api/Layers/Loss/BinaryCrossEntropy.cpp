@@ -1,8 +1,8 @@
-#include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
 using namespace Thor;
 
-void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
+void BinaryCrossEntropy::convertToSingleLayersAndAddToNetwork() {
     Tensor currentFeatureInput = featureInput;
 
     if (!softmaxRemoved) {
@@ -13,19 +13,13 @@ void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
         currentFeatureInput = softmax->getFeatureOutput();
     }
 
-    CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
-                                                                          .network(*network)
-                                                                          .predictions(currentFeatureInput)
-                                                                          .labels(labelsTensor)
-                                                                          .removeSoftmax()
-                                                                          .reportsElementwiseLoss();
-    if (labelType == LabelType::INDEX) {
-        categoricalCrossEntropyBuilder.receivesClassIndexLabels();
-    } else {
-        assert(labelType == LabelType::VECTOR);
-        categoricalCrossEntropyBuilder.receivesOneHotLabels();
-    }
-    CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
+    BinaryCrossEntropy::Builder binaryCrossEntropyBuilder = BinaryCrossEntropy::Builder()
+                                                                .network(*network)
+                                                                .predictions(currentFeatureInput)
+                                                                .labels(labelsTensor)
+                                                                .removeSoftmax()
+                                                                .reportsElementwiseLoss();
+    BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
     currentFeatureInput = crossEntropy.getFeatureOutput();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {

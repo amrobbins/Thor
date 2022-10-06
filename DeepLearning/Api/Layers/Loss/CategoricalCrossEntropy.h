@@ -43,7 +43,8 @@ class CategoricalCrossEntropy : public Loss {
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         // Softmax and LossShaper are connected during multi-layer flattening
-        ThorImplementation::CrossEntropy *crossEntropy = new ThorImplementation::CrossEntropy(labelType == LabelType::INDEX);
+        ThorImplementation::CrossEntropy *crossEntropy =
+            new ThorImplementation::CrossEntropy(CrossEntropyLossType::CATEGORICAL, labelType == LabelType::INDEX);
         Thor::Layer::connectTwoLayers(drivingLayer, crossEntropy, drivingApiLayer, this, connectingApiTensor);
         return crossEntropy;
     }
@@ -184,7 +185,7 @@ class CategoricalCrossEntropy::Builder {
      * The label can be a one-hot vector, but soft labels are also supported,
      * so for example two classes may both have a label of 0.5.
      */
-    virtual CategoricalCrossEntropy::Builder &receivesPerClassLabels() {
+    virtual CategoricalCrossEntropy::Builder &receivesOneHotLabels() {
         assert(!_labelType.isPresent());
         _labelType = LabelType::VECTOR;
         return *this;

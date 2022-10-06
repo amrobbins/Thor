@@ -3,27 +3,23 @@
 using namespace ThorImplementation;
 using namespace std;
 
-CrossEntropy::CrossEntropy() {
-    computeCategoricalCrossEntropyGradient = false;
-    computeBinaryCrossEntropyGradient = false;
+CrossEntropy::CrossEntropy() : Loss() {
+    batchReduce = nullptr;
+    crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED;
 }
 
-CrossEntropy::CrossEntropy(bool computeCategoricalCrossEntropyGradient, bool computeBinaryCrossEntropyGradient) {
-    assert(!(computeCategoricalCrossEntropyGradient && computeBinaryCrossEntropyGradient));
+CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, bool indexLabels) : Loss() {
+    batchReduce = nullptr;
+    this->indexLabels = indexLabels;
 
-    this->computeCategoricalCrossEntropyGradient = computeCategoricalCrossEntropyGradient;
-    this->computeBinaryCrossEntropyGradient = computeBinaryCrossEntropyGradient;
+    assert(crossEntropyLossType == CrossEntropyLossType::BINARY || crossEntropyLossType == CrossEntropyLossType::CATEGORICAL);
+    this->crossEntropyLossType = crossEntropyLossType;
 }
 
 CrossEntropy::~CrossEntropy() {
     if (batchReduce)
         delete batchReduce;
     batchReduce = nullptr;
-}
-
-CrossEntropy::CrossEntropy(bool indexLabels) : Loss() {
-    batchReduce = nullptr;
-    this->indexLabels = indexLabels;
 }
 
 void CrossEntropy::compile() {
@@ -76,21 +72,12 @@ void CrossEntropy::infer(Optional<Tensor> predictions, Optional<Tensor> elementL
 
     stream.waitEvent(labelsStream.putEvent());
 
-    if (indexLabels) {
-        if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
-            launchCrossEntropyForIndexLabelsWithFP16Predictions();
-        else if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            launchCrossEntropyForIndexLabelsWithFP32Predictions();
-        else
-            assert(false);
-    } else {
-        if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
-            launchCrossEntropyForPerClassLabelsWithFP16Predictions();
-        else if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-            launchCrossEntropyForPerClassLabelsWithFP32Predictions();
-        else
-            assert(false);
-    }
+    if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
+        launchCrossEntropyWithFP16Predictions();
+    else if (predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
+        launchCrossEntropyWithFP32Predictions();
+    else
+        assert(false);
 }
 
 void CrossEntropy::backProp(Optional<Tensor> labels, Optional<Tensor> predictions, Optional<Tensor> lossGradient, Stream stream) {
@@ -101,359 +88,34 @@ void CrossEntropy::backProp(Optional<Tensor> labels, Optional<Tensor> prediction
 }
 
 // Yuck, but at least its flattened and contained.
-void CrossEntropy::launchCrossEntropyForIndexLabelsWithFP16Predictions() {
+void CrossEntropy::launchCrossEntropyWithFP16Predictions() {
     assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
-        launchCrossEntropyForIndexLabelsWithFP16PredictionsAndFP16Loss();
+        launchCrossEntropyWithFP16PredictionsAndFP16Loss();
     else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-        launchCrossEntropyForIndexLabelsWithFP16PredictionsAndFP32Loss();
+        launchCrossEntropyWithFP16PredictionsAndFP32Loss();
     else
         assert(false);
 }
 
-void CrossEntropy::launchCrossEntropyForIndexLabelsWithFP32Predictions() {
+void CrossEntropy::launchCrossEntropyWithFP32Predictions() {
     assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
-        launchCrossEntropyForIndexLabelsWithFP32PredictionsAndFP16Loss();
+        launchCrossEntropyWithFP32PredictionsAndFP16Loss();
     else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-        launchCrossEntropyForIndexLabelsWithFP32PredictionsAndFP32Loss();
+        launchCrossEntropyWithFP32PredictionsAndFP32Loss();
     else
         assert(false);
 }
 
-void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP16Predictions() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-
-    if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
-        launchCrossEntropyForPerClassLabelsWithFP16PredictionsAndFP16Loss();
-    else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-        launchCrossEntropyForPerClassLabelsWithFP16PredictionsAndFP32Loss();
-    else
-        assert(false);
-}
-
-void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP32Predictions() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-
-    if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16)
-        launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP16Loss();
-    else if (featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32)
-        launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP32Loss();
-    else
-        assert(false);
-}
-
-void CrossEntropy::launchCrossEntropyForIndexLabelsWithFP16PredictionsAndFP16Loss() {
+void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP16Loss() {
     assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
     assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
 
     if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, half, half>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, half, half>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, half, half>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForIndexLabelsWithFP16PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, half, float>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, half, float>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, half, float>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForIndexLabelsWithFP32PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, float, half>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, float, half>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, float, half>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForIndexLabelsWithFP32PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint8_t, float, float>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint16_t, float, float>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
-        launchElementWiseCrossEntropyLoss_oneHotSpecialCase<uint32_t, float, float>(
-            labelsInput.get().getMemPtr(),
-            featureInput.get().getMemPtr(),
-            featureOutput.get().getMemPtr(),
-            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-            featureOutput.get().getDescriptor().getDimensions()[1],
-            batchSize,
-            !isInferenceOnly(),
-            lossScalingFactor,
-            computeCategoricalCrossEntropyGradient,
-            computeBinaryCrossEntropyGradient,
-            stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP16PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-        launchElementWiseCrossEntropyLoss<half, half, half>(labelsInput.get().getMemPtr(),
-                                                            featureInput.get().getMemPtr(),
-                                                            featureOutput.get().getMemPtr(),
-                                                            isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                            featureOutput.get().getDescriptor().getDimensions()[1],
-                                                            batchSize,
-                                                            !isInferenceOnly(),
-                                                            lossScalingFactor,
-                                                            computeCategoricalCrossEntropyGradient,
-                                                            computeBinaryCrossEntropyGradient,
-                                                            stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-        launchElementWiseCrossEntropyLoss<float, half, half>(labelsInput.get().getMemPtr(),
-                                                             featureInput.get().getMemPtr(),
-                                                             featureOutput.get().getMemPtr(),
-                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                             featureOutput.get().getDescriptor().getDimensions()[1],
-                                                             batchSize,
-                                                             !isInferenceOnly(),
-                                                             lossScalingFactor,
-                                                             computeCategoricalCrossEntropyGradient,
-                                                             computeBinaryCrossEntropyGradient,
-                                                             stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP16PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-        launchElementWiseCrossEntropyLoss<half, half, float>(labelsInput.get().getMemPtr(),
-                                                             featureInput.get().getMemPtr(),
-                                                             featureOutput.get().getMemPtr(),
-                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                             featureOutput.get().getDescriptor().getDimensions()[1],
-                                                             batchSize,
-                                                             !isInferenceOnly(),
-                                                             lossScalingFactor,
-                                                             computeCategoricalCrossEntropyGradient,
-                                                             computeBinaryCrossEntropyGradient,
-                                                             stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-        launchElementWiseCrossEntropyLoss<float, half, float>(labelsInput.get().getMemPtr(),
-                                                              featureInput.get().getMemPtr(),
-                                                              featureOutput.get().getMemPtr(),
-                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                              featureOutput.get().getDescriptor().getDimensions()[1],
-                                                              batchSize,
-                                                              !isInferenceOnly(),
-                                                              lossScalingFactor,
-                                                              computeCategoricalCrossEntropyGradient,
-                                                              computeBinaryCrossEntropyGradient,
-                                                              stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP16Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-        launchElementWiseCrossEntropyLoss<half, float, half>(labelsInput.get().getMemPtr(),
-                                                             featureInput.get().getMemPtr(),
-                                                             featureOutput.get().getMemPtr(),
-                                                             isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                             featureOutput.get().getDescriptor().getDimensions()[1],
-                                                             batchSize,
-                                                             !isInferenceOnly(),
-                                                             lossScalingFactor,
-                                                             computeCategoricalCrossEntropyGradient,
-                                                             computeBinaryCrossEntropyGradient,
-                                                             stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-        launchElementWiseCrossEntropyLoss<float, float, half>(labelsInput.get().getMemPtr(),
-                                                              featureInput.get().getMemPtr(),
-                                                              featureOutput.get().getMemPtr(),
-                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                              featureOutput.get().getDescriptor().getDimensions()[1],
-                                                              batchSize,
-                                                              !isInferenceOnly(),
-                                                              lossScalingFactor,
-                                                              computeCategoricalCrossEntropyGradient,
-                                                              computeBinaryCrossEntropyGradient,
-                                                              stream);
-    } else {
-        assert(false);
-    }
-}
-
-void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP32Loss() {
-    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
-
-    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-        launchElementWiseCrossEntropyLoss<half, float, float>(labelsInput.get().getMemPtr(),
-                                                              featureInput.get().getMemPtr(),
-                                                              featureOutput.get().getMemPtr(),
-                                                              isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
-                                                              featureOutput.get().getDescriptor().getDimensions()[1],
-                                                              batchSize,
-                                                              !isInferenceOnly(),
-                                                              lossScalingFactor,
-                                                              computeCategoricalCrossEntropyGradient,
-                                                              computeBinaryCrossEntropyGradient,
-                                                              stream);
-    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-        launchElementWiseCrossEntropyLoss<float, float, float>(labelsInput.get().getMemPtr(),
+        launchElementWiseCrossEntropyLoss<uint8_t, half, half>(labelsInput.get().getMemPtr(),
                                                                featureInput.get().getMemPtr(),
                                                                featureOutput.get().getMemPtr(),
                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
@@ -461,9 +123,168 @@ void CrossEntropy::launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP32
                                                                batchSize,
                                                                !isInferenceOnly(),
                                                                lossScalingFactor,
-                                                               computeCategoricalCrossEntropyGradient,
-                                                               computeBinaryCrossEntropyGradient,
+                                                               crossEntropyLossType,
+                                                               indexLabels,
                                                                stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+        launchElementWiseCrossEntropyLoss<uint16_t, half, half>(labelsInput.get().getMemPtr(),
+                                                                featureInput.get().getMemPtr(),
+                                                                featureOutput.get().getMemPtr(),
+                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                batchSize,
+                                                                !isInferenceOnly(),
+                                                                lossScalingFactor,
+                                                                crossEntropyLossType,
+                                                                indexLabels,
+                                                                stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+        launchElementWiseCrossEntropyLoss<uint32_t, half, half>(labelsInput.get().getMemPtr(),
+                                                                featureInput.get().getMemPtr(),
+                                                                featureOutput.get().getMemPtr(),
+                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                batchSize,
+                                                                !isInferenceOnly(),
+                                                                lossScalingFactor,
+                                                                crossEntropyLossType,
+                                                                indexLabels,
+                                                                stream);
+    } else {
+        assert(false);
+    }
+}
+
+void CrossEntropy::launchCrossEntropyWithFP16PredictionsAndFP32Loss() {
+    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+
+    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        launchElementWiseCrossEntropyLoss<uint8_t, half, float>(labelsInput.get().getMemPtr(),
+                                                                featureInput.get().getMemPtr(),
+                                                                featureOutput.get().getMemPtr(),
+                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                batchSize,
+                                                                !isInferenceOnly(),
+                                                                lossScalingFactor,
+                                                                crossEntropyLossType,
+                                                                indexLabels,
+                                                                stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+        launchElementWiseCrossEntropyLoss<uint16_t, half, float>(labelsInput.get().getMemPtr(),
+                                                                 featureInput.get().getMemPtr(),
+                                                                 featureOutput.get().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                 featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                 batchSize,
+                                                                 !isInferenceOnly(),
+                                                                 lossScalingFactor,
+                                                                 crossEntropyLossType,
+                                                                 indexLabels,
+                                                                 stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+        launchElementWiseCrossEntropyLoss<uint32_t, half, float>(labelsInput.get().getMemPtr(),
+                                                                 featureInput.get().getMemPtr(),
+                                                                 featureOutput.get().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                 featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                 batchSize,
+                                                                 !isInferenceOnly(),
+                                                                 lossScalingFactor,
+                                                                 crossEntropyLossType,
+                                                                 indexLabels,
+                                                                 stream);
+    } else {
+        assert(false);
+    }
+}
+
+void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP16Loss() {
+    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+
+    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        launchElementWiseCrossEntropyLoss<uint8_t, float, half>(labelsInput.get().getMemPtr(),
+                                                                featureInput.get().getMemPtr(),
+                                                                featureOutput.get().getMemPtr(),
+                                                                isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                batchSize,
+                                                                !isInferenceOnly(),
+                                                                lossScalingFactor,
+                                                                crossEntropyLossType,
+                                                                indexLabels,
+                                                                stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+        launchElementWiseCrossEntropyLoss<uint16_t, float, half>(labelsInput.get().getMemPtr(),
+                                                                 featureInput.get().getMemPtr(),
+                                                                 featureOutput.get().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                 featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                 batchSize,
+                                                                 !isInferenceOnly(),
+                                                                 lossScalingFactor,
+                                                                 crossEntropyLossType,
+                                                                 indexLabels,
+                                                                 stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+        launchElementWiseCrossEntropyLoss<uint32_t, float, half>(labelsInput.get().getMemPtr(),
+                                                                 featureInput.get().getMemPtr(),
+                                                                 featureOutput.get().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                 featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                 batchSize,
+                                                                 !isInferenceOnly(),
+                                                                 lossScalingFactor,
+                                                                 crossEntropyLossType,
+                                                                 indexLabels,
+                                                                 stream);
+    } else {
+        assert(false);
+    }
+}
+
+void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
+    assert(featureInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+    assert(featureOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
+
+    if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT8) {
+        launchElementWiseCrossEntropyLoss<uint8_t, float, float>(labelsInput.get().getMemPtr(),
+                                                                 featureInput.get().getMemPtr(),
+                                                                 featureOutput.get().getMemPtr(),
+                                                                 isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                 featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                 batchSize,
+                                                                 !isInferenceOnly(),
+                                                                 lossScalingFactor,
+                                                                 crossEntropyLossType,
+                                                                 indexLabels,
+                                                                 stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT16) {
+        launchElementWiseCrossEntropyLoss<uint16_t, float, float>(labelsInput.get().getMemPtr(),
+                                                                  featureInput.get().getMemPtr(),
+                                                                  featureOutput.get().getMemPtr(),
+                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                  featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                  batchSize,
+                                                                  !isInferenceOnly(),
+                                                                  lossScalingFactor,
+                                                                  crossEntropyLossType,
+                                                                  indexLabels,
+                                                                  stream);
+    } else if (labelsInput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::UINT32) {
+        launchElementWiseCrossEntropyLoss<uint32_t, float, float>(labelsInput.get().getMemPtr(),
+                                                                  featureInput.get().getMemPtr(),
+                                                                  featureOutput.get().getMemPtr(),
+                                                                  isInferenceOnly() ? nullptr : (half *)errorOutput.get().getMemPtr(),
+                                                                  featureOutput.get().getDescriptor().getDimensions()[1],
+                                                                  batchSize,
+                                                                  !isInferenceOnly(),
+                                                                  lossScalingFactor,
+                                                                  crossEntropyLossType,
+                                                                  indexLabels,
+                                                                  stream);
     } else {
         assert(false);
     }
