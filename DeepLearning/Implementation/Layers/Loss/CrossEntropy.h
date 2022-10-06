@@ -15,7 +15,7 @@ namespace ThorImplementation {
 class CrossEntropy : public Loss {
    public:
     CrossEntropy();
-    CrossEntropy(bool computeCategoricalCrossEntropyGradient, bool computeBinaryCrossEntropyGradient);
+    CrossEntropy(CrossEntropyLossType crossEntropyLossType, bool indexLabels = false);
 
     virtual ~CrossEntropy();
 
@@ -30,21 +30,13 @@ class CrossEntropy : public Loss {
     virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream);
 
    private:
-    void launchCrossEntropyForIndexLabelsWithFP16Predictions();
-    void launchCrossEntropyForIndexLabelsWithFP16PredictionsAndFP16Loss();
-    void launchCrossEntropyForIndexLabelsWithFP16PredictionsAndFP32Loss();
+    void launchCrossEntropyWithFP16Predictions();
+    void launchCrossEntropyWithFP16PredictionsAndFP16Loss();
+    void launchCrossEntropyWithFP16PredictionsAndFP32Loss();
 
-    void launchCrossEntropyForIndexLabelsWithFP32Predictions();
-    void launchCrossEntropyForIndexLabelsWithFP32PredictionsAndFP16Loss();
-    void launchCrossEntropyForIndexLabelsWithFP32PredictionsAndFP32Loss();
-
-    void launchCrossEntropyForPerClassLabelsWithFP16Predictions();
-    void launchCrossEntropyForPerClassLabelsWithFP16PredictionsAndFP16Loss();
-    void launchCrossEntropyForPerClassLabelsWithFP16PredictionsAndFP32Loss();
-
-    void launchCrossEntropyForPerClassLabelsWithFP32Predictions();
-    void launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP16Loss();
-    void launchCrossEntropyForPerClassLabelsWithFP32PredictionsAndFP32Loss();
+    void launchCrossEntropyWithFP32Predictions();
+    void launchCrossEntropyWithFP32PredictionsAndFP16Loss();
+    void launchCrossEntropyWithFP32PredictionsAndFP32Loss();
 
     unsigned int batchSize;
     BatchReduce *batchReduce;
@@ -53,8 +45,7 @@ class CrossEntropy : public Loss {
     // to indicate an example's true class
     bool indexLabels;
 
-    bool computeCategoricalCrossEntropyGradient;
-    bool computeBinaryCrossEntropyGradient;
+    CrossEntropyLossType crossEntropyLossType;
 };
 
 }  // namespace ThorImplementation

@@ -147,6 +147,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Loss/MeanSquaredError.o \
                    build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o \
                    build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o \
+                   build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o \
                    build/Utilities/TensorOperations/Misc/BatchReduce.o \
                    build/Utilities/TensorOperations/DeepLearning/Add1dBias.o \
                    build/Utilities/TensorOperations/Arithmetic/SumScale.o \
@@ -156,6 +157,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o \
                    build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o \
                    build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o \
+                   build/Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.o \
                    build/Utilities/TensorOperations/Misc/Map.o \
                    build/Utilities/TensorOperations/Misc/Split.o \
                    build/Utilities/TensorOperations/Misc/Pad.o \
@@ -424,6 +426,10 @@ build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o: Utilities/T
 	mkdir -p build/Utilities/TensorOperations/Loss
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.cu
 
+build/Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.o: Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.h Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.cu
+	mkdir -p build/Utilities/TensorOperations/Loss
+	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.cu
+
 build/Utilities/TensorOperations/Arithmetic/Exponentiation.o: Utilities/TensorOperations/Arithmetic/Exponentiation.h Utilities/TensorOperations/Arithmetic/Exponentiation.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
 	$(Nvcc) -O3 -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Exponentiation.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Exponentiation.cu
@@ -579,6 +585,10 @@ build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o: DeepLearning/Api/Layers/L
 build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o: DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Loss
 	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o
+
+build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o: DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Loss
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o
 
 build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Utilities/Loaders/ImageProcessor.cpp
 	mkdir -p build/Utilities/Loaders
