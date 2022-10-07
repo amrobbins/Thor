@@ -19,9 +19,9 @@ using namespace ThorImplementation;
  */
 BatchReduce::BatchReduce(uint32_t batchletSize,
                          uint32_t batchSize,
-                         uint32_t lossDimSize,
+                         uint32_t classDimSize,
                          bool reduceBatch,
-                         bool reduceLoss,
+                         bool reduceClass,
                          TensorDescriptor::DataType sourceDataType,
                          TensorDescriptor::DataType destDataType,
                          Stream stream) {
@@ -30,21 +30,29 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
 
     doubleType = sourceDataType == TensorDescriptor::DataType::FP64;
 
+    this->reduceBatch = reduceBatch;
+    this->reduceClass = reduceClass;
+
+    assert(batchSize > 0);
+
     if (doubleType) {
         assert(destDataType == TensorDescriptor::DataType::FP64);
         zero = new double;
         ((double *)zero)[0] = 0.0;
+        one = new double;
+        ((double *)one)[0] = 1.0;
         batchScale = new double;
         ((double *)batchScale)[0] = 1.0 / batchSize;
     } else {
         zero = new float;
         ((float *)zero)[0] = 0.0f;
+        one = new float;
+        ((float *)one)[0] = 1.0f;
         batchScale = new float;
         ((float *)batchScale)[0] = 1.0f / batchSize;
     }
 
-    workspaceSizeInBytes =
-        computeWorkspaceSizeInBytes(batchletSize, batchSize, lossDimSize, reduceBatch, reduceLoss, sourceDataType, destDataType);
+    workspaceSizeInBytes = computeWorkspaceSizeInBytes(batchletSize, batchSize, classDimSize, sourceDataType, destDataType);
     if (workspaceSizeInBytes > 0)
         workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
                            TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
@@ -52,9 +60,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
 
 uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                                   uint32_t batchSize,
-                                                  uint32_t lossDimSize,
-                                                  bool reduceBatch,
-                                                  bool reduceLoss,
+                                                  uint32_t classDimSize,
                                                   TensorDescriptor::DataType sourceDataType,
                                                   TensorDescriptor::DataType destDataType) {
     cudnnStatus_t cudnnStatus;
@@ -69,8 +75,9 @@ uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                                  CUDNN_32BIT_INDICES);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    sourceTensorDescriptor = Layer::createCudnnTensorDescriptor({batchletSize, lossDimSize}, sourceDataType);
-    destTensorDescriptor = Layer::createCudnnTensorDescriptor({reduceBatch ? 1 : batchletSize, reduceLoss ? 1 : lossDimSize}, destDataType);
+    sourceTensorDescriptor = Layer::createCudnnTensorDescriptor({batchletSize, classDimSize}, sourceDataType);
+    destTensorDescriptor =
+        Layer::createCudnnTensorDescriptor({reduceBatch ? 1 : batchletSize, reduceClass ? 1 : classDimSize}, destDataType);
     cudnnStatus = cudnnGetReductionWorkspaceSize(
         stream.getCudnnHandle(), reduceTensorDescriptor, sourceTensorDescriptor, destTensorDescriptor, &workspaceSizeInBytes);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -88,9 +95,11 @@ BatchReduce::~BatchReduce() {
 
     if (doubleType) {
         delete (double *)zero;
+        delete (double *)one;
         delete (double *)batchScale;
     } else {
         delete (float *)zero;
+        delete (float *)one;
         delete (float *)batchScale;
     }
 }
@@ -106,7 +115,7 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     0,
                                     workspaceSizeInBytes > 0 ? workspace.getMemPtr() : nullptr,
                                     workspaceSizeInBytes,
-                                    batchScale,
+                                    reduceBatch ? batchScale : one,
                                     sourceTensorDescriptor,
                                     sourceMem_d,
                                     zero,

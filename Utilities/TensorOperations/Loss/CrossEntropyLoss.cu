@@ -1,5 +1,7 @@
 #include "CrossEntropyLoss.h"
 
+using namespace std;
+
 /**
  *
  * @param numClasses is ignored for binary cross entropy

@@ -402,6 +402,20 @@ void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels(void *classOf
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
 
+    // Do not use the unsafe variants
+    if (is_same<INDEX_TYPE, half>::value) {
+        assert(false);
+        return;
+    }
+    if (is_same<INDEX_TYPE, float>::value) {
+        assert(false);
+        return;
+    }
+    if (is_same<INDEX_TYPE, bool>::value) {
+        assert(false);
+        return;
+    }
+
     if (lossScalingFactor == 1 || !computeGradient) {
         elementWiseCategoricalCrossEntropyLoss_classIndexLabels<INDEX_TYPE, PROBABILITY_TYPE, LOSS_TYPE>
             <<<gridSize, blockSize, 0, stream.getStream()>>>(
@@ -413,248 +427,257 @@ void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels(void *classOf
     }
 }
 
-/*
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<bool, half, half>(void *labels_d,
-                                                                             void *probabilities_d,
-                                                                             void *loss_d,
-                                                                             void *gradient_d,
-                                                                             uint32_t numClasses,
-                                                                             uint32_t batchSize,
-                                                                             bool computeGradient,
-                                                                             uint32_t lossScalingFactor,
-                                                                             Stream stream);
+                                                                                          void *probabilities_d,
+                                                                                          void *loss_d,
+                                                                                          void *gradient_d,
+                                                                                          uint32_t numClasses,
+                                                                                          uint32_t batchSize,
+                                                                                          bool computeGradient,
+                                                                                          uint32_t lossScalingFactor,
+                                                                                          Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<bool, half, float>(void *labels_d,
-                                                                              void *probabilities_d,
-                                                                              void *loss_d,
-                                                                              void *gradient_d,
-                                                                              uint32_t numClasses,
-                                                                              uint32_t batchSize,
-                                                                              bool computeGradient,
-                                                                              uint32_t lossScalingFactor,
-                                                                              Stream stream);
+                                                                                           void *probabilities_d,
+                                                                                           void *loss_d,
+                                                                                           void *gradient_d,
+                                                                                           uint32_t numClasses,
+                                                                                           uint32_t batchSize,
+                                                                                           bool computeGradient,
+                                                                                           uint32_t lossScalingFactor,
+                                                                                           Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<bool, float, half>(void *labels_d,
-                                                                              void *probabilities_d,
-                                                                              void *loss_d,
-                                                                              void *gradient_d,
-                                                                              uint32_t numClasses,
-                                                                              uint32_t batchSize,
-                                                                              bool computeGradient,
-                                                                              uint32_t lossScalingFactor,
-                                                                              Stream stream);
+                                                                                           void *probabilities_d,
+                                                                                           void *loss_d,
+                                                                                           void *gradient_d,
+                                                                                           uint32_t numClasses,
+                                                                                           uint32_t batchSize,
+                                                                                           bool computeGradient,
+                                                                                           uint32_t lossScalingFactor,
+                                                                                           Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<bool, float, float>(void *labels_d,
-                                                                               void *probabilities_d,
-                                                                               void *loss_d,
-                                                                               void *gradient_d,
-                                                                               uint32_t numClasses,
-                                                                               uint32_t batchSize,
-                                                                               bool computeGradient,
-                                                                               uint32_t lossScalingFactor,
-                                                                               Stream stream);
+                                                                                            void *probabilities_d,
+                                                                                            void *loss_d,
+                                                                                            void *gradient_d,
+                                                                                            uint32_t numClasses,
+                                                                                            uint32_t batchSize,
+                                                                                            bool computeGradient,
+                                                                                            uint32_t lossScalingFactor,
+                                                                                            Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint8_t, half, half>(void *labels_d,
-                                                                                void *probabilities_d,
-                                                                                void *loss_d,
-                                                                                void *gradient_d,
-                                                                                uint32_t numClasses,
-                                                                                uint32_t batchSize,
-                                                                                bool computeGradient,
-                                                                                uint32_t lossScalingFactor,
-                                                                                Stream stream);
+                                                                                             void *probabilities_d,
+                                                                                             void *loss_d,
+                                                                                             void *gradient_d,
+                                                                                             uint32_t numClasses,
+                                                                                             uint32_t batchSize,
+                                                                                             bool computeGradient,
+                                                                                             uint32_t lossScalingFactor,
+                                                                                             Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint8_t, half, float>(void *labels_d,
-                                                                                 void *probabilities_d,
-                                                                                 void *loss_d,
-                                                                                 void *gradient_d,
-                                                                                 uint32_t numClasses,
-                                                                                 uint32_t batchSize,
-                                                                                 bool computeGradient,
-                                                                                 uint32_t lossScalingFactor,
-                                                                                 Stream stream);
+                                                                                              void *probabilities_d,
+                                                                                              void *loss_d,
+                                                                                              void *gradient_d,
+                                                                                              uint32_t numClasses,
+                                                                                              uint32_t batchSize,
+                                                                                              bool computeGradient,
+                                                                                              uint32_t lossScalingFactor,
+                                                                                              Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint8_t, float, half>(void *labels_d,
-                                                                                 void *probabilities_d,
-                                                                                 void *loss_d,
-                                                                                 void *gradient_d,
-                                                                                 uint32_t numClasses,
-                                                                                 uint32_t batchSize,
-                                                                                 bool computeGradient,
-                                                                                 uint32_t lossScalingFactor,
-                                                                                 Stream stream);
+                                                                                              void *probabilities_d,
+                                                                                              void *loss_d,
+                                                                                              void *gradient_d,
+                                                                                              uint32_t numClasses,
+                                                                                              uint32_t batchSize,
+                                                                                              bool computeGradient,
+                                                                                              uint32_t lossScalingFactor,
+                                                                                              Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint8_t, float, float>(void *labels_d,
-                                                                                  void *probabilities_d,
-                                                                                  void *loss_d,
-                                                                                  void *gradient_d,
-                                                                                  uint32_t numClasses,
-                                                                                  uint32_t batchSize,
-                                                                                  bool computeGradient,
-                                                                                  uint32_t lossScalingFactor,
-                                                                                  Stream stream);
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint16_t, half, half>(void *labels_d,
-                                                                                 void *probabilities_d,
-                                                                                 void *loss_d,
-                                                                                 void *gradient_d,
-                                                                                 uint32_t numClasses,
-                                                                                 uint32_t batchSize,
-                                                                                 bool computeGradient,
-                                                                                 uint32_t lossScalingFactor,
-                                                                                 Stream stream);
+                                                                                              void *probabilities_d,
+                                                                                              void *loss_d,
+                                                                                              void *gradient_d,
+                                                                                              uint32_t numClasses,
+                                                                                              uint32_t batchSize,
+                                                                                              bool computeGradient,
+                                                                                              uint32_t lossScalingFactor,
+                                                                                              Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint16_t, half, float>(void *labels_d,
-                                                                                  void *probabilities_d,
-                                                                                  void *loss_d,
-                                                                                  void *gradient_d,
-                                                                                  uint32_t numClasses,
-                                                                                  uint32_t batchSize,
-                                                                                  bool computeGradient,
-                                                                                  uint32_t lossScalingFactor,
-                                                                                  Stream stream);
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint16_t, float, half>(void *labels_d,
-                                                                                  void *probabilities_d,
-                                                                                  void *loss_d,
-                                                                                  void *gradient_d,
-                                                                                  uint32_t numClasses,
-                                                                                  uint32_t batchSize,
-                                                                                  bool computeGradient,
-                                                                                  uint32_t lossScalingFactor,
-                                                                                  Stream stream);
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint16_t, float, float>(void *labels_d,
-                                                                                   void *probabilities_d,
-                                                                                   void *loss_d,
-                                                                                   void *gradient_d,
-                                                                                   uint32_t numClasses,
-                                                                                   uint32_t batchSize,
-                                                                                   bool computeGradient,
-                                                                                   uint32_t lossScalingFactor,
-                                                                                   Stream stream);
+                                                                                                void *probabilities_d,
+                                                                                                void *loss_d,
+                                                                                                void *gradient_d,
+                                                                                                uint32_t numClasses,
+                                                                                                uint32_t batchSize,
+                                                                                                bool computeGradient,
+                                                                                                uint32_t lossScalingFactor,
+                                                                                                Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint32_t, half, half>(void *labels_d,
-                                                                                 void *probabilities_d,
-                                                                                 void *loss_d,
-                                                                                 void *gradient_d,
-                                                                                 uint32_t numClasses,
-                                                                                 uint32_t batchSize,
-                                                                                 bool computeGradient,
-                                                                                 uint32_t lossScalingFactor,
-                                                                                 Stream stream);
+                                                                                              void *probabilities_d,
+                                                                                              void *loss_d,
+                                                                                              void *gradient_d,
+                                                                                              uint32_t numClasses,
+                                                                                              uint32_t batchSize,
+                                                                                              bool computeGradient,
+                                                                                              uint32_t lossScalingFactor,
+                                                                                              Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint32_t, half, float>(void *labels_d,
-                                                                                  void *probabilities_d,
-                                                                                  void *loss_d,
-                                                                                  void *gradient_d,
-                                                                                  uint32_t numClasses,
-                                                                                  uint32_t batchSize,
-                                                                                  bool computeGradient,
-                                                                                  uint32_t lossScalingFactor,
-                                                                                  Stream stream);
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint32_t, float, half>(void *labels_d,
-                                                                                  void *probabilities_d,
-                                                                                  void *loss_d,
-                                                                                  void *gradient_d,
-                                                                                  uint32_t numClasses,
-                                                                                  uint32_t batchSize,
-                                                                                  bool computeGradient,
-                                                                                  uint32_t lossScalingFactor,
-                                                                                  Stream stream);
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<uint32_t, float, float>(void *labels_d,
-                                                                                   void *probabilities_d,
-                                                                                   void *loss_d,
-                                                                                   void *gradient_d,
-                                                                                   uint32_t numClasses,
-                                                                                   uint32_t batchSize,
-                                                                                   bool computeGradient,
-                                                                                   uint32_t lossScalingFactor,
-                                                                                   Stream stream);
+                                                                                                void *probabilities_d,
+                                                                                                void *loss_d,
+                                                                                                void *gradient_d,
+                                                                                                uint32_t numClasses,
+                                                                                                uint32_t batchSize,
+                                                                                                bool computeGradient,
+                                                                                                uint32_t lossScalingFactor,
+                                                                                                Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<half, half, half>(void *labels_d,
-                                                                             void *probabilities_d,
-                                                                             void *loss_d,
-                                                                             void *gradient_d,
-                                                                             uint32_t numClasses,
-                                                                             uint32_t batchSize,
-                                                                             bool computeGradient,
-                                                                             uint32_t lossScalingFactor,
-                                                                             Stream stream);
+                                                                                          void *probabilities_d,
+                                                                                          void *loss_d,
+                                                                                          void *gradient_d,
+                                                                                          uint32_t numClasses,
+                                                                                          uint32_t batchSize,
+                                                                                          bool computeGradient,
+                                                                                          uint32_t lossScalingFactor,
+                                                                                          Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<half, half, float>(void *labels_d,
-                                                                              void *probabilities_d,
-                                                                              void *loss_d,
-                                                                              void *gradient_d,
-                                                                              uint32_t numClasses,
-                                                                              uint32_t batchSize,
-                                                                              bool computeGradient,
-                                                                              uint32_t lossScalingFactor,
-                                                                              Stream stream);
+                                                                                           void *probabilities_d,
+                                                                                           void *loss_d,
+                                                                                           void *gradient_d,
+                                                                                           uint32_t numClasses,
+                                                                                           uint32_t batchSize,
+                                                                                           bool computeGradient,
+                                                                                           uint32_t lossScalingFactor,
+                                                                                           Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<half, float, half>(void *labels_d,
-                                                                              void *probabilities_d,
-                                                                              void *loss_d,
-                                                                              void *gradient_d,
-                                                                              uint32_t numClasses,
-                                                                              uint32_t batchSize,
-                                                                              bool computeGradient,
-                                                                              uint32_t lossScalingFactor,
-                                                                              Stream stream);
+                                                                                           void *probabilities_d,
+                                                                                           void *loss_d,
+                                                                                           void *gradient_d,
+                                                                                           uint32_t numClasses,
+                                                                                           uint32_t batchSize,
+                                                                                           bool computeGradient,
+                                                                                           uint32_t lossScalingFactor,
+                                                                                           Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<half, float, float>(void *labels_d,
-                                                                               void *probabilities_d,
-                                                                               void *loss_d,
-                                                                               void *gradient_d,
-                                                                               uint32_t numClasses,
-                                                                               uint32_t batchSize,
-                                                                               bool computeGradient,
-                                                                               uint32_t lossScalingFactor,
-                                                                               Stream stream);
+                                                                                            void *probabilities_d,
+                                                                                            void *loss_d,
+                                                                                            void *gradient_d,
+                                                                                            uint32_t numClasses,
+                                                                                            uint32_t batchSize,
+                                                                                            bool computeGradient,
+                                                                                            uint32_t lossScalingFactor,
+                                                                                            Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<float, half, half>(void *labels_d,
-                                                                              void *probabilities_d,
-                                                                              void *loss_d,
-                                                                              void *gradient_d,
-                                                                              uint32_t numClasses,
-                                                                              uint32_t batchSize,
-                                                                              bool computeGradient,
-                                                                              uint32_t lossScalingFactor,
-                                                                              Stream stream);
+                                                                                           void *probabilities_d,
+                                                                                           void *loss_d,
+                                                                                           void *gradient_d,
+                                                                                           uint32_t numClasses,
+                                                                                           uint32_t batchSize,
+                                                                                           bool computeGradient,
+                                                                                           uint32_t lossScalingFactor,
+                                                                                           Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<float, half, float>(void *labels_d,
-                                                                               void *probabilities_d,
-                                                                               void *loss_d,
-                                                                               void *gradient_d,
-                                                                               uint32_t numClasses,
-                                                                               uint32_t batchSize,
-                                                                               bool computeGradient,
-                                                                               uint32_t lossScalingFactor,
-                                                                               Stream stream);
+                                                                                            void *probabilities_d,
+                                                                                            void *loss_d,
+                                                                                            void *gradient_d,
+                                                                                            uint32_t numClasses,
+                                                                                            uint32_t batchSize,
+                                                                                            bool computeGradient,
+                                                                                            uint32_t lossScalingFactor,
+                                                                                            Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<float, float, half>(void *labels_d,
-                                                                               void *probabilities_d,
-                                                                               void *loss_d,
-                                                                               void *gradient_d,
-                                                                               uint32_t numClasses,
-                                                                               uint32_t batchSize,
-                                                                               bool computeGradient,
-                                                                               uint32_t lossScalingFactor,
-                                                                               Stream stream);
+                                                                                            void *probabilities_d,
+                                                                                            void *loss_d,
+                                                                                            void *gradient_d,
+                                                                                            uint32_t numClasses,
+                                                                                            uint32_t batchSize,
+                                                                                            bool computeGradient,
+                                                                                            uint32_t lossScalingFactor,
+                                                                                            Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels<float, float, float>(void *labels_d,
-                                                                                void *probabilities_d,
-                                                                                void *loss_d,
-                                                                                void *gradient_d,
-                                                                                uint32_t numClasses,
-                                                                                uint32_t batchSize,
-                                                                                bool computeGradient,
-                                                                                uint32_t lossScalingFactor,
-                                                                                Stream stream);
+                                                                                             void *probabilities_d,
+                                                                                             void *loss_d,
+                                                                                             void *gradient_d,
+                                                                                             uint32_t numClasses,
+                                                                                             uint32_t batchSize,
+                                                                                             bool computeGradient,
+                                                                                             uint32_t lossScalingFactor,
+                                                                                             Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint8_t, half, half>(void *labels_d,
+                                                                                                 void *probabilities_d,
+                                                                                                 void *loss_d,
+                                                                                                 void *gradient_d,
+                                                                                                 uint32_t numClasses,
+                                                                                                 uint32_t batchSize,
+                                                                                                 bool computeGradient,
+                                                                                                 uint32_t lossScalingFactor,
+                                                                                                 Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint8_t, half, float>(void *labels_d,
                                                                                                   void *probabilities_d,
                                                                                                   void *loss_d,
                                                                                                   void *gradient_d,
@@ -664,77 +687,37 @@ template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint
                                                                                                   uint32_t lossScalingFactor,
                                                                                                   Stream stream);
 
-template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint8_t, half, float>(void *labels_d,
-                                                                                                   void *probabilities_d,
-                                                                                                   void *loss_d,
-                                                                                                   void *gradient_d,
-                                                                                                   uint32_t numClasses,
-                                                                                                   uint32_t batchSize,
-                                                                                                   bool computeGradient,
-                                                                                                   uint32_t lossScalingFactor,
-                                                                                                   Stream stream);
-
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint8_t, float, half>(void *labels_d,
-                                                                                                   void *probabilities_d,
-                                                                                                   void *loss_d,
-                                                                                                   void *gradient_d,
-                                                                                                   uint32_t numClasses,
-                                                                                                   uint32_t batchSize,
-                                                                                                   bool computeGradient,
-                                                                                                   uint32_t lossScalingFactor,
-                                                                                                   Stream stream);
+                                                                                                  void *probabilities_d,
+                                                                                                  void *loss_d,
+                                                                                                  void *gradient_d,
+                                                                                                  uint32_t numClasses,
+                                                                                                  uint32_t batchSize,
+                                                                                                  bool computeGradient,
+                                                                                                  uint32_t lossScalingFactor,
+                                                                                                  Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint8_t, float, float>(void *labels_d,
-                                                                                                    void *probabilities_d,
-                                                                                                    void *loss_d,
-                                                                                                    void *gradient_d,
-                                                                                                    uint32_t numClasses,
-                                                                                                    uint32_t batchSize,
-                                                                                                    bool computeGradient,
-                                                                                                    uint32_t lossScalingFactor,
-                                                                                                    Stream stream);
+                                                                                                   void *probabilities_d,
+                                                                                                   void *loss_d,
+                                                                                                   void *gradient_d,
+                                                                                                   uint32_t numClasses,
+                                                                                                   uint32_t batchSize,
+                                                                                                   bool computeGradient,
+                                                                                                   uint32_t lossScalingFactor,
+                                                                                                   Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint16_t, half, half>(void *labels_d,
-                                                                                                   void *probabilities_d,
-                                                                                                   void *loss_d,
-                                                                                                   void *gradient_d,
-                                                                                                   uint32_t numClasses,
-                                                                                                   uint32_t batchSize,
-                                                                                                   bool computeGradient,
-                                                                                                   uint32_t lossScalingFactor,
-                                                                                                   Stream stream);
+                                                                                                  void *probabilities_d,
+                                                                                                  void *loss_d,
+                                                                                                  void *gradient_d,
+                                                                                                  uint32_t numClasses,
+                                                                                                  uint32_t batchSize,
+                                                                                                  bool computeGradient,
+                                                                                                  uint32_t lossScalingFactor,
+                                                                                                  Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint16_t, half, float>(void *labels_d,
-                                                                                                    void *probabilities_d,
-                                                                                                    void *loss_d,
-                                                                                                    void *gradient_d,
-                                                                                                    uint32_t numClasses,
-                                                                                                    uint32_t batchSize,
-                                                                                                    bool computeGradient,
-                                                                                                    uint32_t lossScalingFactor,
-                                                                                                    Stream stream);
-
-template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint16_t, float, half>(void *labels_d,
-                                                                                                    void *probabilities_d,
-                                                                                                    void *loss_d,
-                                                                                                    void *gradient_d,
-                                                                                                    uint32_t numClasses,
-                                                                                                    uint32_t batchSize,
-                                                                                                    bool computeGradient,
-                                                                                                    uint32_t lossScalingFactor,
-                                                                                                    Stream stream);
-
-template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint16_t, float, float>(void *labels_d,
-                                                                                                     void *probabilities_d,
-                                                                                                     void *loss_d,
-                                                                                                     void *gradient_d,
-                                                                                                     uint32_t numClasses,
-                                                                                                     uint32_t batchSize,
-                                                                                                     bool computeGradient,
-                                                                                                     uint32_t lossScalingFactor,
-                                                                                                     Stream stream);
-
-template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, half, half>(void *labels_d,
                                                                                                    void *probabilities_d,
                                                                                                    void *loss_d,
                                                                                                    void *gradient_d,
@@ -744,7 +727,17 @@ template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint
                                                                                                    uint32_t lossScalingFactor,
                                                                                                    Stream stream);
 
-template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, half, float>(void *labels_d,
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint16_t, float, half>(void *labels_d,
+                                                                                                   void *probabilities_d,
+                                                                                                   void *loss_d,
+                                                                                                   void *gradient_d,
+                                                                                                   uint32_t numClasses,
+                                                                                                   uint32_t batchSize,
+                                                                                                   bool computeGradient,
+                                                                                                   uint32_t lossScalingFactor,
+                                                                                                   Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint16_t, float, float>(void *labels_d,
                                                                                                     void *probabilities_d,
                                                                                                     void *loss_d,
                                                                                                     void *gradient_d,
@@ -753,8 +746,38 @@ template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint
                                                                                                     bool computeGradient,
                                                                                                     uint32_t lossScalingFactor,
                                                                                                     Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, half, half>(void *labels_d,
+                                                                                                  void *probabilities_d,
+                                                                                                  void *loss_d,
+                                                                                                  void *gradient_d,
+                                                                                                  uint32_t numClasses,
+                                                                                                  uint32_t batchSize,
+                                                                                                  bool computeGradient,
+                                                                                                  uint32_t lossScalingFactor,
+                                                                                                  Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, half, float>(void *labels_d,
+                                                                                                   void *probabilities_d,
+                                                                                                   void *loss_d,
+                                                                                                   void *gradient_d,
+                                                                                                   uint32_t numClasses,
+                                                                                                   uint32_t batchSize,
+                                                                                                   bool computeGradient,
+                                                                                                   uint32_t lossScalingFactor,
+                                                                                                   Stream stream);
 
 template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, float, half>(void *labels_d,
+                                                                                                   void *probabilities_d,
+                                                                                                   void *loss_d,
+                                                                                                   void *gradient_d,
+                                                                                                   uint32_t numClasses,
+                                                                                                   uint32_t batchSize,
+                                                                                                   bool computeGradient,
+                                                                                                   uint32_t lossScalingFactor,
+                                                                                                   Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, float, float>(void *labels_d,
                                                                                                     void *probabilities_d,
                                                                                                     void *loss_d,
                                                                                                     void *gradient_d,
@@ -764,13 +787,124 @@ template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint
                                                                                                     uint32_t lossScalingFactor,
                                                                                                     Stream stream);
 
-template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<uint32_t, float, float>(void *labels_d,
-                                                                                                     void *probabilities_d,
-                                                                                                     void *loss_d,
-                                                                                                     void *gradient_d,
-                                                                                                     uint32_t numClasses,
-                                                                                                     uint32_t batchSize,
-                                                                                                     bool computeGradient,
-                                                                                                     uint32_t lossScalingFactor,
-                                                                                                     Stream stream);
-*/
+// The following functions will not be instantiated (they are unsafe as the class in not exact) and are guarded by assertions
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<half, half, half>(void *labels_d,
+                                                                                              void *probabilities_d,
+                                                                                              void *loss_d,
+                                                                                              void *gradient_d,
+                                                                                              uint32_t numClasses,
+                                                                                              uint32_t batchSize,
+                                                                                              bool computeGradient,
+                                                                                              uint32_t lossScalingFactor,
+                                                                                              Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<half, half, float>(void *labels_d,
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<half, float, half>(void *labels_d,
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<half, float, float>(void *labels_d,
+                                                                                                void *probabilities_d,
+                                                                                                void *loss_d,
+                                                                                                void *gradient_d,
+                                                                                                uint32_t numClasses,
+                                                                                                uint32_t batchSize,
+                                                                                                bool computeGradient,
+                                                                                                uint32_t lossScalingFactor,
+                                                                                                Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<float, half, half>(void *labels_d,
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<float, half, float>(void *labels_d,
+                                                                                                void *probabilities_d,
+                                                                                                void *loss_d,
+                                                                                                void *gradient_d,
+                                                                                                uint32_t numClasses,
+                                                                                                uint32_t batchSize,
+                                                                                                bool computeGradient,
+                                                                                                uint32_t lossScalingFactor,
+                                                                                                Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<float, float, half>(void *labels_d,
+                                                                                                void *probabilities_d,
+                                                                                                void *loss_d,
+                                                                                                void *gradient_d,
+                                                                                                uint32_t numClasses,
+                                                                                                uint32_t batchSize,
+                                                                                                bool computeGradient,
+                                                                                                uint32_t lossScalingFactor,
+                                                                                                Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<float, float, float>(void *labels_d,
+                                                                                                 void *probabilities_d,
+                                                                                                 void *loss_d,
+                                                                                                 void *gradient_d,
+                                                                                                 uint32_t numClasses,
+                                                                                                 uint32_t batchSize,
+                                                                                                 bool computeGradient,
+                                                                                                 uint32_t lossScalingFactor,
+                                                                                                 Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<bool, half, half>(void *labels_d,
+                                                                                              void *probabilities_d,
+                                                                                              void *loss_d,
+                                                                                              void *gradient_d,
+                                                                                              uint32_t numClasses,
+                                                                                              uint32_t batchSize,
+                                                                                              bool computeGradient,
+                                                                                              uint32_t lossScalingFactor,
+                                                                                              Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<bool, half, float>(void *labels_d,
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<bool, float, half>(void *labels_d,
+                                                                                               void *probabilities_d,
+                                                                                               void *loss_d,
+                                                                                               void *gradient_d,
+                                                                                               uint32_t numClasses,
+                                                                                               uint32_t batchSize,
+                                                                                               bool computeGradient,
+                                                                                               uint32_t lossScalingFactor,
+                                                                                               Stream stream);
+
+template void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels<bool, float, float>(void *labels_d,
+                                                                                                void *probabilities_d,
+                                                                                                void *loss_d,
+                                                                                                void *gradient_d,
+                                                                                                uint32_t numClasses,
+                                                                                                uint32_t batchSize,
+                                                                                                bool computeGradient,
+                                                                                                uint32_t lossScalingFactor,
+                                                                                                Stream stream);
