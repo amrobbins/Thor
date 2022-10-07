@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 
 enum class CrossEntropyLossType { BINARY = 104, CATEGORICAL, UNINITIALIZED };
 

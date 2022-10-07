@@ -84,7 +84,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectElementWiseResult_perClassLabel
         layers.push_back(softmax);
         TensorFanout *tensorFanout = new TensorFanout();
         layers.push_back(tensorFanout);
-        CrossEntropy *crossEntropy = new CrossEntropy(false);
+        CrossEntropy *crossEntropy = new CrossEntropy(CrossEntropyLossType::CATEGORICAL, false);
         if (inferenceOnly)
             crossEntropy->setConstructForInferenceOnly(true);
         layers.push_back(crossEntropy);

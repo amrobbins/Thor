@@ -9,7 +9,7 @@
 
 using namespace ThorImplementation;
 
-TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
+TEST(CrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels) {
     srand(time(NULL));
 
     float labels[4096];
@@ -81,8 +81,18 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
             probabilities_d, probabilities, numClasses * batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        launchElementWiseCrossEntropyLoss<float, float, float>(
-            labels_d, probabilities_d, loss_d, gradient_d, numClasses, batchSize, true, stream);
+        uint32_t lossScalingFactor = 1 + rand() % 4;
+        launchElementWiseCrossEntropyLoss<float, float, float>(labels_d,
+                                                               probabilities_d,
+                                                               loss_d,
+                                                               gradient_d,
+                                                               numClasses,
+                                                               batchSize,
+                                                               true,
+                                                               lossScalingFactor,
+                                                               CrossEntropyLossType::CATEGORICAL,
+                                                               false,
+                                                               stream);
 
         cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * numClasses * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
         assert(cudaStatus == cudaSuccess);
@@ -96,7 +106,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_perClassLabels) {
                 if (probability < 0.001f || !isfinite(probability))
                     probability = 0.001f;
                 loss_cpu[b * numClasses + i] = -labels[i + b * numClasses] * log(probability);
-                gradient_cpu[b * numClasses + i] = -labels[i + b * numClasses] / probability;
+                gradient_cpu[b * numClasses + i] = (-labels[i + b * numClasses] / probability) * lossScalingFactor;
             }
         }
 

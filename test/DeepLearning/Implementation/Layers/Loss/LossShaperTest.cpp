@@ -19,34 +19,30 @@ TEST(LossShaper, NumericalBatchFp16) {
         vector<uint64_t> dimensions;
         dimensions.push_back((rand() % 400) + 2);
         dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions;
-        reducedDimensions.push_back(dimensions[1]);
+        vector<uint64_t> reducedDimensions = {1};
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP16;
 
-        Tensor elementwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
+        Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
         // Accumulators are FP32:
-        Tensor batchLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, reducedDimensions));
+        float batchLossCpu = 0.0f;
 
-        half *elementWiseLossCpuMem = (half *)elementwiseLossCpu.getMemPtr();
-        float *batchLossCpuMem = (float *)batchLossCpu.getMemPtr();
+        half *rawLossCpuMem = (half *)rawLossCpu.getMemPtr();
         for (uint32_t b = 0; b < dimensions[0]; ++b) {
-            for (uint32_t e = 0; e < dimensions[1]; ++e) {
+            for (uint32_t c = 0; c < dimensions[1]; ++c) {
                 half val = (rand() % 1000) / 250.0f;
-                elementWiseLossCpuMem[b * dimensions[1] + e] = val;
-                batchLossCpuMem[e] = batchLossCpuMem[e] + val;
+                rawLossCpuMem[b * dimensions[1] + c] = val;
+                batchLossCpu += val;
             }
         }
-        for (uint32_t e = 0; e < dimensions[1]; ++e) {
-            batchLossCpuMem[e] = batchLossCpuMem[e] / dimensions[0];
-        }
+        batchLossCpu /= dimensions[0];
 
         vector<Layer *> layers;
         NetworkInput *lossInput = new NetworkInput(gpuPlacement, dataType, dimensions);
         layers.push_back(lossInput);
         NoOpLayer *noOpLayer1 = new NoOpLayer();
         layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::InputLossType::NUMERICAL_LOSS, LossShaper::OutputLossType::BATCH_LOSS);
+        LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::BATCH);
         layers.push_back(lossShaper);
         NoOpLayer *noOpLayer2 = new NoOpLayer();
         layers.push_back(noOpLayer2);
@@ -66,26 +62,24 @@ TEST(LossShaper, NumericalBatchFp16) {
         ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
 
         // Network is runnable here
-        lossInput->forward(elementwiseLossCpu, false);
-        Tensor batchLossGpu_h = batchLossCpu.clone(dataType);
+        lossInput->forward(rawLossCpu, false);
+        Tensor batchLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         batchLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();
 
-        float thresh = 0.01f;
-        half *batchLossGpuMem_h = (half *)batchLossGpu_h.getMemPtr();
-        for (uint32_t e = 0; e < dimensions[1]; ++e) {
-            float diff = ((half)batchLossCpuMem[e]) - batchLossGpuMem_h[e];
-            ASSERT_LT(abs(diff), thresh);
-        }
+        float thresh = 1.0f;
+        half batchLossGpuMem_h = *((half *)batchLossGpu_h.getMemPtr());
+        float diff = batchLossCpu - (float)batchLossGpuMem_h;
+        ASSERT_LT(abs(diff), thresh);
 
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
-TEST(LossShaper, NumericalBatchFp32) {
+TEST(LossShaper, NumericalElementWiseFp32) {
     srand(time(NULL));
 
     for (uint32_t i = 0; i < 10; ++i) {
@@ -93,32 +87,24 @@ TEST(LossShaper, NumericalBatchFp32) {
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
         vector<uint64_t> dimensions;
-        // Minimum size of a dimension that will be reduced is 2, otherwise there is nothing to do
-        // and a bad param exception will be returned.
         dimensions.push_back((rand() % 400) + 2);
         dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions;
-        reducedDimensions.push_back(dimensions[1]);
-
-        printf("dimensions %ld %ld reduced dimensions %ld\n", dimensions[0], dimensions[1], reducedDimensions[0]);
+        vector<uint64_t> reducedDimensions = {dimensions[0]};
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
 
-        Tensor elementwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
-        // Accumulators are FP32:
-        Tensor batchLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, reducedDimensions));
+        Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
+        Tensor elementwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
 
-        float *elementWiseLossCpuMem = (float *)elementwiseLossCpu.getMemPtr();
-        float *batchLossCpuMem = (float *)batchLossCpu.getMemPtr();
+        float *rawLossCpuMem = (float *)rawLossCpu.getMemPtr();
+        float *elementwiseLossCpuMem = (float *)elementwiseLossCpu.getMemPtr();
         for (uint32_t b = 0; b < dimensions[0]; ++b) {
-            for (uint32_t e = 0; e < dimensions[1]; ++e) {
+            elementwiseLossCpuMem[b] = 0.0f;
+            for (uint32_t c = 0; c < dimensions[1]; ++c) {
                 float val = (rand() % 1000) / 250.0f;
-                elementWiseLossCpuMem[b * dimensions[1] + e] = val;
-                batchLossCpuMem[e] = batchLossCpuMem[e] + val;
+                rawLossCpuMem[b * dimensions[1] + c] = val;
+                elementwiseLossCpuMem[b] += val;
             }
-        }
-        for (uint32_t e = 0; e < dimensions[1]; ++e) {
-            batchLossCpuMem[e] = batchLossCpuMem[e] / dimensions[0];
         }
 
         vector<Layer *> layers;
@@ -126,7 +112,7 @@ TEST(LossShaper, NumericalBatchFp32) {
         layers.push_back(lossInput);
         NoOpLayer *noOpLayer1 = new NoOpLayer();
         layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::InputLossType::NUMERICAL_LOSS, LossShaper::OutputLossType::BATCH_LOSS);
+        LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::ELEMENTWISE);
         layers.push_back(lossShaper);
         NoOpLayer *noOpLayer2 = new NoOpLayer();
         layers.push_back(noOpLayer2);
@@ -146,18 +132,18 @@ TEST(LossShaper, NumericalBatchFp32) {
         ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
 
         // Network is runnable here
-        lossInput->forward(elementwiseLossCpu, false);
-        Tensor batchLossGpu_h = batchLossCpu.clone(dataType);
+        lossInput->forward(rawLossCpu, false);
+        Tensor elementwiseLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
-        batchLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
+        elementwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
 
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         stream.synchronize();
 
         float thresh = 0.01f;
-        float *batchLossGpuMem_h = (float *)batchLossGpu_h.getMemPtr();
-        for (uint32_t e = 0; e < dimensions[1]; ++e) {
-            float diff = batchLossCpuMem[e] - batchLossGpuMem_h[e];
+        float *elementwiseLossGpuMem_h = ((float *)elementwiseLossGpu_h.getMemPtr());
+        for (uint32_t e = 0; e < dimensions[0]; ++e) {
+            float diff = elementwiseLossCpuMem[e] - elementwiseLossGpuMem_h[e];
             ASSERT_LT(abs(diff), thresh);
         }
 
@@ -165,7 +151,7 @@ TEST(LossShaper, NumericalBatchFp32) {
     }
 }
 
-TEST(LossShaper, CategoricalClasswise) {
+TEST(LossShaper, NumericalClassWiseFp32) {
     srand(time(NULL));
 
     for (uint32_t i = 0; i < 10; ++i) {
@@ -175,26 +161,23 @@ TEST(LossShaper, CategoricalClasswise) {
         vector<uint64_t> dimensions;
         dimensions.push_back((rand() % 400) + 2);
         dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions;
-        reducedDimensions.push_back(dimensions[1]);
+        vector<uint64_t> reducedDimensions = {dimensions[1]};
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
 
-        Tensor perExampleClasswiseLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
-        // Accumulators are FP32:
-        Tensor classwiseLossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, reducedDimensions));
+        Tensor rawLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
+        Tensor classwiseLossCpu(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
 
-        float *perExampleClasswiseLossCpuMem = (float *)perExampleClasswiseLossCpu.getMemPtr();
+        float *rawLossCpuMem = (float *)rawLossCpu.getMemPtr();
         float *classwiseLossCpuMem = (float *)classwiseLossCpu.getMemPtr();
-        for (uint32_t b = 0; b < dimensions[0]; ++b) {
-            for (uint32_t e = 0; e < dimensions[1]; ++e) {
+        for (uint32_t c = 0; c < dimensions[1]; ++c) {
+            classwiseLossCpuMem[c] = 0.0f;
+            for (uint32_t b = 0; b < dimensions[0]; ++b) {
                 float val = (rand() % 1000) / 250.0f;
-                perExampleClasswiseLossCpuMem[b * dimensions[1] + e] = val;
-                classwiseLossCpuMem[e] = classwiseLossCpuMem[e] + val;
+                rawLossCpuMem[b * dimensions[1] + c] = val;
+                classwiseLossCpuMem[c] += val;
             }
-        }
-        for (uint32_t e = 0; e < dimensions[1]; ++e) {
-            classwiseLossCpuMem[e] = classwiseLossCpuMem[e] / dimensions[0];
+            classwiseLossCpuMem[c] /= dimensions[0];
         }
 
         vector<Layer *> layers;
@@ -202,7 +185,7 @@ TEST(LossShaper, CategoricalClasswise) {
         layers.push_back(lossInput);
         NoOpLayer *noOpLayer1 = new NoOpLayer();
         layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::InputLossType::CATEGORICAL_LOSS, LossShaper::OutputLossType::CLASSWISE_LOSS);
+        LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::CLASSWISE);
         layers.push_back(lossShaper);
         NoOpLayer *noOpLayer2 = new NoOpLayer();
         layers.push_back(noOpLayer2);
@@ -222,79 +205,7 @@ TEST(LossShaper, CategoricalClasswise) {
         ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
 
         // Network is runnable here
-        lossInput->forward(perExampleClasswiseLossCpu, false);
-        Tensor classwiseLossGpu_h = classwiseLossCpu.clone(dataType);
-        stream.waitEvent(lossOutput->getOutputReadyEvent());
-        classwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
-
-        stream.waitEvent(lossOutput->getOutputReadyEvent());
-        stream.synchronize();
-
-        float thresh = 0.01f;
-        float *classwiseLossGpuMem_h = (float *)classwiseLossGpu_h.getMemPtr();
-        for (uint32_t e = 0; e < dimensions[1]; ++e) {
-            float diff = classwiseLossCpuMem[e] - classwiseLossGpuMem_h[e];
-            ASSERT_LT(abs(diff), thresh);
-        }
-
-        LayerTestHelper::tearDownNetwork(layers);
-    }
-}
-
-TEST(LossShaper, CategoricalBatch) {
-    srand(time(NULL));
-
-    for (uint32_t i = 0; i < 10; ++i) {
-        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-        TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-
-        vector<uint64_t> dimensions;
-        dimensions.push_back((rand() % 400) + 2);
-        dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions;
-        reducedDimensions.push_back(1);
-
-        const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
-
-        Tensor perExampleClasswiseLossCpu(cpuPlacement, TensorDescriptor(dataType, dimensions));
-
-        float *perExampleClasswiseLossCpuMem = (float *)perExampleClasswiseLossCpu.getMemPtr();
-        float batchLoss = 0.0f;
-        for (uint32_t b = 0; b < dimensions[0]; ++b) {
-            for (uint32_t e = 0; e < dimensions[1]; ++e) {
-                float val = (rand() % 1000) / 250.0f;
-                perExampleClasswiseLossCpuMem[b * dimensions[1] + e] = val;
-                batchLoss = batchLoss + val;
-            }
-        }
-        batchLoss = batchLoss / dimensions[0];
-
-        vector<Layer *> layers;
-        NetworkInput *lossInput = new NetworkInput(gpuPlacement, dataType, dimensions);
-        layers.push_back(lossInput);
-        NoOpLayer *noOpLayer1 = new NoOpLayer();
-        layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::InputLossType::CATEGORICAL_LOSS, LossShaper::OutputLossType::BATCH_LOSS);
-        layers.push_back(lossShaper);
-        NoOpLayer *noOpLayer2 = new NoOpLayer();
-        layers.push_back(noOpLayer2);
-        NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
-        layers.push_back(lossOutput);
-
-        Stream stream = lossInput->getStream();
-
-        LayerTestHelper::connectTwoLayers(lossInput, noOpLayer1);
-        LayerTestHelper::connectTwoLayers(noOpLayer1, lossShaper);
-        LayerTestHelper::connectTwoLayers(lossShaper, noOpLayer2);
-        LayerTestHelper::connectTwoLayers(noOpLayer2, lossOutput);
-        LayerTestHelper::initializeNetwork(layers);
-
-        ASSERT_TRUE(lossShaper->getErrorInput().isEmpty());
-        ASSERT_TRUE(lossShaper->getErrorOutput().isEmpty());
-        ASSERT_EQ(lossOutput->getFeatureOutput().get().getDimensions(), reducedDimensions);
-
-        // Network is runnable here
-        lossInput->forward(perExampleClasswiseLossCpu, false);
+        lossInput->forward(rawLossCpu, false);
         Tensor classwiseLossGpu_h(cpuPlacement, TensorDescriptor(dataType, reducedDimensions));
         stream.waitEvent(lossOutput->getOutputReadyEvent());
         classwiseLossGpu_h.copyFromAsync(lossOutput->getFeatureOutput().get(), stream);
@@ -303,9 +214,11 @@ TEST(LossShaper, CategoricalBatch) {
         stream.synchronize();
 
         float thresh = 0.01f;
-        float *classwiseLossGpuMem_h = (float *)classwiseLossGpu_h.getMemPtr();
-        float diff = batchLoss - classwiseLossGpuMem_h[0];
-        ASSERT_LT(abs(diff), thresh);
+        float *classwiseLossGpuMem_h = ((float *)classwiseLossGpu_h.getMemPtr());
+        for (uint32_t c = 0; c < dimensions[1]; ++c) {
+            float diff = classwiseLossCpuMem[c] - classwiseLossGpuMem_h[c];
+            ASSERT_LT(abs(diff), thresh);
+        }
 
         LayerTestHelper::tearDownNetwork(layers);
     }

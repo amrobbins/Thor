@@ -205,7 +205,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
         half *cpuFeatureOut = (half *)featureOutputCpu.getMemPtr();
         half *gpuFeatureOut = (half *)featureOutputGpu_h.getMemPtr();
         for (int i = 0; i < totalNumFeatureOutputElements; ++i) {
-            float thresh = std::max(abs((float)cpuFeatureOut[i]) / 500, 0.01f);
+            float thresh = std::max(abs((float)cpuFeatureOut[i]) / 500, 0.02f);
             EXPECT_LT(abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])), thresh);
             if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= thresh)
                 printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));

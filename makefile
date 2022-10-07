@@ -39,8 +39,7 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
-				build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
                 build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
                 build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
                 build/test/DeepLearning/Api/Network/NetworkTest && \
@@ -49,7 +48,6 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCr
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest && \
                 build/test/DeepLearning/Implementation/Layers/Loss/LossShaperTest && \
-                build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest && \
                 build/test/Utilities/TensorOperations/Arithmetic/ArithmeticTest && \
@@ -71,12 +69,15 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCr
                 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
-                build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
                 build/test/DeepLearning/Api/Layers/Loss/LossShaperTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest \
-                build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
+
 
 				# FIXME: rebuild and put back
+				#build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
+				#build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
+				#build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
+				build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
                 #build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
                 #build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
                 #build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \

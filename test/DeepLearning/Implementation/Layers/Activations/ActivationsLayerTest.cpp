@@ -1136,7 +1136,6 @@ TEST(Softmax, Works) {
             softmaxForward.back().push_back(expectedValueFloat);
             half expectedValue = (half)expectedValueFloat;
             half actualValue = destMem[i];
-            printf("actual %f expected %f [%d,%d]\n", (float)actualValue, (float)expectedValue, batchItem, element);
             ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
         }
 
@@ -1198,7 +1197,6 @@ TEST(Softmax, Works) {
             for (uint32_t classType = 0; classType < dimensions[1]; ++classType) {
                 half expectedValue = (half)(((float *)expectedEOut.getMemPtr())[classType]);
                 half actualValue = errorOutMem[batchItem * dimensions[1] + classType];
-                printf("expected %f actual %f\n", (float)expectedValue, (float)actualValue);
                 ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);
             }
         }

@@ -40,15 +40,21 @@ void LossShaper::compile() {
         // There is no ErrorInput to connect to the previous layer, so this is a nop
     } else {
         uint32_t batchSize = featureInput.get().getDescriptor().getDimensions()[0];
-        uint32_t lossDimSize = featureInput.get().getDescriptor().getDimensions()[1];
-        bool reduceBatchDim = featureInput.get().getDimensions()[0] != 1 && featureOutput.get().getDimensions()[0] == 1;
-        bool reduceLossDim = featureInput.get().getDimensions()[1] != 1 && featureOutput.get().getDimensions()[1] == 1;
+        uint32_t classDimSize = featureInput.get().getDescriptor().getDimensions()[1];
+        bool reduceBatchDim = false;
+        if ((outputLossType == OutputLossType::BATCH || outputLossType == OutputLossType::CLASSWISE) &&
+            featureInput.get().getDimensions()[0] != 1)
+            reduceBatchDim = true;
+        bool reduceClassDim = false;
+        if ((outputLossType == OutputLossType::BATCH || outputLossType == OutputLossType::ELEMENTWISE) &&
+            featureInput.get().getDimensions()[1] != 1)
+            reduceClassDim = true;
 
         batchReduce = new BatchReduce(batchSize,
                                       batchSize,
-                                      lossDimSize,
+                                      classDimSize,
                                       reduceBatchDim,
-                                      reduceLossDim,
+                                      reduceClassDim,
                                       featureInput.get().getDescriptor().getDataType(),
                                       featureOutput.get().getDescriptor().getDataType(),
                                       stream);

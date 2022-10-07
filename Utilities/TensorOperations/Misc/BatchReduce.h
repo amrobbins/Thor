@@ -17,9 +17,9 @@ class BatchReduce {
     // Stream is saved because the cudnnHandle that is created belongs to the stream
     BatchReduce(uint32_t batchletSize,
                 uint32_t batchSize,
-                uint32_t lossDimSize,
+                uint32_t classDimSize,
                 bool reduceBatch,
-                bool reduceLoss,
+                bool reduceClass,
                 ThorImplementation::TensorDescriptor::DataType sourceDataType,
                 ThorImplementation::TensorDescriptor::DataType destDataType,
                 Stream stream);
@@ -35,9 +35,7 @@ class BatchReduce {
    protected:
     uint64_t computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                          uint32_t batchSize,
-                                         uint32_t lossDimSize,
-                                         bool reduceBatch,
-                                         bool reduceLoss,
+                                         uint32_t classDimSize,
                                          TensorDescriptor::DataType sourceDataType,
                                          TensorDescriptor::DataType destDataType);
 
@@ -48,8 +46,11 @@ class BatchReduce {
     ThorImplementation::Tensor workspace;
     uint64_t workspaceSizeInBytes;
     bool doubleType;
+    bool reduceBatch;
+    bool reduceClass;
     void *batchScale;
     void *zero;
+    void *one;
 };
 
 }  // namespace ThorImplementation

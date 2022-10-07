@@ -17,29 +17,32 @@ TEST(LossShaper, Builds) {
     for (uint32_t i = 0; i < 10; ++i) {
         Network network;
 
-        bool classwise = rand() % 2;
-        bool categorical = classwise ? true : rand() % 2 == 0;
-
         vector<uint64_t> dimensions;
         uint32_t numDimensions = 2;
         for (uint32_t j = 0; j < numDimensions; ++j)
             dimensions.push_back(2 + (rand() % 1000));
         Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-        vector<uint64_t> batchDimensions = {dimensions[1]};
-        vector<uint64_t> singletonDimensions = {1};
         Tensor lossInput(dataType, dimensions);
 
         LossShaper::Builder lossShaperBuilder = LossShaper::Builder().network(network).lossInput(lossInput);
 
-        if (categorical)
-            lossShaperBuilder.receivesCategoricalLoss();
-        else
-            lossShaperBuilder.receivesNumericalLoss();
-
-        if (classwise)
-            lossShaperBuilder.reportsClasswiseLoss();
-        else
+        uint32_t shape = rand() % 3;
+        ThorImplementation::LossShaper::OutputLossType outputLossType;
+        if (shape == 0) {
+            outputLossType = ThorImplementation::LossShaper::OutputLossType::BATCH;
             lossShaperBuilder.reportsBatchLoss();
+        } else if (shape == 1) {
+            outputLossType = ThorImplementation::LossShaper::OutputLossType::CLASSWISE;
+            lossShaperBuilder.reportsClasswiseLoss();
+        } else if (shape == 2) {
+            outputLossType = ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE;
+            lossShaperBuilder.reportsElementwiseLoss();
+        } else {
+            assert(false);
+        }
+        vector<uint64_t> batchDimensions = {1};
+        vector<uint64_t> classwiseDimensions = {dimensions[1]};
+        vector<uint64_t> elementwiseDimensions = {dimensions[0]};
 
         LossShaper lossShaper = lossShaperBuilder.build();
 
@@ -53,13 +56,12 @@ TEST(LossShaper, Builds) {
         Optional<Tensor> actualLossOutput = lossShaper.getLossOutput();
         ASSERT_TRUE(actualLossOutput.isPresent());
         ASSERT_EQ(actualLossOutput.get().getDataType(), dataType);
-        if (categorical) {
-            if (classwise)
-                ASSERT_EQ(actualLossOutput.get().getDimensions(), batchDimensions);
-            else
-                ASSERT_EQ(actualLossOutput.get().getDimensions(), singletonDimensions);
-        } else {
+        if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
             ASSERT_EQ(actualLossOutput.get().getDimensions(), batchDimensions);
+        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
+            ASSERT_EQ(actualLossOutput.get().getDimensions(), classwiseDimensions);
+        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
+            ASSERT_EQ(actualLossOutput.get().getDimensions(), elementwiseDimensions);
         }
 
         ASSERT_FALSE(actualLossInput.get() == actualLossOutput.get());
@@ -81,13 +83,12 @@ TEST(LossShaper, Builds) {
         Optional<Tensor> cloneLossOutput = clone->getLossOutput();
         ASSERT_TRUE(cloneLossOutput.isPresent());
         ASSERT_EQ(cloneLossOutput.get().getDataType(), dataType);
-        if (categorical) {
-            if (classwise)
-                ASSERT_EQ(cloneLossOutput.get().getDimensions(), batchDimensions);
-            else
-                ASSERT_EQ(cloneLossOutput.get().getDimensions(), singletonDimensions);
-        } else {
+        if (outputLossType == ThorImplementation::LossShaper::OutputLossType::BATCH) {
             ASSERT_EQ(cloneLossOutput.get().getDimensions(), batchDimensions);
+        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
+            ASSERT_EQ(cloneLossOutput.get().getDimensions(), classwiseDimensions);
+        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
+            ASSERT_EQ(cloneLossOutput.get().getDimensions(), elementwiseDimensions);
         }
 
         ASSERT_FALSE(cloneLossInput.get() == cloneLossOutput.get());

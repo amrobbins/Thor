@@ -207,7 +207,6 @@ void launchElementWiseBinaryCrossEntropyLoss(void *labels_d,
     }
 }
 
-/*
 template void launchElementWiseBinaryCrossEntropyLoss<bool, half, half>(void *labels_d,
                                                                         void *probabilities_d,
                                                                         void *loss_d,
@@ -423,4 +422,3 @@ template void launchElementWiseBinaryCrossEntropyLoss<float, float, float>(void 
                                                                            bool computeGradient,
                                                                            uint32_t lossScalingFactor,
                                                                            Stream stream);
-*/
