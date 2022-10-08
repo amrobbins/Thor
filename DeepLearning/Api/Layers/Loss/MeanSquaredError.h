@@ -20,8 +20,8 @@ class MeanSquaredError : public Loss {
    protected:
     virtual bool isMultiLayer() const {
         if (lossType == ThorImplementation::Loss::LossType::RAW)
-            return true;
-        return false;
+            return false;
+        return true;
     }
 
     virtual void convertToSingleLayersAndAddToNetwork();
