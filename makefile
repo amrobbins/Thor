@@ -39,9 +39,13 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
+				build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
+				build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
+				build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
                 build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
                 build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
+                build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
                 build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
@@ -70,20 +74,18 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest &
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
                 build/test/DeepLearning/Api/Layers/Loss/LossShaperTest && \
+                build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest \
-
 
 				# FIXME: rebuild and put back
 				#build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 				#build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
-				#build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
-				build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
-                #build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
-                #build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
-                #build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
+				# Create API categoricalAccuracy test
+
 
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
+			build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest \
 			build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/WorkQueue/AsyncQueueTest \
             build/test/Utilities/WorkQueue/AsyncTensorQueueTest \
@@ -120,13 +122,8 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/LossShaperTest \
 			build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest \
-
-			# FIXME: rebuild and put back
-			#build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest \
-            #build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
-            #build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest \
-			#build/DeepLearning/Api/ExampleNetworks/PerformanceTests/AlexNetPerformanceTest \
-			#build/DeepLearning/Api/ExampleNetworks/PerformanceTests/InceptionV3PerformanceTest \
+			build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
+			build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest \
 
 
 
@@ -208,9 +205,9 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Utility/DropOut.o \
                    build/DeepLearning/Api/Layers/Utility/NetworkOutput.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
+                   build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o \
 
                    # FIXME: rebuild and put back
-				   #build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o \
                    #build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
                    #build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
                    #build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \

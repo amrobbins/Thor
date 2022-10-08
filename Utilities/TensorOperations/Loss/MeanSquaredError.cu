@@ -43,11 +43,13 @@ __global__ void meanSquaredError(
 
     half2 buffer0, buffer1;
 
+    // (label - prediction)^2
     buffer0 = __hsub2(((half2 *)labelsBuffer)[0], ((half2 *)predictionsBuffer)[0]);
     ((half2 *)elementLossBuffer)[0] = __hmul2(buffer0, buffer0);
     buffer1 = __hsub2(((half2 *)labelsBuffer)[1], ((half2 *)predictionsBuffer)[1]);
     ((half2 *)elementLossBuffer)[1] = __hmul2(buffer1, buffer1);
     if (computeGradient) {
+        // d/dx (y - x)^2 = 2(y - x)
         ((half2 *)gradientBuffer)[0] = __hmul2(((half2 *)two)[0], buffer0);
         ((half2 *)gradientBuffer)[1] = __hmul2(((half2 *)two)[0], buffer1);
         double *gradientBuffer_half4 = (double *)gradientBuffer;

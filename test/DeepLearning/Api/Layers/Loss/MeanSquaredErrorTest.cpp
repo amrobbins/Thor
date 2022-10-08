@@ -27,17 +27,28 @@ TEST(MeanSquaredError, Builds) {
         Tensor::DataType labelsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor labels(labelsDataType, dimensions);
 
-        bool reportBatchLoss = rand() % 2 == 0;
         bool setLossDataType = rand() % 2 == 0;
         Tensor::DataType lossDataType;
 
         MeanSquaredError::Builder meanSquaredErrorBuilder =
             MeanSquaredError::Builder().network(network).predictions(predictions).labels(labels);
 
-        if (reportBatchLoss)
+        uint32_t shape = rand() % 4;
+        if (shape == 0) {
             meanSquaredErrorBuilder.reportsBatchLoss();
-        else
+        } else if (shape == 1) {
             meanSquaredErrorBuilder.reportsElementwiseLoss();
+        } else if (shape == 2) {
+            meanSquaredErrorBuilder.reportsPerOutputLoss();
+        } else if (shape == 3) {
+            meanSquaredErrorBuilder.reportsRawLoss();
+        } else {
+            assert(false);
+        }
+        vector<uint64_t> batchDimensions = {1};
+        vector<uint64_t> elementwiseDimensions = {dimensions[0]};
+        vector<uint64_t> perOutputDimensions = {dimensions[1]};
+        vector<uint64_t> rawLossDimensions = dimensions;
 
         if (setLossDataType) {
             lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
@@ -61,11 +72,16 @@ TEST(MeanSquaredError, Builds) {
         Optional<Tensor> actualLoss = meanSquaredError.getLoss();
         ASSERT_TRUE(actualLoss.isPresent());
         ASSERT_EQ(actualLoss.get().getDataType(), setLossDataType ? lossDataType : predictionsDataType);
-        if (reportBatchLoss) {
-            vector<uint64_t> batchDimensions = {dimensions[1]};
+        if (shape == 0) {
             ASSERT_EQ(actualLoss.get().getDimensions(), batchDimensions);
+        } else if (shape == 1) {
+            ASSERT_EQ(actualLoss.get().getDimensions(), elementwiseDimensions);
+        } else if (shape == 2) {
+            ASSERT_EQ(actualLoss.get().getDimensions(), perOutputDimensions);
+        } else if (shape == 3) {
+            ASSERT_EQ(actualLoss.get().getDimensions(), rawLossDimensions);
         } else {
-            ASSERT_EQ(actualLoss.get().getDimensions(), dimensions);
+            assert(false);
         }
 
         ASSERT_TRUE(meanSquaredError.getPredictions() == meanSquaredError.getFeatureInput());
@@ -85,11 +101,16 @@ TEST(MeanSquaredError, Builds) {
         Optional<Tensor> cloneLoss = clone->getLoss();
         ASSERT_TRUE(cloneLoss.isPresent());
         ASSERT_EQ(cloneLoss.get().getDataType(), setLossDataType ? lossDataType : predictionsDataType);
-        if (reportBatchLoss) {
-            vector<uint64_t> batchDimensions = {dimensions[1]};
+        if (shape == 0) {
             ASSERT_EQ(cloneLoss.get().getDimensions(), batchDimensions);
+        } else if (shape == 1) {
+            ASSERT_EQ(cloneLoss.get().getDimensions(), elementwiseDimensions);
+        } else if (shape == 2) {
+            ASSERT_EQ(cloneLoss.get().getDimensions(), perOutputDimensions);
+        } else if (shape == 3) {
+            ASSERT_EQ(cloneLoss.get().getDimensions(), rawLossDimensions);
         } else {
-            ASSERT_EQ(cloneLoss.get().getDimensions(), dimensions);
+            assert(false);
         }
 
         ASSERT_TRUE(clone->getPredictions() == meanSquaredError.getFeatureInput());

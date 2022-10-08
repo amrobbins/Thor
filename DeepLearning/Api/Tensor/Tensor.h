@@ -127,6 +127,13 @@ class Tensor {
 
     uint64_t getTotalSizeInBytes() const { return (uint64_t)ceil((double)getTotalNumElements() * getBytesPerElement()); }
 
+    void reshape(vector<uint64_t> newDimensions) {
+        uint64_t oldNumElements = getTotalNumElements();
+        dimensions = newDimensions;
+        uint64_t newNumElements = getTotalNumElements();
+        assert(oldNumElements == newNumElements);
+    }
+
    protected:
     void setDataType(DataType dataType) { this->dataType = dataType; }
 

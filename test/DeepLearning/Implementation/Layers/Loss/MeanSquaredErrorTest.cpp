@@ -50,7 +50,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
             labels[i] = ((rand() % 1500) / 999.0f);
             half val = labels[i] - predictions[i];
             elementLoss[i] = val * val;
-            elementLossGradient[i] = (half)2.0f * val * 100;
+            elementLossGradient[i] = (half)2.0f * val * Loss::getLossScalingFactor();
         }
 
         vector<Layer *> layers;
