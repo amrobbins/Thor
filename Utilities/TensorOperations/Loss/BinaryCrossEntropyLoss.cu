@@ -23,20 +23,26 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
     const PROBABILITY_TYPE ONE = 1.0f;
     const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
 
-    PROBABILITY_TYPE label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
-    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    PROBABILITY_TYPE elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    PROBABILITY_TYPE logTerm = label ? probability : ONE - probability;
-    LOSS_TYPE elementwiseLoss = -logf(logTerm);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    PROBABILITY_TYPE label;
+    PROBABILITY_TYPE probability;
+    PROBABILITY_TYPE elementwiseGradient;
+    PROBABILITY_TYPE logTerm;
+    LOSS_TYPE elementwiseLoss;
+
+    label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
+        elementwiseGradient = probability;
         if (label)
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    logTerm = label ? probability : ONE - probability;
+    elementwiseLoss = -logf(logTerm);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex;
@@ -44,18 +50,18 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
         return;
     label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
     probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    logTerm = label ? probability : ONE - probability;
-    elementwiseLoss = -logf(logTerm);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
+        elementwiseGradient = probability;
         if (label)
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    logTerm = label ? probability : ONE - probability;
+    elementwiseLoss = -logf(logTerm);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex;
@@ -63,18 +69,18 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
         return;
     label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
     probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    logTerm = label ? probability : ONE - probability;
-    elementwiseLoss = -logf(logTerm);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
+        elementwiseGradient = probability;
         if (label)
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    logTerm = label ? probability : ONE - probability;
+    elementwiseLoss = -logf(logTerm);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex;
@@ -82,18 +88,18 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
         return;
     label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
     probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    logTerm = label ? probability : ONE - probability;
-    elementwiseLoss = -logf(logTerm);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
+        elementwiseGradient = probability;
         if (label)
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    logTerm = label ? probability : ONE - probability;
+    elementwiseLoss = -logf(logTerm);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 }
 
 template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
@@ -107,21 +113,27 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
     const PROBABILITY_TYPE ONE = 1.0f;
     const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
 
-    PROBABILITY_TYPE label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
-    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    PROBABILITY_TYPE elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    PROBABILITY_TYPE logTerm = label ? probability : ONE - probability;
-    LOSS_TYPE elementwiseLoss = -logf(logTerm);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
+    PROBABILITY_TYPE label;
+    PROBABILITY_TYPE probability;
+    PROBABILITY_TYPE elementwiseGradient;
+    PROBABILITY_TYPE logTerm;
+    LOSS_TYPE elementwiseLoss;
+
+    label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
+    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
+        elementwiseGradient = probability;
         if (label)
             elementwiseGradient -= ONE;
-        elementwiseGradient *= gradientScale;
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    logTerm = label ? probability : ONE - probability;
+    elementwiseLoss = -logf(logTerm);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex;
@@ -129,19 +141,19 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         return;
     label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
     probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    if (computeGradient) {
+        elementwiseGradient = probability;
+        if (label)
+            elementwiseGradient -= ONE;
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient) {
-        if (label)
-            elementwiseGradient -= ONE;
-        elementwiseGradient *= gradientScale;
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
-    }
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex;
@@ -149,19 +161,19 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         return;
     label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
     probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    if (computeGradient) {
+        elementwiseGradient = probability;
+        if (label)
+            elementwiseGradient -= ONE;
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient) {
-        if (label)
-            elementwiseGradient -= ONE;
-        elementwiseGradient *= gradientScale;
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
-    }
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex;
@@ -169,19 +181,19 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         return;
     label = ((LABEL_TYPE *)labels)[batchIndex] ? 1.0f : 0.0f;
     probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    if (computeGradient) {
+        elementwiseGradient = probability;
+        if (label)
+            elementwiseGradient -= ONE;
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient) {
-        if (label)
-            elementwiseGradient -= ONE;
-        elementwiseGradient *= gradientScale;
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
-    }
 }
 
 template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
