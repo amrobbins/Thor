@@ -39,7 +39,8 @@ NVCC_DEBUG = -g
 Gpp = g++ -Wall -Werror -fopenmp
 Nvcc = nvcc
 
-RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
+RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
+				build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
 				build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
 				build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
 				build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
@@ -78,9 +79,9 @@ RUN_ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredEr
                 build/test/DeepLearning/Api/Optimizers/SgdTest \
 
 				# FIXME: rebuild and put back
-				#build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 				#build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
 				# Create API categoricalAccuracy test
+				# Create all 3 types of Binary Cross entropy tests
 
 
 
@@ -206,23 +207,19 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Utility/NetworkOutput.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o \
-
-                   # FIXME: rebuild and put back
-                   #build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
-                   #build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
-                   #build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
-                   #build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o \
-                   #build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o \
-                   #build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
+                   build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
+                   build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
+                   build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
+                   build/DeepLearning/Api/ExampleNetworks/SingleLayerFullyConnected.o \
+                   build/DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.o \
+                   build/DeepLearning/Api/ExampleNetworks/InceptionV3.o \
 
 
 
-ALL_DEMOS =
-			# FIXME: put back once CCE updated
-			#build/Demos/AlexNetDemo \
-			#build/Demos/FewLayerFullyConnectedDemo \
-			#build/Demos/SingleLayerFullyConnectedDemo \
-			#build/Demos/SingleLayerConvolution2dDemo
+ALL_DEMOS =	build/Demos/AlexNetDemo \
+			build/Demos/FewLayerFullyConnectedDemo \
+			build/Demos/SingleLayerFullyConnectedDemo \
+			build/Demos/SingleLayerConvolution2dDemo
 
 ML_DEV = libThor.a Thor.h
 

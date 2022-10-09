@@ -73,12 +73,12 @@ Network buildSingleLayerConvolution2d() {
                               .build()
                               .getFeatureOutput();
 
-    CategoricalCrossEntropyLoss lossLayer = CategoricalCrossEntropyLoss::Builder()
-                                                .network(singleLayerConvolution2d)
-                                                .featureInput(latestOutputTensor)
-                                                .labels(labelsTensor)
-                                                .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
-                                                .build();
+    CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
+                                            .network(singleLayerConvolution2d)
+                                            .predictions(latestOutputTensor)
+                                            .labels(labelsTensor)
+                                            .reportsBatchLoss()
+                                            .build();
 
     labelsTensor = lossLayer.getLabels();
 

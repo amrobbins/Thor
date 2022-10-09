@@ -308,8 +308,12 @@ Network buildInceptionV3() {
                               .build()
                               .getFeatureOutput();
 
-    CategoricalCrossEntropyLoss lossLayer =
-        CategoricalCrossEntropyLoss::Builder().network(inceptionV3).featureInput(latestOutputTensor).labels(labelsTensor).build();
+    CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
+                                            .network(inceptionV3)
+                                            .predictions(latestOutputTensor)
+                                            .labels(labelsTensor)
+                                            .reportsBatchLoss()
+                                            .build();
 
     latestOutputTensor = lossLayer.getFeatureInput();
     labelsTensor = lossLayer.getLabels();

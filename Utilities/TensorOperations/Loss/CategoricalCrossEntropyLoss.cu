@@ -12,16 +12,16 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels(
     const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
     LABEL_TYPE label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    LOSS_TYPE elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     PROBABILITY_TYPE elementwiseGradient;
     if (computeGradient) {
         elementwiseGradient = (float)probability - (float)label;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    LOSS_TYPE elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex / numClasses;
@@ -29,15 +29,15 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels(
         return;
     label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
         elementwiseGradient = (float)probability - (float)label;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex / numClasses;
@@ -45,15 +45,15 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels(
         return;
     label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
         elementwiseGradient = (float)probability - (float)label;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex / numClasses;
@@ -61,15 +61,15 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels(
         return;
     label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
         elementwiseGradient = (float)probability - (float)label;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 }
 
 template <typename INDEX_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
@@ -88,20 +88,19 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels(uint32_t
     uint32_t outputClass = elementwiseLossIndex % numClasses;
     LOSS_TYPE elementwiseLoss = 0.0f;
     uint32_t classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
-    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    PROBABILITY_TYPE elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    PROBABILITY_TYPE elementwiseGradient = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-        }
     }
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
     if (computeGradient)
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     uint32_t oldBatchIndex = batchIndex;
@@ -111,21 +110,20 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels(uint32_t
     if (oldBatchIndex != batchIndex)
         classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
     outputClass = elementwiseLossIndex % numClasses;
-    elementwiseLoss = 0.0f;
-    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    elementwiseGradient = 0.0f;
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    elementwiseLoss = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-        }
     }
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
     if (computeGradient)
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     oldBatchIndex = batchIndex;
@@ -135,21 +133,20 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels(uint32_t
     if (oldBatchIndex != batchIndex)
         classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
     outputClass = elementwiseLossIndex % numClasses;
-    elementwiseLoss = 0.0f;
-    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    elementwiseGradient = 0.0f;
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    elementwiseLoss = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-        }
     }
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
     if (computeGradient)
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 
     elementwiseLossIndex += 256;
     oldBatchIndex = batchIndex;
@@ -159,21 +156,19 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels(uint32_t
     if (oldBatchIndex != batchIndex)
         classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
     outputClass = elementwiseLossIndex % numClasses;
-    elementwiseLoss = 0.0f;
-    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    elementwiseGradient = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-        }
     }
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
     if (computeGradient)
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
 }
 
 template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
@@ -192,16 +187,16 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels_withScale(ui
     const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
     LABEL_TYPE label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    LOSS_TYPE elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     PROBABILITY_TYPE elementwiseGradient;
     if (computeGradient) {
         elementwiseGradient = gradientScale * ((float)probability - (float)label);
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    LOSS_TYPE elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex / numClasses;
@@ -209,15 +204,15 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels_withScale(ui
         return;
     label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
         elementwiseGradient = gradientScale * ((float)probability - (float)label);
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex / numClasses;
@@ -226,15 +221,15 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels_withScale(ui
 
     label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
         elementwiseGradient = gradientScale * ((float)probability - (float)label);
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 
     elementwiseLossIndex += 256;
     batchIndex = elementwiseLossIndex / numClasses;
@@ -242,15 +237,15 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels_withScale(ui
         return;
     label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
-        probability = MIN_PROBABILITY;
-    }
-    elementWiseLoss = (float)-label * logf(probability);
-    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
     if (computeGradient) {
         elementwiseGradient = gradientScale * ((float)probability - (float)label);
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
+    if (probability < MIN_PROBABILITY)
+        probability = MIN_PROBABILITY;
+    elementWiseLoss = (float)-label * logf(probability);
+    ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementWiseLoss;
 }
 
 template <typename INDEX_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>
@@ -270,21 +265,21 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels_withScal
     uint32_t outputClass = elementwiseLossIndex % numClasses;
     LOSS_TYPE elementwiseLoss = 0.0f;
     uint32_t classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
-    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    PROBABILITY_TYPE elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    PROBABILITY_TYPE elementwiseGradient = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-            elementwiseLoss *= gradientScale;
-        }
+    }
+    if (computeGradient) {
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient)
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 
     elementwiseLossIndex += 256;
     uint32_t oldBatchIndex = batchIndex;
@@ -296,21 +291,22 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels_withScal
         classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
     outputClass = elementwiseLossIndex % numClasses;
     elementwiseLoss = 0.0f;
-    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    elementwiseGradient = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-            elementwiseLoss *= gradientScale;
-        }
+    }
+    if (computeGradient) {
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient)
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 
     elementwiseLossIndex += 256;
     oldBatchIndex = batchIndex;
@@ -321,21 +317,22 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels_withScal
         classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
     outputClass = elementwiseLossIndex % numClasses;
     elementwiseLoss = 0.0f;
-    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    elementwiseGradient = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-            elementwiseLoss *= gradientScale;
-        }
+    }
+    if (computeGradient) {
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient)
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 
     elementwiseLossIndex += 256;
     oldBatchIndex = batchIndex;
@@ -346,21 +343,22 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels_withScal
         classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
     outputClass = elementwiseLossIndex % numClasses;
     elementwiseLoss = 0.0f;
-    probability = ((PROBABILITY_TYPE *)probabilities)[batchIndex + classOfHotLabel];
-    elementwiseGradient = (float)probability;
-    if (probability < MIN_PROBABILITY || !isfinite((float)probability)) {
+    classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
+    probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
+    probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
+    elementwiseGradient = probability;
+    if (probability < MIN_PROBABILITY)
         probability = MIN_PROBABILITY;
-    }
     if (outputClass == classOfHotLabel) {
         elementwiseLoss = -logf(probability);
-        if (computeGradient) {
+        if (computeGradient)
             elementwiseGradient -= (PROBABILITY_TYPE)1.0f;
-            elementwiseLoss *= gradientScale;
-        }
+    }
+    if (computeGradient) {
+        elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
+        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
-    if (computeGradient)
-        ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
 }
 
 template <typename LABEL_TYPE, typename PROBABILITY_TYPE, typename LOSS_TYPE>

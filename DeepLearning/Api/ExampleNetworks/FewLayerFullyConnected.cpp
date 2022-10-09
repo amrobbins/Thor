@@ -64,12 +64,12 @@ Network buildFewLayerFullyConnected() {
                               .build()
                               .getFeatureOutput();
 
-    CategoricalCrossEntropyLoss lossLayer = CategoricalCrossEntropyLoss::Builder()
-                                                .network(fewLayerFullyConnected)
-                                                .featureInput(latestOutputTensor)
-                                                .labels(labelsTensor)
-                                                .lossType(ThorImplementation::Loss::ConnectionType::BATCH_LOSS)
-                                                .build();
+    CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
+                                            .network(fewLayerFullyConnected)
+                                            .predictions(latestOutputTensor)
+                                            .labels(labelsTensor)
+                                            .reportsBatchLoss()
+                                            .build();
 
     labelsTensor = lossLayer.getLabels();
 
