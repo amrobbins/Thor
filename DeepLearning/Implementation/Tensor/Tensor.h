@@ -13,6 +13,7 @@
 #include <deque>
 #include <mutex>
 #include <set>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -96,6 +97,8 @@ class Tensor : private ReferenceCounted {
     unsigned int getNumDimensions() { return descriptor.getNumDimensions(); }
     unsigned long getTotalNumElements() { return descriptor.getTotalNumElements(); }
     long unsigned getArraySizeInBytes() { return descriptor.getArraySizeInBytes(); }
+
+    std::string dimensionsToString();
 
    private:
     void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);

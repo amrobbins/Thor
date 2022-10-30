@@ -24,6 +24,8 @@ class NetworkOutput : public Layer {
 
         if (featureInput.isPresent())
             featureOutput = createFeatureOutputTensor();
+
+        // No backward error tensor:
         return Optional<Tensor>::empty();
     }
 

@@ -38,9 +38,9 @@ class Loss : public Layer {
         if (connectingTensor == getLabels())
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         else if (connectingTensor == getPredictions())
-            return (int)ThorImplementation::Loss::ConnectionType::PREDICTIONS;
-        else if (connectingTensor == getLoss())
-            return (int)lossType;
+            return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
+        else  // There is only one output to a loss so no need to disambiguate the output
+            return 0;
         assert(false);
     }
 
