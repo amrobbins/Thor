@@ -74,7 +74,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, meanSquaredError, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, meanSquaredError, 0, (int)Loss::ConnectionType::LABELS);
-        LayerTestHelper::connectTwoLayers(meanSquaredError, elementLossOutput, (int)Loss::ConnectionType::LOSS);
+        LayerTestHelper::connectTwoLayers(meanSquaredError, elementLossOutput, 0);
         LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_TRUE(meanSquaredError->getErrorInput().isEmpty());

@@ -188,9 +188,9 @@ class Loss : public Layer {
             assert(false);
     }
 
-    enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS, PREDICTIONS, LOSS };
+    enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS };
 
-    enum class LossType { BATCH = 8374, CLASSWISE, ELEMENTWISE, RAW };
+    enum class LossType { BATCH = (int)ConnectionType::LABELS + 1027, CLASSWISE, ELEMENTWISE, RAW };
 
     static uint32_t getLossScalingFactor() { return lossScalingFactor; }
 

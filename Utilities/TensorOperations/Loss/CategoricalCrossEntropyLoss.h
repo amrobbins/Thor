@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <math.h>
+#include <stdio.h>
 #include <cmath>
 #include <cstdint>
 #include <limits>

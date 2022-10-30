@@ -3,6 +3,7 @@
 #include "Thor.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 atomic<unsigned long> Tensor::nextInstanceId(1);
 
@@ -216,6 +217,12 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     // must have the same number of elements
     TensorDescriptor sourceDescriptor = source.getDescriptor();
     TensorDescriptor destDescriptor = getDescriptor();
+    if (sourceDescriptor.getTotalNumElements() != destDescriptor.getTotalNumElements()) {
+        printf("Error: total number of elements does not match when copying tensors.\n source dimensions %s\n dest dimensions %s\n",
+               source.dimensionsToString().c_str(),
+               dimensionsToString().c_str());
+        fflush(stdout);
+    }
     assert(sourceDescriptor.getTotalNumElements() == destDescriptor.getTotalNumElements());
 
     int sourceDeviceNum = source.placement.getDeviceNum();
@@ -341,4 +348,16 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         assert(source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
                source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     }
+}
+
+string Tensor::dimensionsToString() {
+    string s = "[";
+    vector<uint64_t> dimensions = getDimensions();
+    for (uint32_t i = 0; i < dimensions.size(); ++i) {
+        if (i > 0)
+            s += ", ";
+        s += to_string(dimensions[i]);
+    }
+    s += "]";
+    return s;
 }
