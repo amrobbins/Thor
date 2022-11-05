@@ -26,7 +26,10 @@ void CrossEntropy::compile() {
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
     assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
+    if (crossEntropyLossType == CrossEntropyLossType::BINARY)
+        assert(featureInput.get().getDescriptor().getDimensions().size() == 1);
+    else  // CrossEntropyLossType::CATEGORICAL
+        assert(featureInput.get().getDescriptor().getDimensions().size() == 2);
 
     if (!isInferenceOnly()) {
         assert(errorOutput.isPresent());
