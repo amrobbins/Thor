@@ -41,6 +41,7 @@ Nvcc = nvcc
 
 RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
+				build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
 				build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
 				build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
@@ -88,6 +89,7 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
 
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
+			build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest \
 			build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest \
 			build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/WorkQueue/AsyncQueueTest \
@@ -812,6 +814,10 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/DropOutTest: build/t
 build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest.cpp -O0 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest.cpp -O0 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Metric

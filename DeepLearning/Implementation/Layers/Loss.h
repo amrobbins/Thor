@@ -50,7 +50,7 @@ class Loss : public Layer {
                                                             Stream stream,
                                                             bool backPropagateError) {
         assert(featureInput.isPresent());
-        assert(featureInput.get().getDescriptor().getDimensions().size() >= 2);
+        assert(featureInput.get().getDescriptor().getDimensions().size() >= 1);
         assert(this->featureInput.isEmpty());
 
         if (labelsInput.isPresent()) {

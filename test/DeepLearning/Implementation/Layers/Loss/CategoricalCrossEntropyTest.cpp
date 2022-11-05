@@ -19,7 +19,7 @@ using std::vector;
 
 using namespace ThorImplementation;
 
-TEST(CrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
+TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -204,7 +204,7 @@ TEST(CrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
     }
 }
 
-TEST(CrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels) {
+TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
