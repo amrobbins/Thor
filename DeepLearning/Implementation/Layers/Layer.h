@@ -192,6 +192,12 @@ class Layer {
     // this method is used to avoid duplicating the tensor and unnecessary data movement.
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
         assert(oldErrorInput.isPresent());
+        assert(oldErrorInput.get() == errorInput.get());
+        // If they are fused already they need to remain fused
+        if (errorOutput.isPresent() && errorOutput.get() == errorInput.get()) {
+            previousLayer.get()->replaceErrorInput(errorOutput, newErrorInput);
+            errorOutput = newErrorInput;
+        }
         errorInput = newErrorInput;
     }
 

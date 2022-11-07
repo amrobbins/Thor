@@ -83,8 +83,8 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
 				# FIXME: rebuild and put back
 				# Create API categoricalAccuracy test
 				# Create all 3 types of Binary Cross entropy tests (API, IMPLEMENTATION, TensorOperation)
-				# uncomment SimpleNetworkTest
 				# uncomment NetworkTest
+				# Improve coverage of tensorFanout
 
 
 

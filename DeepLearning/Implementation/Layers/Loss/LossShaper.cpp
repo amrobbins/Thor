@@ -79,15 +79,9 @@ void LossShaper::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTens
             batchReduceStream.waitEvent(stream.putEvent());
 
         TensorDescriptor::DataType lossDataType = inputTensor.get().getDataType();
-        if (lossDataType == TensorDescriptor::DataType::FP16) {
-            batchReduce->reduce((half *)inputTensor.get().getMemPtr(), (half *)outputTensor.get().getMemPtr());
-        } else if (lossDataType == TensorDescriptor::DataType::FP32) {
-            batchReduce->reduce((float *)inputTensor.get().getMemPtr(), (float *)outputTensor.get().getMemPtr());
-        } else if (lossDataType == TensorDescriptor::DataType::FP64) {
-            batchReduce->reduce((double *)inputTensor.get().getMemPtr(), (double *)outputTensor.get().getMemPtr());
-        } else {
-            assert(false);
-        }
+        assert(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32 ||
+               lossDataType == TensorDescriptor::DataType::FP64);
+        batchReduce->reduce(inputTensor.get().getMemPtr(), outputTensor.get().getMemPtr());
 
         if (batchReduceStream != stream)
             stream.waitEvent(batchReduceStream.putEvent());

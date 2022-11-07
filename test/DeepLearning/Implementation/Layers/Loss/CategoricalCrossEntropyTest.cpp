@@ -200,6 +200,16 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
             }
         }
 
+        // Verify the loss gradient passes through the softmax layer unchanged
+        Tensor softmaxErrorOutputFromGpu_h = softmax->getErrorOutput().get().clone(cpuPlacement);
+        softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().get(), stream);
+        stream.synchronize();
+        half *softmaxErrorOutputFromGpu = (half *)softmaxErrorOutputFromGpu_h.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            ASSERT_EQ((float)errorOutputFromGpu[i], (float)softmaxErrorOutputFromGpu[i]);
+            // printf("%f %f\n", (float)errorOutputFromGpu[i], (float)softmaxErrorOutputFromGpu[i]);
+        }
+
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
@@ -353,6 +363,16 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
                 fflush(stdout);
             }
             ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+        }
+
+        // Verify the loss gradient passes through the softmax layer unchanged
+        Tensor softmaxErrorOutputFromGpu_h = softmax->getErrorOutput().get().clone(cpuPlacement);
+        softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().get(), stream);
+        stream.synchronize();
+        half *softmaxErrorOutputFromGpu = (half *)softmaxErrorOutputFromGpu_h.getMemPtr();
+        for (uint32_t i = 0; i < numElements; ++i) {
+            ASSERT_EQ((float)errorOutputFromGpu[i], (float)softmaxErrorOutputFromGpu[i]);
+            // printf("%f %f\n", (float)errorOutputFromGpu[i], (float)softmaxErrorOutputFromGpu[i]);
         }
 
         LayerTestHelper::tearDownNetwork(layers);

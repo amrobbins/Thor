@@ -51,12 +51,10 @@ void createLabeledFeatures(Tensor featureIn, Tensor labelsIn, vector<set<int>> &
     }
 }
 
-int getClassNum(Tensor labels, int batchItem, float &confidence) {
-    int numClasses = labels.getDescriptor().getDimensions()[1];
-
+template <typename LABELS_TYPE>
+int getClassNum(LABELS_TYPE *labelsMem, int numClasses, int batchItem, half &confidence) {
     float maxLabel = -1.0f;
     int label = -1;
-    float *labelsMem = (float *)labels.getMemPtr();
 
     for (int classNum = 0; classNum < numClasses; ++classNum) {
         if (labelsMem[numClasses * batchItem + classNum] > maxLabel) {
@@ -69,9 +67,8 @@ int getClassNum(Tensor labels, int batchItem, float &confidence) {
     return label;
 }
 
-/* FIXME: put back in once CCE updated
 TEST(SimpleFullyConnectedNetwork, Learns) {
-    srand(time(NULL));
+    srand(time(nullptr));
 
     constexpr int NUM_CLASSES = 8;
     constexpr int FEATURES_PER_CLASS = 8;
@@ -84,15 +81,31 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
         Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {BATCH_SIZE, NUM_CLASSES * FEATURES_PER_CLASS}));
     Tensor labelsIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {BATCH_SIZE, NUM_CLASSES}));
 
+    vector<Layer *> layers;
     NetworkInput *featureInput =
         new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions());
+    layers.push_back(featureInput);
     NetworkInput *labelsInput = new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP32, labelsIn.getDescriptor().getDimensions());
+    layers.push_back(labelsInput);
     FullyConnected *fullyConnectedLayer = new FullyConnected(NUM_CLASSES * FEATURES_PER_CLASS, true);
+    layers.push_back(fullyConnectedLayer);
     Relu *relu = new Relu();
+    layers.push_back(relu);
     FullyConnected *logitsLayer = new FullyConnected(NUM_CLASSES, true);
-    CategoricalCrossEntropyLoss *categoricalCrossEntropyLoss = new CategoricalCrossEntropyLoss();
+    layers.push_back(logitsLayer);
+    Softmax *softmax = new Softmax(true);
+    layers.push_back(softmax);
+    // FIXME TensorFanout backward is not propagating the gradient which is the only thing breaking learning
+    TensorFanout *softmaxFanout = new TensorFanout();
+    layers.push_back(softmaxFanout);
+    CrossEntropy *crossEntropy = new CrossEntropy(CrossEntropyLossType::CATEGORICAL, false);
+    layers.push_back(crossEntropy);
+    LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::BATCH);
+    layers.push_back(lossShaper);
     NetworkOutput *predictionsOutput = new NetworkOutput(cpuPlacement);
+    layers.push_back(predictionsOutput);
     NetworkOutput *lossOutput = new NetworkOutput(cpuPlacement);
+    layers.push_back(lossOutput);
 
     Stream stream = featureInput->getStream();
     Stream labelsStream = labelsInput->getStream();
@@ -100,20 +113,13 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     LayerTestHelper::connectTwoLayers(featureInput, fullyConnectedLayer);
     LayerTestHelper::connectTwoLayers(fullyConnectedLayer, relu);
     LayerTestHelper::connectTwoLayers(relu, logitsLayer);
-    LayerTestHelper::connectTwoLayers(logitsLayer, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
-    LayerTestHelper::connectTwoLayers(labelsInput, categoricalCrossEntropyLoss, 0, (int)Loss::ConnectionType::LABELS);
-    LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, predictionsOutput, (int)Loss::ConnectionType::PREDICTIONS);
-    LayerTestHelper::connectTwoLayers(categoricalCrossEntropyLoss, lossOutput, (int)Loss::ConnectionType::BATCH_LOSS);
-
-    vector<Layer *> layers;
-    layers.push_back(featureInput);
-    layers.push_back(labelsInput);
-    layers.push_back(fullyConnectedLayer);
-    layers.push_back(relu);
-    layers.push_back(logitsLayer);
-    layers.push_back(categoricalCrossEntropyLoss);
-    layers.push_back(predictionsOutput);
-    layers.push_back(lossOutput);
+    LayerTestHelper::connectTwoLayers(logitsLayer, softmax);
+    LayerTestHelper::connectTwoLayers(softmax, softmaxFanout);
+    LayerTestHelper::connectTwoLayers(softmaxFanout, predictionsOutput);
+    LayerTestHelper::connectTwoLayers(softmaxFanout, crossEntropy, 0, (int)Loss::ConnectionType::FORWARD_BACKWARD);
+    LayerTestHelper::connectTwoLayers(labelsInput, crossEntropy, 0, (int)Loss::ConnectionType::LABELS);
+    LayerTestHelper::connectTwoLayers(crossEntropy, lossShaper);
+    LayerTestHelper::connectTwoLayers(lossShaper, lossOutput);
 
     LayerTestHelper::initializeNetwork(layers);
 
@@ -165,16 +171,15 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
             lossOutput->getOutputReadyEvent().synchronize();
             Tensor loss = lossOutput->getFeatureOutput();
 
-            printf("batch %d,  batch loss %f\n", i, ((float *)loss.getMemPtr())[0]);
-            for (int i = 0; i < 10; ++i) {
-                int label;
-                float confidence;
-                label = getClassNum(predictions, i, confidence);
-                float unused;
-                printf("actual class %d    predicted class %d  confidence %d%%\n",
-                       getClassNum(labelsIn, i, unused),
-                       label,
-                       (int)(confidence * 100));
+            printf("batch %d,  batch loss %f\n", i, (float)((half *)loss.getMemPtr())[0]);
+            for (int j = 0; j < 10; ++j) {
+                int predictedClass;
+                half confidence;
+                predictedClass = getClassNum((half *)predictions.getMemPtr(), NUM_CLASSES, j, confidence);
+                int trueClass;
+                half labelValue;
+                trueClass = getClassNum((float *)labelsIn.getMemPtr(), NUM_CLASSES, j, labelValue);
+                printf("actual class %d    predicted class %d  confidence %d%%\n", trueClass, predictedClass, (int)(confidence * 100));
             }
         }
 
@@ -187,11 +192,10 @@ TEST(SimpleFullyConnectedNetwork, Learns) {
     lossOutput->getOutputReadyEvent().synchronize();
     Tensor loss = lossOutput->getFeatureOutput();
 
-    ASSERT_LT(((float *)loss.getMemPtr())[0], 10.0f);
+    ASSERT_LT(((half *)loss.getMemPtr())[0], 0.25f);
 
     LayerTestHelper::tearDownNetwork(layers);
 }
-*/
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

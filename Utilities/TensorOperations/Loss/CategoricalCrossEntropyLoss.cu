@@ -9,7 +9,7 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels(
     uint32_t batchIndex = elementwiseLossIndex / numClasses;
     if (batchIndex >= batchSize)
         return;
-    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
     LABEL_TYPE label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
     probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
@@ -84,7 +84,7 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels(uint32_t
     uint32_t batchIndex = elementwiseLossIndex / numClasses;
     if (batchIndex >= batchSize)
         return;
-    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
     uint32_t outputClass = elementwiseLossIndex % numClasses;
     LOSS_TYPE elementwiseLoss = 0.0f;
     uint32_t classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
@@ -184,7 +184,7 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_oneHotLabels_withScale(ui
     uint32_t batchIndex = elementwiseLossIndex / numClasses;
     if (batchIndex >= batchSize)
         return;
-    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
     LABEL_TYPE label = ((LABEL_TYPE *)labels)[elementwiseLossIndex];
     PROBABILITY_TYPE probability = ((PROBABILITY_TYPE *)probabilities)[elementwiseLossIndex];
     probability = !isfinite((float)probability) || isnan((float)probability) ? 0.0f : (float)probability;
@@ -261,7 +261,7 @@ __global__ void elementWiseCategoricalCrossEntropyLoss_classIndexLabels_withScal
     uint32_t batchIndex = elementwiseLossIndex / numClasses;
     if (batchIndex >= batchSize)
         return;
-    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
     uint32_t outputClass = elementwiseLossIndex % numClasses;
     LOSS_TYPE elementwiseLoss = 0.0f;
     uint32_t classOfHotLabel = ((INDEX_TYPE *)classOfHotLabels)[batchIndex];
