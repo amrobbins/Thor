@@ -21,7 +21,7 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
         return;
 
     const PROBABILITY_TYPE ONE = 1.0f;
-    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
 
     PROBABILITY_TYPE label;
     PROBABILITY_TYPE probability;
@@ -111,7 +111,7 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         return;
 
     const PROBABILITY_TYPE ONE = 1.0f;
-    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 0.000000000000000000000000000000000001f;
+    const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
 
     PROBABILITY_TYPE label;
     PROBABILITY_TYPE probability;

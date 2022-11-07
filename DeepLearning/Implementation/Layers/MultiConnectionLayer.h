@@ -31,6 +31,11 @@ class MultiConnectionLayer : public Layer {
         assert(oldErrorInput.isPresent());
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
             if (errorInputs[i].isPresent() && errorInputs[i].get() == oldErrorInput.get()) {
+                // If they were fused they need to remain fused
+                if (errorOutputs[i].isPresent() && errorOutputs[i].get() == errorInputs[i].get()) {
+                    previousLayers[i].get()->replaceErrorInput(errorOutputs[i], newErrorInput);
+                    errorOutputs[i] = newErrorInput;
+                }
                 errorInputs[i] = newErrorInput;
                 return;
             }
