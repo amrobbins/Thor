@@ -12,7 +12,7 @@ using namespace ThorImplementation;
 const float MIN_PROBABILITY_FLOAT = 0.000000000000000000000000000000000001f;
 const half MIN_PROBABILITY_HALF = 0.000062f;
 
-TEST(CrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels) {
+TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels) {
     srand(time(NULL));
 
     float labels[4096];
@@ -152,7 +152,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels) {
     assert(cudaStatus == cudaSuccess);
 }
 
-TEST(CrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_halfPrecision) {
+TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_halfPrecision) {
     srand(time(NULL));
 
     half labels[4096];
@@ -296,7 +296,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_halfPrecisi
     assert(cudaStatus == cudaSuccess);
 }
 
-TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
+TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
     srand(time(NULL));
 
     uint32_t labels[4096];
@@ -444,7 +444,7 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels) {
     assert(cudaStatus == cudaSuccess);
 }
 
-TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPrecision) {
+TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPrecision) {
     srand(time(NULL));
 
     uint16_t labels[4096];
@@ -582,6 +582,246 @@ TEST(CrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPrecision) {
                 }
                 ASSERT_LT(diff, thresh);
             }
+        }
+    }
+
+    cudaStatus = cudaFree(labels_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(probabilities_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(workspace_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(loss_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(gradient_d);
+    assert(cudaStatus == cudaSuccess);
+}
+
+TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer) {
+    srand(time(NULL));
+
+    float labels[4096];
+    float probabilities[4096];
+    float loss[4096];
+    float loss_cpu[4096];
+    float gradient[4096];
+    float gradient_cpu[4096];
+
+    cudaError_t cudaStatus;
+
+    float *labels_d;
+    float *probabilities_d;
+    float *workspace_d;
+    float *loss_d;
+    float *gradient_d;
+
+    Stream stream(0);
+
+    cudaStatus = cudaMalloc(&labels_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&probabilities_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&workspace_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&loss_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&gradient_d, 4096 * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+
+    for (uint32_t t = 0; t < 10; ++t) {
+        uint32_t batchSize = (rand() % 8) + 1;
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            labels[b] = rand() % 2;
+            if (rand() % 50 == 0) {
+                uint32_t sel = rand() % 5;
+                if (sel == 0)
+                    probabilities[b] = 0.0f;
+                else if (sel == 1)
+                    probabilities[b] = -0.0f;
+                else if (sel == 2)
+                    probabilities[b] = NAN;
+                else if (sel == 3)
+                    probabilities[b] = std::numeric_limits<float>::infinity();
+                else if (sel == 4)
+                    probabilities[b] = -std::numeric_limits<float>::infinity();
+            } else {
+                probabilities[b] = (rand() % 10000) / 9999.0f;
+            }
+        }
+
+        cudaStatus = cudaMemcpyAsync(labels_d, labels, batchSize * sizeof(uint32_t), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(probabilities_d, probabilities, batchSize * sizeof(float), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        uint32_t lossScalingFactor = 1 + rand() % 4;
+        launchElementWiseCrossEntropyLoss<uint32_t, float, float>(labels_d,
+                                                                  probabilities_d,
+                                                                  loss_d,
+                                                                  gradient_d,
+                                                                  100,  // ignored
+                                                                  batchSize,
+                                                                  true,
+                                                                  lossScalingFactor,
+                                                                  CrossEntropyLossType::BINARY,
+                                                                  true,
+                                                                  stream);
+
+        cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(gradient, gradient_d, batchSize * sizeof(float), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            float probability = probabilities[b];
+            float rawProbability = (!isfinite(probability) || isnan(probability)) ? 0.0f : probability;
+            if (probability < MIN_PROBABILITY_FLOAT || (!isfinite(probability) || isnan(probability)))
+                probability = MIN_PROBABILITY_FLOAT;
+            loss_cpu[b] = -(labels[b] * logf(probability) + (1.0f - labels[b]) * (logf(1.0f - probability)));
+            gradient_cpu[b] = (rawProbability - labels[b]) * lossScalingFactor;
+            // printf("batch %d label %f prob %f loss %f gradient %f lossScalingFactor %d\n", b, labels[b], probability, loss_cpu[b],
+            // gradient_cpu[b], lossScalingFactor);
+        }
+
+        cudaStatus = cudaStreamSynchronize(stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        float thresh = 0.01;
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            float diff = abs(loss[b] - loss_cpu[b]);
+            if (diff >= thresh || !isfinite(diff)) {
+                printf("loss batchItem %d, %f %f\n", b, loss_cpu[b], loss[b]);
+            }
+            ASSERT_LT(diff, thresh);
+        }
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            float diff = abs(gradient[b] - gradient_cpu[b]);
+            if (diff >= thresh || !isfinite(diff)) {
+                printf("gradient batchItem %d, %f %f\n", b, gradient_cpu[b], gradient[b]);
+            }
+            ASSERT_LT(diff, thresh);
+        }
+    }
+
+    cudaStatus = cudaFree(labels_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(probabilities_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(workspace_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(loss_d);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(gradient_d);
+    assert(cudaStatus == cudaSuccess);
+}
+
+TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer_halfPrecision) {
+    srand(time(NULL));
+
+    half labels[4096];
+    half probabilities[4096];
+    half loss[4096];
+    half loss_cpu[4096];
+    half gradient[4096];
+    half gradient_cpu[4096];
+
+    cudaError_t cudaStatus;
+
+    half *labels_d;
+    half *probabilities_d;
+    half *workspace_d;
+    half *loss_d;
+    half *gradient_d;
+
+    Stream stream(0);
+
+    cudaStatus = cudaMalloc(&labels_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&probabilities_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&workspace_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&loss_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&gradient_d, 4096 * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+
+    for (uint32_t t = 0; t < 10; ++t) {
+        uint32_t batchSize = (rand() % 8) + 1;
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            labels[b] = (half)(float)(rand() % 2);
+            if (rand() % 50 == 0) {
+                uint32_t sel = rand() % 5;
+                if (sel == 0)
+                    probabilities[b] = 0.0f;
+                else if (sel == 1)
+                    probabilities[b] = -0.0f;
+                else if (sel == 2)
+                    probabilities[b] = NAN;
+                else if (sel == 3)
+                    probabilities[b] = std::numeric_limits<float>::infinity();
+                else if (sel == 4)
+                    probabilities[b] = -std::numeric_limits<float>::infinity();
+            } else {
+                probabilities[b] = (rand() % 10000) / 9999.0f;
+            }
+        }
+
+        cudaStatus = cudaMemcpyAsync(labels_d, labels, batchSize * sizeof(uint32_t), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(probabilities_d, probabilities, batchSize * sizeof(half), cudaMemcpyHostToDevice, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        uint32_t lossScalingFactor = 1 + rand() % 4;
+        launchElementWiseCrossEntropyLoss<half, half, half>(labels_d,
+                                                            probabilities_d,
+                                                            loss_d,
+                                                            gradient_d,
+                                                            100,  // ignored
+                                                            batchSize,
+                                                            true,
+                                                            lossScalingFactor,
+                                                            CrossEntropyLossType::BINARY,
+                                                            true,
+                                                            stream);
+
+        cudaStatus = cudaMemcpyAsync(loss, loss_d, batchSize * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+        cudaStatus = cudaMemcpyAsync(gradient, gradient_d, batchSize * sizeof(half), cudaMemcpyDeviceToHost, stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            half probability = probabilities[b];
+            half rawProbability = (!isfinite(probability) || isnan(probability)) ? (half)0.0f : probability;
+            if (probability < MIN_PROBABILITY_HALF || (!isfinite(probability) || isnan(probability)))
+                probability = MIN_PROBABILITY_HALF;
+            loss_cpu[b] = -(labels[b] * logf(probability) + (1.0f - labels[b]) * (logf(1.0f - probability)));
+            gradient_cpu[b] = (rawProbability - labels[b]) * lossScalingFactor;
+            // printf("batch %d label %f prob %f loss %f gradient %f lossScalingFactor %d\n", b, (float)labels[b], (float)probability,
+            // (float)loss_cpu[b], (float)gradient_cpu[b], lossScalingFactor);
+        }
+
+        cudaStatus = cudaStreamSynchronize(stream.getStream());
+        assert(cudaStatus == cudaSuccess);
+
+        float thresh = 0.01;
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            float diff = abs(loss[b] - loss_cpu[b]);
+            if (diff >= thresh || !isfinite(diff)) {
+                printf("loss batchItem %d, %f %f\n", b, (float)loss_cpu[b], (float)loss[b]);
+            }
+            ASSERT_LT(diff, thresh);
+        }
+
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            float diff = abs(gradient[b] - gradient_cpu[b]);
+            if (diff >= thresh || !isfinite(diff)) {
+                printf("gradient batchItem %d, %f %f\n", b, (float)gradient_cpu[b], (float)gradient[b]);
+            }
+            ASSERT_LT(diff, thresh);
         }
     }
 
