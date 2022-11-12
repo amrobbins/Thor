@@ -67,7 +67,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         layers.push_back(noOpLayer);
         NetworkInput *labelsInput = new NetworkInput(labelsGpu);
         layers.push_back(labelsInput);
-        Sigmoid *sigmoid = new Sigmoid();
+        Sigmoid *sigmoid = new Sigmoid(true);
         layers.push_back(sigmoid);
         CrossEntropy *crossEntropy = new CrossEntropy(CrossEntropyLossType::BINARY, false);
         if (inferenceOnly)
@@ -111,7 +111,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         Tensor errorOutputCpu;
         Tensor errorOutputGpu_h;
         if (!inferenceOnly) {
-            errorOutputGpu = crossEntropy->getErrorOutput();
+            errorOutputGpu = sigmoid->getErrorOutput();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
             errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);

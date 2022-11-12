@@ -18,9 +18,9 @@ class CategoricalCrossEntropy : public Loss {
     virtual ~CategoricalCrossEntropy() {}
 
     virtual bool isMultiLayer() const {
-        if (lossType == ThorImplementation::Loss::LossType::RAW)
-            return false;
-        return true;
+        if (lossType != ThorImplementation::Loss::LossType::RAW || !softmaxStamped)
+            return true;
+        return false;
     }
 
     virtual void convertToSingleLayersAndAddToNetwork();
@@ -49,17 +49,9 @@ class CategoricalCrossEntropy : public Loss {
         return crossEntropy;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
-        uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-
-        uint64_t lossWorkspaceBytes = predictionsTensor.getTotalNumElements() * 4;
-        uint64_t inverseSumOfExponentials = 4;  // 1 per batch item, FP32
-
-        return standardLossBytes + batchSize * (lossWorkspaceBytes + inverseSumOfExponentials);
-    }
-
     Network *network;
     LabelType labelType;
+    bool softmaxStamped;
 };
 
 class CategoricalCrossEntropy::Builder {
@@ -74,6 +66,9 @@ class CategoricalCrossEntropy::Builder {
         assert(_labelType == LabelType::INDEX || _labelType == LabelType::ONE_HOT);
         if (_labelType == LabelType::ONE_HOT) {
             assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
+            vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+            assert(labelDimensions.size() == 2);
+            assert(labelDimensions[1] > 1);
         } else {
             vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
@@ -89,6 +84,12 @@ class CategoricalCrossEntropy::Builder {
         }
 
         CategoricalCrossEntropy categoricalCrossEntropy;
+        if (_softmaxStamped.isPresent()) {
+            assert(_softmaxStamped.get() == true);
+            categoricalCrossEntropy.softmaxStamped = true;
+        } else {
+            categoricalCrossEntropy.softmaxStamped = false;
+        }
         categoricalCrossEntropy.predictionsTensor = _predictions;
         categoricalCrossEntropy.labelsTensor = _labels;
         categoricalCrossEntropy.predictionsTensor = _predictions;
@@ -104,8 +105,8 @@ class CategoricalCrossEntropy::Builder {
             categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
         } else if (_lossType == LossType::CLASSWISE) {
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::CLASSWISE;
-            uint32_t batchSize = _predictions.get().getDimensions()[0];
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {batchSize});
+            uint32_t numClasses = _predictions.get().getDimensions()[1];
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {numClasses});
         } else if (_lossType == LossType::ELEMENTWISE) {
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
             uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -209,6 +210,18 @@ class CategoricalCrossEntropy::Builder {
         return *this;
     }
 
+   protected:
+    /**
+     * CategoricalCrossEntropy is a softmax activation followed by a cross entropy loss.
+     * When the layer is stamped an external softmax will also be stamped and this will be recorded so that next attempt to stamp will
+     * result in a single layer that can be stamped.
+     */
+    virtual CategoricalCrossEntropy::Builder &softmaxStamped() {
+        assert(!_softmaxStamped.isPresent());
+        _softmaxStamped = true;
+        return *this;
+    }
+
    private:
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
@@ -216,6 +229,9 @@ class CategoricalCrossEntropy::Builder {
     Optional<LabelType> _labelType;
     Optional<LossType> _lossType;
     Optional<Tensor::DataType> _lossDataType;
+    Optional<bool> _softmaxStamped;
+
+    friend class CategoricalCrossEntropy;
 };
 
 }  // namespace Thor

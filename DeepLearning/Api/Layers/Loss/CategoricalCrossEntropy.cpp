@@ -3,12 +3,21 @@
 using namespace Thor;
 
 void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
-    Tensor currentPredictionsTensor = predictionsTensor;
+    Tensor currentFeatureInput = predictionsTensor;
+
+    assert(!softmaxStamped);
+    Softmax::Builder softmaxBuilder = Softmax::Builder();
+    softmaxBuilder.network(*network);
+    softmaxBuilder.featureInput(currentFeatureInput);
+    softmaxBuilder.backwardComputedExternally();
+    shared_ptr<Layer> softmax = softmaxBuilder.build();
+    currentFeatureInput = softmax->getFeatureOutput();
 
     CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
                                                                           .network(*network)
-                                                                          .predictions(currentPredictionsTensor)
+                                                                          .predictions(currentFeatureInput)
                                                                           .labels(labelsTensor)
+                                                                          .softmaxStamped()
                                                                           .reportsRawLoss()
                                                                           .lossDataType(lossTensor.getDataType());
     if (labelType == LabelType::INDEX) {
@@ -18,17 +27,16 @@ void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
         categoricalCrossEntropyBuilder.receivesOneHotLabels();
     }
     CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
-    currentPredictionsTensor = crossEntropy.getLoss();
+    currentFeatureInput = crossEntropy.getLoss();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentPredictionsTensor).reportsBatchLoss().build();
+        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else if (lossType == ThorImplementation::Loss::LossType::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentPredictionsTensor).reportsClasswiseLoss().build();
+        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsClasswiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else if (lossType == ThorImplementation::Loss::LossType::ELEMENTWISE) {
-        LossShaper lossShaper =
-            LossShaper::Builder().network(*network).lossInput(currentPredictionsTensor).reportsElementwiseLoss().build();
+        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsElementwiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else {
         // No loss shaper needed in this case

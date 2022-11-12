@@ -125,6 +125,8 @@ class LossShaper::Builder {
         assert(!this->_lossInput.isPresent());
         assert(!_lossInput.getDimensions().empty());
         this->_lossInput = _lossInput;
+        if (_lossInput.getDimensions().size() == 1)
+            this->_lossInput.get().reshape({_lossInput.getDimensions()[0], 1});
         return *this;
     }
 

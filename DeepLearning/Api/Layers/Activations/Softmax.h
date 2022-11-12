@@ -5,6 +5,8 @@
 
 namespace Thor {
 
+class CategoricalCrossEntropy;
+
 class Softmax : public Activation {
    public:
     class Builder;
@@ -25,7 +27,7 @@ class Softmax : public Activation {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::Softmax *softmax = new ThorImplementation::Softmax();
+        ThorImplementation::Softmax *softmax = new ThorImplementation::Softmax(backwardComputedExternally);
         Thor::Layer::connectTwoLayers(drivingLayer, softmax, drivingApiLayer, this, connectingApiTensor);
         return softmax;
     }
@@ -34,6 +36,8 @@ class Softmax : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    bool backwardComputedExternally;
 };
 
 class Softmax::Builder : public Activation::Builder {
@@ -45,6 +49,10 @@ class Softmax::Builder : public Activation::Builder {
         Softmax softmax;
         softmax.featureInput = _featureInput;
         softmax.featureOutput = _featureInput.get().clone();
+        if (_backwardComputedExternally.isPresent() && _backwardComputedExternally.get() == true)
+            softmax.backwardComputedExternally = true;
+        else
+            softmax.backwardComputedExternally = false;
         softmax.initialized = true;
         softmax.addToNetwork(_network.get());
         return softmax.clone();
@@ -63,9 +71,18 @@ class Softmax::Builder : public Activation::Builder {
 
     virtual shared_ptr<Activation::Builder> clone() { return make_shared<Softmax::Builder>(*this); }
 
+   protected:
+    void backwardComputedExternally() {
+        assert(!_backwardComputedExternally.isPresent());
+        _backwardComputedExternally = true;
+    }
+
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
+    Optional<bool> _backwardComputedExternally;
+
+    friend class Thor::CategoricalCrossEntropy;
 };
 
 }  // namespace Thor
