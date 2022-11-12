@@ -5,6 +5,8 @@
 
 namespace Thor {
 
+class BinaryCrossEntropy;
+
 class Sigmoid : public Activation {
    public:
     class Builder;
@@ -25,7 +27,7 @@ class Sigmoid : public Activation {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::Sigmoid *sigmoid = new ThorImplementation::Sigmoid();
+        ThorImplementation::Sigmoid *sigmoid = new ThorImplementation::Sigmoid(backwardComputedExternally);
         Thor::Layer::connectTwoLayers(drivingLayer, sigmoid, drivingApiLayer, this, connectingApiTensor);
         return sigmoid;
     }
@@ -34,6 +36,8 @@ class Sigmoid : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    bool backwardComputedExternally;
 };
 
 class Sigmoid::Builder : public Activation::Builder {
@@ -45,6 +49,10 @@ class Sigmoid::Builder : public Activation::Builder {
         Sigmoid sigmoid;
         sigmoid.featureInput = _featureInput;
         sigmoid.featureOutput = _featureInput.get().clone();
+        if (_backwardComputedExternally.isPresent() && _backwardComputedExternally.get() == true)
+            sigmoid.backwardComputedExternally = true;
+        else
+            sigmoid.backwardComputedExternally = false;
         sigmoid.initialized = true;
         sigmoid.addToNetwork(_network.get());
         return sigmoid.clone();
@@ -59,9 +67,18 @@ class Sigmoid::Builder : public Activation::Builder {
 
     virtual shared_ptr<Activation::Builder> clone() { return make_shared<Sigmoid::Builder>(*this); }
 
+   protected:
+    void backwardComputedExternally() {
+        assert(!_backwardComputedExternally.isPresent());
+        _backwardComputedExternally = true;
+    }
+
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
+    Optional<bool> _backwardComputedExternally;
+
+    friend class BinaryCrossEntropy;
 };
 
 }  // namespace Thor

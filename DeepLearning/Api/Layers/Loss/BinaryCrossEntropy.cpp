@@ -3,22 +3,22 @@
 using namespace Thor;
 
 void BinaryCrossEntropy::convertToSingleLayersAndAddToNetwork() {
-    Tensor currentFeatureInput = featureInput;
+    Tensor currentFeatureInput = predictionsTensor;
 
-    if (!softmaxRemoved) {
-        Softmax::Builder softmaxBuilder = Softmax::Builder();
-        softmaxBuilder.network(*network);
-        softmaxBuilder.featureInput(currentFeatureInput);
-        shared_ptr<Layer> softmax = softmaxBuilder.build();
-        currentFeatureInput = softmax->getFeatureOutput();
-    }
+    assert(!sigmoidStamped);
+    Sigmoid::Builder sigmoidBuilder = Sigmoid::Builder();
+    sigmoidBuilder.network(*network);
+    sigmoidBuilder.featureInput(currentFeatureInput);
+    sigmoidBuilder.backwardComputedExternally();
+    shared_ptr<Layer> sigmoid = sigmoidBuilder.build();
+    currentFeatureInput = sigmoid->getFeatureOutput();
 
     BinaryCrossEntropy::Builder binaryCrossEntropyBuilder = BinaryCrossEntropy::Builder()
                                                                 .network(*network)
                                                                 .predictions(currentFeatureInput)
                                                                 .labels(labelsTensor)
-                                                                .removeSoftmax()
-                                                                .reportsElementwiseLoss();
+                                                                .sigmoidStamped()
+                                                                .reportsRawLoss();
     BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
     currentFeatureInput = crossEntropy.getFeatureOutput();
 

@@ -1,10 +1,10 @@
 #pragma once
 
-#include "DeepLearning/Api/Layers/Activations/Softmax.h"
+#include "DeepLearning/Api/Layers/Activations/Sigmoid.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 
-#include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
+#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
 
@@ -18,9 +18,9 @@ class BinaryCrossEntropy : public Loss {
     virtual ~BinaryCrossEntropy() {}
 
     virtual bool isMultiLayer() const {
-        if (lossType == ThorImplementation::Loss::LossType::RAW && softmaxRemoved)
-            return false;
-        return true;
+        if (lossType != ThorImplementation::Loss::LossType::RAW || !sigmoidStamped)
+            return true;
+        return false;
     }
 
     virtual void convertToSingleLayersAndAddToNetwork();
@@ -47,47 +47,50 @@ class BinaryCrossEntropy : public Loss {
         return crossEntropy;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
-        uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-
-        uint64_t lossWorkspaceBytes = featureInput.get().getTotalNumElements() * 4;
-        uint64_t inverseSumOfExponentials = 4;  // 1 per batch item, FP32
-
-        return standardLossBytes + batchSize * (lossWorkspaceBytes + inverseSumOfExponentials);
-    }
-
     Network *network;
-    bool softmaxRemoved;
+    bool sigmoidStamped;
 };
 
 class BinaryCrossEntropy::Builder {
    public:
     virtual BinaryCrossEntropy build() {
         assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+        assert(_predictions.isPresent());
         assert(_labels.isPresent());
-        assert(_featureInput.get() != _labels.get());
+        assert(_predictions.get() != _labels.get());
         assert(_lossType.isPresent());
 
+        vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+        assert(labelDimensions.size() == 1);
+        assert(labelDimensions[0] == _predictions.get().getDimensions()[0]);
+
         BinaryCrossEntropy binaryCrossEntropy;
-        if (_softmaxRemoved.isPresent() && _softmaxRemoved.get() == true)
-            binaryCrossEntropy.softmaxRemoved = true;
-        else
-            binaryCrossEntropy.softmaxRemoved = false;
-        binaryCrossEntropy.featureInput = _featureInput;
+        if (_sigmoidStamped.isPresent()) {
+            assert(_sigmoidStamped.get() == true);
+            binaryCrossEntropy.sigmoidStamped = true;
+        } else {
+            binaryCrossEntropy.sigmoidStamped = false;
+        }
+        binaryCrossEntropy.predictionsTensor = _predictions;
         binaryCrossEntropy.labelsTensor = _labels;
-        binaryCrossEntropy.predictionsTensor = _featureInput.get().clone(Tensor::DataType::FP32);
+        binaryCrossEntropy.predictionsTensor = _predictions.get().clone(Tensor::DataType::FP32);
         if (_lossType == LossType::BATCH) {
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
             binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, {1});
         } else if (_lossType == LossType::CLASSWISE) {
+            // FIXME: For this and CCE index labels, I will need to do something special
+            // One solution is to convert whatever the user sends to CCE one hot labels, think I should do that.
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::CLASSWISE;
-            uint32_t batchSize = _featureInput.get().getDimensions()[0];
+            uint32_t numClasses = 2;
+            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, {numClasses});
+        } else if (_lossType == LossType::ELEMENTWISE) {
+            binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
+            uint32_t batchSize = _predictions.get().getDimensions()[0];
             binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, {batchSize});
         } else {
             assert(_lossType == LossType::RAW);
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::RAW;
-            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, _featureInput.get().getDimensions());
+            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, _predictions.get().getDimensions());
         }
         binaryCrossEntropy.initialized = true;
         binaryCrossEntropy.network = _network;
@@ -101,10 +104,10 @@ class BinaryCrossEntropy::Builder {
         return *this;
     }
 
-    virtual BinaryCrossEntropy::Builder &predictions(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        assert(!_featureInput.getDimensions().empty());
-        this->_featureInput = _featureInput;
+    virtual BinaryCrossEntropy::Builder &predictions(Tensor _predictions) {
+        assert(!this->_predictions.isPresent());
+        assert(!_predictions.getDimensions().empty());
+        this->_predictions = _predictions;
         return *this;
     }
 
@@ -116,32 +119,12 @@ class BinaryCrossEntropy::Builder {
     }
 
     /**
-     * BinaryCrossEntropy is a softmax activation followed by a cross entropy loss.
-     * If for whatever reason the softmax is not wanted it can be removed so only the cross entropy loss function will be applied.
-     */
-    virtual BinaryCrossEntropy::Builder &removeSoftmax() {
-        assert(!_softmaxRemoved.isPresent());
-        _softmaxRemoved = true;
-        return *this;
-    }
-
-    /**
      * Reports loss to the user as a single scalar that represents the total loss of the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsBatchLoss() {
         assert(!_lossType.isPresent());
         _lossType = LossType::BATCH;
-        return *this;
-    }
-
-    /**
-     * Reports loss to the user as a scalar per class that indicates the loss attributed to that class across the batch.
-     * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
-     */
-    virtual BinaryCrossEntropy::Builder &reportsClasswiseLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossType::CLASSWISE;
         return *this;
     }
 
@@ -164,12 +147,26 @@ class BinaryCrossEntropy::Builder {
         return *this;
     }
 
+   protected:
+    /**
+     * BinaryCrossEntropy is a sigmoid activation followed by a cross entropy loss.
+     * When the layer is stamped an external sigmoid will also be stamped and this will be recorded so that next attempt to stamp will
+     * result in a single layer that can be stamped.
+     */
+    virtual BinaryCrossEntropy::Builder &sigmoidStamped() {
+        assert(!_sigmoidStamped.isPresent());
+        _sigmoidStamped = true;
+        return *this;
+    }
+
    private:
     Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
+    Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
     Optional<LossType> _lossType;
-    Optional<bool> _softmaxRemoved;
+    Optional<bool> _sigmoidStamped;
+
+    friend class BinaryCrossEntropy;
 };
 
 }  // namespace Thor
