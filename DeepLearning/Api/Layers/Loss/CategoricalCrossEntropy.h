@@ -90,9 +90,8 @@ class CategoricalCrossEntropy::Builder {
         } else {
             categoricalCrossEntropy.softmaxStamped = false;
         }
-        categoricalCrossEntropy.predictionsTensor = _predictions;
-        categoricalCrossEntropy.labelsTensor = _labels;
-        categoricalCrossEntropy.predictionsTensor = _predictions;
+        categoricalCrossEntropy.predictionsTensor = _predictions.get().clone();
+        categoricalCrossEntropy.labelsTensor = _labels.get().clone();
         if (_lossDataType.isEmpty()) {
             _lossDataType = Tensor::DataType::FP32;
         } else {
@@ -184,6 +183,7 @@ class CategoricalCrossEntropy::Builder {
 
     virtual CategoricalCrossEntropy::Builder &lossDataType(Tensor::DataType _lossDataType) {
         assert(this->_lossDataType.isEmpty());
+        assert(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
         this->_lossDataType = _lossDataType;
         return *this;
     }

@@ -18,7 +18,7 @@ class BinaryCrossEntropy : public Loss {
     virtual ~BinaryCrossEntropy() {}
 
     virtual bool isMultiLayer() const {
-        if (lossType != ThorImplementation::Loss::LossType::RAW || !sigmoidStamped)
+        if (lossType != ThorImplementation::Loss::LossType::ELEMENTWISE || !sigmoidStamped)
             return true;
         return false;
     }
@@ -30,7 +30,9 @@ class BinaryCrossEntropy : public Loss {
     virtual string getLayerType() const { return "BinaryCrossEntropy"; }
 
    private:
-    enum class LossType { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
+    // Binary cross entropy only supports batch and elementwise loss.
+    // For classwise loss or raw loss use CategoricalCrossEntropy with 2 classes instead of BinaryCrossEntropy
+    enum class LossType { BATCH = 9, ELEMENTWISE };
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -71,26 +73,20 @@ class BinaryCrossEntropy::Builder {
         } else {
             binaryCrossEntropy.sigmoidStamped = false;
         }
-        binaryCrossEntropy.predictionsTensor = _predictions;
-        binaryCrossEntropy.labelsTensor = _labels;
-        binaryCrossEntropy.predictionsTensor = _predictions.get().clone(Tensor::DataType::FP32);
+        binaryCrossEntropy.predictionsTensor = _predictions.get().clone();
+        binaryCrossEntropy.labelsTensor = _labels.get().clone();
+        if (_lossDataType.isEmpty()) {
+            _lossDataType = Tensor::DataType::FP32;
+        } else {
+            assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
+        }
         if (_lossType == LossType::BATCH) {
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
-            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, {1});
-        } else if (_lossType == LossType::CLASSWISE) {
-            // FIXME: For this and CCE index labels, I will need to do something special
-            // One solution is to convert whatever the user sends to CCE one hot labels, think I should do that.
-            binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::CLASSWISE;
-            uint32_t numClasses = 2;
-            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, {numClasses});
+            binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
         } else if (_lossType == LossType::ELEMENTWISE) {
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
             uint32_t batchSize = _predictions.get().getDimensions()[0];
-            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, {batchSize});
-        } else {
-            assert(_lossType == LossType::RAW);
-            binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::RAW;
-            binaryCrossEntropy.lossTensor = Tensor(Tensor::DataType::FP32, _predictions.get().getDimensions());
+            binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {batchSize});
         }
         binaryCrossEntropy.initialized = true;
         binaryCrossEntropy.network = _network;
@@ -138,12 +134,10 @@ class BinaryCrossEntropy::Builder {
         return *this;
     }
 
-    /**
-     * Reports loss to the user in its raw form: one scalar per class per example in the batch.
-     */
-    virtual BinaryCrossEntropy::Builder &reportsRawLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossType::RAW;
+    virtual BinaryCrossEntropy::Builder &lossDataType(Tensor::DataType _lossDataType) {
+        assert(this->_lossDataType.isEmpty());
+        assert(_lossDataType == Tensor::DataType::FP32 || _lossDataType == Tensor::DataType::FP16);
+        this->_lossDataType = _lossDataType;
         return *this;
     }
 
@@ -164,6 +158,7 @@ class BinaryCrossEntropy::Builder {
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
     Optional<LossType> _lossType;
+    Optional<Tensor::DataType> _lossDataType;
     Optional<bool> _sigmoidStamped;
 
     friend class BinaryCrossEntropy;

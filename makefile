@@ -49,6 +49,7 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
                 build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
                 build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
                 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
+                build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest && \
                 build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
@@ -82,7 +83,6 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
 
 				# FIXME: rebuild and put back
 				# Create API categoricalAccuracy test
-				# Create API Binary cross entropy test
 				# uncomment test in NetworkTest
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
 				# Improve coverage of tensorFanout
@@ -92,6 +92,7 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
 			build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest \
 			build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest \
+			build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest \
 			build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/WorkQueue/AsyncQueueTest \
             build/test/Utilities/WorkQueue/AsyncTensorQueueTest \
@@ -846,10 +847,13 @@ build/test/DeepLearning/Api/Network/NetworkTest: build/test/googletest/libgtest.
 	mkdir -p build/test/DeepLearning/Api/Network
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Network/NetworkTest test/DeepLearning/Api/Network/NetworkTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-
 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest.cpp -O3 -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
