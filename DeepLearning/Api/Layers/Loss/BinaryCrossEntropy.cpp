@@ -18,22 +18,16 @@ void BinaryCrossEntropy::convertToSingleLayersAndAddToNetwork() {
                                                                 .predictions(currentFeatureInput)
                                                                 .labels(labelsTensor)
                                                                 .sigmoidStamped()
-                                                                .reportsRawLoss();
+                                                                .reportsElementwiseLoss();
     BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
     currentFeatureInput = crossEntropy.getFeatureOutput();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
         featureOutput = lossShaper.getFeatureOutput();
-    } else if (lossType == ThorImplementation::Loss::LossType::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsClasswiseLoss().build();
-        featureOutput = lossShaper.getFeatureOutput();
-    } else if (lossType == ThorImplementation::Loss::LossType::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsElementwiseLoss().build();
-        featureOutput = lossShaper.getFeatureOutput();
     } else {
         // No loss shaper needed in this case
-        assert(lossType == ThorImplementation::Loss::LossType::RAW);
+        assert(lossType == ThorImplementation::Loss::LossType::ELEMENTWISE);
         featureOutput = crossEntropy.getFeatureOutput();
     }
 }
