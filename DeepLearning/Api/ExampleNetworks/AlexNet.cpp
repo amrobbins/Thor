@@ -227,10 +227,13 @@ Network buildAlexNet() {
                               .build()
                               .getFeatureOutput();
 
-    CategoricalCrossEntropy lossLayer =
-        CategoricalCrossEntropy::Builder().network(alexNet).predictions(latestOutputTensor).labels(labelsTensor).reportsBatchLoss().build();
-
-    labelsTensor = lossLayer.getLabels();
+    CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
+                                            .network(alexNet)
+                                            .predictions(latestOutputTensor)
+                                            .labels(labelsTensor)
+                                            .reportsBatchLoss()
+                                            .receivesOneHotLabels()
+                                            .build();
 
     NetworkOutput predictions = NetworkOutput::Builder()
                                     .network(alexNet)
@@ -244,7 +247,7 @@ Network buildAlexNet() {
     CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
                                             .network(alexNet)
                                             .predictions(lossLayer.getPredictions())
-                                            .labels(labelsTensor)
+                                            .labels(lossLayer.getLabels())
                                             .receivesOneHotLabels()
                                             .build();
 

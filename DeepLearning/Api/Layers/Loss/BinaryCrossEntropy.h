@@ -63,7 +63,8 @@ class BinaryCrossEntropy::Builder {
         assert(_lossType.isPresent());
 
         vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-        assert(labelDimensions.size() == 1);
+        // API layer does not have a batch dimension:
+        assert(labelDimensions.size() == 0);
         assert(labelDimensions[0] == _predictions.get().getDimensions()[0]);
 
         BinaryCrossEntropy binaryCrossEntropy;
@@ -73,8 +74,8 @@ class BinaryCrossEntropy::Builder {
         } else {
             binaryCrossEntropy.sigmoidStamped = false;
         }
-        binaryCrossEntropy.predictionsTensor = _predictions.get().clone();
-        binaryCrossEntropy.labelsTensor = _labels.get().clone();
+        binaryCrossEntropy.predictionsTensor = _predictions.get();
+        binaryCrossEntropy.labelsTensor = _labels.get();
         if (_lossDataType.isEmpty()) {
             _lossDataType = Tensor::DataType::FP32;
         } else {

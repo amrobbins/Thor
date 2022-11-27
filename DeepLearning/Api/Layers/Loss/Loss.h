@@ -35,12 +35,14 @@ class Loss : public Layer {
     virtual Optional<Tensor> getFeatureOutput() { return getLoss(); }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
-        if (connectingTensor == getLabels())
+        if (connectingTensor == getLabels()) {
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
-        else if (connectingTensor == getPredictions())
+        } else if (connectingTensor == getPredictions()) {
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
-        else  // There is only one output to a loss so no need to disambiguate the output
+        } else {
+            // There is only one output to a loss so no need to disambiguate the output
             return 0;
+        }
         assert(false);
     }
 
@@ -65,7 +67,7 @@ class Loss : public Layer {
         uint64_t labelsBytes = labelsTensor.getTotalSizeInBytes();
 
         // Error Output
-        uint64_t errorOutputBytes = featureInput.get().getTotalSizeInBytes();  // FIXME this is not present for inference only
+        uint64_t errorOutputBytes = predictionsTensor.getTotalSizeInBytes();  // FIXME this is not present for inference only
 
         // Predictions
         uint64_t predictionsOutputBytes = predictionsTensor.getTotalSizeInBytes();

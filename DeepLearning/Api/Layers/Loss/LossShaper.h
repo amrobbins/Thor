@@ -63,16 +63,24 @@ class LossShaper : public Layer {
         if (inputDimensions == outputDimensions)
             return 0;
 
-        // sending BatchReduce an uninitialized stream since it is only being instantiated to compute workspace size.
-        uint64_t workspaceSizeInBytes = ThorImplementation::BatchReduce(lossInput.getDimensions()[0],
-                                                                        lossInput.getDimensions()[0],
-                                                                        lossInput.getDimensions()[1],
-                                                                        reduceBatchDim,
-                                                                        reduceLossDim,
-                                                                        Tensor::convertToImplementationDataType(lossInput.getDataType()),
-                                                                        Tensor::convertToImplementationDataType(lossInput.getDataType()),
-                                                                        Stream())
-                                            .getWorkspaceSizeInBytes();
+        // Only compute this once per device to avoid creating and destroying many streams
+        static std::map<int, uint64_t> workspaceSizePerDevice;
+        int deviceNum = tensorPlacement.getDeviceNum();
+        uint64_t workspaceSizeInBytes;
+        if (workspaceSizePerDevice.count(deviceNum) == 1) {
+            workspaceSizeInBytes = workspaceSizePerDevice[deviceNum];
+        } else {
+            workspaceSizeInBytes = ThorImplementation::BatchReduce(lossInput.getDimensions()[0],
+                                                                   lossInput.getDimensions()[0],
+                                                                   lossInput.getDimensions()[1],
+                                                                   reduceBatchDim,
+                                                                   reduceLossDim,
+                                                                   Tensor::convertToImplementationDataType(lossInput.getDataType()),
+                                                                   Tensor::convertToImplementationDataType(lossInput.getDataType()),
+                                                                   Stream(deviceNum))
+                                       .getWorkspaceSizeInBytes();
+            workspaceSizePerDevice[deviceNum] = workspaceSizeInBytes;
+        }
 
         return lossOutput.getTotalSizeInBytes() + workspaceSizeInBytes;
     }

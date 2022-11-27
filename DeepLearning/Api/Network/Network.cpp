@@ -2,6 +2,24 @@
 
 using namespace Thor;
 
+string Network::statusCodeToString(int statusCode) {
+    if ((StatusCode)statusCode == StatusCode::SUCCESS)
+        return "SUCCESS";
+    else if ((StatusCode)statusCode == StatusCode::FLOATING_INPUT)
+        return "FLOATING INPUT";
+    else if ((StatusCode)statusCode == StatusCode::DANGLING_OUTPUT)
+        return "DANGLING OUTPUT";
+    else if ((StatusCode)statusCode == StatusCode::GPU_OUT_OF_MEMORY)
+        return "GPU OUT OF MEMORY";
+    else if ((StatusCode)statusCode == StatusCode::DUPLICATE_NAMED_NETWORK_INPUT)
+        return "DUPLICATE NAMED NETWORK INPUT";
+    else if ((StatusCode)statusCode == StatusCode::DUPLICATE_NAMED_NETWORK_OUTPUT)
+        return "DUPLICATE NAMED NETWORK OUTPUT";
+    else if ((StatusCode)statusCode == StatusCode::DEADLOCK_CYCLE)
+        return "DEADLOCK CYCLE";
+    assert(false);
+}
+
 Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
     if (!frozen) {
         StatusCode status = evaluateGraph();
@@ -27,7 +45,12 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
     stampedNetwork.gpuNum = gpuNum;
 
-    preOptimize(gpuNum, batchSize);
+    StatusCode preoptimizeStatus = preOptimize(gpuNum, batchSize);
+    if (preoptimizeStatus != StatusCode::SUCCESS) {
+        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString((int)preoptimizeStatus).c_str());
+        fflush(stdout);
+    }
+    assert(preoptimizeStatus == StatusCode::SUCCESS);
 
     // FIXME: check for non-first instance to use shared weights
     // FIXME: support other gpus
@@ -184,23 +207,19 @@ Network::StatusCode Network::evaluateGraph() {
 
         Loss *loss = dynamic_cast<Loss *>(layer);
         if (loss) {
-            Tensor inputTensor = loss->getFeatureInput();
-            Tensor labelsTensor = loss->getLabels();
+            // Predictions and Labels in, Loss out
             Tensor predictionsTensor = loss->getPredictions();
+            Tensor labelsTensor = loss->getLabels();
             Tensor lossTensor = loss->getLoss();
-            allTensors.insert(inputTensor);
-            allTensors.insert(labelsTensor);
             allTensors.insert(predictionsTensor);
+            allTensors.insert(labelsTensor);
             allTensors.insert(lossTensor);
-            apiTensorToApiLoadingLayers[inputTensor].push_back(loss);
+            apiTensorToApiLoadingLayers[predictionsTensor].push_back(loss);
             apiTensorToApiLoadingLayers[labelsTensor].push_back(loss);
-            apiLayerToApiInputTensors[loss].push_back(inputTensor);
+            apiLayerToApiInputTensors[loss].push_back(predictionsTensor);
             apiLayerToApiInputTensors[loss].push_back(labelsTensor);
-            assert(apiTensorToApiDrivingLayer.count(predictionsTensor) == 0);
-            apiTensorToApiDrivingLayer[predictionsTensor] = loss;
             assert(apiTensorToApiDrivingLayer.count(lossTensor) == 0);
             apiTensorToApiDrivingLayer[lossTensor] = loss;
-            apiLayerToApiOutputTensors[loss].push_back(predictionsTensor);
             apiLayerToApiOutputTensors[loss].push_back(lossTensor);
             continue;
         }
@@ -307,26 +326,34 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
     return status;
 }
 
+/**
+ * A tensor has a floating input when nothing is connected to write to it. -> No Driver.
+ */
 Network::StatusCode Network::checkForFloatingInputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiLoadingLayers.count(tensor) == 0)
+        if (apiTensorToApiDrivingLayer.count(tensor) == 0)
             return StatusCode::FLOATING_INPUT;
     }
     return StatusCode::SUCCESS;
 }
 
+/**
+ * A tensor has a dangling output when nothing is connected to read from it -> No Loader.
+ */
 Network::StatusCode Network::checkForDanglingOutputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiDrivingLayer.count(tensor) == 0)
+        if (apiTensorToApiLoadingLayers.count(tensor) == 0)
             return StatusCode::DANGLING_OUTPUT;
     }
     return StatusCode::SUCCESS;
 }
 
-// An deadlock cycle occurs when a layer that requires all of its input to arrive before it drives its output
-// is connected in a way where there is a path from its output to its input.
+/**
+ * A deadlock cycle occurs when a layer that requires all of its input to arrive before it drives its output
+ * is connected in a way where there is a path from its output to its input.
+ */
 Network::StatusCode Network::checkForDeadlockCycles() {
     for (auto it = network.begin(); it != network.end(); ++it) {
         Layer *layer = it->get();

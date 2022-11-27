@@ -83,7 +83,6 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
                 build/test/DeepLearning/Api/Optimizers/SgdTest \
 
 				# FIXME: rebuild and put back
-				# Create API categoricalAccuracy test
 				# uncomment test in NetworkTest
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
 				# Improve coverage of tensorFanout
@@ -589,7 +588,7 @@ build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o: DeepLearning/Api/L
 
 build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o: DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Loss
-	$(Gpp) -c -O3 $(DEBUG) -std=c++11 DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o
+	$(Gpp) -c -O3 -std=c++11 DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o
 
 build/Utilities/Loaders/ImageProcessor.o: Utilities/Loaders/ImageProcessor.h Utilities/Loaders/ImageProcessor.cpp
 	mkdir -p build/Utilities/Loaders

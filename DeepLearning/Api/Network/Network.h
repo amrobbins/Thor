@@ -183,6 +183,8 @@ class Network {
     Network() : frozen(false) {}
     virtual ~Network() {}
 
+    virtual std::string statusCodeToString(int statusCode);
+
     virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
     virtual vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
