@@ -27,6 +27,12 @@ void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
         categoricalCrossEntropyBuilder.receivesOneHotLabels();
     }
     CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
+    printf("CE predictions id %ld, labels id %ld loss id %ld, softmax id %ld CE id %ld\n",
+           currentFeatureInput.getId(),
+           labelsTensor.getId(),
+           crossEntropy.getLoss().getId(),
+           softmax->getId(),
+           crossEntropy.getId());
     currentFeatureInput = crossEntropy.getLoss();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
