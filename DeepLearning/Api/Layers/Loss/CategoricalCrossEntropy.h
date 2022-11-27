@@ -61,21 +61,21 @@ class CategoricalCrossEntropy::Builder {
         assert(_predictions.isPresent());
         assert(_labels.isPresent());
         assert(_predictions.get() != _labels.get());
-        assert(_predictions.get().getDimensions().size() == 2);
+        // API layer does not have a batch dimension:
+        assert(_predictions.get().getDimensions().size() == 1);
         assert(_labelType.isPresent());
         assert(_labelType == LabelType::INDEX || _labelType == LabelType::ONE_HOT);
         if (_labelType == LabelType::ONE_HOT) {
-            assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
             vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-            assert(labelDimensions.size() == 2);
-            assert(labelDimensions[1] > 1);
+            assert(labelDimensions.size() == 1);
+            assert(labelDimensions[0] > 1);
+            assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
         } else {
             vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
-            assert(labelDimensions.size() == 1 || labelDimensions.size() == 2);
-            assert(predictionDimensions[0] == labelDimensions[0]);
-            if (labelDimensions.size() == 2)
-                assert(_labels.get().getDimensions()[1] == 1);
+            assert(labelDimensions.size() == 0 || labelDimensions.size() == 1);
+            if (labelDimensions.size() == 1)
+                assert(_labels.get().getDimensions()[0] == 1);
             else
                 _labels.get().reshape({predictionDimensions[0], 1});
             Tensor::DataType labelsDataType = _labels.get().getDataType();
@@ -90,8 +90,8 @@ class CategoricalCrossEntropy::Builder {
         } else {
             categoricalCrossEntropy.softmaxStamped = false;
         }
-        categoricalCrossEntropy.predictionsTensor = _predictions.get().clone();
-        categoricalCrossEntropy.labelsTensor = _labels.get().clone();
+        categoricalCrossEntropy.predictionsTensor = _predictions.get();
+        categoricalCrossEntropy.labelsTensor = _labels.get();
         if (_lossDataType.isEmpty()) {
             _lossDataType = Tensor::DataType::FP32;
         } else {
