@@ -32,8 +32,10 @@ class Layer {
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
 
     virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
-        assert(inputTensor == featureInput.get());
-        return {featureOutput};
+        assert(getFeatureInput().isPresent());
+        assert(getFeatureOutput().isPresent());
+        assert(inputTensor == getFeatureInput().get());
+        return {getFeatureOutput().get()};
     }
 
     virtual bool mustConnectAllInputsToDriveOutput() { return false; }

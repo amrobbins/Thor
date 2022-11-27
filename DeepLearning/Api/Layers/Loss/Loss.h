@@ -21,6 +21,9 @@ class Loss : public Layer {
 
     virtual bool mustConnectAllInputsToDriveOutput() { return true; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
+        // FIXME: TEMP
+        printf("Loss connecting tensor id %ld\n", inputTensor.getId());
+
         numInputConnectionsMade += 1;
         // Only one type of loss is supported at a time.
         assert(numInputConnectionsMade < 3);
@@ -35,6 +38,16 @@ class Loss : public Layer {
     virtual Optional<Tensor> getFeatureOutput() { return getLoss(); }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
+        // FIXME: TEMP
+        if (connectingTensor == getLabels()) {
+            printf("loss connecting labels\n");
+        } else if (connectingTensor == getPredictions()) {
+            printf("loss connecting predictions\n");
+        } else {
+            // There is only one output to a loss so no need to disambiguate the output
+            printf("loss connecting other\n");
+        }
+
         if (connectingTensor == getLabels()) {
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
         } else if (connectingTensor == getPredictions()) {
@@ -48,7 +61,7 @@ class Loss : public Layer {
 
     virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
         if (numInputConnectionsMade == 2)
-            return {lossTensor, predictionsTensor};
+            return {lossTensor};
         else
             return vector<Tensor>();
     }
