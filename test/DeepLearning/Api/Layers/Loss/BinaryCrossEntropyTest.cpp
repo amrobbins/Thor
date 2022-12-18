@@ -18,7 +18,7 @@ TEST(BinaryCrossEntropy, BatchLossBuilds) {
         Network network;
 
         vector<uint64_t> dimensions;
-        dimensions = {1UL + (rand() % 300)};
+        dimensions = {1UL};
         vector<uint64_t> lossDimensions = {1};
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
@@ -101,7 +101,7 @@ TEST(BinaryCrossEntropy, ElementwiseLossBuilds) {
         Network network;
 
         vector<uint64_t> dimensions;
-        dimensions = {1UL + (rand() % 300)};
+        dimensions = {1UL};
         vector<uint64_t> lossDimensions = dimensions;
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;

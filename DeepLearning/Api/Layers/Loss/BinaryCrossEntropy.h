@@ -64,8 +64,7 @@ class BinaryCrossEntropy::Builder {
 
         vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         // API layer does not have a batch dimension:
-        assert(labelDimensions.size() == 0);
-        assert(labelDimensions[0] == _predictions.get().getDimensions()[0]);
+        assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 
         BinaryCrossEntropy binaryCrossEntropy;
         if (_sigmoidStamped.isPresent()) {
@@ -103,14 +102,14 @@ class BinaryCrossEntropy::Builder {
 
     virtual BinaryCrossEntropy::Builder &predictions(Tensor _predictions) {
         assert(!this->_predictions.isPresent());
-        assert(!_predictions.getDimensions().empty());
+        assert(_predictions.getDimensions().size() == 1 && _predictions.getDimensions()[0] == 1);
         this->_predictions = _predictions;
         return *this;
     }
 
     virtual BinaryCrossEntropy::Builder &labels(Tensor _labels) {
         assert(!this->_labels.isPresent());
-        assert(!_labels.getDimensions().empty());
+        assert(_labels.getDimensions().size() == 1 && _labels.getDimensions()[0] == 1);
         this->_labels = _labels;
         return *this;
     }
