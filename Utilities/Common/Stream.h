@@ -5,6 +5,7 @@
 #include "ScopedGpu.h"
 #include "Utilities/Common/Optional.h"
 #include "Utilities/Common/ReferenceCounted.h"
+#include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn.h>
 #include "cuda.h"
@@ -13,6 +14,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <mutex>
+#include <unordered_map>
 
 using std::mutex;
 
@@ -144,6 +146,10 @@ class Stream : private ReferenceCounted {
 
     uint64_t getId() { return getReferenceCountedId(); }
 
+    // For cases where you just need any stream (for example computing workspace sizes for cudnn) use the static stream to
+    // avoid allocating too many streams and crashing Cuda.
+    static Stream getStaticStream(uint32_t deviceNum);
+
    private:
     void construct(int gpuNum, Priority priority) {
         ReferenceCounted::initialize();
@@ -209,6 +215,7 @@ class Stream : private ReferenceCounted {
     Optional<cudnnHandle_t> *cudnnHandle;
 
     bool isStatic;
+    static std::unordered_map<uint32_t, Stream> staticDeviceStreams;
 
     static int numCudnnHandles;
 

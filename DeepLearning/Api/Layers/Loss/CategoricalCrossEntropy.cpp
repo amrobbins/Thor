@@ -21,7 +21,7 @@ void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
                                                                           .reportsRawLoss()
                                                                           .lossDataType(lossTensor.getDataType());
     if (labelType == LabelType::INDEX) {
-        categoricalCrossEntropyBuilder.receivesClassIndexLabels();
+        categoricalCrossEntropyBuilder.receivesClassIndexLabels(numClasses);
     } else {
         assert(labelType == LabelType::ONE_HOT);
         categoricalCrossEntropyBuilder.receivesOneHotLabels();

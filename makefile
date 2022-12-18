@@ -36,8 +36,8 @@ TEST_COMPILE_DEPENDENCIES = $(INCLUDE_DIRS_TEST) $(LIB_DIRS_TEST) $(LIBS_TEST) $
 DEBUG = -ggdb
 NVCC_DEBUG = -g
 
-Gpp = g++ -Wall -Werror -fopenmp
-Nvcc = nvcc
+Gpp = g++ -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG
+Nvcc = nvcc -D_GLIBCXX_DEBUG
 
 RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
@@ -468,7 +468,7 @@ build/Utilities/ComputeTopology/MachineEvaluator.o: Utilities/ComputeTopology/Ma
 
 build/DeepLearning/Implementation/Tensor/Tensor.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/Tensor.cpp DeepLearning/Implementation/Tensor/TensorDescriptor.h DeepLearning/Implementation/Tensor/TensorPlacement.h
 	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Gpp) -c -O3 -I./ -std=c++11 DeepLearning/Implementation/Tensor/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Tensor/Tensor.o
+	$(Gpp) -c -O3 $(DEBUG) -I./ -std=c++11 DeepLearning/Implementation/Tensor/Tensor.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Tensor/Tensor.o
 
 build/DeepLearning/Implementation/Layers/Layer.o:  DeepLearning/Implementation/Layers/Layer.h DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h
 	mkdir -p build/DeepLearning/Implementation/Layers/Layer
@@ -496,7 +496,7 @@ build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o: DeepLearning/I
 
 build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o: DeepLearning/Implementation/Layers/Loss/CrossEntropy.h DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/Loss
-	$(Gpp) -c -O3 -std=c++11 DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o
+	$(Gpp) -c -O3 $(DEBUG) -std=c++11 DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o
 
 build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.cpp
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply

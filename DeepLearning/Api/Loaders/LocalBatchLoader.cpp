@@ -1,10 +1,8 @@
 #include "DeepLearning/Api/Loaders/LocalBatchLoader.h"
 
-using ThorImplementation::TensorDescriptor;
-
-using std::make_shared;
-using std::string;
+using namespace std;
 using ThorImplementation::Tensor;
+using ThorImplementation::TensorDescriptor;
 
 LocalBatchLoader::LocalBatchLoader(set<string> shardPaths,
                                    ThorImplementation::TensorDescriptor exampleDescriptor,

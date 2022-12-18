@@ -543,7 +543,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     EXPECT_EQ(stampedNetwork.inputs.size(), 2u);
     EXPECT_EQ(stampedNetwork.outputs.size(), 3u);
     EXPECT_EQ(stampedNetwork.trainableLayers.size(), 13u);
-    EXPECT_EQ(stampedNetwork.otherLayers.size(), 27u);
+    EXPECT_EQ(stampedNetwork.otherLayers.size(), 30u);
 
     ThorImplementation::NetworkInput *images;
     ThorImplementation::NetworkInput *labels;
