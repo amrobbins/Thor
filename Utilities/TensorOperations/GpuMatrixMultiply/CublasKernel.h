@@ -13,8 +13,6 @@
 #include <atomic>
 #include <utility>
 
-using std::atomic;
-
 namespace ThorImplementation {
 
 struct RunStats {
@@ -254,7 +252,7 @@ class CublasKernel : private ReferenceCounted {
                                                                                         : cublasKernelRequirement->kernelRequirement.colsA;
 
         // Check that everything matches up
-        vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
+        std::vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
         assert(ADimensions.size() == 2);
         assert(ADimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsA);
         assert(ADimensions[1] == ldA);
@@ -263,7 +261,7 @@ class CublasKernel : private ReferenceCounted {
         else
             assert(cublasKernelRequirement->operationType.ADataType == CUDA_R_16F);
 
-        vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
+        std::vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
         assert(BDimensions.size() == 2);
         assert(BDimensions[0] == (uint64_t)cublasKernelRequirement->kernelRequirement.rowsB);
         assert(BDimensions[1] == ldB);
@@ -272,7 +270,7 @@ class CublasKernel : private ReferenceCounted {
         else
             assert(cublasKernelRequirement->operationType.BDataType == CUDA_R_16F);
 
-        vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
+        std::vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
         assert(CDimensions.size() == 2);
         assert(CDimensions[0] == rowsC);
         assert(CDimensions[1] == ldC);
@@ -281,7 +279,7 @@ class CublasKernel : private ReferenceCounted {
         else
             assert(cublasKernelRequirement->operationType.CDataType == CUDA_R_16F);
 
-        vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
+        std::vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
         assert(DDimensions.size() == 2);
         assert(DDimensions[0] == rowsC);
         assert(DDimensions[1] == ldD);
@@ -418,9 +416,9 @@ class CublasKernel : private ReferenceCounted {
 
     string gpuType;
 
-    vector<cublasLtMatmulAlgo_t> *algorithmPerGpu;
+    std::vector<cublasLtMatmulAlgo_t> *algorithmPerGpu;
 
-    static map<cublasLtMatmulTile_t, string> tileEnumToString;
+    static std::map<cublasLtMatmulTile_t, string> tileEnumToString;
 
     void allocateCublasResources() {
         assert(!uninitialized());
@@ -546,7 +544,7 @@ class CublasKernel : private ReferenceCounted {
         this->cublasKernelRequirement = new CublasKernelRequirement(cublasKernelRequirement);
         this->cublasKernelOptions = new CublasKernelOptions(cublasKernelOptions);
         this->gpuType = gpuType;
-        this->algorithmPerGpu = new vector<cublasLtMatmulAlgo_t>(MachineEvaluator::instance().getNumGpus());
+        this->algorithmPerGpu = new std::vector<cublasLtMatmulAlgo_t>(MachineEvaluator::instance().getNumGpus());
 
         allocateCublasResources();
     }

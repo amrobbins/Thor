@@ -1,5 +1,7 @@
 #include "MachineEvaluator.h"
 
+using namespace std;
+
 const int MachineEvaluator::NONE = -10;
 const int MachineEvaluator::CPU_DEVICE_NUM = -1;
 

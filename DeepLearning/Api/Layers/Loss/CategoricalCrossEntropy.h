@@ -51,6 +51,7 @@ class CategoricalCrossEntropy : public Loss {
 
     Network *network;
     LabelType labelType;
+    uint32_t numClasses;
     bool softmaxStamped;
 };
 
@@ -65,11 +66,14 @@ class CategoricalCrossEntropy::Builder {
         assert(_predictions.get().getDimensions().size() == 1);
         assert(_labelType.isPresent());
         assert(_labelType == LabelType::INDEX || _labelType == LabelType::ONE_HOT);
+
+        CategoricalCrossEntropy categoricalCrossEntropy;
         if (_labelType == LabelType::ONE_HOT) {
             vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             assert(labelDimensions.size() == 1);
             assert(labelDimensions[0] > 1);
             assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
+            categoricalCrossEntropy.numClasses = _predictions.get().getDimensions()[0];
         } else {
             vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
@@ -81,9 +85,10 @@ class CategoricalCrossEntropy::Builder {
             Tensor::DataType labelsDataType = _labels.get().getDataType();
             assert(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
                    labelsDataType == Tensor::DataType::UINT32);
+            assert(_numClasses.isPresent());
+            categoricalCrossEntropy.numClasses = _numClasses;
         }
 
-        CategoricalCrossEntropy categoricalCrossEntropy;
         if (_softmaxStamped.isPresent()) {
             assert(_softmaxStamped.get() == true);
             categoricalCrossEntropy.softmaxStamped = true;
@@ -103,17 +108,18 @@ class CategoricalCrossEntropy::Builder {
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
             categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
         } else if (_lossType == LossType::CLASSWISE) {
+            // This type is batch-reduced by the implemenation layer
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::CLASSWISE;
-            uint32_t numClasses = _predictions.get().getDimensions()[1];
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {numClasses});
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
         } else if (_lossType == LossType::ELEMENTWISE) {
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
             uint32_t batchSize = _predictions.get().getDimensions()[0];
             categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {batchSize});
         } else {
+            // This type is *not* batch-reduced by the implemenation layer
             assert(_lossType == LossType::RAW);
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::RAW;
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, _predictions.get().getDimensions());
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
         }
         categoricalCrossEntropy.labelType = _labelType;
         categoricalCrossEntropy.initialized = true;
@@ -193,9 +199,11 @@ class CategoricalCrossEntropy::Builder {
      * One number is passed per item in the batch.
      * Soft labels are not supported in this case.
      */
-    virtual CategoricalCrossEntropy::Builder &receivesClassIndexLabels() {
+    virtual CategoricalCrossEntropy::Builder &receivesClassIndexLabels(uint32_t numClasses) {
         assert(!_labelType.isPresent());
+        assert(numClasses > 1);
         _labelType = LabelType::INDEX;
+        this->_numClasses = numClasses;
         return *this;
     }
 
@@ -227,6 +235,7 @@ class CategoricalCrossEntropy::Builder {
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
     Optional<LabelType> _labelType;
+    Optional<uint32_t> _numClasses;
     Optional<LossType> _lossType;
     Optional<Tensor::DataType> _lossDataType;
     Optional<bool> _softmaxStamped;

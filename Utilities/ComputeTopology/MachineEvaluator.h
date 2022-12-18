@@ -17,12 +17,6 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 
-using std::map;
-using std::mutex;
-using std::set;
-using std::string;
-using std::vector;
-
 class Stream;
 
 struct GpuConnectionRanking {
@@ -61,7 +55,7 @@ class MachineEvaluator {
    public:
     int getCurrentGpuNum();
 
-    vector<GpuConnectionRanking> getConnectionSpeedRankings(int sourceGpuNum);
+    std::vector<GpuConnectionRanking> getConnectionSpeedRankings(int sourceGpuNum);
     // Returns -1 if not known:
     int getConnectionSpeedRanking(int sourceGpuNum, int destGpuNum);
     // Returns false if not known:
@@ -72,7 +66,7 @@ class MachineEvaluator {
     int getGpuNumFromBusId(int gpuBusId);
     int getAdjacentHigherGpu(int gpuNum);
     int getAdjacentLowerGpu(int gpuNum);
-    vector<int> getOrderedGpus() { return orderedGpus; }
+    std::vector<int> getOrderedGpus() { return orderedGpus; }
 
     unsigned int getNumGpus() { return numGpus; }
     unsigned int getNumMultiProcessors(int gpuNum);
@@ -121,29 +115,29 @@ class MachineEvaluator {
     static const int CPU_DEVICE_NUM;
 
    private:
-    map<int, vector<GpuConnectionRanking>> connectionRankings;
-    map<int, map<int, bool>> peerToPeerEnabled;
-    map<int, map<int, int>> peerConnectionRankings;
-    vector<string> gpuType;
-    vector<int> gpuPciBusId;  // index is gpuNum, value is gpuPciBusId
-    vector<int> orderedGpus;  // index is order (adjacent gpus are adjacent in this vector), value is gpuNum
-    map<int, int> gpuNumFromBusId;
-    vector<cudaDeviceProp> deviceProps;
+    std::map<int, std::vector<GpuConnectionRanking>> connectionRankings;
+    std::map<int, std::map<int, bool>> peerToPeerEnabled;
+    std::map<int, std::map<int, int>> peerConnectionRankings;
+    std::vector<string> gpuType;
+    std::vector<int> gpuPciBusId;  // index is gpuNum, value is gpuPciBusId
+    std::vector<int> orderedGpus;  // index is order (adjacent gpus are adjacent in this vector), value is gpuNum
+    std::map<int, int> gpuNumFromBusId;
+    std::vector<cudaDeviceProp> deviceProps;
 
-    map<int, Stream> copyStreamFromLower;
-    map<int, Stream> copyStreamFromHigher;
-    map<int, Stream> copyStreamFromCpu;
-    map<int, Stream> copyStreamToCpu;
-    map<int, Stream> copyStreamLocal;
+    std::map<int, Stream> copyStreamFromLower;
+    std::map<int, Stream> copyStreamFromHigher;
+    std::map<int, Stream> copyStreamFromCpu;
+    std::map<int, Stream> copyStreamToCpu;
+    std::map<int, Stream> copyStreamLocal;
 
     unsigned int numGpus;
 
-    mutex mtx;
+    std::mutex mtx;
 
     void evaluateConnectionSpeeds();
     void getGpuTypes();
     void getGpuPciBusIds();
     void createCopyStreams();
 
-    vector<cublasLtHandle_t> cublasLtHandlePerDevice;
+    std::vector<cublasLtHandle_t> cublasLtHandlePerDevice;
 };

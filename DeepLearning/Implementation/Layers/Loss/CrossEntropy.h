@@ -46,6 +46,8 @@ class CrossEntropy : public Loss {
     bool indexLabels;
 
     CrossEntropyLossType crossEntropyLossType;
+
+    uint32_t numClasses;
 };
 
 }  // namespace ThorImplementation

@@ -6,7 +6,7 @@ const float CublasKernel::ALPHA_NO_SCALE = 1.0f;
 const float CublasKernel::BETA_ACCUMULATE = 1.0f;
 const float CublasKernel::BETA_CLEAR = 0.0f;
 
-map<cublasLtMatmulTile_t, string> CublasKernel::tileEnumToString(
+std::map<cublasLtMatmulTile_t, string> CublasKernel::tileEnumToString(
     {{CUBLASLT_MATMUL_TILE_UNDEFINED, "CUBLASLT_MATMUL_TILE_UNDEFINED"}, {CUBLASLT_MATMUL_TILE_8x8, "CUBLASLT_MATMUL_TILE_8x8"},
      {CUBLASLT_MATMUL_TILE_8x16, "CUBLASLT_MATMUL_TILE_8x16"},           {CUBLASLT_MATMUL_TILE_16x8, "CUBLASLT_MATMUL_TILE_16x8"},
      {CUBLASLT_MATMUL_TILE_8x32, "CUBLASLT_MATMUL_TILE_8x32"},           {CUBLASLT_MATMUL_TILE_16x16, "CUBLASLT_MATMUL_TILE_16x16"},
