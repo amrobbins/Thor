@@ -323,7 +323,11 @@ bool WorkQueue<InputType, OutputType>::isOpen() {
 
 template <class InputType, class OutputType>
 unsigned int WorkQueue<InputType, OutputType>::computeOutputSlot(unsigned short argumentOutputOrder) {
-    int outputSlot = argumentOutputOrder - outputOrder[0];
+    int outputSlot;
+    if (outputOrder.empty())
+        outputSlot = argumentOutputOrder;
+    else
+        outputSlot = argumentOutputOrder - outputOrder[0];
     // need to handle rollover case
     if (outputSlot < 0)
         outputSlot += std::numeric_limits<unsigned short>::max() + 1;

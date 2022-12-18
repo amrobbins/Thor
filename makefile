@@ -38,6 +38,8 @@ NVCC_DEBUG = -g
 
 Gpp = g++ -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG
 Nvcc = nvcc -D_GLIBCXX_DEBUG
+#Gpp = g++ -Wall -Werror -fopenmp
+#Nvcc = nvcc
 
 RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
@@ -51,7 +53,6 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
                 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
                 build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest && \
                 build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest && \
-                build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest && \
@@ -73,17 +74,18 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
                 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest && \
                 build/test/DeepLearning/Implementation/Tensor/tensorTest && \
                 build/test/Utilities/ComputeTopology/machineEvaluatorTest && \
-                build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
-                build/test/Utilities/WorkQueue/WorkQueueTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
                 build/test/DeepLearning/Api/Layers/Loss/LossShaperTest && \
                 build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
-                build/test/DeepLearning/Api/Optimizers/SgdTest \
+                build/test/DeepLearning/Api/Optimizers/SgdTest && \
+				build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
+				build/test/Utilities/WorkQueue/WorkQueueTest \
+
 
 				# FIXME: rebuild and put back
-				# uncomment test in NetworkTest
+				# build/test/DeepLearning/Api/Network/NetworkTest && \
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
 				# Improve coverage of tensorFanout
 
