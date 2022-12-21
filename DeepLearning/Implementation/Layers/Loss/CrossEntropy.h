@@ -29,6 +29,8 @@ class CrossEntropy : public Loss {
 
     virtual void backProp(Optional<Tensor> labels, Optional<Tensor> normalizedPredictions, Optional<Tensor> lossGradient, Stream stream);
 
+    virtual std::string getType();
+
    private:
     void launchCrossEntropyWithFP16Predictions();
     void launchCrossEntropyWithFP16PredictionsAndFP16Loss();

@@ -2,13 +2,11 @@
 
 #include "Utilities/WorkQueue/AsyncQueue.h"
 
+#include <assert.h>
 #include <chrono>
 #include <cmath>
 #include <mutex>
-#include <thread>
 #include <vector>
-
-using std::thread;
 
 /**
  *  This is a Linear congruential generator.
@@ -108,7 +106,7 @@ class FullPeriodRandom {
     std::vector<uint64_t> periodNonFactors;
 
     const bool synchronized;
-    mutex mtx;
+    std::mutex mtx;
 
     uint64_t getClockSeed() {
         std::hash<uint64_t> hashFunctor;

@@ -8,7 +8,7 @@ class Reshape : public Layer {
    public:
     virtual ~Reshape() {}
 
-    Reshape(vector<unsigned long> outputDimensions) : outputDimensions(outputDimensions) {}
+    Reshape(std::vector<unsigned long> outputDimensions) : outputDimensions(outputDimensions) {}
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
@@ -41,7 +41,7 @@ class Reshape : public Layer {
     }
 
    private:
-    vector<unsigned long> outputDimensions;
+    std::vector<unsigned long> outputDimensions;
 };
 
 }  // namespace ThorImplementation

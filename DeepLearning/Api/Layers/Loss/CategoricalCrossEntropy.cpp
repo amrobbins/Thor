@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 
 using namespace Thor;
+using namespace std;
 
 void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
     Tensor currentFeatureInput = predictionsTensor;

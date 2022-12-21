@@ -1,6 +1,9 @@
 #include "DeepLearning/Api/Network/Network.h"
 
 using namespace Thor;
+using namespace std;
+
+using ThorImplementation::TensorPlacement;
 
 string Network::statusCodeToString(int statusCode) {
     if ((StatusCode)statusCode == StatusCode::SUCCESS)
@@ -536,7 +539,7 @@ void Network::stampLayer(
         stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
 
         if (DEBUG_STAMP) {
-            printf("stamped tensor fanout - network input\n");
+            printf("stamped tensor fanout - layer\n");
             fflush(stdout);
         }
     }
@@ -549,6 +552,11 @@ void Network::stampLayer(
         layerPreviouslyStamped = true;
         implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer->getId()];
         Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
+
+        if (DEBUG_STAMP) {
+            printf("connecting to %s\n", layer->getLayerType().c_str());
+            fflush(stdout);
+        }
     } else {
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, stampedNetwork.initializers);
         stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer;

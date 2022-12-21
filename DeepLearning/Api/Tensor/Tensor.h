@@ -8,9 +8,6 @@
 #include <utility>
 #include <vector>
 
-using std::atomic;
-using std::vector;
-
 namespace Thor {
 
 class Network;
@@ -20,7 +17,7 @@ class Tensor {
     enum class DataType { PACKED_BOOLEAN = 7, BOOLEAN, INT8, UINT8, INT16, UINT16, INT32, UINT32, INT64, UINT64, FP16, FP32, FP64 };
 
     Tensor() : initialized(false) {}
-    Tensor(DataType dataType, vector<uint64_t> dimensions)
+    Tensor(DataType dataType, std::vector<uint64_t> dimensions)
         : id(nextId.fetch_add(1)), dataType(dataType), dimensions(dimensions), initialized(true) {
         for (uint32_t i = 0; i < dimensions.size(); ++i) {
             assert(dimensions[i] != 0);
@@ -40,7 +37,7 @@ class Tensor {
         assert(initialized);
         return dataType;
     }
-    vector<uint64_t> getDimensions() const {
+    std::vector<uint64_t> getDimensions() const {
         assert(initialized);
         return dimensions;
     }
@@ -127,7 +124,7 @@ class Tensor {
 
     uint64_t getTotalSizeInBytes() const { return (uint64_t)ceil((double)getTotalNumElements() * getBytesPerElement()); }
 
-    void reshape(vector<uint64_t> newDimensions) {
+    void reshape(std::vector<uint64_t> newDimensions) {
         uint64_t oldNumElements = getTotalNumElements();
         dimensions = newDimensions;
         uint64_t newNumElements = getTotalNumElements();
@@ -139,10 +136,10 @@ class Tensor {
 
    private:
     uint64_t id;
-    static atomic<uint64_t> nextId;
+    static std::atomic<uint64_t> nextId;
 
     DataType dataType;
-    vector<uint64_t> dimensions;
+    std::vector<uint64_t> dimensions;
 
     bool initialized;
 

@@ -13,14 +13,14 @@ class Glorot : public Initializer {
 
     virtual ~Glorot() {}
 
-    virtual shared_ptr<Initializer> clone() const { return make_shared<Glorot>(*this); }
+    virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<Glorot>(*this); }
 };
 
 class Glorot::Builder : public Initializer::Builder {
    public:
     virtual ~Builder() { _layerThatOwnsTensor = nullptr; }
 
-    virtual shared_ptr<Initializer> build() {
+    virtual std::shared_ptr<Initializer> build() {
         assert(_tensorToInitialize.isPresent());
 
         if (_mode.isEmpty())
@@ -52,7 +52,7 @@ class Glorot::Builder : public Initializer::Builder {
         return *this;
     }
 
-    virtual shared_ptr<Initializer::Builder> clone() { return make_shared<Glorot::Builder>(*this); }
+    virtual std::shared_ptr<Initializer::Builder> clone() { return std::make_shared<Glorot::Builder>(*this); }
 
    protected:
     Optional<ThorImplementation::Tensor> _tensorToInitialize;

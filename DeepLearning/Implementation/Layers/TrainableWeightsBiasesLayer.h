@@ -29,7 +29,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         Stream gradientUpdateStream;
 
-        vector<Tensor> otherSharedMem;
+        std::vector<Tensor> otherSharedMem;
     };
 
     TrainableWeightsBiasesLayer(SharedWeightsPackage sharedWeightsPackage)

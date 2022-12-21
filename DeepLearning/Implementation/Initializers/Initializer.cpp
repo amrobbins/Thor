@@ -1,7 +1,6 @@
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 
-using std::make_shared;
-using std::shared_ptr;
+using namespace std;
 
 namespace ThorImplementation {
 

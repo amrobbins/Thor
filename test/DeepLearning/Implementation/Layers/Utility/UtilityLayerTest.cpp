@@ -21,6 +21,7 @@ using std::set;
 using std::vector;
 
 using namespace ThorImplementation;
+using namespace std;
 
 inline int randomElement(set<int> &filledSet) {
     assert(!filledSet.empty());

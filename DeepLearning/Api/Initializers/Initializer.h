@@ -7,13 +7,9 @@
 #include <assert.h>
 #include <memory>
 
-using std::make_shared;
-
 namespace Thor {
 
 struct StampedNetwork;
-
-using std::shared_ptr;
 
 class Initializer {
    public:
@@ -23,7 +19,7 @@ class Initializer {
 
     virtual ~Initializer() {}
 
-    virtual shared_ptr<Initializer> clone() const = 0;
+    virtual std::shared_ptr<Initializer> clone() const = 0;
 
     // Referring to the initializer object, not the tensor that gets initialized:
     bool isInitialized() { return initialized; }
@@ -35,7 +31,7 @@ class Initializer {
     }
 
    protected:
-    shared_ptr<ThorImplementation::Initializer> implementationInitializer;
+    std::shared_ptr<ThorImplementation::Initializer> implementationInitializer;
     Optional<ThorImplementation::Tensor> tensorToInitialize;
     ThorImplementation::Layer *layerThatOwnsTensor;
 
@@ -50,8 +46,8 @@ class Initializer::Builder {
     virtual ~Builder() {}
     virtual void tensorToInitialize(ThorImplementation::Tensor _tensorToInitialize) = 0;
     virtual void layerThatOwnsTensor(ThorImplementation::Layer *_layerThatOwnsTensor) = 0;
-    virtual shared_ptr<Initializer> build() = 0;
-    virtual shared_ptr<Builder> clone() = 0;
+    virtual std::shared_ptr<Initializer> build() = 0;
+    virtual std::shared_ptr<Builder> clone() = 0;
 };
 
 }  // namespace Thor

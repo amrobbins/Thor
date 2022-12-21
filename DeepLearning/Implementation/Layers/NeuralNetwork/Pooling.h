@@ -38,7 +38,7 @@ class Pooling : public Layer {
         assert(featureOutput.isPresent());
 
         // Dimensions are NCHW
-        vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
         assert(inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numFeatures = inputDimensions[1];
@@ -58,7 +58,7 @@ class Pooling : public Layer {
         // Ensure that cudnnHandle is preallocated
         stream.getCudnnHandle();
 
-        vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
         assert(outputDimensions.size() == 4);
         assert(outputDimensions[0] == (uint32_t)batchSize);
         assert(outputDimensions[1] == (uint32_t)numFeatures);
@@ -100,7 +100,7 @@ class Pooling : public Layer {
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
 
-        vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputDimensions = featureInput.get().getDescriptor().getDimensions();
         assert(inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numFeatures = inputDimensions[1];
@@ -115,7 +115,7 @@ class Pooling : public Layer {
         outputHeight = computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
         outputWidth = computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
-        vector<unsigned long> featureOutputDimensions;
+        std::vector<unsigned long> featureOutputDimensions;
         featureOutputDimensions.push_back(batchSize);
         featureOutputDimensions.push_back(numFeatures);
         featureOutputDimensions.push_back(outputHeight);

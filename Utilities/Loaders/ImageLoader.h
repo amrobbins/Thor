@@ -8,8 +8,6 @@
 #include <assert.h>
 #include <math.h>
 
-// using namespace Magick;
-
 class ImageLoader {
    public:
     enum class Layout { HWC = 9, CHW };

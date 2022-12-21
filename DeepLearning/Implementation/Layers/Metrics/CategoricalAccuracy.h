@@ -21,8 +21,8 @@ class CategoricalAccuracy : public Metric {
         assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         assert(labelsInput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
 
-        vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
-        vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
+        std::vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<uint64_t> labelDimensions = labelsInput.get().getDescriptor().getDimensions();
         TensorDescriptor::DataType labelsDataType = labelsInput.get().getDescriptor().getDataType();
         bool perClassLabels = featureInputDimensions == labelDimensions &&
                               (labelsDataType == TensorDescriptor::DataType::UINT8 || labelsDataType == TensorDescriptor::DataType::FP16 ||

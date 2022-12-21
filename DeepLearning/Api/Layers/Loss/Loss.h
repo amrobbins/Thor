@@ -7,8 +7,6 @@
 #include <atomic>
 #include <utility>
 
-using std::atomic;
-
 namespace Thor {
 
 class Loss : public Layer {
@@ -59,21 +57,21 @@ class Loss : public Layer {
         assert(false);
     }
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
         if (numInputConnectionsMade == 2)
             return {lossTensor};
         else
-            return vector<Tensor>();
+            return std::vector<Tensor>();
     }
 
-    virtual vector<Tensor> getAllOutputTensors() const { return {getPredictions(), getLoss()}; }
+    virtual std::vector<Tensor> getAllOutputTensors() const { return {getPredictions(), getLoss()}; }
 
    protected:
     Tensor labelsTensor;
     Tensor predictionsTensor;
     Tensor lossTensor;
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint32_t fixedMem = 4;  // loss scaling factor, FP32
 
         // Labels

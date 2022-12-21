@@ -11,11 +11,6 @@
 #include <memory>
 #include <utility>
 
-using std::atomic;
-using std::make_shared;
-using std::shared_ptr;
-using std::unique_ptr;
-
 namespace Thor {
 
 class Network;
@@ -31,7 +26,7 @@ class Layer {
     virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
         assert(getFeatureInput().isPresent());
         assert(getFeatureOutput().isPresent());
         assert(inputTensor == getFeatureInput().get());
@@ -45,10 +40,12 @@ class Layer {
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {}
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const = 0;
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                           ThorImplementation::TensorPlacement tensorPlacement) const = 0;
     // Layers with weights that share the weights mem with other instances of the same layer on the same gpu will have less non first
     // instance fixed mem requirements.
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
         return getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
 
@@ -62,13 +59,13 @@ class Layer {
         return 0;
     }
 
-    virtual vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().get()}; }
+    virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().get()}; }
 
-    virtual shared_ptr<Layer> clone() const = 0;
+    virtual std::shared_ptr<Layer> clone() const = 0;
 
     static uint64_t getUnusedId() { return nextId.fetch_add(1); }
 
-    virtual string getLayerType() const = 0;
+    virtual std::string getLayerType() const = 0;
 
    protected:
     Optional<Tensor> featureInput;
@@ -80,7 +77,7 @@ class Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const = 0;
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const = 0;
 
     // FIXME: Why do I bother calling it a multilayer and then flattening later?
     // FIXME: I should just override addToNetwork to where it adds all required layers.
@@ -101,7 +98,7 @@ class Layer {
 
    private:
     uint64_t id;
-    static atomic<uint64_t> nextId;
+    static std::atomic<uint64_t> nextId;
 
     friend class Network;
 };

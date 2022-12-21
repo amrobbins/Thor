@@ -20,13 +20,6 @@
 #include <unordered_map>
 #include <utility>
 
-using std::exception;
-using std::make_pair;
-using std::mutex;
-using std::pair;
-using std::string;
-using std::unordered_map;
-
 namespace ThorImplementation {
 
 /**
@@ -94,13 +87,13 @@ class GpuConvolution {
     void printBackwardFilterKernelInfo(ConvolutionKernelRequirement convolutionKernelRequirement);
 
    private:
-    mutex forwardMutex;
-    mutex backwardDataMutex;
-    mutex backwardFilterMutex;
+    std::mutex forwardMutex;
+    std::mutex backwardDataMutex;
+    std::mutex backwardFilterMutex;
 
-    unordered_map<ConvolutionKernelRequirement, cudnnConvolutionFwdAlgoPerf_t> optimalForwardKernels;
-    unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdDataAlgoPerf_t> optimalBackwardDataKernels;
-    unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdFilterAlgoPerf_t> optimalBackwardFilterKernels;
+    std::unordered_map<ConvolutionKernelRequirement, cudnnConvolutionFwdAlgoPerf_t> optimalForwardKernels;
+    std::unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdDataAlgoPerf_t> optimalBackwardDataKernels;
+    std::unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdFilterAlgoPerf_t> optimalBackwardFilterKernels;
 
     static constexpr int MAX_ALGOS = 5000;
 

@@ -1,5 +1,7 @@
 #include "DeepLearning/Implementation/Initializers/UniformRandom.h"
 
+using namespace std;
+
 namespace ThorImplementation {
 
 UniformRandom::UniformRandom(double maxValue, double minValue) : maxValue(maxValue), minValue(minValue) {

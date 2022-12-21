@@ -31,7 +31,7 @@ class DropOut : public Layer {
         this->training = training;
     }
 
-    static size_t getReservedSpaceSizeInBytes(vector<unsigned long> featureInputDimensions, TensorDescriptor::DataType dataType) {
+    static size_t getReservedSpaceSizeInBytes(std::vector<unsigned long> featureInputDimensions, TensorDescriptor::DataType dataType) {
         size_t numBytes;
 
         cudnnTensorDescriptor_t descriptor = createCudnnTensorDescriptor(featureInputDimensions, dataType);
@@ -148,7 +148,7 @@ class DropOut : public Layer {
     float probabilityOfDroppingOut;
     bool training;
 
-    static mutex mtx;
+    static std::mutex mtx;
     static uint64_t seed;
 
     Tensor randomState;

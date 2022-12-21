@@ -3,9 +3,8 @@
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
-#include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
-
 using namespace Thor;
+using namespace std;
 
 atomic<uint64_t> Layer::nextId(2);
 

@@ -28,30 +28,24 @@
 #include <utility>
 #include <vector>
 
-using std::deque;
-using std::make_pair;
-using std::pair;
-using std::set;
-using std::vector;
-
 namespace ThorImplementation {
 
 class StampedNetwork {
    public:
-    vector<ThorImplementation::NetworkInput *> inputs;
-    vector<ThorImplementation::NetworkOutput *> outputs;
-    vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
-    vector<ThorImplementation::Layer *> otherLayers;
+    std::vector<ThorImplementation::NetworkInput *> inputs;
+    std::vector<ThorImplementation::NetworkOutput *> outputs;
+    std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
+    std::vector<ThorImplementation::Layer *> otherLayers;
 
-    vector<shared_ptr<Thor::Initializer>> initializers;
+    std::vector<std::shared_ptr<Thor::Initializer>> initializers;
 
-    map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
-    map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
-    map<ThorImplementation::Layer *, uint64_t> physicalLayerToApiLayer;
-    map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
+    std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
+    std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
+    std::map<ThorImplementation::Layer *, uint64_t> physicalLayerToApiLayer;
+    std::map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
 
-    map<string, ThorImplementation::NetworkInput *> inputNamed;
-    map<string, ThorImplementation::NetworkOutput *> outputNamed;
+    std::map<std::string, ThorImplementation::NetworkInput *> inputNamed;
+    std::map<std::string, ThorImplementation::NetworkOutput *> outputNamed;
 
     uint32_t gpuNum;
 
@@ -85,9 +79,9 @@ class StampedNetwork {
 
     // Note that all processing is finished at the end of any input stream of the stamp.
     // Note *input* stream - this is not the case for the loader streams
-    Event sendBatch(map<string, Tensor> batchInputs,
-                    map<string, Tensor> &batchOutputs,
-                    map<string, Event> &outputReadyEvents,
+    Event sendBatch(std::map<std::string, Tensor> batchInputs,
+                    std::map<std::string, Tensor> &batchOutputs,
+                    std::map<std::string, Event> &outputReadyEvents,
                     bool isInferenceOnly) {
         assert(batchInputs.size() == inputs.size());
 
@@ -187,30 +181,30 @@ class Network {
 
     virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
+    virtual std::vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
 
-    virtual void setNetworkName(string networkName) { this->networkName = networkName; }
-    virtual string getNetworkName() { return networkName; }
+    virtual void setNetworkName(std::string networkName) { this->networkName = networkName; }
+    virtual std::string getNetworkName() { return networkName; }
 
    private:
-    static const bool DEBUG_STAMP = false;
+    static const bool DEBUG_STAMP = true;
 
    protected:
-    set<shared_ptr<Layer>> network;
-    vector<pair<Optional<Tensor>, Layer *>> orderedNetwork;
+    std::set<std::shared_ptr<Layer>> network;
+    std::vector<std::pair<Optional<Tensor>, Layer *>> orderedNetwork;
 
-    set<Tensor> allTensors;
-    map<Tensor, vector<Layer *>> apiTensorToApiLoadingLayers;
-    map<Tensor, Layer *> apiTensorToApiDrivingLayer;
-    map<Layer *, vector<Tensor>> apiLayerToApiOutputTensors;
-    map<Layer *, vector<Tensor>> apiLayerToApiInputTensors;
+    std::set<Tensor> allTensors;
+    std::map<Tensor, std::vector<Layer *>> apiTensorToApiLoadingLayers;
+    std::map<Tensor, Layer *> apiTensorToApiDrivingLayer;
+    std::map<Layer *, std::vector<Tensor>> apiLayerToApiOutputTensors;
+    std::map<Layer *, std::vector<Tensor>> apiLayerToApiInputTensors;
 
-    vector<shared_ptr<Initializer>> initializers;
+    std::vector<std::shared_ptr<Initializer>> initializers;
 
-    vector<ThorImplementation::StampedNetwork> stampedNetworks;
+    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
-    uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement);
-    uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement);
+    uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement);
+    uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement);
 
     uint64_t firstInstanceBytes;
     uint64_t nonFirstInstanceBytes;
@@ -237,7 +231,7 @@ class Network {
                             uint32_t batchSize,
                             ThorImplementation::StampedNetwork &stampedNetwork);
 
-    void createBatchDimensions(vector<uint64_t> &batchDimensions, vector<uint64_t> tensorDimensions, uint32_t batchSize);
+    void createBatchDimensions(std::vector<uint64_t> &batchDimensions, std::vector<uint64_t> tensorDimensions, uint32_t batchSize);
 
     void addSingleLayerToNetwork(const Layer *layer) {
         assert(!layer->isMultiLayer());
@@ -251,7 +245,7 @@ class Network {
     std::string networkName;
 
     // void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork);
-    // void reorderLayers(StampedNetwork &stampedNetwork, vector<Layer*> &layersToReoder, vector<Layer*> &destinationStorage);
+    // void reorderLayers(StampedNetwork &stampedNetwork, std::vector<Layer*> &layersToReoder, std::vector<Layer*> &destinationStorage);
 
     bool terminatesWithoutHitting(Tensor tensor, Layer *layer);
 

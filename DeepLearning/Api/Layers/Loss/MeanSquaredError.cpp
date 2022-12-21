@@ -1,6 +1,7 @@
 #include "MeanSquaredError.h"
 
 using namespace Thor;
+using namespace std;
 
 void MeanSquaredError::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());

@@ -27,10 +27,10 @@ class Concatenate : public TrainableWeightsBiasesLayer {
 
     virtual ~Concatenate() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Concatenate>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Concatenate>(*this); }
 
     virtual Tensor getFeatureOutput(Tensor inputTensor) const {
-        map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
+        std::map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
         assert(it != outputTensorFromInputTensor.end());
         return it->second;
     }
@@ -45,11 +45,11 @@ class Concatenate : public TrainableWeightsBiasesLayer {
         assert(false);
     }
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
         if (numInputConnectionsMade == featureInputs.size()) {
             return {featureOutputs[0]};
         } else {
-            return vector<Tensor>();
+            return std::vector<Tensor>();
         }
     }
 
@@ -59,14 +59,14 @@ class Concatenate : public TrainableWeightsBiasesLayer {
         assert(numInputConnectionsMade <= featureInputs.size());
     }
 
-    virtual string getLayerType() const { return "Concatenate"; }
+    virtual std::string getLayerType() const { return "Concatenate"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
@@ -77,7 +77,7 @@ class Concatenate : public TrainableWeightsBiasesLayer {
         return concatenate;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // featureOutput and errorInput
         return (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
     }
@@ -99,7 +99,7 @@ class Concatenate::Builder {
         assert(!_featureInputs.empty());
         assert(!_concatenationAxis.isEmpty());
         assert(_concatenationAxis.get() < _featureInputs[0].getDimensions().size());
-        set<Tensor> uniqueFeatureInputs(_featureInputs.begin(), _featureInputs.end());
+        std::set<Tensor> uniqueFeatureInputs(_featureInputs.begin(), _featureInputs.end());
         assert(uniqueFeatureInputs.size() == _featureInputs.size());  // No duplicate inputs
 
         Concatenate concatenate;
@@ -107,7 +107,7 @@ class Concatenate::Builder {
         concatenate.concatenationAxis = _concatenationAxis;
         concatenate.numInputConnectionsMade = 0;
 
-        vector<uint64_t> outputDimensions = concatenate.featureInputs[0].getDimensions();
+        std::vector<uint64_t> outputDimensions = concatenate.featureInputs[0].getDimensions();
         outputDimensions[concatenate.concatenationAxis] = 0;
         for (uint32_t i = 0; i < concatenate.featureInputs.size(); ++i) {
             outputDimensions[concatenate.concatenationAxis] += concatenate.featureInputs[i].getDimensions()[concatenate.concatenationAxis];
@@ -146,7 +146,7 @@ class Concatenate::Builder {
 
    private:
     Optional<Network *> _network;
-    vector<Tensor> _featureInputs;
+    std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _concatenationAxis;
 };
 

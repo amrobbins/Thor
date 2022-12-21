@@ -10,6 +10,7 @@
 using std::shared_ptr;
 
 using namespace Thor;
+using namespace std;
 
 TEST(FullyConnectedSingleFeatureInput, Builds) {
     srand(time(nullptr));

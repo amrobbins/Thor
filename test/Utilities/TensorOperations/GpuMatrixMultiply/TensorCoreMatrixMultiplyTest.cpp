@@ -3,7 +3,7 @@
 #include "gtest/gtest.h"
 #include "omp.h"
 
-using std::string;
+using namespace std;
 
 #define INTEREST_KERNEL KernelWithSpec::KernelIndex::_256_96_bigSharedBlockA16Restrict
 

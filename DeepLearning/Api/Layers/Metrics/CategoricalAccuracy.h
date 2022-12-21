@@ -11,9 +11,9 @@ class CategoricalAccuracy : public Metric {
 
     virtual ~CategoricalAccuracy() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalAccuracy>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<CategoricalAccuracy>(*this); }
 
-    virtual string getLayerType() const { return "CategoricalAccuracy"; }
+    virtual std::string getLayerType() const { return "CategoricalAccuracy"; }
 
    private:
     enum class LabelType { INDEX = 5, ONE_HOT };
@@ -23,7 +23,7 @@ class CategoricalAccuracy : public Metric {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
 
@@ -32,7 +32,7 @@ class CategoricalAccuracy : public Metric {
         return categoricalAccuracy;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t workspaceSize = 4 * batchSize;
         uint64_t metricOutputSize = 4;
 
@@ -54,8 +54,8 @@ class CategoricalAccuracy::Builder {
         if (_labelType == LabelType::ONE_HOT) {
             assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
         } else {
-            vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-            vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
+            std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+            std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
             assert(labelDimensions.size() == 1 || labelDimensions.size() == 2);
             assert(predictionDimensions[0] == labelDimensions[0]);
             if (labelDimensions.size() == 2)

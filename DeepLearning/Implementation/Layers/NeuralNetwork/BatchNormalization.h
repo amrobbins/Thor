@@ -57,7 +57,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         // Cudnn forces the use of FP32 for the weights currently
         // https://docs.nvidia.com/deeplearning/cudnn/api/index.html#cudnnDeriveBNTensorDescriptor
         if (!usingSharedWeights && !weights.isInitialized()) {
-            vector<unsigned long> derivedBnTensorDimensions = {
+            std::vector<unsigned long> derivedBnTensorDimensions = {
                 featureInputs.front().get().getDescriptor().getDimensions()[1]};  // numChannels
 
             weights = Tensor(featureInputs[0].get().getPlacement(),
@@ -97,7 +97,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         assert(!featureOutputs.empty());
         assert(featureInputs.size() == featureOutputs.size());
 
-        vector<uint64_t> inputDimensions = featureInputs.front().get().getDescriptor().getDimensions();
+        std::vector<uint64_t> inputDimensions = featureInputs.front().get().getDescriptor().getDimensions();
         assert(inputDimensions.size() == 2 || inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
         numChannels = inputDimensions[1];
@@ -131,7 +131,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                     inputDimensions.size() == 2 ? CUDNN_BATCHNORM_PER_ACTIVATION : CUDNN_BATCHNORM_SPATIAL);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        vector<unsigned long> derivedBnTensorDimensions = {numChannels};
+        std::vector<unsigned long> derivedBnTensorDimensions = {numChannels};
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i) {
             resultSaveMean.push_back(Tensor(featureInputs[0].get().getPlacement(),
@@ -312,8 +312,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     Tensor resultRunningMean;
     Tensor resultRunningVariance;
-    vector<Tensor> resultSaveMean;
-    vector<Tensor> resultSaveInvVariance;
+    std::vector<Tensor> resultSaveMean;
+    std::vector<Tensor> resultSaveInvVariance;
 };
 
 }  // namespace ThorImplementation

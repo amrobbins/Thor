@@ -6,9 +6,6 @@
 
 #include <string>
 
-using std::string;
-using std::to_string;
-
 namespace Thor {
 
 class NetworkInput : public Layer {
@@ -19,23 +16,23 @@ class NetworkInput : public Layer {
 
     virtual ~NetworkInput() {}
 
-    virtual string getName() const { return name; }
-    vector<uint64_t> getDimensions() const { return dimensions; }
+    virtual std::string getName() const { return name; }
+    std::vector<uint64_t> getDimensions() const { return dimensions; }
     Tensor::DataType getDataType() const { return dataType; }
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<NetworkInput>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<NetworkInput>(*this); }
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {featureOutput}; }
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {featureOutput}; }
 
-    virtual string getLayerType() const { return "NetworkInput"; }
+    virtual std::string getLayerType() const { return "NetworkInput"; }
 
    protected:
     virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement,
                                                     uint32_t batchSize,
-                                                    vector<shared_ptr<Initializer>> &initializers) const {
+                                                    std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
 
-        vector<uint64_t> batchDimensions;
+        std::vector<uint64_t> batchDimensions;
         batchDimensions.push_back(batchSize);
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             batchDimensions.push_back(dimensions[i]);
@@ -51,18 +48,18 @@ class NetworkInput : public Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(false);
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // Input has a prefetch buffer in addition to storing the output tensor
         return 2 * featureOutput.get().getTotalSizeInBytes();
     }
 
    private:
-    string name;
-    vector<uint64_t> dimensions;
+    std::string name;
+    std::vector<uint64_t> dimensions;
     Tensor::DataType dataType;
 
     friend class Network;
@@ -79,7 +76,7 @@ class NetworkInput::Builder {
         if (_name.isPresent())
             networkInput.name = _name;
         else
-            networkInput.name = string("NetworkInput") + to_string(networkInput.getId());
+            networkInput.name = std::string("NetworkInput") + std::to_string(networkInput.getId());
         networkInput.dimensions = _dimensions;
         networkInput.dataType = _dataType;
         networkInput.featureInput = Tensor(_dataType, _dimensions);
@@ -95,7 +92,7 @@ class NetworkInput::Builder {
         return *this;
     }
 
-    virtual NetworkInput::Builder &name(string _name) {
+    virtual NetworkInput::Builder &name(std::string _name) {
         assert(!_name.empty());
         assert(this->_name.isEmpty());
         this->_name = _name;
@@ -103,7 +100,7 @@ class NetworkInput::Builder {
     }
 
     // Note: dimensions do not include batch size
-    virtual NetworkInput::Builder &dimensions(vector<uint64_t> _dimensions) {
+    virtual NetworkInput::Builder &dimensions(std::vector<uint64_t> _dimensions) {
         assert(!_dimensions.empty());
         this->_dimensions = _dimensions;
         return *this;
@@ -116,9 +113,9 @@ class NetworkInput::Builder {
     }
 
    private:
-    Optional<string> _name;
+    Optional<std::string> _name;
     Optional<Network *> _network;
-    Optional<vector<uint64_t>> _dimensions;
+    Optional<std::vector<uint64_t>> _dimensions;
     Optional<Tensor::DataType> _dataType;
 };
 

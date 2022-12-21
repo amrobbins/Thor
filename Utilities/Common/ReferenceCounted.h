@@ -5,9 +5,6 @@
 #include <atomic>
 #include <mutex>
 
-using std::atomic;
-using std::recursive_mutex;
-
 /**
  * Note: if you want to create a class that derives from a class that derives ReferenceCounted,
  *       you will have to be able to figure out which is the most derived destructor and only
@@ -92,7 +89,7 @@ class ReferenceCounted {
     long getReferenceCountedId() { return id; }
 
     ReferenceCounted &operator=(const ReferenceCounted &other) {
-        atomic<long> *otherReferenceCount = other.referenceCount;
+        std::atomic<long> *otherReferenceCount = other.referenceCount;
 
         // If they already refer to the same instance, or they are both uninitialized, then do nothing.
         if (referenceCount == otherReferenceCount)
@@ -147,7 +144,7 @@ class ReferenceCounted {
     long getReferenceCount() { return (referenceCount.load())->fetch_add(0); }
 
     void initialize() {
-        referenceCount = new atomic<long>(1);
+        referenceCount = new std::atomic<long>(1);
 
 #ifdef DEBUG_REF_COUNTS
         objectsCreated.fetch_add(1);
@@ -186,16 +183,16 @@ class ReferenceCounted {
     }
 
    private:
-    atomic<atomic<long> *> referenceCount;
+    std::atomic<std::atomic<long> *> referenceCount;
 
-    recursive_mutex mtx;
+    std::recursive_mutex mtx;
 
     const long id;
-    static atomic<long> nextId;
+    static std::atomic<long> nextId;
 
 #ifdef DEBUG_REF_COUNTS
-    static atomic<long> objectsCreated;
-    static atomic<long> objectsDestroyed;
+    static std::atomic<long> objectsCreated;
+    static std::atomic<long> objectsDestroyed;
 
     class RefCountChecker {
        public:

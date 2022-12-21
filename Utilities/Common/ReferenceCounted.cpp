@@ -1,5 +1,7 @@
 #include "Utilities/Common/ReferenceCounted.h"
 
+using namespace std;
+
 atomic<long> ReferenceCounted::nextId(1L);
 
 #ifdef DEBUG_REF_COUNTS

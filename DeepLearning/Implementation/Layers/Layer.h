@@ -25,16 +25,6 @@
 #include <utility>
 #include <vector>
 
-using std::make_pair;
-using std::map;
-using std::mutex;
-using std::pair;
-using std::priority_queue;
-using std::set;
-using std::unique_lock;
-using std::unordered_multimap;
-using std::vector;
-
 namespace ThorImplementation {
 
 class Tensor;
@@ -88,12 +78,12 @@ class Layer {
 
     virtual ~Layer() {}
 
-    virtual void setName(string name) {
+    virtual void setName(std::string name) {
         assert(this->name.empty());
         this->name = name;
     }
 
-    virtual string getName() const { return name; }
+    virtual std::string getName() const { return name; }
 
     // initialize weights using the configured initializer. In general set any initial values.
     virtual void initialize() {}
@@ -261,7 +251,7 @@ class Layer {
     // compute the fan in for one element of a batch
     virtual uint64_t getFanIn() {
         assert(featureInput.isPresent());
-        vector<uint64_t> inputDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<uint64_t> inputDimensions = featureInput.get().getDescriptor().getDimensions();
         uint64_t fanIn = 1;
         for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
             fanIn *= inputDimensions[i];
@@ -272,7 +262,7 @@ class Layer {
     // compute the fan out for one element of a batch
     virtual uint64_t getFanOut() {
         assert(featureOutput.isPresent());
-        vector<uint64_t> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
+        std::vector<uint64_t> outputDimensions = featureOutput.get().getDescriptor().getDimensions();
         uint64_t fanOut = 1;
         for (uint32_t i = 1; i < outputDimensions.size(); ++i) {
             fanOut *= outputDimensions[i];
@@ -289,7 +279,9 @@ class Layer {
 
     virtual uint64_t floatingPointOperationsPerExampleBackward() { return 0; }
 
-    static cudnnTensorDescriptor_t createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
+    virtual std::string getType() { return "Layer"; }
+
+    static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<unsigned long> featureInputDimensions,
                                                                TensorDescriptor::DataType dataType);
 
    protected:
@@ -308,16 +300,16 @@ class Layer {
     bool running;
     bool compiled;
 
-    string name;
+    std::string name;
 
-    mutex mtx;
+    std::mutex mtx;
 
    private:
     bool inferenceOnly;
     bool connectToBackPropErrorIn;
 
     uint64_t id;
-    static atomic<uint64_t> nextId;
+    static std::atomic<uint64_t> nextId;
 };
 
 }  // namespace ThorImplementation

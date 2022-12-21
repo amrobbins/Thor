@@ -12,16 +12,16 @@ class SoftSign : public Activation {
 
     virtual ~SoftSign() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<SoftSign>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<SoftSign>(*this); }
 
-    virtual string getLayerType() const { return "SoftSign"; }
+    virtual std::string getLayerType() const { return "SoftSign"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
@@ -30,7 +30,7 @@ class SoftSign : public Activation {
         return softSign;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
@@ -38,7 +38,7 @@ class SoftSign : public Activation {
 
 class SoftSign::Builder : public Activation::Builder {
    public:
-    virtual shared_ptr<Layer> build() {
+    virtual std::shared_ptr<Layer> build() {
         assert(_network.isPresent());
         assert(_featureInput.isPresent());
 
@@ -61,7 +61,7 @@ class SoftSign::Builder : public Activation::Builder {
         this->_featureInput = _featureInput;
     }
 
-    virtual shared_ptr<Activation::Builder> clone() { return make_shared<SoftSign::Builder>(*this); }
+    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<SoftSign::Builder>(*this); }
 
    private:
     Optional<Network *> _network;

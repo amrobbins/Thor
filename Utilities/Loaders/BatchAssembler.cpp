@@ -2,10 +2,9 @@
 
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
+using ThorImplementation::TensorPlacement;
 
-using std::shared_ptr;
-using std::thread;
-using std::unique_ptr;
+using namespace std;
 
 const half BatchAssembler::HALF_ONE = (half)1.0f;
 

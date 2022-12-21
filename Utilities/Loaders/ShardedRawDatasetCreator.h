@@ -28,10 +28,6 @@
 #include <utility>
 #include <vector>
 
-using std::mutex;
-using std::string;
-using std::thread;
-
 class DataProcessor : public WorkQueueExecutorBase<DataElement, DataElement> {
    public:
     /**
@@ -49,43 +45,43 @@ class DataProcessor : public WorkQueueExecutorBase<DataElement, DataElement> {
  */
 class ShardedRawDatasetCreator {
    public:
-    ShardedRawDatasetCreator(std::unordered_set<string> sourceDirectories,
-                             std::unordered_set<string> destDirectories,
-                             string baseDatasetFileName);
+    ShardedRawDatasetCreator(std::unordered_set<std::string> sourceDirectories,
+                             std::unordered_set<std::string> destDirectories,
+                             std::string baseDatasetFileName);
 
     bool createDataset(std::unique_ptr<DataProcessor> &&dataProcessor, std::vector<std::shared_ptr<Shard>> &shards);
 
    private:
-    std::unordered_set<string> sourceDirectories;
-    std::unordered_set<string> destDirectories;
-    string baseDatasetFileName;
+    std::unordered_set<std::string> sourceDirectories;
+    std::unordered_set<std::string> destDirectories;
+    std::string baseDatasetFileName;
 
     uint64_t numTrainExamples;
     uint64_t numValidateExamples;
     uint64_t numTestExamples;
     uint64_t outputTensorSizeInBytes;
 
-    std::unordered_set<string> classes;
+    std::unordered_set<std::string> classes;
     // sourceDirectory -> (class -> [examplePath, examplePath, ...])
-    std::unordered_map<string, std::unordered_map<string, std::vector<boost::filesystem::path>>> trainExamplesPerClass;
-    std::unordered_map<string, std::unordered_map<string, std::vector<boost::filesystem::path>>> validateExamplesPerClass;
-    std::unordered_map<string, std::unordered_map<string, std::vector<boost::filesystem::path>>> testExamplesPerClass;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<boost::filesystem::path>>> trainExamplesPerClass;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<boost::filesystem::path>>> validateExamplesPerClass;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<boost::filesystem::path>>> testExamplesPerClass;
 
     uint32_t numOutputShards;
     std::vector<boost::filesystem::path> destShardFiles;
 
-    mutex mtx;
+    std::mutex mtx;
 
     void getNumExamples(uint64_t &numTrainExamples,
                         uint64_t &numValidateExamples,
                         uint64_t &numTestExamples,
                         uint64_t &numFilenameChars,
-                        std::set<string> &allClasses,
+                        std::set<std::string> &allClasses,
                         uint64_t &numClassNameChars);
     void loadExamples(WorkQueueUnordered<DataElement, DataElement> &workQueue);
     void writeDataToShard(WorkQueueUnordered<DataElement, DataElement> *workQueue, std::vector<std::shared_ptr<Shard>> *shards);
 
-    atomic<uint64_t> destShardTrain;
-    atomic<uint64_t> destShardValidate;
-    atomic<uint64_t> destShardTest;
+    std::atomic<uint64_t> destShardTrain;
+    std::atomic<uint64_t> destShardValidate;
+    std::atomic<uint64_t> destShardTest;
 };

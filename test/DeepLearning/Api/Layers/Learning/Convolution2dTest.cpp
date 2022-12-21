@@ -10,6 +10,7 @@
 using std::shared_ptr;
 
 using namespace Thor;
+using namespace std;
 
 TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
     srand(time(nullptr));

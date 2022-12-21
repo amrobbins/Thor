@@ -18,6 +18,7 @@ using std::unordered_set;
 using std::vector;
 
 using namespace Thor;
+using namespace std;
 
 int main() {
     Network singleLayerFullyConnected = buildSingleLayerFullyConnected();

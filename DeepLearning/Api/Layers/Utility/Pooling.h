@@ -13,7 +13,7 @@ class Pooling : public Layer {
 
     ~Pooling() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Pooling>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Pooling>(*this); }
 
     uint32_t getWindowHeight() { return windowHeight; }
     uint32_t getWindowWidth() { return windowWidth; }
@@ -22,7 +22,7 @@ class Pooling : public Layer {
     uint32_t getVerticalPadding() { return verticalPadding; }
     uint32_t getHorizontalPadding() { return horizontalPadding; }
 
-    virtual string getLayerType() const { return "Pooling"; }
+    virtual std::string getLayerType() const { return "Pooling"; }
 
     enum class Type { AVERAGE = 3, MAX };
 
@@ -31,7 +31,7 @@ class Pooling : public Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -45,7 +45,7 @@ class Pooling : public Layer {
         return pooling;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         return batchSize * featureOutput.get().getTotalSizeInBytes();
     }
 

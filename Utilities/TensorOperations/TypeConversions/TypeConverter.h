@@ -11,11 +11,6 @@
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"
 
-using std::aligned_storage;
-using std::is_convertible;
-using std::is_integral;
-using std::is_same;
-
 namespace ThorImplementation {
 
 // In-place conversions are supported and are about 20% slower than non-in-place conversions

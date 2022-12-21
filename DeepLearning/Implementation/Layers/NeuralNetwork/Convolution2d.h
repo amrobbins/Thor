@@ -45,7 +45,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             // Allocate 1 weights and 1 weights gradient, if there is more than one connection, will accumulate to weights gradient using
             // BETA=1.0. Data format is NCHW so filter format is KCRS where K = num output channels, C = num input channels, R = filter
             // rows, S = filter columns
-            vector<unsigned long> weightsDimensions;
+            std::vector<unsigned long> weightsDimensions;
             weightsDimensions.push_back(numOutputChannels);
             weightsDimensions.push_back(featureInputs[0].get().getDescriptor().getDimensions()[1]);
             weightsDimensions.push_back(filterHeight);
@@ -72,7 +72,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         numInputRows = featureInputs[0].get().getDescriptor().getDimensions()[2];
         numInputColumns = featureInputs[0].get().getDescriptor().getDimensions()[3];
 
-        string anyGpuType = MachineEvaluator::instance().getGpuType(0);
+        std::string anyGpuType = MachineEvaluator::instance().getGpuType(0);
         ConvolutionKernelRequirement tempConvolutionKernelRequirement = ConvolutionKernelRequirement(anyGpuType,
                                                                                                      filterWidth,
                                                                                                      filterHeight,
@@ -113,7 +113,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             streams[i].getCudnnHandle();
         }
 
-        string gpuType = MachineEvaluator::instance().getGpuType(streams.front().getGpuNum());
+        std::string gpuType = MachineEvaluator::instance().getGpuType(streams.front().getGpuNum());
         convolutionKernelRequirement = ConvolutionKernelRequirement(gpuType,
                                                                     filterWidth,
                                                                     filterHeight,
@@ -136,7 +136,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         uint64_t workspaceForwardSizeInBytes = GpuConvolution::instance().getForwardWorkspaceSizeInBytes(convolutionKernelRequirement);
         if (workspaceForwardSizeInBytes > 0) {
-            vector<unsigned long> workspaceDimensions;
+            std::vector<unsigned long> workspaceDimensions;
             workspaceDimensions.push_back(workspaceForwardSizeInBytes);
             TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
             workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
@@ -146,7 +146,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                 GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
             GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
             if (workspaceBackwardDataSizeInBytes > 0) {
-                vector<unsigned long> workspaceDimensions;
+                std::vector<unsigned long> workspaceDimensions;
                 workspaceDimensions.push_back(workspaceBackwardDataSizeInBytes);
                 TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
                 workspaceBackwardData = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
@@ -155,7 +155,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         uint64_t workspaceBackwardFilterSizeInBytes =
             GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
         if (workspaceBackwardFilterSizeInBytes > 0) {
-            vector<unsigned long> workspaceDimensions;
+            std::vector<unsigned long> workspaceDimensions;
             workspaceDimensions.push_back(workspaceBackwardFilterSizeInBytes);
             TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
             workspaceBackwardFilter = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);

@@ -23,12 +23,6 @@
 #include <unordered_map>
 #include <utility>
 
-using std::exception;
-using std::make_pair;
-using std::mutex;
-using std::pair;
-using std::unordered_map;
-
 namespace ThorImplementation {
 
 /**
@@ -206,7 +200,7 @@ class CublasMatrixMultiply {
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
-    inline void chooseOptimalKernel(string gpuType,
+    inline void chooseOptimalKernel(std::string gpuType,
                                     int rowsA,
                                     int colsA,
                                     int rowsB,
@@ -219,7 +213,7 @@ class CublasMatrixMultiply {
         chooseOptimalKernel(gpuType, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, printResults);
     }
 
-    inline void chooseOptimalKernel(string gpuType,
+    inline void chooseOptimalKernel(std::string gpuType,
                                     int rowsA,
                                     int colsA,
                                     int rowsB,
@@ -310,7 +304,7 @@ class CublasMatrixMultiply {
     // optimal kernel was not measured.
     //
     // This can be useful if you need to balance the execution time between multiple GPUs.
-    double getOptimalKernelTime(string gpuType,
+    double getOptimalKernelTime(std::string gpuType,
                                 int rowsA,
                                 int colsA,
                                 int rowsB,
@@ -337,19 +331,19 @@ class CublasMatrixMultiply {
                                 bool workspaceAllowed);
 
    private:
-    unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
-    unordered_map<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
+    std::unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
+    std::unordered_map<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
 
-    mutex mtx;
+    std::mutex mtx;
 
-    class Youreusingitwrong : public exception {
+    class Youreusingitwrong : public std::exception {
        public:
-        Youreusingitwrong(string message) { this->message = message; }
+        Youreusingitwrong(std::string message) { this->message = message; }
 
         virtual const char *what() const throw() { return message.c_str(); }
 
        private:
-        string message;
+        std::string message;
     };
 
     CublasMatrixMultiply() {}
@@ -371,11 +365,11 @@ class CublasMatrixMultiply {
                              bool printResults);
 
     void getSupportedCublasAlgorithms(const OperationType &operationType,
-                                      vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,
-                                      vector<int> &supportedAlgorithmIds,
+                                      std::vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,
+                                      std::vector<int> &supportedAlgorithmIds,
                                       CublasKernelRequirement cublasKernelRequirement,
                                       int gpuNum);
-    vector<cublasLtMatmulTile_t> getSupportedTileSizes(cublasLtMatmulAlgo_t algo);
+    std::vector<cublasLtMatmulTile_t> getSupportedTileSizes(cublasLtMatmulAlgo_t algo);
     bool isSplitKSupported(cublasLtMatmulAlgo_t algo);
     uint32_t getReductionSupportMask(cublasLtMatmulAlgo_t algo);
     int getSwizzleMaxValue(cublasLtMatmulAlgo_t algo);

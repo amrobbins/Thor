@@ -1,6 +1,7 @@
 #include "TypeConverter.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 void TypeConverter::convertType(void *source,
                                 void *dest,

@@ -12,7 +12,7 @@ class NetworkInput : public Layer {
 
     NetworkInput(TensorPlacement networkPlacement,
                  Optional<TensorDescriptor::DataType> contentDataType,
-                 Optional<vector<unsigned long>> contentDimensions) {
+                 Optional<std::vector<unsigned long>> contentDimensions) {
         construct(networkPlacement, contentDataType, contentDimensions);
     }
 
@@ -23,7 +23,7 @@ class NetworkInput : public Layer {
 
     void construct(TensorPlacement networkPlacement,
                    Optional<TensorDescriptor::DataType> contentDataType,
-                   Optional<vector<unsigned long>> contentDimensions) {
+                   Optional<std::vector<unsigned long>> contentDimensions) {
         assert(contentDimensions.isPresent() == contentDataType.isPresent());
         this->networkPlacement = networkPlacement;
         this->contentDataType = contentDataType;
@@ -103,7 +103,7 @@ class NetworkInput : public Layer {
     virtual void backward(Optional<Tensor> errorInput) {}
 
    protected:
-    Optional<vector<unsigned long>> contentDimensions;
+    Optional<std::vector<unsigned long>> contentDimensions;
     TensorPlacement networkPlacement;
     Optional<TensorDescriptor::DataType> contentDataType;
 

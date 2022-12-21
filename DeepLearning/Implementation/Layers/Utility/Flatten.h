@@ -13,10 +13,10 @@ class Flatten : public Layer {
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
 
-        vector<unsigned long> originalDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> originalDimensions = featureInput.get().getDescriptor().getDimensions();
         assert(toNumDimensions < originalDimensions.size());
         unsigned int d = 0;
-        vector<unsigned long> dimensions;
+        std::vector<unsigned long> dimensions;
         for (; d < toNumDimensions - 1; ++d) {
             dimensions.push_back(originalDimensions[d]);
         }

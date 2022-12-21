@@ -50,6 +50,7 @@
 //-----------------------------------------------
 
 using namespace ThorImplementation;
+using namespace std;
 
 // This variant allows non-packed matrices and uses a workspace
 void CublasMatrixMultiply::multiply(Tensor A,

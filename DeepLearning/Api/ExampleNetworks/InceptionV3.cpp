@@ -26,6 +26,7 @@
 #include "DeepLearning/Api/ExampleNetworks/InceptionV3.h"
 
 using namespace Thor;
+using namespace std;
 
 Network buildInceptionV3() {
     Network inceptionV3;

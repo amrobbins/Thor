@@ -10,8 +10,6 @@
 
 namespace Thor {
 
-using std::shared_ptr;
-
 class HyperparameterController {
    public:
     HyperparameterController() {}

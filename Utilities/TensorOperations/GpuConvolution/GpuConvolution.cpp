@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 const float GpuConvolution::ALPHA_NO_SCALE = 1.0f;
 const float GpuConvolution::BETA_CLEAR = 0.0f;

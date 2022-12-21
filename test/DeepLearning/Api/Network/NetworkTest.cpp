@@ -11,11 +11,10 @@
 #include <set>
 #include <vector>
 
-using std::set;
-using std::vector;
+using namespace std;
 
 using namespace Thor;
-
+/*
 TEST(Network, SimplestNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
@@ -528,7 +527,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
 
     stampedNetwork.clear();
 }
-
+*/
 TEST(Network, AlexnetIsProperlyFormed) {
     ThorImplementation::StampedNetwork stampedNetwork;
 
@@ -621,6 +620,8 @@ TEST(Network, AlexnetIsProperlyFormed) {
     vector<ThorImplementation::TensorFanout *> fo;
     vector<ThorImplementation::Concatenate *> cat;
     vector<ThorImplementation::CategoricalAccuracy *> acc;
+    vector<ThorImplementation::Sigmoid *> sgm;
+    vector<ThorImplementation::LossShaper *> ls;
 
     for (uint64_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
         if (dynamic_cast<ThorImplementation::TypeConversion *>(stampedNetwork.otherLayers[i]) != nullptr)
@@ -641,7 +642,15 @@ TEST(Network, AlexnetIsProperlyFormed) {
             cat.push_back(dynamic_cast<ThorImplementation::Concatenate *>(stampedNetwork.otherLayers[i]));
         else if (dynamic_cast<ThorImplementation::CategoricalAccuracy *>(stampedNetwork.otherLayers[i]) != nullptr)
             acc.push_back(dynamic_cast<ThorImplementation::CategoricalAccuracy *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::Softmax *>(stampedNetwork.otherLayers[i]) != nullptr)
+            sm.push_back(dynamic_cast<ThorImplementation::Softmax *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::Sigmoid *>(stampedNetwork.otherLayers[i]) != nullptr)
+            sgm.push_back(dynamic_cast<ThorImplementation::Sigmoid *>(stampedNetwork.otherLayers[i]));
+        else if (dynamic_cast<ThorImplementation::LossShaper *>(stampedNetwork.otherLayers[i]) != nullptr)
+            ls.push_back(dynamic_cast<ThorImplementation::LossShaper *>(stampedNetwork.otherLayers[i]));
         else {
+            printf(
+                "other layer id %ld type %s\n", stampedNetwork.otherLayers[i]->getId(), stampedNetwork.otherLayers[i]->getType().c_str());
             ASSERT_EQ(dynamic_cast<ThorImplementation::TensorFanout *>(stampedNetwork.otherLayers[i]), nullptr);
             ASSERT_EQ(dynamic_cast<ThorImplementation::BatchNormalization *>(stampedNetwork.otherLayers[i]), nullptr);
             ASSERT_EQ(dynamic_cast<ThorImplementation::Tanh *>(stampedNetwork.otherLayers[i]), nullptr);
@@ -662,7 +671,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     }
     ASSERT_NE(imagesFO, nullptr);
 
-    ASSERT_EQ(tc.size(), 0u);
+    ASSERT_EQ(tc.size(), 1u);
     ASSERT_EQ(fo.size(), 3u);
     ASSERT_EQ(r.size(), 12u);
     ASSERT_EQ(p.size(), 6u);
@@ -671,6 +680,9 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(d.size(), 2u);
     ASSERT_EQ(ccl.size(), 1u);
     ASSERT_EQ(acc.size(), 1u);
+    ASSERT_EQ(sm.size(), 1u);
+    ASSERT_EQ(sgm.size(), 0u);
+    ASSERT_EQ(ls.size(), 1u);
 
     // Forward
     ASSERT_EQ(images->getFeatureOutput().get(), imagesFO->getFeatureInputs()[0].get());
@@ -711,13 +723,20 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(d[1]->getFeatureOutput().get(), fc1->getFeatureInputs()[0].get());
     ASSERT_EQ(fc1->getFeatureOutputs()[0].get(), r[11]->getFeatureInput().get());
     ASSERT_EQ(r[11]->getFeatureOutput().get(), fc2->getFeatureInputs()[0].get());
-    ASSERT_EQ(fc2->getFeatureOutputs()[0].get(), ccl[0]->getFeatureInput().get());
+    ASSERT_EQ(fc2->getFeatureOutputs()[0].get(), sm[0]->getFeatureInput().get());
+    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
+    // I think the problem is that I referenced the tensor when building to connect it,
+    // but then I swapped the tensor later when flattening to a single layer.
+    // Maybe a fix is to assign the ids of the proper tensors of the flattened layer
+    // to be those that are reported during building
+    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), ccl[2]->getFeatureInput().get());
+    ASSERT_EQ(ccl[0]->getFeatureOutput().get(), ls[0]->getFeatureInput().get());
 
     ASSERT_EQ(labels->getFeatureOutput().get(), ccl[0]->getLabelsInput().get());
-    ASSERT_EQ(ccl[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
-    ASSERT_EQ(ccl[0]->getLossOutput().get(), loss->getFeatureInput().get());
+    ASSERT_EQ(fo[2]->getFeatureOutputs()[1].get(), predictions->getFeatureInput().get());
+    ASSERT_EQ(ls[0]->getFeatureOutput().get(), loss->getFeatureInput().get());
 
-    ASSERT_EQ(ccl[0]->getFeatureOutput().get(), acc[0]->getFeatureInput().get());
+    ASSERT_EQ(fo[2]->getFeatureOutputs()[1].get(), acc[0]->getFeatureInput().get());
     ASSERT_EQ(labels->getFeatureOutput().get(), acc[0]->getLabelsInput().get());
     ASSERT_EQ(acc[0]->getFeatureOutput().get(), accuracy->getFeatureInput().get());
 

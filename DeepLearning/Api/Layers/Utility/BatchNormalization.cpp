@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 
 using namespace Thor;
+using namespace std;
 
 void BatchNormalization::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());

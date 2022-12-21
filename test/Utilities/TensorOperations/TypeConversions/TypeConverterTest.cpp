@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
     srand(time(NULL));

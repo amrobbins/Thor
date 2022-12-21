@@ -19,14 +19,14 @@ class Pad : public Layer {
     // The corresponding value is a pair where the first integer represents the number of elements of padding at the
     // beginning of that dimension and the second integer represents the number of elements of padding at the end of
     // that dimension.
-    Pad(map<unsigned int, pair<unsigned int, unsigned int>> paddingAmount) {
+    Pad(std::map<unsigned int, std::pair<unsigned int, unsigned int>> paddingAmount) {
         assert(!paddingAmount.empty());
         this->paddingAmount = paddingAmount;
     }
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
         assert(featureInput.isPresent());
-        vector<unsigned long> paddedDimensions = getDimensionsAfterPadding(featureInput);
+        std::vector<unsigned long> paddedDimensions = getDimensionsAfterPadding(featureInput);
         return Tensor(featureInput.get().getPlacement(),
                       TensorDescriptor(featureInput.get().getDescriptor().getDataType(), paddedDimensions));
     }
@@ -36,9 +36,9 @@ class Pad : public Layer {
         assert(featureOutput.isPresent());
 
         TensorPlacement placement = featureInput.get().getPlacement();
-        vector<unsigned long> strideArrayDimensions;
+        std::vector<unsigned long> strideArrayDimensions;
 
-        vector<unsigned long> inputTensorDimensions = featureInput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputTensorDimensions = featureInput.get().getDescriptor().getDimensions();
         strideArrayDimensions.push_back(inputTensorDimensions.size());
         Tensor stridePerUnpaddedDimension(TensorPlacement::MemDevices::CPU,
                                           TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
@@ -49,7 +49,7 @@ class Pad : public Layer {
             strideCpu[i] = inputTensorDimensions[i + 1] * strideCpu[i + 1];
         stridePerUnpaddedDimension_d.copyFromAsync(stridePerUnpaddedDimension, stream);
 
-        vector<unsigned long> outputTensorDimensions = featureOutput.get().getDescriptor().getDimensions();
+        std::vector<unsigned long> outputTensorDimensions = featureOutput.get().getDescriptor().getDimensions();
         Tensor stridePerPaddedDimension(TensorPlacement::MemDevices::CPU,
                                         TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         stridePerPaddedDimension_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
@@ -72,7 +72,7 @@ class Pad : public Layer {
                 padBeforeCpu[i] = 0;
                 padAfterCpu[i] = inputDimensionSize - 1;
             } else {
-                pair<unsigned int, unsigned int> dimensionPadding = it->second;
+                std::pair<unsigned int, unsigned int> dimensionPadding = it->second;
                 padBeforeCpu[i] = dimensionPadding.first;
                 padAfterCpu[i] = padBeforeCpu[i] + inputDimensionSize - 1;
                 unsigned long outputDimensionSize = featureOutput.get().getDescriptor().getDimensions()[i];
@@ -119,19 +119,19 @@ class Pad : public Layer {
                       stream);
     }
 
-    vector<unsigned long> getDimensionsAfterPadding(Tensor unpaddedTensor) {
-        vector<unsigned long> dimensions = unpaddedTensor.getDescriptor().getDimensions();
+    std::vector<unsigned long> getDimensionsAfterPadding(Tensor unpaddedTensor) {
+        std::vector<unsigned long> dimensions = unpaddedTensor.getDescriptor().getDimensions();
         for (auto it = paddingAmount.begin(); it != paddingAmount.end(); ++it) {
             unsigned int dimension = it->first;
             assert(dimension < dimensions.size());
-            pair<unsigned int, unsigned int> dimensionPadding = it->second;
+            std::pair<unsigned int, unsigned int> dimensionPadding = it->second;
             dimensions[dimension] += (dimensionPadding.first + dimensionPadding.second);
         }
         return dimensions;
     }
 
    private:
-    map<unsigned int, pair<unsigned int, unsigned int>> paddingAmount;
+    std::map<unsigned int, std::pair<unsigned int, unsigned int>> paddingAmount;
 
     Tensor stridePerPaddedDimension_d;
     Tensor stridePerUnpaddedDimension_d;

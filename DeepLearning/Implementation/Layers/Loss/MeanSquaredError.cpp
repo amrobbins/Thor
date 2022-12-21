@@ -8,6 +8,7 @@
 #include <thread>
 
 using namespace ThorImplementation;
+using namespace std;
 
 MeanSquaredError::~MeanSquaredError() {
     if (batchReduce)

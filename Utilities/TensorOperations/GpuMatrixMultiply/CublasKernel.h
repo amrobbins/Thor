@@ -129,7 +129,7 @@ class CublasKernel : private ReferenceCounted {
 
     CublasKernel() : ReferenceCounted() {}
 
-    CublasKernel(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, string gpuType) {
+    CublasKernel(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
         construct(cublasKernelRequirement, cublasKernelOptions, gpuType);
     }
 
@@ -329,10 +329,10 @@ class CublasKernel : private ReferenceCounted {
         return cublasStatus;
     }
 
-    string toString(int gpuNum) {
+    std::string toString(int gpuNum) {
         assert(!uninitialized());
 
-        string description;
+        std::string description;
         description += "AlgoId " + std::to_string(cublasKernelOptions->algorithmId);
         assert(tileEnumToString.count(cublasKernelOptions->tileSize) == 1);
         description += " " + tileEnumToString[cublasKernelOptions->tileSize];
@@ -348,7 +348,7 @@ class CublasKernel : private ReferenceCounted {
 
         if (cublasKernelOptions->runStats.runCount > 0) {
             double timePerKernelMs = cublasKernelOptions->runStats.getAverageRunTimeMilliseconds();
-            string timePerKernelMsString = std::to_string(timePerKernelMs);
+            std::string timePerKernelMsString = std::to_string(timePerKernelMs);
 
             int finalRowsA = cublasKernelRequirement->kernelRequirement.transposeA == false
                                  ? cublasKernelRequirement->kernelRequirement.rowsA
@@ -360,7 +360,7 @@ class CublasKernel : private ReferenceCounted {
                                  ? cublasKernelRequirement->kernelRequirement.colsB
                                  : cublasKernelRequirement->kernelRequirement.rowsB;
             double TFLOPS = (2.0 * finalRowsA * finalColsA * finalColsB) / (timePerKernelMs * 1.0e9);
-            string TFLOPSString = std::to_string(TFLOPS);
+            std::string TFLOPSString = std::to_string(TFLOPS);
 
             description += " kernelTime: " + timePerKernelMsString + "ms";
             description += " TFLOPS: " + TFLOPSString + "\n";
@@ -414,11 +414,11 @@ class CublasKernel : private ReferenceCounted {
     cublasLtMatrixLayout_t *CDesc;
     cublasLtMatrixLayout_t *DDesc;
 
-    string gpuType;
+    std::string gpuType;
 
     std::vector<cublasLtMatmulAlgo_t> *algorithmPerGpu;
 
-    static std::map<cublasLtMatmulTile_t, string> tileEnumToString;
+    static std::map<cublasLtMatmulTile_t, std::string> tileEnumToString;
 
     void allocateCublasResources() {
         assert(!uninitialized());
@@ -538,7 +538,7 @@ class CublasKernel : private ReferenceCounted {
         }
     }
 
-    void construct(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, string gpuType) {
+    void construct(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
         ReferenceCounted::initialize();
 
         this->cublasKernelRequirement = new CublasKernelRequirement(cublasKernelRequirement);

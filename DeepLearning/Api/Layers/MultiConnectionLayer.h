@@ -5,9 +5,6 @@
 #include <map>
 #include <vector>
 
-using std::map;
-using std::vector;
-
 namespace Thor {
 
 class MultiConnectionLayer : public Layer {
@@ -27,13 +24,13 @@ class MultiConnectionLayer : public Layer {
 
     // When there is more than one connection, you must use the following version:
     virtual Tensor getFeatureOutput(Tensor inputTensor) const {
-        map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
+        std::map<Tensor, Tensor>::const_iterator it = outputTensorFromInputTensor.find(inputTensor);
         assert(it != outputTensorFromInputTensor.end());
         return it->second;
     }
 
     virtual Tensor getFeatureInput(Tensor outputTensor) const {
-        map<Tensor, Tensor>::const_iterator it = inputTensorFromOutputTensor.find(outputTensor);
+        std::map<Tensor, Tensor>::const_iterator it = inputTensorFromOutputTensor.find(outputTensor);
         assert(it != inputTensorFromOutputTensor.end());
         return it->second;
     }
@@ -50,20 +47,20 @@ class MultiConnectionLayer : public Layer {
         assert(false);
     }
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {getFeatureOutput(inputTensor)}; }
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return {getFeatureOutput(inputTensor)}; }
 
-    virtual vector<Tensor> getAllOutputTensors() const { return featureOutputs; }
+    virtual std::vector<Tensor> getAllOutputTensors() const { return featureOutputs; }
 
     // Inputs and outputs are stored in the vector in the same order as they are added to the builder.
-    virtual vector<Tensor> getFeatureOutputs() const { return featureOutputs; }
-    virtual vector<Tensor> getFeatureInputs() const { return featureInputs; }
+    virtual std::vector<Tensor> getFeatureOutputs() const { return featureOutputs; }
+    virtual std::vector<Tensor> getFeatureInputs() const { return featureInputs; }
 
    protected:
-    vector<Tensor> featureInputs;
-    vector<Tensor> featureOutputs;
+    std::vector<Tensor> featureInputs;
+    std::vector<Tensor> featureOutputs;
 
-    map<Tensor, Tensor> outputTensorFromInputTensor;
-    map<Tensor, Tensor> inputTensorFromOutputTensor;
+    std::map<Tensor, Tensor> outputTensorFromInputTensor;
+    std::map<Tensor, Tensor> inputTensorFromOutputTensor;
 
    private:
     using Layer::featureInput;

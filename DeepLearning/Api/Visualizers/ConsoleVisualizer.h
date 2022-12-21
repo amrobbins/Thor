@@ -27,7 +27,7 @@ class Visualizer;
 struct ProgressRow {
     ExampleType executionMode;
     uint64_t epochNum;
-    string label;
+    std::string label;
     uint64_t curBatch;
     uint64_t numBatches;
     double batchLoss;
@@ -96,15 +96,15 @@ class ConsoleVisualizer : public Visualizer {
     static int thorDashLeft;
     static int thorDashRight;
     static int thorDashY;
-    static string thorDashUrl;
+    static std::string thorDashUrl;
 
     static ExecutionState mostRecentExecutionState;
-    static vector<ProgressRow> rows;
+    static std::vector<ProgressRow> rows;
     static std::chrono::high_resolution_clock::time_point start;
     static double totalEpochLoss;
     static double totalEpochAccuracy;
 
-    static string cudaDevicesString;
+    static std::string cudaDevicesString;
 
     // Optional<ExecutionState> previousExecutionState;
 
@@ -138,13 +138,13 @@ class ConsoleVisualizer : public Visualizer {
 
     static void display();
 
-    static int openUrl(string URL);
+    static int openUrl(std::string URL);
 
     static void drawStatusBar(
-        void *win, int y, int xStart, int xEnd, double progress, string leftLabel, string rightLabel, bool boldLabels = false);
+        void *win, int y, int xStart, int xEnd, double progress, std::string leftLabel, std::string rightLabel, bool boldLabels = false);
 
-    static string popUpPrompt(string message);
-    static void popUpAcknowledge(string message);
+    static std::string popUpPrompt(std::string message);
+    static void popUpAcknowledge(std::string message);
 
     static void drawBox(void *win, int top, int bottom, int left, int right);
     static void drawBlock(void *win, int top, int bottom, int left, int right);

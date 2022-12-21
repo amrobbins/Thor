@@ -13,16 +13,16 @@ class Reshape : public Layer {
 
     virtual ~Reshape() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Reshape>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Reshape>(*this); }
 
-    virtual string getLayerType() const { return "Reshape"; }
+    virtual std::string getLayerType() const { return "Reshape"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -33,9 +33,11 @@ class Reshape : public Layer {
     }
 
     // Reshape only changes the descriptor, no tensor is allocated
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const { return 0; }
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+        return 0;
+    }
 
-    vector<uint64_t> newDimensions;
+    std::vector<uint64_t> newDimensions;
 };
 
 class Reshape::Builder {
@@ -72,7 +74,7 @@ class Reshape::Builder {
         return *this;
     }
 
-    virtual Reshape::Builder &newDimensions(vector<uint64_t> _newDimensions) {
+    virtual Reshape::Builder &newDimensions(std::vector<uint64_t> _newDimensions) {
         assert(!this->_newDimensions.isPresent());
         assert(_newDimensions.size() > 0);
         this->_newDimensions = _newDimensions;
@@ -82,7 +84,7 @@ class Reshape::Builder {
    private:
     Optional<Network *> _network;
     Optional<Tensor> _featureInput;
-    Optional<vector<uint64_t>> _newDimensions;
+    Optional<std::vector<uint64_t>> _newDimensions;
 };
 
 }  // namespace Thor

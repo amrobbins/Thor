@@ -8,9 +8,6 @@
 
 #include <memory>
 
-using std::make_shared;
-using std::shared_ptr;
-
 namespace ThorImplementation {
 
 class Initializer {
@@ -19,12 +16,12 @@ class Initializer {
 
     virtual void initialize(Layer *layer, Tensor tensorToInitialize);
 
-    virtual shared_ptr<Initializer> clone();
+    virtual std::shared_ptr<Initializer> clone();
 
    protected:
-    virtual void performCopy(Tensor buffer, Tensor tensorToInitialize, vector<Stream> streams);
+    virtual void performCopy(Tensor buffer, Tensor tensorToInitialize, std::vector<Stream> streams);
 
-    virtual void initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) = 0;
+    virtual void initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams) = 0;
 };
 
 }  // namespace ThorImplementation

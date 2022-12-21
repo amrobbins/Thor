@@ -13,12 +13,12 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual ~BatchNormalization() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<BatchNormalization>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BatchNormalization>(*this); }
 
     virtual Optional<double> getExponentialRunningAverageFactor() { return exponentialRunningAverageFactor; }
     virtual Optional<double> getEpsilon() { return epsilon; }
 
-    virtual string getLayerType() const { return "BatchNormalization"; }
+    virtual std::string getLayerType() const { return "BatchNormalization"; }
 
     virtual bool isMultiLayer() const { return featureInputs.front().getDataType() != Tensor::DataType::FP16; }
 
@@ -29,7 +29,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
 
         ThorImplementation::BatchNormalization *batchNormalization =
@@ -42,7 +42,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual uint64_t getFirstInstanceFixedMemRequirementInBytes() const { return 0; }
 
     // mem requirements are the input output tensors
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
         uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16
         uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;       // FP16
@@ -53,7 +53,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         return perInstanceWeights + perInputState + batchSize * (featureOutputSize + errorOutputSize);
     }
 
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
         uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;  // FP16
 
@@ -123,7 +124,7 @@ class BatchNormalization::Builder {
 
    private:
     Optional<Network *> _network;
-    vector<Tensor> _featureInputs;
+    std::vector<Tensor> _featureInputs;
     Optional<double> _exponentialRunningAverageFactor;
     Optional<double> _epsilon;
 };

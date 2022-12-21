@@ -10,8 +10,6 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 
-using std::atomic;
-
 /**
  * A reference counted container for cudaEvent_t.
  *

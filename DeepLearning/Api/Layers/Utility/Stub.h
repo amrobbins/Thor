@@ -13,11 +13,11 @@ class Stub : public Layer {
 
     virtual ~Stub() {}
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return vector<Tensor>(); }
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return std::vector<Tensor>(); }
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Stub>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Stub>(*this); }
 
-    virtual string getLayerType() const { return "Stub"; }
+    virtual std::string getLayerType() const { return "Stub"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const { assert(false); }
@@ -26,11 +26,13 @@ class Stub : public Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(false);
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const { return 0; }
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+        return 0;
+    }
 
    private:
     Tensor getFeatureOutput();

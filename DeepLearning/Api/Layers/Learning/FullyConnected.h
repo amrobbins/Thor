@@ -28,7 +28,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual ~FullyConnected() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<FullyConnected>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
 
    protected:
     virtual bool isMultiLayer() const {
@@ -40,7 +40,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
-        vector<uint64_t> inputDimensions = inputTensor.getDimensions();
+        std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
         int gpuNum = stream.getGpuNum();
         assert(!inputDimensions.empty());
 
@@ -81,20 +81,20 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
 
-        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
+        std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(fullyConnected->getWeights());
         weightsInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
         initializers.push_back(weightsInitializerBuilderClone->build());
 
         if (fullyConnected->getBiases().isPresent()) {
-            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
+            std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
             biasInitializerBuilderClone->tensorToInitialize(fullyConnected->getBiases().get());
             biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
             initializers.push_back(biasInitializerBuilderClone->build());
@@ -104,7 +104,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     }
 
     // mem requirements are the weights
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // FIXME: workspace? Or do I assume no workspace at first and can add one later if have extra mem?
         assert(featureInputs.size() > 0);
         assert(featureInputs[0].getDimensions().size() > 0);
@@ -121,20 +121,21 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         return fixedMem + batchSizeDependentMem;
     }
 
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t batchSizeDependentMem =
             2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;
     }
 
-    virtual string getLayerType() const { return "FullyConnected"; }
+    virtual std::string getLayerType() const { return "FullyConnected"; }
 
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
-    shared_ptr<Initializer::Builder> weightsInitializerBuilder;
-    shared_ptr<Initializer::Builder> biasInitializerBuilder;
-    shared_ptr<Activation::Builder> activationBuilder;
+    std::shared_ptr<Initializer::Builder> weightsInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> biasInitializerBuilder;
+    std::shared_ptr<Activation::Builder> activationBuilder;
 
     float dropProportion;
 
@@ -158,11 +159,11 @@ class FullyConnected::Builder {
         if (_hasBias.isEmpty())
             _hasBias = false;
         if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
+            _weightsInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
         if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
+            _biasInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
         if (!_activationBuilder && !_activationExplicitlyRemoved)
-            _activationBuilder = make_shared<Relu::Builder>(Relu::Builder());
+            _activationBuilder = std::make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
@@ -270,7 +271,7 @@ class FullyConnected::Builder {
     }
 
     // FIXME: batchNormalization and dropOut should be passed as builders. To support this Layer::Builder will need to be created with
-    // virtual shared_ptr<Layer::Builder> clone.
+    // virtual std::shared_ptr<Layer::Builder> clone.
 
     // Adds a BatchNormalization layer before this FullyConnected layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
@@ -292,12 +293,12 @@ class FullyConnected::Builder {
 
    private:
     Optional<Network *> _network;
-    vector<Tensor> _featureInputs;
+    std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputFeatures;
     Optional<bool> _hasBias;
-    shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
-    shared_ptr<Initializer::Builder> _biasInitializerBuilder;
-    shared_ptr<Activation::Builder> _activationBuilder;
+    std::shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> _biasInitializerBuilder;
+    std::shared_ptr<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

@@ -5,10 +5,10 @@
 #include <vector>
 
 struct ExecutionState {
-    string networkName;
-    string datasetName;
+    std::string networkName;
+    std::string datasetName;
 
-    string outputDirectory;
+    std::string outputDirectory;
 
     // Note: All fields pertain to the specific exectution mode only,
     // i.e. if training is occuring then all items pertain to training,

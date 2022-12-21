@@ -83,3 +83,5 @@ void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Option
                                        errorOut.get().getMemPtr());
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
+
+std::string Softmax::getType() { return "Softmax"; }

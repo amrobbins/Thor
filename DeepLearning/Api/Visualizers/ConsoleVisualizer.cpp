@@ -5,6 +5,7 @@
 #include <curses.h>
 
 using namespace Thor;
+using namespace std;
 
 using std::make_shared;
 using std::map;
@@ -767,7 +768,7 @@ void ConsoleVisualizer::drawOverallStatusBar() {
             minutes = " " + minutes;
         timeRemainingString += minutes + " minute" + (timeRemainingMinutes != 1 ? "s " : "  ");
     } else {
-        uint32_t timeRemainingSeconds = timeRemainingSeconds;
+        uint32_t timeRemainingSeconds = timeRemaining;
         string seconds = to_string(timeRemainingSeconds);
         if (seconds.length() == 1)
             seconds = " " + seconds;

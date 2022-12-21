@@ -16,10 +16,6 @@
 #include <mutex>
 #include <unordered_map>
 
-using std::mutex;
-
-using ThorImplementation::TensorPlacement;
-
 #define DEBUG_REF_COUNTS
 
 /**
@@ -40,8 +36,8 @@ class Stream : private ReferenceCounted {
         *this = other;
     }
 
-    explicit Stream(TensorPlacement placement, Priority priority = Priority::REGULAR) {
-        int gpuNum = placement.getMemDevice() == TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
+    explicit Stream(ThorImplementation::TensorPlacement placement, Priority priority = Priority::REGULAR) {
+        int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
         construct(gpuNum, priority);
     }
 
@@ -138,7 +134,7 @@ class Stream : private ReferenceCounted {
 
     bool isInitialized() { return !uninitialized(); }
 
-    virtual string getObjectName() { return "Stream"; }
+    virtual std::string getObjectName() { return "Stream"; }
 
     // It is too late to destroy the cuDNN handle when the destructor of a static string is called,
     // so just don't destroy the cuDNN handle of a static string.
@@ -155,7 +151,7 @@ class Stream : private ReferenceCounted {
         ReferenceCounted::initialize();
 
         cudnnHandle = new Optional<cudnnHandle_t>;
-        mtx = new mutex;
+        mtx = new std::mutex;
 
         ScopedGpu scopedGpu(gpuNum);
         cudaError_t cudaStatus;
@@ -219,5 +215,5 @@ class Stream : private ReferenceCounted {
 
     static int numCudnnHandles;
 
-    mutex *mtx;
+    std::mutex *mtx;
 };

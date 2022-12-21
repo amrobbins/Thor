@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 const float CublasKernel::ALPHA_NO_SCALE = 1.0f;
 const float CublasKernel::BETA_ACCUMULATE = 1.0f;

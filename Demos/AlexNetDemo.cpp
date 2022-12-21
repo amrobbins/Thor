@@ -20,6 +20,7 @@ using std::unordered_set;
 using std::vector;
 
 using namespace Thor;
+using namespace std;
 
 int main() {
     Thor::Network alexNet = buildAlexNet();

@@ -13,14 +13,14 @@ class UniformRandom : public Initializer {
 
     virtual ~UniformRandom() {}
 
-    virtual shared_ptr<Initializer> clone() const { return make_shared<UniformRandom>(*this); }
+    virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<UniformRandom>(*this); }
 };
 
 class UniformRandom::Builder : public Initializer::Builder {
    public:
     virtual ~Builder() { _layerThatOwnsTensor = nullptr; }
 
-    virtual shared_ptr<Initializer> build() {
+    virtual std::shared_ptr<Initializer> build() {
         assert(_tensorToInitialize.isPresent());
 
         UniformRandom uniformRandomInitializer;
@@ -59,7 +59,7 @@ class UniformRandom::Builder : public Initializer::Builder {
         return *this;
     }
 
-    virtual shared_ptr<Initializer::Builder> clone() { return make_shared<UniformRandom::Builder>(*this); }
+    virtual std::shared_ptr<Initializer::Builder> clone() { return std::make_shared<UniformRandom::Builder>(*this); }
 
    protected:
     Optional<ThorImplementation::Tensor> _tensorToInitialize;

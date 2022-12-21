@@ -9,7 +9,7 @@
 
 class LocalBatchLoader : public Loader {
    public:
-    LocalBatchLoader(set<std::string> shardPaths,
+    LocalBatchLoader(std::set<std::string> shardPaths,
                      ThorImplementation::TensorDescriptor exampleDescriptor,
                      ThorImplementation::TensorDescriptor labelDescriptor,
                      uint64_t batchSize);
@@ -22,9 +22,9 @@ class LocalBatchLoader : public Loader {
     virtual uint64_t getNextBatchNum(ExampleType exampleType);
 
    private:
-    vector<shared_ptr<Shard>> shards;
+    std::vector<std::shared_ptr<Shard>> shards;
 
-    shared_ptr<BatchAssembler> batchAssemblerTrain;
-    shared_ptr<BatchAssembler> batchAssemblerValidate;
-    shared_ptr<BatchAssembler> batchAssemblerTest;
+    std::shared_ptr<BatchAssembler> batchAssemblerTrain;
+    std::shared_ptr<BatchAssembler> batchAssemblerValidate;
+    std::shared_ptr<BatchAssembler> batchAssemblerTest;
 };

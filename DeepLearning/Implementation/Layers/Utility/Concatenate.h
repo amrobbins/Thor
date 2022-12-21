@@ -72,7 +72,7 @@ class Concatenate : public MultiConnectionLayer {
             newAxisSize += featureInputs[i].get().getDescriptor().getDimensions()[axis];
         }
 
-        vector<unsigned long> outputDimensions = featureInputs.front().get().getDescriptor().getDimensions();
+        std::vector<unsigned long> outputDimensions = featureInputs.front().get().getDescriptor().getDimensions();
         outputDimensions[axis] = newAxisSize;
         TensorDescriptor outputDescriptor = TensorDescriptor(featureInputs.front().get().getDescriptor().getDataType(), outputDimensions);
 
@@ -145,7 +145,7 @@ class Concatenate : public MultiConnectionLayer {
         delete[] stridePerSplitTensorDimension;
         delete[] axisElementsPerSplitTensor;
 
-        vector<unsigned long> outputDimensions = featureOutputs[0].get().getDescriptor().getDimensions();
+        std::vector<unsigned long> outputDimensions = featureOutputs[0].get().getDescriptor().getDimensions();
         long *stridePerPackedTensorDimension = new long[outputDimensions.size()];
         stridePerPackedTensorDimension[outputDimensions.size() - 1] = 1;
         for (int i = (int)outputDimensions.size() - 2; i >= 0; --i)
@@ -298,8 +298,8 @@ class Concatenate : public MultiConnectionLayer {
     long *stridePerSplitTensorDimension_d;
     long *axisElementsPerSplitTensor_d;
 
-    set<unsigned long> allFeatureInputTensorIds;
-    set<unsigned long> stillWaitingForFeatureInputTensors;
+    std::set<unsigned long> allFeatureInputTensorIds;
+    std::set<unsigned long> stillWaitingForFeatureInputTensors;
 };
 
 }  // namespace ThorImplementation
