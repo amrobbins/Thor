@@ -26,6 +26,7 @@ using std::unordered_set;
 using std::vector;
 
 using namespace boost::filesystem;
+using namespace std;
 
 class TestDataProcessor : public DataProcessor {
     virtual uint64_t outputTensorSizeInBytes() { return 100; }

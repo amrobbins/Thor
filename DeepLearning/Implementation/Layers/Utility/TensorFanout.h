@@ -125,7 +125,7 @@ class TensorFanout : public MultiConnectionLayer {
 
         if (errorInput.isPresent()) {
             // Locked section
-            unique_lock<mutex> lck(mtx);
+            std::unique_lock<std::mutex> lck(mtx);
 
             if (errorInput.isPresent()) {
                 assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);

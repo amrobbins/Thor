@@ -11,8 +11,6 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-using std::vector;
-
 // void matrixTranspose(half *transposedMatrix_d, const half *matrix_d, int numRows, int numCols, cudaStream_t stream);
 // void matrixTranspose(float *transposedMatrix_d, const float *matrix_d, int numRows, int numCols, cudaStream_t
 // stream);

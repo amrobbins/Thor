@@ -3,8 +3,6 @@
 #include <assert.h>
 #include <string>
 
-using std::string;
-
 namespace ThorImplementation {
 
 class TensorPlacement {
@@ -24,13 +22,13 @@ class TensorPlacement {
     bool operator==(const TensorPlacement& rhs) { return memDevice == rhs.memDevice && deviceNum == rhs.deviceNum; }
     bool operator!=(const TensorPlacement& rhs) { return !((*this) == rhs); }
 
-    string toString() {
+    std::string toString() {
         assert(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);
-        string s;
+        std::string s;
         if (memDevice == MemDevices::CPU)
-            return string("CPU");
+            return std::string("CPU");
         else
-            return string("GPU:") + std::to_string(deviceNum);
+            return std::string("GPU:") + std::to_string(deviceNum);
     }
 
    private:

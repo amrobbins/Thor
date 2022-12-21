@@ -8,8 +8,6 @@
 #include <unordered_map>
 #include <utility>
 
-using std::string;
-
 /**
  * Every kernel must specify at the minimum:
  *  1. aRowsPerBlock

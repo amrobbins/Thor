@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/ExampleNetworks/SingleLayerConvolution2d.h"
 
 using namespace Thor;
+using namespace std;
 
 Network buildSingleLayerConvolution2d() {
     Network singleLayerConvolution2d;

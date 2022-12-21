@@ -7,9 +7,8 @@
 #include <stdio.h>
 #include <memory>
 
-using std::shared_ptr;
-
 using namespace Thor;
+using namespace std;
 
 TEST(NetworkInput, Builds) {
     srand(time(nullptr));

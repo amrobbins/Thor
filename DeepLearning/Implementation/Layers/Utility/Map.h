@@ -21,15 +21,15 @@ class Map : public Layer {
     // Note: if more than one instance of a mapping is wanted, all instances after the first need to be called as:
     // Map(mappingOfSourceTensorIntoDestTensor, sourceDimensions, existingInstance.getReverseMapping()) {
     // This is because creating the backward pass mapping is a very heavy weight operation that only needs to be done once.
-    Map(Tensor mappingOfSourceTensorIntoDestTensor, vector<unsigned long> sourceDimensions) {
+    Map(Tensor mappingOfSourceTensorIntoDestTensor, std::vector<unsigned long> sourceDimensions) {
         setup(mappingOfSourceTensorIntoDestTensor, sourceDimensions);
         createBackwardPassMapping(mappingOfSourceTensorIntoDestTensor);
     }
 
     Map(Tensor mappingOfSourceTensorIntoDestTensor,
-        vector<unsigned long> sourceDimensions,
-        map<unsigned int, Tensor> backwardPassMappingHost,
-        map<unsigned int, Tensor> backwardPassMappingDevice) {
+        std::vector<unsigned long> sourceDimensions,
+        std::map<unsigned int, Tensor> backwardPassMappingHost,
+        std::map<unsigned int, Tensor> backwardPassMappingDevice) {
         setup(mappingOfSourceTensorIntoDestTensor, sourceDimensions);
         backwardPassMappingOfNTo1Host = backwardPassMappingHost;
         backwardPassMappingOfNTo1Device = backwardPassMappingDevice;
@@ -98,12 +98,12 @@ class Map : public Layer {
         }
     }
 
-    map<unsigned int, Tensor> getBackwardPassMappingOnHost() {
+    std::map<unsigned int, Tensor> getBackwardPassMappingOnHost() {
         assert(!uninitialized);
         return backwardPassMappingOfNTo1Host;
     }
 
-    map<unsigned int, Tensor> getBackwardPassMappingOnDevice() {
+    std::map<unsigned int, Tensor> getBackwardPassMappingOnDevice() {
         assert(!uninitialized);
         return backwardPassMappingOfNTo1Device;
     }
@@ -112,12 +112,12 @@ class Map : public Layer {
     bool uninitialized;
 
     Tensor mappingOfSourceTensorIntoDestTensor;
-    map<unsigned int, Tensor> backwardPassMappingOfNTo1Host;
-    map<unsigned int, Tensor> backwardPassMappingOfNTo1Device;
+    std::map<unsigned int, Tensor> backwardPassMappingOfNTo1Host;
+    std::map<unsigned int, Tensor> backwardPassMappingOfNTo1Device;
 
-    vector<unsigned long> sourceDimensions;
+    std::vector<unsigned long> sourceDimensions;
 
-    void setup(Tensor mappingOfSourceTensorIntoDestTensor, vector<unsigned long> sourceDimensions) {
+    void setup(Tensor mappingOfSourceTensorIntoDestTensor, std::vector<unsigned long> sourceDimensions) {
         assert(std::is_integral<INDEX_TYPE>());
         assert(!std::is_signed<INDEX_TYPE>());
         if (sizeof(INDEX_TYPE) < sizeof(uint64_t)) {
@@ -148,7 +148,8 @@ class Map : public Layer {
 
         // For each input feature element, get the list of output feature elements it maps to.
         //  featureInput    {featureOutputs...}     (dense over outputs)
-        map<INDEX_TYPE, priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>> outputDestinationsOfInputElement;
+        std::map<INDEX_TYPE, std::priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>>
+            outputDestinationsOfInputElement;
         INDEX_TYPE numFeatureOutputElements = mappingOfSourceTensorIntoDestTensor.getDescriptor().getTotalNumElements();
         for (INDEX_TYPE outputElementFlatIndex = 0; outputElementFlatIndex < numFeatureOutputElements; ++outputElementFlatIndex) {
             INDEX_TYPE inputElementFlatIndex = cpuMappingTensorMem[outputElementFlatIndex];
@@ -158,7 +159,7 @@ class Map : public Layer {
         // For each output error element, describe the N to 1 summation from the corresponding error input elements.
         // N=0 is used where necessary to create a dense mapping of errorInputs to errorOutputs
         //                N             featureInput    {featureOutputs...}
-        map<unsigned int, map<INDEX_TYPE, priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>>>
+        std::map<unsigned int, std::map<INDEX_TYPE, std::priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>>>
             nGroupingsOfOutputDestinationsOfInputElement;
 
         TensorDescriptor elementPopulatedTensorDescriptor(TensorDescriptor::DataType::BOOLEAN, sourceDimensions);
@@ -174,7 +175,7 @@ class Map : public Layer {
         for (INDEX_TYPE errorOutputFlatIndex = 0; errorOutputFlatIndex < numErrorOutputElements; ++errorOutputFlatIndex) {
             if (!elementPopulated[errorOutputFlatIndex])
                 nGroupingsOfOutputDestinationsOfInputElement[0][errorOutputFlatIndex] =
-                    priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>();
+                    std::priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>();
         }
 
         // Now I have all summations grouped by N (the number of error outputs that map to the error input)
@@ -182,9 +183,9 @@ class Map : public Layer {
         for (auto it = nGroupingsOfOutputDestinationsOfInputElement.begin(); it != nGroupingsOfOutputDestinationsOfInputElement.end();
              ++it) {
             unsigned int N = it->first;
-            map<INDEX_TYPE, priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>> &nMapping = it->second;
+            std::map<INDEX_TYPE, std::priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>>> &nMapping = it->second;
             INDEX_TYPE mappingsOfSizeN = nMapping.size();
-            vector<unsigned long> flatDimension;
+            std::vector<unsigned long> flatDimension;
             // { errorOutputIndex1, {errorInputIndex1, ..., errorInputIndexN},
             //   errorOutputIndex2, {errorInputIndex1, ..., errorInputIndexN} }
             // ...
@@ -198,7 +199,7 @@ class Map : public Layer {
             INDEX_TYPE i = 0;
             for (auto mappingIt = nMapping.begin(); mappingIt != nMapping.end(); ++mappingIt) {
                 INDEX_TYPE destinationErrorOutput = mappingIt->first;
-                priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>> &mappedErrorInputs = mappingIt->second;
+                std::priority_queue<INDEX_TYPE, std::vector<INDEX_TYPE>, std::greater<INDEX_TYPE>> &mappedErrorInputs = mappingIt->second;
 
                 backwardMappingMem[i] = destinationErrorOutput;
                 i += 1;

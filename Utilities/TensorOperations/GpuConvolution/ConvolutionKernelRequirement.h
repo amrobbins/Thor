@@ -12,21 +12,17 @@
 #include <string>
 #include <utility>
 
-using std::atomic;
-using std::hash;
-using std::string;
-
 class ConvolutionKernelRequirement;
 namespace std {
 template <>
-struct hash<ConvolutionKernelRequirement>;
+struct std::hash<ConvolutionKernelRequirement>;
 }
 
 class ConvolutionKernelRequirement : private ReferenceCounted {
    public:
     ConvolutionKernelRequirement() = delete;
 
-    ConvolutionKernelRequirement(const string gpuType,
+    ConvolutionKernelRequirement(const std::string gpuType,
                                  const int filterWidth,
                                  const int filterHeight,
                                  const int filterHorizontalStride,
@@ -223,7 +219,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
                numOutputColumns == other.numOutputColumns && numOutputRows == other.numOutputRows;
     }
 
-    string getGpuType() {
+    std::string getGpuType() {
         assert(!uninitialized());
         return gpuType;
     }
@@ -280,10 +276,10 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
         return numOutputRows;
     }
 
-    string toString() {
+    std::string toString() {
         assert(!uninitialized());
 
-        string s;
+        std::string s;
         s = "GpuType " + getGpuType() + " FilterWidth " + std::to_string(getFilterWidth()) + " FilterHeight " +
             std::to_string(getFilterHeight()) + " FilterHorizontalStride " + std::to_string(getFilterHorizontalStride()) +
             " FilterVerticalStride " + std::to_string(getFilterVerticalStride()) + " leftAndRightPadWidth " +
@@ -296,7 +292,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     }
 
    private:
-    string gpuType;
+    std::string gpuType;
     int filterWidth;
     int filterHeight;
     int filterHorizontalStride;
@@ -317,7 +313,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     cudnnTensorDescriptor_t **ppOutputTensorDescriptor;
     cudnnTensorDescriptor_t **ppBiasesDescriptor;
 
-    void construct(const string gpuType,
+    void construct(const std::string gpuType,
                    const int filterWidth,
                    const int filterHeight,
                    const int filterHorizontalStride,
@@ -449,7 +445,7 @@ namespace std {
 
 template <>
 struct hash<ConvolutionKernelRequirement> {
-    std::size_t operator()(const ConvolutionKernelRequirement &k) const {
+    size_t operator()(const ConvolutionKernelRequirement &k) const {
         size_t hashValue;
         hashValue = (hash<int>()(k.numInputRows)) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.filterWidth))) << 1;

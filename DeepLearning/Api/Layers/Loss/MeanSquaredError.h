@@ -13,9 +13,9 @@ class MeanSquaredError : public Loss {
 
     virtual ~MeanSquaredError() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<MeanSquaredError>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<MeanSquaredError>(*this); }
 
-    virtual string getLayerType() const { return "MeanSquaredError"; }
+    virtual std::string getLayerType() const { return "MeanSquaredError"; }
 
    protected:
     virtual bool isMultiLayer() const {
@@ -30,7 +30,7 @@ class MeanSquaredError : public Loss {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
@@ -40,7 +40,7 @@ class MeanSquaredError : public Loss {
         return meanSquaredError;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t lossShaperBytes = 0;
         // Loss will be reported either element-wise or batch-wise, the shaper is only required when loss is batch-wise.
         if (isMultiLayer()) {

@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 using namespace ThorImplementation;
+using namespace std;
 
 // Launch out-of-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>

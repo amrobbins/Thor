@@ -25,17 +25,6 @@
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"
 
-using std::deque;
-using std::pair;
-using std::set;
-using std::unordered_map;
-using std::vector;
-
-using std::atomic;
-using std::mutex;
-using std::recursive_mutex;
-using std::unique_lock;
-
 namespace ThorImplementation {
 
 /**
@@ -66,13 +55,13 @@ class Tensor : private ReferenceCounted {
     Tensor clone(TensorPlacement newPlacement, TensorDescriptor::DataType newDataType) {
         return uninitialized() ? Tensor() : Tensor(newPlacement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
-    Tensor clone(vector<uint64_t> newDimensions) {
+    Tensor clone(std::vector<uint64_t> newDimensions) {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(getDataType(), newDimensions));
     }
 
     TensorPlacement getPlacement() { return placement; }
     void *getMemPtr() { return mem; }
-    void *getElement(vector<unsigned long> dimensionIndex);
+    void *getElement(std::vector<unsigned long> dimensionIndex);
     TensorDescriptor getDescriptor();
     unsigned long getTensorId() { return instanceId; }
 
@@ -80,10 +69,10 @@ class Tensor : private ReferenceCounted {
 
     void moveFromAsync(Tensor source, Stream stream);
 
-    void reshape(vector<unsigned long> dimensions);
-    void resize(vector<unsigned long> dimensions);
-    void concatenateFrom(vector<Tensor> sources);
-    void splitInto(vector<Tensor> destinations);
+    void reshape(std::vector<unsigned long> dimensions);
+    void resize(std::vector<unsigned long> dimensions);
+    void concatenateFrom(std::vector<Tensor> sources);
+    void splitInto(std::vector<Tensor> destinations);
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
@@ -93,7 +82,7 @@ class Tensor : private ReferenceCounted {
 
     // Convenience functions to pass information from the descriptor
     TensorDescriptor::DataType getDataType() { return descriptor.getDataType(); }
-    vector<unsigned long> getDimensions() { return descriptor.getDimensions(); }
+    std::vector<unsigned long> getDimensions() { return descriptor.getDimensions(); }
     unsigned int getNumDimensions() { return descriptor.getNumDimensions(); }
     unsigned long getTotalNumElements() { return descriptor.getTotalNumElements(); }
     long unsigned getArraySizeInBytes() { return descriptor.getArraySizeInBytes(); }
@@ -119,7 +108,7 @@ class Tensor : private ReferenceCounted {
     void allocate();
     void deallocate();
 
-    static atomic<unsigned long> nextInstanceId;
+    static std::atomic<unsigned long> nextInstanceId;
 
     void allocateMemory();
 

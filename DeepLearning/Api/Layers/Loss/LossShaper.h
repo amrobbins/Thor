@@ -14,9 +14,9 @@ class LossShaper : public Layer {
 
     virtual ~LossShaper() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<LossShaper>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<LossShaper>(*this); }
 
-    virtual string getLayerType() const { return "LossShaper"; }
+    virtual std::string getLayerType() const { return "LossShaper"; }
 
     virtual Tensor getLossInput() const { return lossInput; }
     virtual Tensor getLossOutput() const { return lossOutput; }
@@ -30,16 +30,17 @@ class LossShaper : public Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == lossInput || connectingApiTensor == lossOutput);
 
-        vector<uint64_t> inputDimensions = lossInput.getDimensions();
-        vector<uint64_t> outputDimensions = ThorImplementation::LossShaper::getOutputDimensions(lossInput.getDimensions(), outputLossType);
+        std::vector<uint64_t> inputDimensions = lossInput.getDimensions();
+        std::vector<uint64_t> outputDimensions =
+            ThorImplementation::LossShaper::getOutputDimensions(lossInput.getDimensions(), outputLossType);
 
         if (inputDimensions == outputDimensions) {
             // In this case we need a nop, so just place a reshape with the same shape.
-            vector<uint64_t> implementationDimensions;
+            std::vector<uint64_t> implementationDimensions;
             // Tell reshape to match the batch size:
             implementationDimensions.push_back(0);
             for (uint32_t i = 0; i < outputDimensions.size(); ++i)
@@ -54,9 +55,9 @@ class LossShaper : public Layer {
         }
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
-        vector<uint64_t> inputDimensions = lossInput.getDimensions();
-        vector<uint64_t> outputDimensions = lossOutput.getDimensions();
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+        std::vector<uint64_t> inputDimensions = lossInput.getDimensions();
+        std::vector<uint64_t> outputDimensions = lossOutput.getDimensions();
         bool reduceBatchDim = inputDimensions[0] != 1 && outputDimensions[0] == 1;
         bool reduceLossDim = inputDimensions[1] != 1 && outputDimensions[1] == 1;
 
@@ -96,7 +97,7 @@ class LossShaper::Builder {
         lossShaper.lossInput = _lossInput.get();
         lossShaper.outputLossType = _outputLossType.get();
 
-        vector<uint64_t> outputDimensions =
+        std::vector<uint64_t> outputDimensions =
             ThorImplementation::LossShaper::getOutputDimensions(_lossInput.get().getDimensions(), _outputLossType.get());
         lossShaper.lossOutput = Tensor(_lossInput.get().getDataType(), outputDimensions);
 
@@ -112,7 +113,7 @@ class LossShaper::Builder {
         return lossShaper;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         return construct().getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
 

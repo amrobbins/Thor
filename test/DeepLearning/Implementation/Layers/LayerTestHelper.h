@@ -4,17 +4,15 @@
 
 #include <vector>
 
-using std::vector;
-
 class LayerTestHelper {
    public:
-    static void connectNetwork(vector<ThorImplementation::Layer *> &layers) {
+    static void connectNetwork(std::vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size() - 1; ++i) {
             layers[i]->connectToNextLayer(layers[i + 1]);
         }
     }
 
-    static void initializeNetwork(vector<ThorImplementation::Layer *> &layers) {
+    static void initializeNetwork(std::vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->parentCompile();
             layers[i]->compile();
@@ -25,12 +23,12 @@ class LayerTestHelper {
         }
     }
 
-    static void connectAndInitializeNetwork(vector<ThorImplementation::Layer *> &layers) {
+    static void connectAndInitializeNetwork(std::vector<ThorImplementation::Layer *> &layers) {
         connectNetwork(layers);
         initializeNetwork(layers);
     }
 
-    static void tearDownNetwork(vector<ThorImplementation::Layer *> &layers) {
+    static void tearDownNetwork(std::vector<ThorImplementation::Layer *> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->cleanup();
             layers[i]->parentCleanup();

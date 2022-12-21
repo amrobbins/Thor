@@ -28,7 +28,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual void createWeightsIfNecessary() {
         if (!usingSharedWeights && !weights.isInitialized()) {
-            vector<unsigned long> weightsDimensions;
+            std::vector<unsigned long> weightsDimensions;
             weightsDimensions.push_back(featureInputs[0].get().getDescriptor().getDimensions()[1]);
             weightsDimensions.push_back(numOutputFeatures);
             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
@@ -73,7 +73,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                                                                         kernelWillRunOnGpu);
         assert(kernelWillRunOnGpu);
         if (workspaceForwardSizeInBytes > 0) {
-            vector<unsigned long> workspaceDimensions;
+            std::vector<unsigned long> workspaceDimensions;
             workspaceDimensions.push_back(workspaceForwardSizeInBytes);
             TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
             workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
@@ -345,7 +345,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         Optional<Tensor> anyFeatureOutput = getFirstPresentTensor(featureOutputs);
         assert(anyFeatureOutput.isPresent());
-        vector<uint64_t> dimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
+        std::vector<uint64_t> dimensions = anyFeatureOutput.get().getDescriptor().getDimensions();
         cudnnStatus = cudnnSetTensor4dDescriptor(descriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, dimensions[0], dimensions[1], 1, 1);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 

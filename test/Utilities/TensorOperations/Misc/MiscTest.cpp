@@ -8,10 +8,8 @@
 
 #include <set>
 
-using std::advance;
-using std::set;
-
 using namespace ThorImplementation;
+using namespace std;
 
 inline int randomElement(set<int> &filledSet) {
     assert(!filledSet.empty());

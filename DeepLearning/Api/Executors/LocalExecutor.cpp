@@ -6,6 +6,7 @@ using std::string;
 using std::thread;
 
 using namespace Thor;
+using namespace std;
 
 shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     assert(_network.isPresent());
@@ -94,7 +95,7 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
             assert(params->batchletOutput.count(tensorName) == 1);
             copyFromTensor = params->batchletOutput[tensorName];
         }
-        assert(copyFromTensor.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(copyFromTensor.getPlacement() == ThorImplementation::TensorPlacement::MemDevices::CPU);
         uint64_t numTensorBytes = copyFromTensor.getDescriptor().getArraySizeInBytes();
         bufferMap[tensorName] = vector<uint8_t>(numTensorBytes);
         memcpy(&(bufferMap[tensorName][0]), copyFromTensor.getMemPtr(), numTensorBytes);

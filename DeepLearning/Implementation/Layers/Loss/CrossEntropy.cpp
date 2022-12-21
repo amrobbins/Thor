@@ -26,6 +26,9 @@ CrossEntropy::~CrossEntropy() {
 }
 
 void CrossEntropy::compile() {
+    // FIXME: TEMP
+    printf("Cross entropy id %ld\n", getId());
+
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
     assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -443,4 +446,8 @@ void CrossEntropy::launchCrossEntropyWithFP32PredictionsAndFP32Loss() {
     } else {
         assert(false);
     }
+}
+
+string CrossEntropy::getType() {
+    return string("CrossEntropy ") + (crossEntropyLossType == CrossEntropyLossType::BINARY ? string("(Binary)") : string("(Categorical)"));
 }

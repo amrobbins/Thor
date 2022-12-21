@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 
 using namespace Thor;
+using namespace std;
 
 void Convolution2d::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());

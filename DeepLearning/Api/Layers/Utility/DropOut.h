@@ -13,18 +13,18 @@ class DropOut : public Layer {
     class Builder;
     virtual ~DropOut() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<DropOut>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<DropOut>(*this); }
 
     virtual float getDropProportion() { return dropProportion; }
 
-    virtual string getLayerType() const { return "DropOut"; }
+    virtual std::string getLayerType() const { return "DropOut"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -33,8 +33,8 @@ class DropOut : public Layer {
         return dropOut;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
-        assert(tensorPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+        assert(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         uint32_t gpuNum = tensorPlacement.getDeviceNum();
         cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
         uint64_t randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
@@ -48,7 +48,7 @@ class DropOut : public Layer {
    protected:
     virtual uint64_t getReservedStateSizeInBytes(uint32_t batchSize) const {
         ThorImplementation::TensorDescriptor::DataType dataType = ThorImplementation::TensorDescriptor::DataType::FP16;
-        vector<uint64_t> featureInputDimensionsWithBatchSize;
+        std::vector<uint64_t> featureInputDimensionsWithBatchSize;
         featureInputDimensionsWithBatchSize.push_back(batchSize);
         for (uint32_t i = 0; i < featureInput.get().getDimensions().size(); ++i)
             featureInputDimensionsWithBatchSize.push_back(featureInput.get().getDimensions()[i]);

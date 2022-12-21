@@ -8,10 +8,8 @@
 #include <atomic>
 #include <utility>
 
-using std::atomic;
-
 struct KernelRequirement {
-    KernelRequirement(const string gpuType,
+    KernelRequirement(const std::string gpuType,
                       const int rowsA,
                       const int colsA,
                       const int rowsB,
@@ -61,7 +59,7 @@ struct KernelRequirement {
         assert(finalColsA == finalRowsB);
     }
 
-    const string gpuType;
+    const std::string gpuType;
     const int rowsA;
     const int colsA;
     const int rowsB;
@@ -100,7 +98,7 @@ struct hash<KernelRequirement> {
         hashValue = (hashValue ^ (hash<int>()(k.ldA))) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.ldB))) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.ldC))) << 1;
-        hashValue = hashValue ^ hash<string>()(k.gpuType);
+        hashValue = hashValue ^ hash<std::string>()(k.gpuType);
 
         return hashValue;
     }

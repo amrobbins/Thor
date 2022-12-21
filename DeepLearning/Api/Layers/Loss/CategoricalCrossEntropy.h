@@ -25,9 +25,9 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual void convertToSingleLayersAndAddToNetwork();
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<CategoricalCrossEntropy>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<CategoricalCrossEntropy>(*this); }
 
-    virtual string getLayerType() const { return "CategoricalCrossEntropy"; }
+    virtual std::string getLayerType() const { return "CategoricalCrossEntropy"; }
 
    private:
     enum class LabelType { INDEX = 5, ONE_HOT };
@@ -38,7 +38,7 @@ class CategoricalCrossEntropy : public Loss {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
@@ -69,14 +69,14 @@ class CategoricalCrossEntropy::Builder {
 
         CategoricalCrossEntropy categoricalCrossEntropy;
         if (_labelType == LabelType::ONE_HOT) {
-            vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+            std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             assert(labelDimensions.size() == 1);
             assert(labelDimensions[0] > 1);
             assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
             categoricalCrossEntropy.numClasses = _predictions.get().getDimensions()[0];
         } else {
-            vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-            vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
+            std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+            std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
             assert(labelDimensions.size() == 0 || labelDimensions.size() == 1);
             if (labelDimensions.size() == 1)
                 assert(_labels.get().getDimensions()[0] == 1);

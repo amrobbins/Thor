@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
 using namespace Thor;
+using namespace std;
 
 void FullyConnected::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());

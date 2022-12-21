@@ -28,7 +28,9 @@ class LossShaper : public Layer {
     virtual void backward(Optional<Tensor> errorInput);
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream);
 
-    static vector<uint64_t> getOutputDimensions(vector<uint64_t> inputDimensions, OutputLossType outputLossType);
+    virtual std::string getType();
+
+    static std::vector<uint64_t> getOutputDimensions(std::vector<uint64_t> inputDimensions, OutputLossType outputLossType);
 
    private:
     bool uninitialized;

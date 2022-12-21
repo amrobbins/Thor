@@ -5,8 +5,6 @@
 
 namespace Thor {
 
-using std::shared_ptr;
-
 class Executor {
    public:
     Executor() {}

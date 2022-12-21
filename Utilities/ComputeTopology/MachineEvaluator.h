@@ -60,8 +60,8 @@ class MachineEvaluator {
     int getConnectionSpeedRanking(int sourceGpuNum, int destGpuNum);
     // Returns false if not known:
     bool isPeerToPeerAvailable(int sourceGpuNum, int destGpuNum);
-    string getGpuType(int gpuNum);
-    string getGpuType();
+    std::string getGpuType(int gpuNum);
+    std::string getGpuType();
     int getGpuPciBusId(int gpuNum);
     int getGpuNumFromBusId(int gpuBusId);
     int getAdjacentHigherGpu(int gpuNum);
@@ -118,7 +118,7 @@ class MachineEvaluator {
     std::map<int, std::vector<GpuConnectionRanking>> connectionRankings;
     std::map<int, std::map<int, bool>> peerToPeerEnabled;
     std::map<int, std::map<int, int>> peerConnectionRankings;
-    std::vector<string> gpuType;
+    std::vector<std::string> gpuType;
     std::vector<int> gpuPciBusId;  // index is gpuNum, value is gpuPciBusId
     std::vector<int> orderedGpus;  // index is order (adjacent gpus are adjacent in this vector), value is gpuNum
     std::map<int, int> gpuNumFromBusId;

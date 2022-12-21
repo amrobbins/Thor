@@ -25,9 +25,9 @@ class BinaryCrossEntropy : public Loss {
 
     virtual void convertToSingleLayersAndAddToNetwork();
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<BinaryCrossEntropy>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BinaryCrossEntropy>(*this); }
 
-    virtual string getLayerType() const { return "BinaryCrossEntropy"; }
+    virtual std::string getLayerType() const { return "BinaryCrossEntropy"; }
 
    private:
     // Binary cross entropy only supports batch and elementwise loss.
@@ -39,7 +39,7 @@ class BinaryCrossEntropy : public Loss {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
@@ -62,7 +62,7 @@ class BinaryCrossEntropy::Builder {
         assert(_predictions.get() != _labels.get());
         assert(_lossType.isPresent());
 
-        vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+        std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         // API layer does not have a batch dimension:
         assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 

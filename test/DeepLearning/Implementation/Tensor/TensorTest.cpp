@@ -10,6 +10,7 @@
 #pragma GCC diagnostic pop
 
 using namespace ThorImplementation;
+using namespace std;
 
 TEST(Tensor, Copies) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);

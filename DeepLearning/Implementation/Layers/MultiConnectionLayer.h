@@ -25,22 +25,26 @@ class MultiConnectionLayer : public Layer {
         }
     }
 
-    // For situations where the error input should just pass through to the error output,
+    // For situations where the error input should just pass through to the error output of the next layer,
     // this method is used to avoid duplicating the tensor and unnecessary data movement.
+    // They may not have the same number of error inputs and error outputs, consider tensorFanout.
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
         assert(oldErrorInput.isPresent());
+        bool replacementHappend = false;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
             if (errorInputs[i].isPresent() && errorInputs[i].get() == oldErrorInput.get()) {
                 // If they were fused they need to remain fused
-                if (errorOutputs[i].isPresent() && errorOutputs[i].get() == errorInputs[i].get()) {
-                    previousLayers[i].get()->replaceErrorInput(errorOutputs[i], newErrorInput);
-                    errorOutputs[i] = newErrorInput;
+                for (uint32_t j = 0; j < errorOutputs.size(); ++j) {
+                    if (errorOutputs[j].isPresent() && errorOutputs[j].get() == oldErrorInput.get()) {
+                        previousLayers[j].get()->replaceErrorInput(errorOutputs[j], newErrorInput);
+                        errorOutputs[j] = newErrorInput;
+                    }
                 }
                 errorInputs[i] = newErrorInput;
-                return;
+                replacementHappend = true;
             }
         }
-        assert(false);
+        assert(replacementHappend);
     }
 
     virtual void parentInitialize() {
@@ -217,12 +221,12 @@ class MultiConnectionLayer : public Layer {
 
     virtual bool isBackPropStub() { return getFirstPresentTensor(errorOutputs).isEmpty(); }
 
-    virtual vector<Optional<Tensor>> getFeatureInputs() { return featureInputs; }
-    virtual vector<Optional<Tensor>> getFeatureOutputs() { return featureOutputs; }
-    virtual vector<Optional<Tensor>> getErrorInputs() { return errorInputs; }
-    virtual vector<Optional<Tensor>> getErrorOutputs() { return errorOutputs; }
-    virtual vector<Optional<Layer *>> getNextLayers() { return nextLayers; }
-    virtual vector<Stream> getStreams() { return streams; }
+    virtual std::vector<Optional<Tensor>> getFeatureInputs() { return featureInputs; }
+    virtual std::vector<Optional<Tensor>> getFeatureOutputs() { return featureOutputs; }
+    virtual std::vector<Optional<Tensor>> getErrorInputs() { return errorInputs; }
+    virtual std::vector<Optional<Tensor>> getErrorOutputs() { return errorOutputs; }
+    virtual std::vector<Optional<Layer *>> getNextLayers() { return nextLayers; }
+    virtual std::vector<Stream> getStreams() { return streams; }
 
     // compute the fan in for one element of a batch
     virtual uint64_t getFanIn() {
@@ -230,7 +234,7 @@ class MultiConnectionLayer : public Layer {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             if (featureInputs[i].isPresent()) {
                 Tensor aFeatureInput = featureInputs[i];
-                vector<uint64_t> inputDimensions = aFeatureInput.getDescriptor().getDimensions();
+                std::vector<uint64_t> inputDimensions = aFeatureInput.getDescriptor().getDimensions();
                 uint64_t fanIn = 1;
                 for (uint32_t j = 1; j < inputDimensions.size(); ++j) {
                     fanIn *= inputDimensions[j];
@@ -246,7 +250,7 @@ class MultiConnectionLayer : public Layer {
 
         Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
         assert(anyFeatureInput.isPresent());
-        vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
+        std::vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
         uint64_t fanIn = 1;
         for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
             fanIn *= inputDimensions[i];
@@ -260,7 +264,7 @@ class MultiConnectionLayer : public Layer {
         for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
             if (featureOutputs[i].isPresent()) {
                 Tensor aFeatureOutput = featureOutputs[i];
-                vector<uint64_t> outputDimensions = aFeatureOutput.getDescriptor().getDimensions();
+                std::vector<uint64_t> outputDimensions = aFeatureOutput.getDescriptor().getDimensions();
                 uint64_t fanOut = 1;
                 for (uint32_t j = 1; j < outputDimensions.size(); ++j)
                     fanOut *= outputDimensions[j];
@@ -277,25 +281,25 @@ class MultiConnectionLayer : public Layer {
     }
 
    protected:
-    set<unsigned long> allErrorInputTensorIds;
-    set<unsigned long> stillWaitingForErrorInputTensors;
+    std::set<unsigned long> allErrorInputTensorIds;
+    std::set<unsigned long> stillWaitingForErrorInputTensors;
     unsigned int numEmptyErrorInputConnections;
     unsigned int stillWaitingForNumEmptyErrorInputConnections;
 
-    vector<Optional<Tensor>> featureInputs;
-    vector<Optional<Tensor>> featureOutputs;
-    vector<Optional<Tensor>> errorInputs;
-    vector<Optional<Tensor>> errorOutputs;
-    vector<Stream> streams;
-    vector<Optional<Layer *>> nextLayers;
-    vector<Optional<Layer *>> previousLayers;
+    std::vector<Optional<Tensor>> featureInputs;
+    std::vector<Optional<Tensor>> featureOutputs;
+    std::vector<Optional<Tensor>> errorInputs;
+    std::vector<Optional<Tensor>> errorOutputs;
+    std::vector<Stream> streams;
+    std::vector<Optional<Layer *>> nextLayers;
+    std::vector<Optional<Layer *>> previousLayers;
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) = 0;
 
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) = 0;
 
-    Optional<Tensor> getFirstPresentTensor(vector<Optional<Tensor>> tensors) {
+    Optional<Tensor> getFirstPresentTensor(std::vector<Optional<Tensor>> tensors) {
         for (auto it = tensors.begin(); it != tensors.end(); ++it) {
             if (it->isPresent())
                 return *it;
@@ -303,7 +307,7 @@ class MultiConnectionLayer : public Layer {
         return Optional<Tensor>::empty();
     }
 
-    Optional<Tensor> getLastPresentTensor(vector<Optional<Tensor>> tensors) {
+    Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
         for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
             if (it->isPresent())
                 return *it;
@@ -311,7 +315,7 @@ class MultiConnectionLayer : public Layer {
         return Optional<Tensor>::empty();
     }
 
-    unsigned int numPresentTensors(vector<Optional<Tensor>> tensors) {
+    unsigned int numPresentTensors(std::vector<Optional<Tensor>> tensors) {
         unsigned int numPresent = 0;
         for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
             if (it->isPresent())

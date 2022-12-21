@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.h"
 
 using namespace Thor;
+using namespace std;
 
 Network buildFewLayerFullyConnected() {
     Network fewLayerFullyConnected;

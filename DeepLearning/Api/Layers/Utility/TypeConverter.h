@@ -13,16 +13,16 @@ class TypeConverter : public Layer {
 
     virtual ~TypeConverter() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<TypeConverter>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<TypeConverter>(*this); }
 
-    virtual string getLayerType() const { return "TypeConverter"; }
+    virtual std::string getLayerType() const { return "TypeConverter"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
         assert(getFeatureOutput().isPresent());
@@ -34,7 +34,7 @@ class TypeConverter : public Layer {
         return typeConverter;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         assert(getFeatureOutput().isPresent());
         return getFeatureOutput().get().getTotalSizeInBytes();
     }

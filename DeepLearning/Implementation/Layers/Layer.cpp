@@ -2,6 +2,7 @@
 #include "NeuralNetwork/DropOut.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 atomic<uint64_t> Layer::nextId(2);
 

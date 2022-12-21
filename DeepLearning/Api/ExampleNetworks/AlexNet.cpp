@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/ExampleNetworks/AlexNet.h"
 
 using namespace Thor;
+using namespace std;
 
 Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput) {
     Tensor latestOutputTensor;

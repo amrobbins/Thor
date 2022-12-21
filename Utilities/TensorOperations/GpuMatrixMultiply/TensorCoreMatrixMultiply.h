@@ -23,15 +23,6 @@
 #define C_rows A_rows
 #define C_cols B_cols
 
-namespace bi = boost::interprocess;
-
-using bi::interprocess_exception;
-using std::exception;
-using std::make_pair;
-using std::mutex;
-using std::pair;
-using std::unordered_map;
-
 /**
  * TensorCoreMatrixMultiply is a singleton object that can find the optimal matrix multiply kernel for a matrix multiply operation
  * of a given set of dimensions on a specific type of GPU.
@@ -145,11 +136,11 @@ class TensorCoreMatrixMultiply {
                                             const Stream stream);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
-    void chooseOptimalKernel(string gpuType, int rowsA, int colsA, int colsB) {
+    void chooseOptimalKernel(std::string gpuType, int rowsA, int colsA, int colsB) {
         chooseOptimalKernel(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB);
     }
 
-    void chooseOptimalKernel(string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC) {
+    void chooseOptimalKernel(std::string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC) {
         // Find a gpu of the proper type or fail, switch current gpu to that one while in this scope
         int gpuNum = -1;
         for (int i = 0; i < (int)MachineEvaluator::instance().getNumGpus(); ++i) {
@@ -177,10 +168,10 @@ class TensorCoreMatrixMultiply {
 
     void chooseOptimalKernel(int gpuNum, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC);
 
-    unsigned int getWorkspaceSizeInBytes(string gpuType, int rowsA, int colsA, int colsB) {
+    unsigned int getWorkspaceSizeInBytes(std::string gpuType, int rowsA, int colsA, int colsB) {
         return getWorkspaceSizeInBytes(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB);
     }
-    unsigned int getWorkspaceSizeInBytes(string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC);
+    unsigned int getWorkspaceSizeInBytes(std::string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC);
 
     unsigned int getWorkspaceSizeInBytes(int gpuNum, int rowsA, int colsA, int colsB) {
         return getWorkspaceSizeInBytes(gpuNum, rowsA, colsA, colsB, colsA, colsB, colsB);
@@ -201,11 +192,11 @@ class TensorCoreMatrixMultiply {
         return getOptimalKernelTime(MachineEvaluator::instance().getGpuType(gpuNum), rowsA, colsA, colsB, ldA, ldB, ldC, workspaceAllowed);
     }
 
-    inline float getOptimalKernelTime(string gpuType, int rowsA, int colsA, int colsB, bool workspaceAllowed) {
+    inline float getOptimalKernelTime(std::string gpuType, int rowsA, int colsA, int colsB, bool workspaceAllowed) {
         return getOptimalKernelTime(gpuType, rowsA, colsA, colsB, colsA, colsB, colsB, workspaceAllowed);
     }
 
-    float getOptimalKernelTime(string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, bool workspaceAllowed);
+    float getOptimalKernelTime(std::string gpuType, int rowsA, int colsA, int colsB, int ldA, int ldB, int ldC, bool workspaceAllowed);
 
     // You must call startingMultiThreadedOptimization() if you are optimizing kernels using multiple threads (so that you can use multiple
     // GPUs). Call it before you begin.
@@ -223,49 +214,51 @@ class TensorCoreMatrixMultiply {
     static bool checkPreRequisitesBatch8();
     static bool checkPreRequisitesBatch16();
     TensorCoreMatrixMultiply();
-    vector<KernelWithSpec> getAllKernels() { return TensorCoreMatrixMultiply::kernels; }
+    std::vector<KernelWithSpec> getAllKernels() { return TensorCoreMatrixMultiply::kernels; }
 
    private:
-    unordered_map<KernelRequirement, KernelWithSpec> optimalKernels;
-    unordered_map<KernelRequirement, float> optimalKernelMeasuredTime;
+    std::unordered_map<KernelRequirement, KernelWithSpec> optimalKernels;
+    std::unordered_map<KernelRequirement, float> optimalKernelMeasuredTime;
 
-    vector<KernelWithSpec> kernels;
+    std::vector<KernelWithSpec> kernels;
 
     bool useLocks;
-    mutex mtx;
+    std::mutex mtx;
 
-    string diskIndexFileName;
+    std::string diskIndexFileName;
     const int CURRENT_KERNEL_VERSION;
 
-    typedef bi::allocator<pair<const KernelRequirement, pair<int, float>>, bi::managed_mapped_file::segment_manager>
+    typedef boost::interprocess::allocator<std::pair<const KernelRequirement, std::pair<int, float>>,
+                                           boost::interprocess::managed_mapped_file::segment_manager>
         kernel_listing_map_allocator_t;
-    typedef bi::map<KernelRequirement, pair<int, float>, std::less<KernelRequirement>, kernel_listing_map_allocator_t> kernel_listing_map_t;
-    bi::managed_mapped_file optimalKernelListingFile;
+    typedef boost::interprocess::map<KernelRequirement, std::pair<int, float>, std::less<KernelRequirement>, kernel_listing_map_allocator_t>
+        kernel_listing_map_t;
+    boost::interprocess::managed_mapped_file optimalKernelListingFile;
     kernel_listing_map_t *optimalKernelListing;
 
-    class Youreusingitwrong : public exception {
+    class Youreusingitwrong : public std::exception {
        public:
-        Youreusingitwrong(string message) { this->message = message; }
+        Youreusingitwrong(std::string message) { this->message = message; }
 
         virtual const char *what() const throw() { return message.c_str(); }
 
        private:
-        string message;
+        std::string message;
     };
 
-    vector<KernelWithSpec> getBCol8Kernels();
-    vector<KernelWithSpec> getBCol16Kernels();
-    vector<KernelWithSpec> getBCol32Kernels();
-    vector<KernelWithSpec> getBCol48Kernels();
-    vector<KernelWithSpec> getBCol64Kernels();
-    vector<KernelWithSpec> getBCol80Kernels();
-    vector<KernelWithSpec> getBCol96Kernels();
-    vector<KernelWithSpec> getBCol112Kernels();
-    vector<KernelWithSpec> getBCol128Kernels();
+    std::vector<KernelWithSpec> getBCol8Kernels();
+    std::vector<KernelWithSpec> getBCol16Kernels();
+    std::vector<KernelWithSpec> getBCol32Kernels();
+    std::vector<KernelWithSpec> getBCol48Kernels();
+    std::vector<KernelWithSpec> getBCol64Kernels();
+    std::vector<KernelWithSpec> getBCol80Kernels();
+    std::vector<KernelWithSpec> getBCol96Kernels();
+    std::vector<KernelWithSpec> getBCol112Kernels();
+    std::vector<KernelWithSpec> getBCol128Kernels();
 
     static float computeWaves(KernelRequirement kernelRequirement, KernelWithSpec kernel, int gpuNum);
 
-    vector<KernelWithSpec> getEligibleKernels(KernelRequirement kernelRequirement);
+    std::vector<KernelWithSpec> getEligibleKernels(KernelRequirement kernelRequirement);
     KernelWithSpec getHeuristicKernel(KernelRequirement kernelRequirement);
 
     kernel_listing_map_t *createDiskIndex();

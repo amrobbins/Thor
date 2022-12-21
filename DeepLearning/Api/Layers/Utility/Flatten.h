@@ -13,16 +13,16 @@ class Flatten : public Layer {
 
     virtual ~Flatten() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Flatten>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Flatten>(*this); }
 
-    virtual string getLayerType() const { return "Flatten"; }
+    virtual std::string getLayerType() const { return "Flatten"; }
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -33,7 +33,9 @@ class Flatten : public Layer {
     }
 
     // Flatten only changes the descriptor, no tensor is allocated
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const { return 0; }
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
+        return 0;
+    }
 };
 
 class Flatten::Builder {
@@ -44,9 +46,9 @@ class Flatten::Builder {
         assert(_numOutputDimensions.isPresent());
         assert(_numOutputDimensions.get() < _featureInput.get().getDimensions().size());
 
-        vector<uint64_t> inputDimensions = _featureInput.get().getDimensions();
+        std::vector<uint64_t> inputDimensions = _featureInput.get().getDimensions();
         assert(inputDimensions.size() > 0);
-        vector<uint64_t> outputDimensions;
+        std::vector<uint64_t> outputDimensions;
         for (uint32_t i = 0; i < inputDimensions.size(); ++i) {
             if (i < _numOutputDimensions)
                 outputDimensions.push_back(inputDimensions[i]);

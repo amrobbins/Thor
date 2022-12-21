@@ -23,7 +23,7 @@ class Executor;
 
 struct BufferStampTensorsParams {
     std::shared_ptr<std::vector<std::unordered_map<std::string, std::vector<uint8_t>>>> batchletData;
-    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<string, vector<uint8_t>>>> batchData;
+    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<std::string, std::vector<uint8_t>>>> batchData;
     std::shared_ptr<std::mutex> batchMutex;
     std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
     std::shared_ptr<std::mutex> epochMutex;
@@ -36,9 +36,9 @@ struct BufferStampTensorsParams {
     uint64_t numBatchletsInBatch;
     uint64_t numBatchesInEpoch;
 
-    set<string> tensorsToReturn;
-    map<string, ThorImplementation::Tensor> batchletInput;
-    map<string, ThorImplementation::Tensor> batchletOutput;
+    std::set<std::string> tensorsToReturn;
+    std::map<std::string, ThorImplementation::Tensor> batchletInput;
+    std::map<std::string, ThorImplementation::Tensor> batchletOutput;
 };
 
 class LocalExecutor : public Executor {
@@ -50,12 +50,12 @@ class LocalExecutor : public Executor {
     virtual ~LocalExecutor();
 
     // FIXME: need train, validate and test and no exampleType
-    void trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn);
+    void trainEpochs(uint32_t numEpochs, std::set<std::string> tensorsToReturn);
     void createSnapshot(std::string filepath) {}  // FIXME
 
     bool isBatchDataReady();
     void waitForBatchData();
-    unordered_map<string, std::vector<uint8_t>> popBatchData();
+    std::unordered_map<std::string, std::vector<uint8_t>> popBatchData();
 
    private:
     bool initialized;
@@ -64,9 +64,9 @@ class LocalExecutor : public Executor {
     std::shared_ptr<Loader> loader;
     std::shared_ptr<Optimizer> optimizer;
     // FIXME: shared_ptr, however how do I deal with singletons then?
-    vector<Visualizer*> visualizers;
+    std::vector<Visualizer*> visualizers;
 
-    vector<ThorImplementation::StampedNetwork> stampedNetworks;
+    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
     std::shared_ptr<std::mutex> epochMutex;
     std::shared_ptr<uint64_t> currentEpoch;
@@ -75,11 +75,11 @@ class LocalExecutor : public Executor {
     std::shared_ptr<std::condition_variable> batchFinished;
     std::condition_variable batchDataPopped;
     std::shared_ptr<std::map<uint64_t, bool>> batchDataReady;
-    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<string, vector<uint8_t>>>> batchData;
+    std::shared_ptr<std::unordered_map<uint64_t, std::unordered_map<std::string, std::vector<uint8_t>>>> batchData;
 
-    vector<shared_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
+    std::vector<std::shared_ptr<AsyncQueue<ExecutionState>>> visualizerExecutionState;
 
-    string outputDirectory;
+    std::string outputDirectory;
 
     // stampNumber -> [ (start0, finish0), (start1, finish1), ... ]
     std::unordered_map<uint64_t, std::deque<std::pair<Event, Event>>> batchletTimingEvents;
@@ -87,7 +87,7 @@ class LocalExecutor : public Executor {
     bool isBatchDataReadyUnlocked();
     void waitForBatchDataUnlocked(std::unique_lock<std::mutex>& lck);
 
-    void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, set<string> tensorsToReturn);
+    void trainBatches(uint64_t initialEpochBatchNum, uint64_t batches, ExampleType exampleType, std::set<std::string> tensorsToReturn);
 
     static void CUDART_CB bufferStampTensors(void* data);
 };
@@ -118,12 +118,12 @@ class LocalExecutor::Builder {
 
     LocalExecutor::Builder visualizer(Visualizer* _visualizer) {
         if (_visualizers.isEmpty())
-            _visualizers = vector<Visualizer*>();
+            _visualizers = std::vector<Visualizer*>();
         _visualizers.get().push_back(_visualizer);
         return *this;
     }
 
-    LocalExecutor::Builder outputDirectory(string _outputDirectory) {
+    LocalExecutor::Builder outputDirectory(std::string _outputDirectory) {
         assert(this->_outputDirectory.isEmpty());
         if (_outputDirectory.empty())
             _outputDirectory = "./";
@@ -136,8 +136,8 @@ class LocalExecutor::Builder {
     Optional<Network> _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
-    Optional<vector<Visualizer*>> _visualizers;
-    Optional<string> _outputDirectory;
+    Optional<std::vector<Visualizer*>> _visualizers;
+    Optional<std::string> _outputDirectory;
 };
 
 }  // namespace Thor

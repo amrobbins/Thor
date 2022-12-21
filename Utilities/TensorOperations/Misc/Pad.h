@@ -5,14 +5,6 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 
-#include <map>
-#include <utility>
-#include <vector>
-
-using std::map;
-using std::pair;
-using std::vector;
-
 void launchPad(half *dest_d,
                half *source_d,
                unsigned long numDestElements,

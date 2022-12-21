@@ -1,5 +1,7 @@
 #include "gpuMatrixMultiply.h"
 
+using namespace std;
+
 cublasStatus_t matrixMultiply(cublasLtHandle_t cublasLtHandle,
                               cudaStream_t stream,
                               const void *A_d,

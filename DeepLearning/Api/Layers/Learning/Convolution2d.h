@@ -23,7 +23,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     Convolution2d() {}
     virtual ~Convolution2d() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Convolution2d>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Convolution2d>(*this); }
 
     virtual uint32_t getFilterHeight() { return filterHeight; }
     virtual uint32_t getFilterWidth() { return filterWidth; }
@@ -32,7 +32,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual uint32_t getVerticalPadding() { return verticalPadding; }
     virtual uint32_t getHoriztonalPadding() { return horizontalPadding; }
 
-    virtual string getLayerType() const { return "Convolution2d"; }
+    virtual std::string getLayerType() const { return "Convolution2d"; }
 
    protected:
     virtual bool isMultiLayer() const {
@@ -42,13 +42,13 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual void convertToSingleLayersAndAddToNetwork();
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
-        vector<uint64_t> inputDimensions = inputTensor.getDimensions();
+        std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
         assert(inputDimensions.size() == 3);
 
         uint32_t numInputChannels = inputDimensions[0];
         uint32_t numInputRows = inputDimensions[1];
         uint32_t numInputColumns = inputDimensions[2];
-        string gpuType = MachineEvaluator::instance().getGpuType(stream.getGpuNum());
+        std::string gpuType = MachineEvaluator::instance().getGpuType(stream.getGpuNum());
         ConvolutionKernelRequirement convolutionKernelRequirement(gpuType,
                                                                   filterWidth,
                                                                   filterHeight,
@@ -70,7 +70,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
@@ -78,13 +78,13 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
 
-        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
+        std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(convolution2d->getWeights());
         weightsInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
         initializers.push_back(weightsInitializerBuilderClone->build());
 
         if (convolution2d->getBiases().isPresent()) {
-            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
+            std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
             biasInitializerBuilderClone->tensorToInitialize(convolution2d->getBiases().get());
             biasInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
             initializers.push_back(biasInitializerBuilderClone->build());
@@ -93,7 +93,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return convolution2d;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // FIXME: workspace size?
         uint64_t numInputChannels = featureInputs[0].getDimensions()[0];
         uint64_t numWeights = filterHeight * filterWidth * numInputChannels * numOutputChannels;
@@ -106,7 +106,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return fixedMem + batchSizeDependentMem;
     }
 
-    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                              ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t batchSizeDependentMem =
             2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;
@@ -122,9 +123,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     uint32_t verticalPadding;
     uint32_t horizontalPadding;
     bool hasBias;
-    shared_ptr<Initializer::Builder> weightsInitializerBuilder;
-    shared_ptr<Initializer::Builder> biasInitializerBuilder;
-    shared_ptr<Activation::Builder> activationBuilder;
+    std::shared_ptr<Initializer::Builder> weightsInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> biasInitializerBuilder;
+    std::shared_ptr<Activation::Builder> activationBuilder;
 
     float dropProportion;
 
@@ -160,11 +161,11 @@ class Convolution2d::Builder {
         if (_hasBias.isEmpty())
             _hasBias = false;
         if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
+            _weightsInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
         if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
+            _biasInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
         if (!_activationBuilder && !_activationExplicitlyRemoved)
-            _activationBuilder = make_shared<Relu::Builder>(Relu::Builder());
+            _activationBuilder = std::make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
@@ -416,7 +417,7 @@ class Convolution2d::Builder {
 
    private:
     Optional<Network *> _network;
-    vector<Tensor> _featureInputs;
+    std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputChannels;
     Optional<uint32_t> _filterHeight;
     Optional<uint32_t> _filterWidth;
@@ -427,9 +428,9 @@ class Convolution2d::Builder {
     Optional<uint32_t> _verticalPadding;
     Optional<uint32_t> _horizontalPadding;
     Optional<bool> _hasBias;
-    shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
-    shared_ptr<Initializer::Builder> _biasInitializerBuilder;
-    shared_ptr<Activation::Builder> _activationBuilder;
+    std::shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> _biasInitializerBuilder;
+    std::shared_ptr<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

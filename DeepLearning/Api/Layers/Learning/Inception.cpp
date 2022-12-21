@@ -4,6 +4,7 @@
 // FIXME: Instead of that, optimize concatenate to rewrite its input tensors memory locations, so that concatenate is a no op.
 
 using namespace Thor;
+using namespace std;
 
 void Inception::convertToSingleLayersAndAddToNetwork() {
     assert(isMultiLayer());

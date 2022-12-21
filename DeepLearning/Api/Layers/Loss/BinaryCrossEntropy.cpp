@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
 using namespace Thor;
+using namespace std;
 
 void BinaryCrossEntropy::convertToSingleLayersAndAddToNetwork() {
     Tensor currentFeatureInput = predictionsTensor;

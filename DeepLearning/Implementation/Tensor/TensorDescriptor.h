@@ -12,15 +12,6 @@
 #include <assert.h>
 #include <type_traits>
 
-using std::string;
-using std::vector;
-
-using std::is_const;
-using std::is_pointer;
-using std::is_reference;
-using std::is_same;
-using std::is_volatile;
-
 namespace ThorImplementation {
 
 class TensorDescriptor {
@@ -29,7 +20,7 @@ class TensorDescriptor {
 
     TensorDescriptor() {}
 
-    TensorDescriptor(DataType dataType, const vector<unsigned long> &dimensions) : dataType(dataType), dimensions(dimensions) {
+    TensorDescriptor(DataType dataType, const std::vector<unsigned long> &dimensions) : dataType(dataType), dimensions(dimensions) {
         construct();
     }
 
@@ -118,9 +109,9 @@ class TensorDescriptor {
     long unsigned getArraySizeInBytes() { return getArraySizeInBytes(totalNumElements, dataType); }
     long unsigned getArraySizeInBytes(long numElements) { return getArraySizeInBytes(numElements, dataType); }
 
-    string getElementName() { return getElementTypeName(dataType); }
+    std::string getElementName() { return getElementTypeName(dataType); }
 
-    static string getElementTypeName(DataType dataType) {
+    static std::string getElementTypeName(DataType dataType) {
         switch (dataType) {
             case DataType::INT8:
                 return "int8";
@@ -154,9 +145,11 @@ class TensorDescriptor {
         return "";
     }
 
-    string getValueAsString(void *basePointer, unsigned long elementIndex) { return getValueAsString(basePointer, elementIndex, dataType); }
+    std::string getValueAsString(void *basePointer, unsigned long elementIndex) {
+        return getValueAsString(basePointer, elementIndex, dataType);
+    }
 
-    static string getValueAsString(void *basePointer, unsigned long elementIndex, DataType dataType) {
+    static std::string getValueAsString(void *basePointer, unsigned long elementIndex, DataType dataType) {
         switch (dataType) {
             case DataType::INT8:
                 return std::to_string(*((int8_t *)basePointer + elementIndex));
@@ -248,12 +241,12 @@ class TensorDescriptor {
     }
 
     DataType getDataType() { return dataType; }
-    vector<unsigned long> getDimensions() { return dimensions; }
+    std::vector<unsigned long> getDimensions() { return dimensions; }
     unsigned int getNumDimensions() { return dimensions.size(); }
     unsigned long getTotalNumElements() { return totalNumElements; }
 
-    string toString() const {
-        string s = string("DataType ") + getElementTypeName(dataType) + "\nDimensions [";
+    std::string toString() const {
+        std::string s = std::string("DataType ") + getElementTypeName(dataType) + "\nDimensions [";
         for (unsigned int i = 0; i < dimensions.size(); ++i) {
             s += std::to_string(dimensions[i]);
             if (i < dimensions.size() - 1)
@@ -263,7 +256,7 @@ class TensorDescriptor {
         return s;
     }
 
-    void reshape(vector<unsigned long> newDimensions) {
+    void reshape(std::vector<unsigned long> newDimensions) {
         dimensions = newDimensions;
         unsigned long newTotalNumElements = 1;
         for (unsigned int i = 0; i < dimensions.size(); ++i)
@@ -271,7 +264,7 @@ class TensorDescriptor {
         assert(newTotalNumElements == totalNumElements);
     }
 
-    unsigned long getFlatIndex(vector<unsigned long> element) {
+    unsigned long getFlatIndex(std::vector<unsigned long> element) {
         assert(element.size() == dimensions.size());
         unsigned long stepSize = 1;
         unsigned long index = 0;
@@ -284,10 +277,10 @@ class TensorDescriptor {
         return index;
     }
 
-    vector<unsigned long> getDimensionalIndex(unsigned long flatIndex) {
+    std::vector<unsigned long> getDimensionalIndex(unsigned long flatIndex) {
         assert(flatIndex < totalNumElements);
 
-        vector<unsigned long> dimensionIndex;
+        std::vector<unsigned long> dimensionIndex;
         for (unsigned int d = 0; d < dimensions.size(); ++d) {
             dimensionIndex.push_back(flatIndex / stridePerDimension[d]);
             flatIndex -= dimensionIndex[d] * stridePerDimension[d];
@@ -300,7 +293,7 @@ class TensorDescriptor {
         return stridePerDimension[axis];
     }
 
-    void *getChunkAddress(vector<unsigned long> leadingDimensions, void *mem) {
+    void *getChunkAddress(std::vector<unsigned long> leadingDimensions, void *mem) {
         assert(leadingDimensions.size() <= dimensions.size());
         unsigned long chunkOffset = 0;
         for (unsigned int i = 0; i < leadingDimensions.size(); ++i) {
@@ -310,13 +303,13 @@ class TensorDescriptor {
         return (uint8_t *)mem + getArraySizeInBytes(chunkOffset);
     }
 
-    void *getElementAddress(vector<unsigned long> leadingDimensions, void *mem) { return getChunkAddress(leadingDimensions, mem); }
+    void *getElementAddress(std::vector<unsigned long> leadingDimensions, void *mem) { return getChunkAddress(leadingDimensions, mem); }
 
    private:
     DataType dataType;
-    vector<unsigned long> dimensions;
+    std::vector<unsigned long> dimensions;
     unsigned long totalNumElements;
-    vector<unsigned long> stridePerDimension;
+    std::vector<unsigned long> stridePerDimension;
 
     void construct() {
         assert(!dimensions.empty());

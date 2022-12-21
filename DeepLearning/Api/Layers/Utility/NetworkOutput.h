@@ -14,13 +14,13 @@ class NetworkOutput : public Layer {
 
     virtual ~NetworkOutput() {}
 
-    virtual string getName() const { return name; }
+    virtual std::string getName() const { return name; }
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<NetworkOutput>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<NetworkOutput>(*this); }
 
     Tensor::DataType getDataType() const { return dataType; }
 
-    virtual string getLayerType() const { return "NetworkOutput"; }
+    virtual std::string getLayerType() const { return "NetworkOutput"; }
 
     virtual bool isMultiLayer() const {
         assert(featureInput.isPresent());
@@ -35,7 +35,7 @@ class NetworkOutput : public Layer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
@@ -45,13 +45,13 @@ class NetworkOutput : public Layer {
         return networkOutput;
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // If there is a type conversion required, the memory requirement is reported by the TypeConverter layer
         return 0;
     }
 
    private:
-    string name;
+    std::string name;
     Tensor::DataType dataType;
     Network *network;
 };
@@ -68,7 +68,7 @@ class NetworkOutput::Builder {
         if (_name.isPresent())
             networkOutput.name = _name;
         else
-            networkOutput.name = string("NetworkOutput") + std::to_string(networkOutput.getId());
+            networkOutput.name = std::string("NetworkOutput") + std::to_string(networkOutput.getId());
         networkOutput.dataType = _dataType;
         networkOutput.featureInput = _inputTensor;
         // A type converter will be stamped where the new data type will take effect, when it is needed.
@@ -85,7 +85,7 @@ class NetworkOutput::Builder {
         return *this;
     }
 
-    virtual NetworkOutput::Builder &name(string _name) {
+    virtual NetworkOutput::Builder &name(std::string _name) {
         assert(!_name.empty());
         assert(this->_name.isEmpty());
         this->_name = _name;
@@ -105,7 +105,7 @@ class NetworkOutput::Builder {
     }
 
    private:
-    Optional<string> _name;
+    Optional<std::string> _name;
     Optional<Network *> _network;
     Optional<Tensor> _inputTensor;
     Optional<Tensor::DataType> _dataType;

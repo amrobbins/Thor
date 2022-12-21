@@ -7,8 +7,6 @@
 #include <atomic>
 #include <utility>
 
-using std::atomic;
-
 namespace Thor {
 
 class Metric : public Layer {
@@ -29,7 +27,7 @@ class Metric : public Layer {
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getMetric() const { return metricTensor; }
     virtual Optional<Tensor> getFeatureOutput() const { return getMetric(); }
-    virtual vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput()}; }
+    virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput()}; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
         if (connectingTensor == getFeatureInput())
@@ -41,19 +39,19 @@ class Metric : public Layer {
         assert(false);
     }
 
-    virtual vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
+    virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) {
         assert(inputTensor == getFeatureInput() || inputTensor == getLabels());
         if (numInputConnectionsMade == 2)
             return {metricTensor};
         else
-            return vector<Tensor>();
+            return std::vector<Tensor>();
     }
 
    protected:
     Tensor labelsTensor;
     Tensor metricTensor;
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // Metric
         uint64_t metricBytes = metricTensor.getTotalSizeInBytes();
         return metricBytes;

@@ -5,8 +5,6 @@
 #include <string>
 #include <unordered_map>
 
-using std::shared_ptr;
-
 class Optimizer {
    public:
     Optimizer() {}

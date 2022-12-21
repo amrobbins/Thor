@@ -4,6 +4,7 @@
 #include <cuda_fp16.h>
 
 using namespace ThorImplementation;
+using namespace std;
 
 __global__ void addConvolutionBiasKernel(
     half *data, half *biases, unsigned int batchDimension, unsigned int channelDimension, unsigned int elementDimension) {

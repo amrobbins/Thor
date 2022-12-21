@@ -19,6 +19,8 @@ class Sigmoid : public Activation {
     }
 
     virtual void compile() {
+        printf("sigmoid id %ld\n", getId());
+
         if (backwardComputedExternally) {
             // ErrorInput to the previous layer is the errorInput coming to this layer,
             // then backProp is a no op
@@ -56,6 +58,8 @@ class Sigmoid : public Activation {
                               errorOut.get().getDescriptor().getTotalNumElements(),
                               stream);
     }
+
+    virtual std::string getType() { return "Sigmoid"; }
 
    protected:
     bool backwardComputedExternally;

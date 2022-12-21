@@ -43,7 +43,7 @@ class Split : public MultiConnectionLayer {
    public:
     virtual ~Split() {}
 
-    Split(unsigned int axis, vector<unsigned long> axisElements) {
+    Split(unsigned int axis, std::vector<unsigned long> axisElements) {
         this->axis = axis;
         this->axisElements = axisElements;
         assert(!axisElements.empty());
@@ -59,7 +59,7 @@ class Split : public MultiConnectionLayer {
         assert(connection < axisElements.size());
         assert(featureInputs[0].isPresent());
 
-        vector<unsigned long> dimensions = featureInputs[0].get().getDescriptor().getDimensions();
+        std::vector<unsigned long> dimensions = featureInputs[0].get().getDescriptor().getDimensions();
         dimensions[axis] = axisElements[connection];
         return Tensor(featureInputs[0].get().getPlacement(),
                       TensorDescriptor(featureInputs[0].get().getDescriptor().getDataType(), dimensions));
@@ -72,7 +72,7 @@ class Split : public MultiConnectionLayer {
             totalAxisElements += axisElements[i];
         assert(featureInputs.size() == 1);
         assert(featureInputs[0].isPresent());
-        vector<unsigned long> inputDimensions = featureInputs[0].get().getDescriptor().getDimensions();
+        std::vector<unsigned long> inputDimensions = featureInputs[0].get().getDescriptor().getDimensions();
         assert(inputDimensions.size() > axis);
         assert(totalAxisElements = inputDimensions[axis]);
         assert(featureOutputs.size() == axisElements.size());
@@ -188,7 +188,7 @@ class Split : public MultiConnectionLayer {
     virtual void backward(Optional<Tensor> errorInput) {
         if (errorInputs.size() > 1) {
             // Locked section
-            unique_lock<mutex> lck(mtx);
+            std::unique_lock<std::mutex> lck(mtx);
 
             if (errorInput.isPresent()) {
                 assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
@@ -289,7 +289,7 @@ class Split : public MultiConnectionLayer {
 
    private:
     unsigned int axis;
-    vector<unsigned long> axisElements;
+    std::vector<unsigned long> axisElements;
 
     half **splitTensorErrorInputMemoriesArray_d;
     half **splitTensorFeatureOutputMemoriesArray_d;

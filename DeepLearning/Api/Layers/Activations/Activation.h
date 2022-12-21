@@ -7,8 +7,6 @@
 #include <atomic>
 #include <utility>
 
-using std::atomic;
-
 namespace Thor {
 
 class Activation : public Layer {
@@ -25,9 +23,9 @@ class Activation::Builder {
     // Note: the builder functions return void because if they can't return an Activation::Builder because it is abstract.
     virtual void network(Network &_network) = 0;
     virtual void featureInput(Tensor featureInput) = 0;
-    virtual shared_ptr<Layer> build() = 0;
+    virtual std::shared_ptr<Layer> build() = 0;
     // You can clone a builder to instantiate multiple distinct instances because the id is only generated when build() is called.
-    virtual shared_ptr<Builder> clone() = 0;
+    virtual std::shared_ptr<Builder> clone() = 0;
 };
 
 }  // namespace Thor

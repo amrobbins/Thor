@@ -22,6 +22,8 @@ class Softmax : public Activation {
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream);
 
+    virtual std::string getType();
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;

@@ -9,6 +9,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 
+#include <string>
+
 namespace Thor {
 
 class Inception : public TrainableWeightsBiasesLayer {
@@ -18,9 +20,9 @@ class Inception : public TrainableWeightsBiasesLayer {
 
     virtual ~Inception() {}
 
-    virtual shared_ptr<Layer> clone() const { return make_shared<Inception>(*this); }
+    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Inception>(*this); }
 
-    virtual string getLayerType() const { return "Inception"; }
+    virtual std::string getLayerType() const { return "Inception"; }
 
    protected:
     virtual bool isMultiLayer() const { return true; }
@@ -30,14 +32,14 @@ class Inception : public TrainableWeightsBiasesLayer {
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
                                              Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
         // Inception is purely a compound layer consisting of other layers, each which stamp themselves.
         // So when an inception layer converts itself to single layers, none of those layers is an inception layer
         // so it will never be added to the network as a stampable layer, and so stamp will never be called for inception.
         assert(false);
     }
 
-    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, TensorPlacement tensorPlacement) const {
+    virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // Inception is purely a compound layer consisting of other layers, each which stamp themselves.
         // So when an inception layer converts itself to single layers, none of those layers is an inception layer
         // so it will never be added to the network as a stampable layer, and so getFirstInstanceMemRequirementInBytes
@@ -54,8 +56,8 @@ class Inception : public TrainableWeightsBiasesLayer {
     uint32_t outputChannels5x5;
     uint32_t outputChannelsPooling;
 
-    shared_ptr<Initializer::Builder> weightsInitializerBuilder;
-    shared_ptr<Initializer::Builder> biasInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> weightsInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> biasInitializerBuilder;
 };
 
 class Inception::Builder {
@@ -71,9 +73,9 @@ class Inception::Builder {
         assert(_outputChannelsPooling.isPresent());
 
         if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
+            _weightsInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
         if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder = make_shared<Glorot::Builder>(Glorot::Builder());
+            _biasInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
 
         Inception inception;
         inception.network = _network;
@@ -177,7 +179,7 @@ class Inception::Builder {
 
    private:
     Optional<Network *> _network;
-    vector<Tensor> _featureInputs;
+    std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _outputChannels1x1;
     Optional<uint32_t> _inputChannels3x3;
     Optional<uint32_t> _outputChannels3x3;
@@ -185,8 +187,8 @@ class Inception::Builder {
     Optional<uint32_t> _outputChannels5x5;
     Optional<uint32_t> _outputChannelsPooling;
 
-    shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
-    shared_ptr<Initializer::Builder> _biasInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
+    std::shared_ptr<Initializer::Builder> _biasInitializerBuilder;
 };
 
 }  // namespace Thor

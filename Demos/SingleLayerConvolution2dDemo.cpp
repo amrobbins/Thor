@@ -18,6 +18,7 @@ using std::unordered_set;
 using std::vector;
 
 using namespace Thor;
+using namespace std;
 
 int main() {
     Network singleLayerConvolution2d = buildSingleLayerConvolution2d();
