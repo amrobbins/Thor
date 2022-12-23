@@ -3,9 +3,7 @@
 using namespace Thor;
 using namespace std;
 
-void Convolution2d::convertToSingleLayersAndAddToNetwork() {
-    assert(isMultiLayer());
-
+void Convolution2d::buildSupportLayersAndAddToNetwork() {
     Convolution2d::Builder convolution2dBuilder;
     convolution2dBuilder.network(*network)
         .numOutputChannels(numOutputChannels)

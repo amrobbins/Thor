@@ -3,9 +3,7 @@
 using namespace Thor;
 using namespace std;
 
-void FullyConnected::convertToSingleLayersAndAddToNetwork() {
-    assert(isMultiLayer());
-
+void FullyConnected::buildSupportLayersAndAddToNetwork() {
     vector<Tensor> currentFeatureInputs;
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)

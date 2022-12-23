@@ -24,11 +24,10 @@ class NetworkOutput : public Layer {
 
     virtual bool isMultiLayer() const {
         assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
         return featureInput.get().getDataType() != dataType;
     }
 
-    virtual void convertToSingleLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork();
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -71,11 +70,17 @@ class NetworkOutput::Builder {
             networkOutput.name = std::string("NetworkOutput") + std::to_string(networkOutput.getId());
         networkOutput.dataType = _dataType;
         networkOutput.featureInput = _inputTensor;
-        // A type converter will be stamped where the new data type will take effect, when it is needed.
-        networkOutput.featureOutput = Tensor(_inputTensor.get().getDataType(), _inputTensor.get().getDimensions());
         networkOutput.initialized = true;
         networkOutput.network = _network.get();
-        networkOutput.addToNetwork(_network.get());
+
+        if (networkOutput.isMultiLayer()) {
+            // A type converter will be stamped where the new data type will take effect, when it is needed.
+            networkOutput.buildSupportLayersAndAddToNetwork();
+        } else {
+            networkOutput.featureOutput = Tensor(_inputTensor.get().getDataType(), _inputTensor.get().getDimensions());
+            networkOutput.addToNetwork(_network.get());
+        }
+
         return networkOutput;
     }
 

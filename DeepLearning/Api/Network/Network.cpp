@@ -452,7 +452,6 @@ uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, Tensor
     for (auto it = network.begin(); it != network.end(); ++it) {
         const Layer *layer = it->get();
         // It is only valid to get first instance bytes on single layers
-        assert(!layer->isMultiLayer());
         bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
     return bytes;
@@ -510,12 +509,7 @@ void Network::addToNetwork(Layer *layer) {
     frozen = false;
 
     assert(layer != nullptr);
-
-    if (layer->isMultiLayer()) {
-        layer->convertToSingleLayersAndAddToNetwork();
-    } else {
-        addSingleLayerToNetwork(layer);
-    }
+    addLayerToNetwork(layer);
 }
 
 void Network::stampLayer(

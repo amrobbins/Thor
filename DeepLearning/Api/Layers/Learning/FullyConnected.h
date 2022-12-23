@@ -37,7 +37,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
 
-    virtual void convertToSingleLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork();
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
@@ -175,11 +175,6 @@ class FullyConnected::Builder {
         fullyConnected.network = _network;
         fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
-        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
-            fullyConnected.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {fullyConnected.numOutputFeatures}));
-            fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
-            fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
-        }
 
         fullyConnected.hasBias = _hasBias;
         fullyConnected.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
@@ -191,7 +186,20 @@ class FullyConnected::Builder {
         fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         fullyConnected.batchNormEpsilon = _batchNormEpsilon;
         fullyConnected.initialized = true;
-        fullyConnected.addToNetwork(fullyConnected.network);
+
+        // When the config requires supporting layers then this layer is not actually added to the network but a subnetwork of layers
+        // is added to support the config. It is important that after this happens then the getFeatureOutput() function, called on this
+        // stand-in pseudo layer returns the actual featureOut of the real subnetwork.
+        if (fullyConnected.isMultiLayer()) {
+            fullyConnected.buildSupportLayersAndAddToNetwork();
+        } else {
+            for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
+                fullyConnected.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {fullyConnected.numOutputFeatures}));
+                fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
+                fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
+            }
+            fullyConnected.addToNetwork(_network.get());
+        }
 
         return fullyConnected;
     }

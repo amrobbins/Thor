@@ -24,7 +24,7 @@ class MeanSquaredError : public Loss {
         return true;
     }
 
-    virtual void convertToSingleLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
@@ -54,6 +54,7 @@ class MeanSquaredError : public Loss {
         return standardLossBytes + lossShaperBytes;
     }
 
+    Tensor::DataType lossDataType;
     Network *network;
 };
 
@@ -64,7 +65,7 @@ class MeanSquaredError::Builder {
         assert(_predictions.isPresent());
         assert(_labels.isPresent());
         assert(_predictions.get() != _labels.get());
-        assert(_predictions.get().getDimensions().size() == 2);
+        assert(_predictions.get().getDimensions().size() == 1);
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
         if (_lossType.isEmpty())
@@ -72,18 +73,22 @@ class MeanSquaredError::Builder {
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
-        uint32_t numPredictions = _predictions.get().getDimensions()[1];
 
         MeanSquaredError meanSquaredError;
         meanSquaredError.predictionsTensor = _predictions;
         meanSquaredError.labelsTensor = _labels;
+        meanSquaredError.lossDataType = _lossDataType;
         meanSquaredError.lossType = _lossType;
-        // lossTensor is the one that comes directly out of MeanSquaredError, that may be replaced by a loss shaper.
-        meanSquaredError.lossTensor = Tensor(_lossDataType, {batchSize, numPredictions});
         meanSquaredError.network = _network;
         meanSquaredError.initialized = true;
 
-        meanSquaredError.addToNetwork(_network.get());
+        if (meanSquaredError.isMultiLayer()) {
+            meanSquaredError.buildSupportLayersAndAddToNetwork();
+        } else {
+            // lossTensor is the one that comes directly out of MeanSquaredError, that may be replaced by a loss shaper.
+            meanSquaredError.lossTensor = Tensor(_lossDataType, {batchSize});
+            meanSquaredError.addToNetwork(_network.get());
+        }
 
         return meanSquaredError;
     }

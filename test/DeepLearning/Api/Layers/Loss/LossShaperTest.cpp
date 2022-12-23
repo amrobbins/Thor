@@ -17,9 +17,7 @@ TEST(LossShaper, Builds) {
         Network network;
 
         vector<uint64_t> dimensions;
-        uint32_t numDimensions = 2;
-        for (uint32_t j = 0; j < numDimensions; ++j)
-            dimensions.push_back(2 + (rand() % 1000));
+        dimensions.push_back(2 + (rand() % 1000));
         Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor lossInput(dataType, dimensions);
 
@@ -40,8 +38,9 @@ TEST(LossShaper, Builds) {
             assert(false);
         }
         vector<uint64_t> batchDimensions = {1};
-        vector<uint64_t> classwiseDimensions = {dimensions[1]};
-        vector<uint64_t> elementwiseDimensions = {dimensions[0]};
+        vector<uint64_t> classwiseDimensions = {dimensions[0]};
+        // Hmm, dimensions of elementwise loss are not known for real at build time, only once the layer is stamped and batch size is known.
+        vector<uint64_t> elementwiseDimensions = {0};
 
         LossShaper lossShaper = lossShaperBuilder.build();
 

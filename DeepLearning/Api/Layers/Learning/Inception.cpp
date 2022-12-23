@@ -6,9 +6,7 @@
 using namespace Thor;
 using namespace std;
 
-void Inception::convertToSingleLayersAndAddToNetwork() {
-    assert(isMultiLayer());
-
+void Inception::buildSupportLayersAndAddToNetwork() {
     vector<Tensor> currentFeatureInputs;
 
     // Force the input tensor to this type of layer to be FP16

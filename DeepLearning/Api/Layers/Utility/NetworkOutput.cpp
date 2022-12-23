@@ -5,9 +5,7 @@ using namespace Thor;
 
 using namespace std;
 
-void NetworkOutput::convertToSingleLayersAndAddToNetwork() {
-    assert(isMultiLayer());
-
+void NetworkOutput::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = featureInput.get();
 
     // Force the input tensor to this type of layer to be FP16
