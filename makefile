@@ -239,8 +239,8 @@ ML_DEV = libThor.a Thor.h
 
 all: $(ML_DEV)
 	$(MAKE) $(ALL_TESTS)
-	$(RUN_ALL_TESTS)
 	$(MAKE) $(ALL_DEMOS)
+	$(RUN_ALL_TESTS)
 	@echo ""
 	@echo ""
 	@echo "Tests Passed"

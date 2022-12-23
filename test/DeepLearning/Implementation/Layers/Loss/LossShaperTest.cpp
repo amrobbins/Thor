@@ -19,7 +19,7 @@ TEST(LossShaper, NumericalBatchFp16) {
         vector<uint64_t> dimensions;
         dimensions.push_back((rand() % 400) + 2);
         dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions = {1};
+        vector<uint64_t> reducedDimensions = {1, 1};
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP16;
 
@@ -89,7 +89,7 @@ TEST(LossShaper, NumericalElementWiseFp32) {
         vector<uint64_t> dimensions;
         dimensions.push_back((rand() % 400) + 2);
         dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions = {dimensions[0]};
+        vector<uint64_t> reducedDimensions = {dimensions[0], 1};
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
 
@@ -161,7 +161,7 @@ TEST(LossShaper, NumericalClassWiseFp32) {
         vector<uint64_t> dimensions;
         dimensions.push_back((rand() % 400) + 2);
         dimensions.push_back((rand() % 400) + 2);
-        vector<uint64_t> reducedDimensions = {dimensions[1]};
+        vector<uint64_t> reducedDimensions = {1, dimensions[1]};
 
         const TensorDescriptor::DataType dataType = TensorDescriptor::DataType::FP32;
 
