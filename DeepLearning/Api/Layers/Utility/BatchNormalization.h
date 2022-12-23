@@ -22,7 +22,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual bool isMultiLayer() const { return featureInputs.front().getDataType() != Tensor::DataType::FP16; }
 
-    virtual void convertToSingleLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork();
 
    protected:
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
@@ -79,16 +79,20 @@ class BatchNormalization::Builder {
 
         BatchNormalization batchNormalization;
         batchNormalization.featureInputs = _featureInputs;
-        for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
-            batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
-            batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
-            batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs[i]] = batchNormalization.featureInputs[i];
-        }
         batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
         batchNormalization.epsilon = _epsilon;
         batchNormalization.network = _network.get();
         batchNormalization.initialized = true;
-        batchNormalization.addToNetwork(_network.get());
+        if (batchNormalization.isMultiLayer()) {
+            batchNormalization.buildSupportLayersAndAddToNetwork();
+        } else {
+            for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
+                batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
+                batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
+                batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs[i]] = batchNormalization.featureInputs[i];
+            }
+            batchNormalization.addToNetwork(_network.get());
+        }
         return batchNormalization;
     }
 

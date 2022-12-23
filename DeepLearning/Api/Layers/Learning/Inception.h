@@ -25,8 +25,7 @@ class Inception : public TrainableWeightsBiasesLayer {
     virtual std::string getLayerType() const { return "Inception"; }
 
    protected:
-    virtual bool isMultiLayer() const { return true; }
-    virtual void convertToSingleLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork();
 
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
@@ -91,7 +90,10 @@ class Inception::Builder {
         inception.biasInitializerBuilder = _biasInitializerBuilder->clone();
 
         inception.initialized = true;
-        inception.addToNetwork(_network.get());
+
+        // Inception is always a compound layer
+        inception.buildSupportLayersAndAddToNetwork();
+
         return inception;
     }
 

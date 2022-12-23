@@ -17,14 +17,6 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual ~CategoricalCrossEntropy() {}
 
-    virtual bool isMultiLayer() const {
-        if (lossType != ThorImplementation::Loss::LossType::RAW || !softmaxStamped)
-            return true;
-        return false;
-    }
-
-    virtual void convertToSingleLayersAndAddToNetwork();
-
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<CategoricalCrossEntropy>(*this); }
 
     virtual std::string getLayerType() const { return "CategoricalCrossEntropy"; }
@@ -34,6 +26,14 @@ class CategoricalCrossEntropy : public Loss {
     enum class LossType { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
 
    protected:
+    virtual bool isMultiLayer() const {
+        if (lossType != ThorImplementation::Loss::LossType::RAW || !softmaxStamped)
+            return true;
+        return false;
+    }
+
+    virtual void buildSupportLayersAndAddToNetwork();
+
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
@@ -51,6 +51,7 @@ class CategoricalCrossEntropy : public Loss {
 
     Network *network;
     LabelType labelType;
+    Tensor::DataType lossDataType;
     uint32_t numClasses;
     bool softmaxStamped;
 };
@@ -97,34 +98,37 @@ class CategoricalCrossEntropy::Builder {
         }
         categoricalCrossEntropy.predictionsTensor = _predictions.get();
         categoricalCrossEntropy.labelsTensor = _labels.get();
-        if (_lossDataType.isEmpty()) {
+        if (_lossDataType.isEmpty())
             _lossDataType = Tensor::DataType::FP32;
-        } else {
-            assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
-        }
+        assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
+        categoricalCrossEntropy.lossDataType = _lossDataType;
+
         if (_lossType.isEmpty())
             _lossType = LossType::BATCH;
         if (_lossType == LossType::BATCH) {
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
         } else if (_lossType == LossType::CLASSWISE) {
             // This type is batch-reduced by the implemenation layer
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::CLASSWISE;
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
         } else if (_lossType == LossType::ELEMENTWISE) {
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
-            uint32_t batchSize = _predictions.get().getDimensions()[0];
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {batchSize});
         } else {
             // This type is *not* batch-reduced by the implemenation layer
             assert(_lossType == LossType::RAW);
             categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::RAW;
-            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
         }
         categoricalCrossEntropy.labelType = _labelType;
         categoricalCrossEntropy.initialized = true;
         categoricalCrossEntropy.network = _network;
-        categoricalCrossEntropy.addToNetwork(_network.get());
+
+        if (categoricalCrossEntropy.isMultiLayer()) {
+            categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
+        } else {
+            assert(categoricalCrossEntropy.lossType == ThorImplementation::Loss::LossType::RAW);
+            categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
+            categoricalCrossEntropy.addToNetwork(_network.get());
+        }
+
         return categoricalCrossEntropy;
     }
 

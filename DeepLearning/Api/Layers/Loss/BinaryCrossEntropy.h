@@ -17,14 +17,6 @@ class BinaryCrossEntropy : public Loss {
 
     virtual ~BinaryCrossEntropy() {}
 
-    virtual bool isMultiLayer() const {
-        if (lossType != ThorImplementation::Loss::LossType::ELEMENTWISE || !sigmoidStamped)
-            return true;
-        return false;
-    }
-
-    virtual void convertToSingleLayersAndAddToNetwork();
-
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BinaryCrossEntropy>(*this); }
 
     virtual std::string getLayerType() const { return "BinaryCrossEntropy"; }
@@ -49,8 +41,17 @@ class BinaryCrossEntropy : public Loss {
         return crossEntropy;
     }
 
+    virtual bool isMultiLayer() const {
+        if (lossType != ThorImplementation::Loss::LossType::ELEMENTWISE || !sigmoidStamped)
+            return true;
+        return false;
+    }
+
+    virtual void buildSupportLayersAndAddToNetwork();
+
     Network *network;
     bool sigmoidStamped;
+    Tensor::DataType lossDataType;
 };
 
 class BinaryCrossEntropy::Builder {
@@ -75,22 +76,27 @@ class BinaryCrossEntropy::Builder {
         }
         binaryCrossEntropy.predictionsTensor = _predictions.get();
         binaryCrossEntropy.labelsTensor = _labels.get();
-        if (_lossDataType.isEmpty()) {
+        if (_lossDataType.isEmpty())
             _lossDataType = Tensor::DataType::FP32;
-        } else {
-            assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
-        }
+        assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
+        binaryCrossEntropy.lossDataType = _lossDataType;
+
         if (_lossType == LossType::BATCH) {
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
-            binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
         } else if (_lossType == LossType::ELEMENTWISE) {
             binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
-            uint32_t batchSize = _predictions.get().getDimensions()[0];
-            binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {batchSize});
         }
         binaryCrossEntropy.initialized = true;
         binaryCrossEntropy.network = _network;
-        binaryCrossEntropy.addToNetwork(_network.get());
+
+        if (binaryCrossEntropy.isMultiLayer()) {
+            binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
+        } else {
+            assert(binaryCrossEntropy.lossType == ThorImplementation::Loss::LossType::ELEMENTWISE);
+            binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
+            binaryCrossEntropy.addToNetwork(_network.get());
+        }
+
         return binaryCrossEntropy;
     }
 

@@ -233,10 +233,7 @@ class Network {
 
     void createBatchDimensions(std::vector<uint64_t> &batchDimensions, std::vector<uint64_t> tensorDimensions, uint32_t batchSize);
 
-    void addSingleLayerToNetwork(const Layer *layer) {
-        assert(!layer->isMultiLayer());
-        network.insert(layer->clone());
-    }
+    void addLayerToNetwork(const Layer *layer) { network.insert(layer->clone()); }
 
     // Take a snapshot of layer and add the snapshot to the network
     void addToNetwork(Layer *layer);

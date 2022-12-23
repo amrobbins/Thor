@@ -19,7 +19,8 @@ class Tensor {
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, std::vector<uint64_t> dimensions)
         : id(nextId.fetch_add(1)), dataType(dataType), dimensions(dimensions), initialized(true) {
-        for (uint32_t i = 0; i < dimensions.size(); ++i) {
+        // When dimension[0] == 0, it means copy the batch size when it is known.
+        for (uint32_t i = 1; i < dimensions.size(); ++i) {
             assert(dimensions[i] != 0);
         }
     }

@@ -3,7 +3,7 @@
 using namespace Thor;
 using namespace std;
 
-void BinaryCrossEntropy::convertToSingleLayersAndAddToNetwork() {
+void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = predictionsTensor;
 
     assert(!sigmoidStamped);
@@ -19,16 +19,17 @@ void BinaryCrossEntropy::convertToSingleLayersAndAddToNetwork() {
                                                                 .predictions(currentFeatureInput)
                                                                 .labels(labelsTensor)
                                                                 .sigmoidStamped()
-                                                                .reportsElementwiseLoss();
+                                                                .reportsElementwiseLoss()
+                                                                .lossDataType(lossDataType);
     BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
     currentFeatureInput = crossEntropy.getFeatureOutput();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
-        featureOutput = lossShaper.getFeatureOutput();
+        lossTensor = lossShaper.getFeatureOutput();
     } else {
         // No loss shaper needed in this case
         assert(lossType == ThorImplementation::Loss::LossType::ELEMENTWISE);
-        featureOutput = crossEntropy.getFeatureOutput();
+        lossTensor = crossEntropy.getFeatureOutput();
     }
 }

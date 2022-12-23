@@ -3,7 +3,7 @@
 using namespace Thor;
 using namespace std;
 
-void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
+void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = predictionsTensor;
 
     assert(!softmaxStamped);
@@ -20,7 +20,7 @@ void CategoricalCrossEntropy::convertToSingleLayersAndAddToNetwork() {
                                                                           .labels(labelsTensor)
                                                                           .softmaxStamped()
                                                                           .reportsRawLoss()
-                                                                          .lossDataType(lossTensor.getDataType());
+                                                                          .lossDataType(lossDataType);
     if (labelType == LabelType::INDEX) {
         categoricalCrossEntropyBuilder.receivesClassIndexLabels(numClasses);
     } else {

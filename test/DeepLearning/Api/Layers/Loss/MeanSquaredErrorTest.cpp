@@ -17,9 +17,7 @@ TEST(MeanSquaredError, Builds) {
         Network network;
 
         vector<uint64_t> dimensions;
-        uint32_t numDimensions = 2;
-        for (uint32_t j = 0; j < numDimensions; ++j)
-            dimensions.push_back(1 + (rand() % 1000));
+        dimensions.push_back(1 + (rand() % 1000));
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor predictions(predictionsDataType, dimensions);
 
@@ -45,8 +43,8 @@ TEST(MeanSquaredError, Builds) {
             assert(false);
         }
         vector<uint64_t> batchDimensions = {1};
-        vector<uint64_t> elementwiseDimensions = {dimensions[0]};
-        vector<uint64_t> perOutputDimensions = {dimensions[1]};
+        vector<uint64_t> elementwiseDimensions = {0};
+        vector<uint64_t> perOutputDimensions = {dimensions[0]};
         vector<uint64_t> rawLossDimensions = dimensions;
 
         if (setLossDataType) {

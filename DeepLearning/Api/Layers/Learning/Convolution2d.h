@@ -39,7 +39,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return useBatchNormalization || dropProportion > 0.0f || activationBuilder ||
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
-    virtual void convertToSingleLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork();
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
@@ -208,12 +208,6 @@ class Convolution2d::Builder {
                                                       convolution2d.filterWidth,
                                                       convolution2d.horizontalPadding);
 
-        for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
-            convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels, outputHeight, outputWidth}));
-            convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
-            convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
-        }
-
         convolution2d.hasBias = _hasBias;
         convolution2d.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
         convolution2d.biasInitializerBuilder = _biasInitializerBuilder->clone();
@@ -224,7 +218,17 @@ class Convolution2d::Builder {
         convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         convolution2d.batchNormEpsilon = _batchNormEpsilon;
         convolution2d.initialized = true;
-        convolution2d.addToNetwork(_network.get());
+
+        if (convolution2d.isMultiLayer()) {
+            convolution2d.buildSupportLayersAndAddToNetwork();
+        } else {
+            for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
+                convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels, outputHeight, outputWidth}));
+                convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
+                convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
+            }
+            convolution2d.addToNetwork(_network.get());
+        }
 
         return convolution2d;
     }
