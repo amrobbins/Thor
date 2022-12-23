@@ -43,7 +43,7 @@ TEST(MeanSquaredError, Builds) {
             assert(false);
         }
         vector<uint64_t> batchDimensions = {1};
-        vector<uint64_t> elementwiseDimensions = {0};
+        vector<uint64_t> elementwiseDimensions = {1};
         vector<uint64_t> perOutputDimensions = {dimensions[0]};
         vector<uint64_t> rawLossDimensions = dimensions;
 

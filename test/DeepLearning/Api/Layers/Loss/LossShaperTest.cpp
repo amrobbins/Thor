@@ -39,8 +39,7 @@ TEST(LossShaper, Builds) {
         }
         vector<uint64_t> batchDimensions = {1};
         vector<uint64_t> classwiseDimensions = {dimensions[0]};
-        // Hmm, dimensions of elementwise loss are not known for real at build time, only once the layer is stamped and batch size is known.
-        vector<uint64_t> elementwiseDimensions = {0};
+        vector<uint64_t> elementwiseDimensions = {1};
 
         LossShaper lossShaper = lossShaperBuilder.build();
 
@@ -58,7 +57,8 @@ TEST(LossShaper, Builds) {
             ASSERT_EQ(actualLossOutput.get().getDimensions(), batchDimensions);
         } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::CLASSWISE) {
             ASSERT_EQ(actualLossOutput.get().getDimensions(), classwiseDimensions);
-        } else if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
+        } else {
+            assert(outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE);
             ASSERT_EQ(actualLossOutput.get().getDimensions(), elementwiseDimensions);
         }
 

@@ -250,11 +250,11 @@ TEST(CategoricalCrossEntropy, OneHotLabelsElementwiseLossBuilds) {
         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
         ASSERT_EQ(actualPredictions.get().getDimensions(), dimensions);
 
-        vector<uint64_t> standInBatchDimensions(1, 0);
+        vector<uint64_t> batchLossDimensions = {1UL};
         Optional<Tensor> actualLoss = crossEntropy.getLoss();
         ASSERT_TRUE(actualLoss.isPresent());
         ASSERT_EQ(actualLoss.get().getDataType(), lossDataType);
-        ASSERT_EQ(actualLoss.get().getDimensions(), standInBatchDimensions);
+        ASSERT_EQ(actualLoss.get().getDimensions(), batchLossDimensions);
 
         shared_ptr<Layer> cloneLayer = crossEntropy.clone();
         CategoricalCrossEntropy *clone = dynamic_cast<CategoricalCrossEntropy *>(cloneLayer.get());
@@ -280,7 +280,7 @@ TEST(CategoricalCrossEntropy, OneHotLabelsElementwiseLossBuilds) {
         Optional<Tensor> cloneLoss = clone->getLoss();
         ASSERT_TRUE(cloneLoss.isPresent());
         ASSERT_EQ(cloneLoss.get().getDataType(), lossDataType);
-        ASSERT_EQ(cloneLoss.get().getDimensions(), standInBatchDimensions);
+        ASSERT_EQ(cloneLoss.get().getDimensions(), batchLossDimensions);
 
         ASSERT_EQ(crossEntropy.getId(), clone->getId());
         ASSERT_GT(crossEntropy.getId(), 1u);

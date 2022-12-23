@@ -54,19 +54,20 @@ class LossShaper : public Layer {
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
-        std::vector<uint64_t> inputDimensions = lossInput.getDimensions();
-        std::vector<uint64_t> outputDimensions = lossOutput.getDimensions();
-        bool reduceBatchDim = inputDimensions[0] != 1 && outputDimensions[0] == 1;
-        bool reduceLossDim = inputDimensions[1] != 1 && outputDimensions[1] == 1;
+        std::vector<uint64_t> implementationInputLossDimensions = createRepresentativeImplementationDimensions(lossInput.getDimensions());
+        std::vector<uint64_t> implementationOutputLossDimensions =
+            getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);
+        bool reduceBatchDim = implementationInputLossDimensions[0] != 1 && implementationOutputLossDimensions[0] == 1;
+        bool reduceLossDim = implementationInputLossDimensions[1] != 1 && implementationOutputLossDimensions[1] == 1;
 
-        if (inputDimensions == outputDimensions)
+        if (implementationInputLossDimensions == implementationOutputLossDimensions)
             return 0;
 
         int deviceNum = tensorPlacement.getDeviceNum();
         uint64_t workspaceSizeInBytes;
-        workspaceSizeInBytes = ThorImplementation::BatchReduce(lossInput.getDimensions()[0],
-                                                               lossInput.getDimensions()[0],
-                                                               lossInput.getDimensions()[1],
+        workspaceSizeInBytes = ThorImplementation::BatchReduce(implementationInputLossDimensions[0],
+                                                               implementationInputLossDimensions[0],
+                                                               implementationInputLossDimensions[1],
                                                                reduceBatchDim,
                                                                reduceLossDim,
                                                                Tensor::convertToImplementationDataType(lossInput.getDataType()),
@@ -103,24 +104,9 @@ class LossShaper : public Layer {
         std::vector<uint64_t> implementationOutputLossDimensions =
             getImplementationOutputDimensions(implementationInputLossDimensions, outputLossType);
 
-        assert(implementationOutputLossDimensions.size() == 1);
-        if (outputLossType == ThorImplementation::LossShaper::OutputLossType::ELEMENTWISE) {
-            // In this case the single dimension is equal to the batch dimension size,
-            // this is not known at layer build time, only at network stamping time
-            // so set the dimension to 0 to indicate "batch dimension size"
-            implementationOutputLossDimensions[0] = 0;
-        }
-        return implementationOutputLossDimensions;
-
-        //        // When there is no batch dimension, do not remove the first dimension:
-        //        if (implementationOutputLossDimensions.size() == 1)
-        //            return implementationOutputLossDimensions;
-        //
-        //        // Otherwise remove the first dimension
-        //        std::vector<uint64_t> apiOutputLossDimensions;
-        //        for(uint32_t i = 1; i < implementationOutputLossDimensions.size(); ++i)
-        //            apiOutputLossDimensions.push_back(implementationOutputLossDimensions[i]);
-        //        return apiOutputLossDimensions;
+        assert(implementationOutputLossDimensions.size() == 2);
+        std::vector<uint64_t> apiOutputLossDimensions(1, implementationOutputLossDimensions[1]);
+        return apiOutputLossDimensions;
     }
 
     Tensor lossInput;

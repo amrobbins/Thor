@@ -103,13 +103,13 @@ vector<uint64_t> LossShaper::getOutputDimensions(vector<uint64_t> inputDimension
 
     if (outputLossType == OutputLossType::BATCH) {
         // Sum all losses, return a scalar
-        return {1};
+        return {1, 1};
     } else if (outputLossType == OutputLossType::CLASSWISE) {
         // sum all batch items, return a scalar per output
-        return {inputDimensions[1]};
+        return {1, inputDimensions[1]};
     } else if (outputLossType == OutputLossType::ELEMENTWISE) {
         // Sum all outputs for each batch item, return a scalar per batch item
-        return {inputDimensions[0]};
+        return {inputDimensions[0], 1};
     } else {
         assert(false);
     }
