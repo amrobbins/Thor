@@ -88,6 +88,9 @@ class Split : public MultiConnectionLayer {
         int numSplitTensors = featureOutputs.size();
         assert(errorInputs.size() == featureOutputs.size());
 
+        uint32_t numPresentErrorInputs = numPresentTensors(errorInputs);
+        assert(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
+
         cudaStatus = cudaMalloc(&splitTensorFeatureOutputMemoriesArray_d, numSplitTensors * sizeof(half *));
         assert(cudaStatus == cudaSuccess);
         half **splitTensorFeatureOutputMemoriesArray = new half *[numSplitTensors];
@@ -100,19 +103,26 @@ class Split : public MultiConnectionLayer {
         assert(cudaStatus == cudaSuccess);
         delete[] splitTensorFeatureOutputMemoriesArray;
 
-        cudaStatus = cudaMalloc(&splitTensorErrorInputMemoriesArray_d, numSplitTensors * sizeof(half *));
-        assert(cudaStatus == cudaSuccess);
-        half **splitTensorErrorInputMemoriesArray = new half *[numSplitTensors];
-        for (int i = 0; i < numSplitTensors; ++i) {
-            // FIXME: do not allocate memory when error inputs are not present
-            splitTensorErrorInputMemoriesArray[i] = (half *)featureOutputs[i].get().getMemPtr();
+        if (numPresentErrorInputs > 0) {
+            cudaStatus = cudaMalloc(&splitTensorErrorInputMemoriesArray_d, numSplitTensors * sizeof(half *));
+            assert(cudaStatus == cudaSuccess);
+            half **splitTensorErrorInputMemoriesArray = new half *[numSplitTensors];
+            for (int i = 0; i < numSplitTensors; ++i) {
+                splitTensorErrorInputMemoriesArray[i] = (half *)errorInputs[i].get().getMemPtr();
+            }
+            cudaStatus = cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
+                                    splitTensorErrorInputMemoriesArray,
+                                    numSplitTensors * sizeof(half *),
+                                    cudaMemcpyHostToDevice);
+            assert(cudaStatus == cudaSuccess);
+            delete[] splitTensorErrorInputMemoriesArray;
+        } else {
+            for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
+                assert(previousLayers[i].isPresent());
+                if (errorOutputs[i].isPresent())
+                    previousLayers[i].get()->replaceErrorInput(errorOutputs[i], Optional<Tensor>::empty());
+            }
         }
-        cudaStatus = cudaMemcpy(splitTensorErrorInputMemoriesArray_d,
-                                splitTensorErrorInputMemoriesArray,
-                                numSplitTensors * sizeof(half *),
-                                cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
-        delete[] splitTensorErrorInputMemoriesArray;
 
         long *axisElementsPerSplitTensor = new long[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
@@ -227,9 +237,11 @@ class Split : public MultiConnectionLayer {
         TensorPlacement placement = featureInputs[0].get().getPlacement();
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
-        cudaStatus = cudaFree(splitTensorErrorInputMemoriesArray_d);
-        assert(cudaStatus == cudaSuccess);
-        splitTensorErrorInputMemoriesArray_d = nullptr;
+        if (splitTensorErrorInputMemoriesArray_d != nullptr) {
+            cudaStatus = cudaFree(splitTensorErrorInputMemoriesArray_d);
+            assert(cudaStatus == cudaSuccess);
+            splitTensorErrorInputMemoriesArray_d = nullptr;
+        }
         cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
         assert(cudaStatus == cudaSuccess);
         axisElementsPerSplitTensor_d = nullptr;
@@ -239,6 +251,7 @@ class Split : public MultiConnectionLayer {
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+        // FIXME: Reuse MultiConnectionLayer connectToNextLayer and add any additional logic here if needed
         assert(!running);
         assert(featureInputs.size() == 1);
 
@@ -273,7 +286,7 @@ class Split : public MultiConnectionLayer {
 
         previousLayers.push_back(previousLayer);
         featureInputs.emplace_back(featureInput);
-        if (backPropagateError)
+        if (backPropagateError && !isInferenceOnly())
             errorOutputs.emplace_back(featureInput.get().clone());
         else
             errorOutputs.emplace_back(Optional<Tensor>::empty());

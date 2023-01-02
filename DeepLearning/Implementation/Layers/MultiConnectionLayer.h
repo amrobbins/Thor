@@ -32,17 +32,20 @@ class MultiConnectionLayer : public Layer {
         assert(oldErrorInput.isPresent());
         bool replacementHappend = false;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
-            if (errorInputs[i].isPresent() && errorInputs[i].get() == oldErrorInput.get()) {
-                // If they were fused they need to remain fused
-                for (uint32_t j = 0; j < errorOutputs.size(); ++j) {
-                    if (errorOutputs[j].isPresent() && errorOutputs[j].get() == oldErrorInput.get()) {
-                        previousLayers[j].get()->replaceErrorInput(errorOutputs[j], newErrorInput);
-                        errorOutputs[j] = newErrorInput;
-                    }
+            if (errorInputs[i].isEmpty() || errorInputs[i].get() != oldErrorInput.get())
+                continue;
+            replacementHappend = true;
+
+            if (errorOutputs[i].isPresent()) {
+                // 1. When it was populated but now should not be, then deallocate it
+                // 2. When they are fused already they need to remain fused, and pass the message to check for this condition backward.
+                if (newErrorInput.isEmpty() || (errorOutputs[i].get() == errorInputs[i].get())) {
+                    if (previousLayers[i].isPresent())
+                        previousLayers[i].get()->replaceErrorInput(errorOutputs[i], newErrorInput);
+                    errorOutputs[i] = newErrorInput;
                 }
-                errorInputs[i] = newErrorInput;
-                replacementHappend = true;
             }
+            errorInputs[i] = newErrorInput;
         }
         assert(replacementHappend);
     }
@@ -149,6 +152,19 @@ class MultiConnectionLayer : public Layer {
 
         errorInputs.emplace_back(nextLayer->connectToPreviousLayer(
             this, featureOutputs.back(), streams.back(), shouldConnectToBackPropErrorIn(), loaderConnectionType));
+
+        uint32_t tensorSlot = errorInputs.size() - 1;
+        if (errorInputs[tensorSlot].isPresent()) {
+            // Some logic would not function correctly if the same error input tensor were allowed to be connected multiple times,
+            // so avoid that.
+            for (uint32_t i = 0; i < errorInputs.size() - 1; ++i)
+                assert(errorInputs[i].get() != errorInputs.back().get());
+        } else if (previousLayers[tensorSlot].isPresent() && errorOutputs[tensorSlot].isPresent()) {
+            // This layer is now being informed that this back propagation path is unused, so deallocate the tensor and inform the adjacent
+            // layer in that path to do the same.
+            previousLayers[tensorSlot].get()->replaceErrorInput(errorOutputs[tensorSlot], errorInputs[tensorSlot]);
+            errorOutputs[tensorSlot].clear();
+        }
 
         Optional<Tensor> firstErrorInput = getFirstPresentTensor(errorInputs);
         if (firstErrorInput.isPresent()) {

@@ -84,4 +84,6 @@ void Softmax::backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Option
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
 
+bool Softmax::isBackwardComputedExternally() { return backwardComputedExternally; }
+
 std::string Softmax::getType() { return "Softmax"; }

@@ -19,9 +19,6 @@ class Loss : public Layer {
 
     virtual bool mustConnectAllInputsToDriveOutput() { return true; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
-        // FIXME: TEMP
-        printf("Loss connecting tensor id %ld\n", inputTensor.getId());
-
         numInputConnectionsMade += 1;
         // Only one type of loss is supported at a time.
         assert(numInputConnectionsMade < 3);
@@ -31,27 +28,19 @@ class Loss : public Layer {
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getLoss() const { return lossTensor; }
 
-    // getPredictions() and getLoss() are synonyms for getFeatureInput() and getFeatureOutput() in losses:
-    virtual Optional<Tensor> getFeatureInput() { return getPredictions(); }
-    virtual Optional<Tensor> getFeatureOutput() { return getLoss(); }
+    // getPredictions() ia a synonym for getFeatureInput() and in losses BY DEFAULT ONLY.
+    // If the raw predictions are transformed. i.e. by softmax before becoming predictions
+    // then featureInput will be a different tensor that predictions,
+    // i.e. featureInput will be the input to softmax and predictions will be the output of softmax
+    virtual Optional<Tensor> getFeatureInput() { return predictionsTensor; }
+    virtual Optional<Tensor> getFeatureOutput() { return lossTensor; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
-        // FIXME: TEMP
-        if (connectingTensor == getLabels()) {
-            printf("loss connecting labels\n");
-        } else if (connectingTensor == getPredictions()) {
-            printf("loss connecting predictions\n");
-        } else {
-            // There is only one output to a loss so no need to disambiguate the output
-            printf("loss connecting other\n");
-        }
-
-        if (connectingTensor == getLabels()) {
+        if (connectingTensor == labelsTensor) {
             return (int)ThorImplementation::Loss::ConnectionType::LABELS;
-        } else if (connectingTensor == getPredictions()) {
+        } else if (connectingTensor == predictionsTensor) {
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
         } else {
-            // There is only one output to a loss so no need to disambiguate the output
             return 0;
         }
         assert(false);

@@ -33,9 +33,6 @@ Optional<Tensor> LossShaper::createFeatureOutputTensor() {
 }
 
 void LossShaper::compile() {
-    // FIXME: temp
-    printf("Loss shaper id %ld\n", getId());
-
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
 

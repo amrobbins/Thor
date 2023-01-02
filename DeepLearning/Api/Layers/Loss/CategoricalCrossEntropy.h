@@ -21,6 +21,8 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual std::string getLayerType() const { return "CategoricalCrossEntropy"; }
 
+    virtual Tensor getPredictions() const { return softmaxOutput; }
+
    private:
     enum class LabelType { INDEX = 5, ONE_HOT };
     enum class LossType { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
@@ -54,6 +56,7 @@ class CategoricalCrossEntropy : public Loss {
     Tensor::DataType lossDataType;
     uint32_t numClasses;
     bool softmaxStamped;
+    Tensor softmaxOutput;
 };
 
 class CategoricalCrossEntropy::Builder {
@@ -148,6 +151,7 @@ class CategoricalCrossEntropy::Builder {
     virtual CategoricalCrossEntropy::Builder &labels(Tensor _labels) {
         assert(!this->_labels.isPresent());
         assert(!_labels.getDimensions().empty());
+        assert(_labels.getDimensions().size() == 1);
         this->_labels = _labels;
         return *this;
     }

@@ -148,6 +148,13 @@ class Layer {
         errorInput = nextLayer->connectToPreviousLayer(
             this, featureOutput, stream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
+        // When the next layer says that there is no error back propagation path here, then this layer removes that path
+        // from itself and informs the adjacent layer in the back propagation path to do the same.
+        if (errorInput.isEmpty() && errorOutput.isPresent() && previousLayer.isPresent()) {
+            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
+            errorOutput.clear();
+        }
+
         if (errorInput.isPresent() && featureOutput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
             assert(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
@@ -170,7 +177,7 @@ class Layer {
         this->previousLayer = previousLayer;
         this->stream = stream;
         this->featureInput = featureInput;
-        if (backPropagateError && !inferenceOnly)
+        if (backPropagateError && !isInferenceOnly())
             errorOutput = featureInput.get().clone();
         else
             errorOutput = Optional<Tensor>::empty();
@@ -180,13 +187,20 @@ class Layer {
 
     // For situations where the error input should just pass through to the error output,
     // this method is used to avoid duplicating the tensor and unnecessary data movement.
+    // This is also used when there is a path that hits in a non-back prop layer,
+    // in that case the errorInput is set to Optional<Tensor>.empty().
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
         assert(oldErrorInput.isPresent());
         assert(oldErrorInput.get() == errorInput.get());
-        // If they are fused already they need to remain fused
-        if (errorOutput.isPresent() && errorOutput.get() == errorInput.get()) {
-            previousLayer.get()->replaceErrorInput(errorOutput, newErrorInput);
-            errorOutput = newErrorInput;
+
+        if (errorOutput.isPresent()) {
+            // 1. When it was populated but now should not be, then deallocate it
+            // 2. When they are fused already they need to remain fused, and pass the message to check for this condition backward.
+            if (newErrorInput.isEmpty() || (errorOutput.get() == errorInput.get())) {
+                if (previousLayer.isPresent())
+                    previousLayer.get()->replaceErrorInput(errorOutput, newErrorInput);
+                errorOutput = newErrorInput;
+            }
         }
         errorInput = newErrorInput;
     }

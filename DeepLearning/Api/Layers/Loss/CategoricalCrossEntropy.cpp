@@ -12,7 +12,8 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     softmaxBuilder.featureInput(currentFeatureInput);
     softmaxBuilder.backwardComputedExternally();
     shared_ptr<Layer> softmax = softmaxBuilder.build();
-    currentFeatureInput = softmax->getFeatureOutput();
+    softmaxOutput = softmax->getFeatureOutput();
+    currentFeatureInput = softmaxOutput;
 
     CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
                                                                           .network(*network)
@@ -28,12 +29,6 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
         categoricalCrossEntropyBuilder.receivesOneHotLabels();
     }
     CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
-    printf("CE predictions id %ld, labels id %ld loss id %ld, softmax id %ld CE id %ld\n",
-           currentFeatureInput.getId(),
-           labelsTensor.getId(),
-           crossEntropy.getLoss().getId(),
-           softmax->getId(),
-           crossEntropy.getId());
     currentFeatureInput = crossEntropy.getLoss();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
@@ -48,6 +43,6 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     } else {
         // No loss shaper needed in this case
         assert(lossType == ThorImplementation::Loss::LossType::RAW);
-        lossTensor = crossEntropy.getLoss();
+        lossTensor = currentFeatureInput;
     }
 }

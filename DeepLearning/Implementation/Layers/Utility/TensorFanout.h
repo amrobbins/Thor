@@ -17,6 +17,7 @@ class TensorFanout : public MultiConnectionLayer {
         if (errorInputs.size() == streams.size()) {
             streams.emplace_back(streams[0].getGpuNum());
         }
+        // The set of errorInputs is checked during compile to make optimizations when possible
         errorInputs.push_back(nextLayer->connectToPreviousLayer(
             this, featureInputs[0], streams.back(), shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType));
         nextLayers.push_back(nextLayer);
@@ -32,7 +33,7 @@ class TensorFanout : public MultiConnectionLayer {
         assert(previousLayers.empty());
         featureInputs.push_back(featureInput);
         featureOutputs.push_back(featureInput);
-        if (backPropagateError)
+        if (backPropagateError && !isInferenceOnly())
             errorOutputs.push_back(featureInput.get().clone());
         else
             errorOutputs.push_back(Optional<Tensor>::empty());
@@ -55,27 +56,54 @@ class TensorFanout : public MultiConnectionLayer {
         cudaStatus = cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(half *));
         assert(cudaStatus == cudaSuccess);
 
-        half **errorInputArray = new half *[numPresentTensors(errorInputs)];
-        uint32_t j = 0;
-        for (unsigned int i = 0; i < errorInputs.size(); ++i) {
-            if (errorInputs[i].isPresent()) {
-                errorInputArray[j] = (half *)errorInputs[i].get().getMemPtr();
-                allErrorInputTensorIds.insert(errorInputs[i].get().getTensorId());
-                ++j;
+        if (numPresentTensors(errorInputs) > 0) {
+            half **errorInputArray = new half *[numPresentTensors(errorInputs)];
+            uint32_t j = 0;
+            for (unsigned int i = 0; i < errorInputs.size(); ++i) {
+                if (errorInputs[i].isPresent()) {
+                    errorInputArray[j] = (half *)errorInputs[i].get().getMemPtr();
+                    allErrorInputTensorIds.insert(errorInputs[i].get().getTensorId());
+                    ++j;
+                }
             }
+            cudaStatus =
+                cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
+            assert(cudaStatus == cudaSuccess);
+            delete[] errorInputArray;
         }
-        cudaStatus =
-            cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(half *), cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
-        delete[] errorInputArray;
 
         // When there is only one layer that backpropagates (for example if the fanout is just to connect the tensor to a network output),
         // then the errorInput replaces the errorOutput so that back prop is a nop.
-        if (numPresentTensors(errorInputs) == 1 and numPresentTensors(errorOutputs) == 1) {
+        // When there is no layer that back propagates, then prune the existing back prop path
+        if (numPresentTensors(errorInputs) == 1 && numPresentTensors(errorOutputs) == 1) {
+            // Fuse
             assert(previousLayers[0].isPresent());
             previousLayers[0].get()->replaceErrorInput(errorOutputs[0], getFirstPresentTensor(errorInputs));
             errorOutputs[0] = getFirstPresentTensor(errorInputs);
+        } else if (numPresentTensors(errorInputs) == 0 && numPresentTensors(errorOutputs) == 1) {
+            // Prune
+            Optional<Tensor> newErrorOutput = Optional<Tensor>::empty();
+            assert(previousLayers[0].isPresent());
+            previousLayers[0].get()->replaceErrorInput(errorOutputs[0], newErrorOutput);
+            errorOutputs[0] = newErrorOutput;
         }
+        // The third option is that there are multiple present errorInputs, in that case they will be summed together and passed as errorOut
+    }
+
+    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
+        assert(oldErrorInput.isPresent());
+        bool replacementHappend = false;
+        for (unsigned int i = 0; i < errorInputs.size(); ++i) {
+            if (errorInputs[i].isEmpty() || errorInputs[i].get() != oldErrorInput.get())
+                continue;
+            replacementHappend = true;
+
+            // During compile, tensorFanout will replace the errorInput of the previous layer when:
+            // 1. There is just one populated errorInput to tensorFanout, in this case it can be fused.
+            // 2. There are no populated errorInputs to tensorFanout, in this case the path can be pruned.
+            errorInputs[i] = newErrorInput;
+        }
+        assert(replacementHappend);
     }
 
     // initialize weights using the configured initializer. In general set any initial values.

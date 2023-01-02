@@ -110,7 +110,7 @@ TEST(CategoricalCrossEntropy, OneHotLabelsClasswiseLossBuilds) {
         Network network;
 
         vector<uint64_t> dimensions;
-        dimensions = {1UL + (rand() % 300)};
+        dimensions = {2UL + (rand() % 300)};
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
 
@@ -204,7 +204,7 @@ TEST(CategoricalCrossEntropy, OneHotLabelsElementwiseLossBuilds) {
         Network network;
 
         vector<uint64_t> dimensions;
-        dimensions = {1UL + (rand() % 300)};
+        dimensions = {2UL + (rand() % 300)};
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
 

@@ -26,9 +26,6 @@ CrossEntropy::~CrossEntropy() {
 }
 
 void CrossEntropy::compile() {
-    // FIXME: TEMP
-    printf("Cross entropy id %ld\n", getId());
-
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
     assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -55,8 +52,8 @@ void CrossEntropy::compile() {
         vector<uint64_t> featureInputDimensions = featureInput.get().getDescriptor().getDimensions();
 
         if (indexLabels) {
-            assert(featureInputDimensions.size() == 1 || (featureInputDimensions.size() == 2 && featureInputDimensions[1] == 1));
-            assert(featureInputDimensions[0] == labelDimensions[0]);
+            assert(labelDimensions[0] == featureInputDimensions[0]);
+            assert(labelDimensions.size() == 1 || (labelDimensions.size() == 2 && labelDimensions[1] == 1));
         } else {
             // label per class
             assert(featureInputDimensions == labelDimensions);

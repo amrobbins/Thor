@@ -22,6 +22,7 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
 
     const PROBABILITY_TYPE ONE = 1.0f;
     const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
+    const PROBABILITY_TYPE MAX_TRUE_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.9995f : 0.9999999f;
 
     PROBABILITY_TYPE label;
     PROBABILITY_TYPE probability;
@@ -38,8 +39,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -57,8 +63,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -76,8 +87,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -95,8 +111,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss(
             elementwiseGradient -= ONE;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -112,6 +133,7 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
 
     const PROBABILITY_TYPE ONE = 1.0f;
     const PROBABILITY_TYPE MIN_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.000062f : 1E-36;
+    const PROBABILITY_TYPE MAX_TRUE_PROBABILITY = is_same<PROBABILITY_TYPE, half>::value ? 0.9995f : 0.9999999f;
 
     PROBABILITY_TYPE label;
     PROBABILITY_TYPE probability;
@@ -129,8 +151,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -149,8 +176,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -169,8 +201,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;
@@ -189,8 +226,13 @@ __global__ void elementWiseBinaryCrossEntropyLoss_withScale(
         elementwiseGradient *= (PROBABILITY_TYPE)gradientScale;
         ((PROBABILITY_TYPE *)gradient)[elementwiseLossIndex] = elementwiseGradient;
     }
-    if (probability < MIN_PROBABILITY)
-        probability = MIN_PROBABILITY;
+    if (label) {
+        if (probability < MIN_PROBABILITY)
+            probability = MIN_PROBABILITY;
+    } else {
+        if (probability > MAX_TRUE_PROBABILITY)
+            probability = MAX_TRUE_PROBABILITY;
+    }
     logTerm = label ? probability : ONE - probability;
     elementwiseLoss = -logf(logTerm);
     ((LOSS_TYPE *)loss)[elementwiseLossIndex] = elementwiseLoss;

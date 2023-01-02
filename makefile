@@ -41,14 +41,15 @@ Nvcc = nvcc -D_GLIBCXX_DEBUG -g
 #Gpp = g++ -Wall -Werror -fopenmp -O3
 #Nvcc = nvcc -O3
 
-RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
+RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
+                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
+                build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
+				build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
 				build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
 				build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
-                build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest && \
-                build/test/Utilities/TensorOperations/GpuConvolution/GpuConvolutionTest && \
 				build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
                 build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
                 build/test/DeepLearning/Api/Layers/Activations/ActivationsTest && \
@@ -85,7 +86,7 @@ RUN_ALL_TESTS = build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest 
 
 
 				# FIXME: rebuild and put back
-				# build/test/DeepLearning/Api/Network/NetworkTest && \
+				#
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
 				# Improve coverage of tensorFanout
 

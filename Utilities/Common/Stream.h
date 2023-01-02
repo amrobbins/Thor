@@ -184,23 +184,27 @@ class Stream : private ReferenceCounted {
     }
 
     void destroy() {
-        ScopedGpu scopedGpu(gpuNum);
+        // If this is a static stream, it is too late to free cuda resources, or interact with cuda, when it is destroyed.
+        // Doesn't much matter as the program is exiting anyway.
+        if (isStatic) {
+            ScopedGpu scopedGpu(gpuNum);
 
-        // can't destroy the cudnn handle at the point when the static string is destroyed
-        if (cudnnHandle->isPresent() && !isStatic) {
-            numCudnnHandles -= 1;
+            // can't destroy the cudnn handle at the point when the static string is destroyed
+            if (cudnnHandle->isPresent()) {
+                numCudnnHandles -= 1;
 
-            cudnnStatus_t cudnnStatus;
-            cudnnStatus = cudnnDestroy(*cudnnHandle);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+                cudnnStatus_t cudnnStatus;
+                cudnnStatus = cudnnDestroy(*cudnnHandle);
+                assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            }
+
+            cudaError_t cudaStatus;
+            cudaStatus = cudaStreamDestroy(cudaStream);
+            assert(cudaStatus == cudaSuccess);
+
+            delete cudnnHandle;
+            cudnnHandle = nullptr;
         }
-
-        cudaError_t cudaStatus;
-        cudaStatus = cudaStreamDestroy(cudaStream);
-        assert(cudaStatus == cudaSuccess);
-
-        delete cudnnHandle;
-        cudnnHandle = nullptr;
         delete mtx;
         mtx = nullptr;
     }

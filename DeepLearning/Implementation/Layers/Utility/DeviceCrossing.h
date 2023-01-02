@@ -33,6 +33,9 @@ class DeviceCrossing : public Layer {
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
         assert(outputPlacement != featureInput.get().getPlacement());
+        assert(stream.getGpuNum() == inputPlacement.getDeviceNum());
+        assert(inputTensor.get().getPlacement() == inputPlacement);
+        assert(outputTensor.get().getPlacement() == outputPlacement);
 
         // Ensure the previous data transfer has finished, so the buffer is available
         stream.waitEvent(finishedCopyEvent);
@@ -58,19 +61,31 @@ class DeviceCrossing : public Layer {
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        assert(!uninitialized);
-        assert(!running);
+        assert(!compiled);
+
+        assert(this->nextLayer.isEmpty());
         this->nextLayer = nextLayer;
-        featureOutput = createFeatureOutputTensor();
-        otherDeviceStream = Stream(outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU ? inputPlacement.getDeviceNum()
-                                                                                                      : outputPlacement.getDeviceNum());
+        if (nextLayer->hasFeatureInput())
+            featureOutput = createFeatureOutputTensor();
+        else
+            featureOutput = Optional<Tensor>::empty();
+
         errorInput = nextLayer->connectToPreviousLayer(
             this, featureOutput, otherDeviceStream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
 
-        if (errorInput.isPresent()) {
+        // When the next layer says that there is no error back propagation path here, then this layer removes that path
+        // from itself and informs the adjacent layer in the back propagation path to do the same.
+        if (errorInput.isEmpty() && errorOutput.isPresent() && previousLayer.isPresent()) {
+            previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
+            errorOutput.clear();
+        }
+
+        if (errorInput.isPresent() && featureOutput.isPresent()) {
             assert(errorInput.get().getDescriptor() == featureOutput.get().getDescriptor());
             assert(errorInput.get().getPlacement() == featureOutput.get().getPlacement());
         }
+
+        ensureNoDeviceCrossing();
     }
 
     virtual Optional<Tensor> connectToPreviousLayer(
@@ -78,6 +93,12 @@ class DeviceCrossing : public Layer {
         assert(!uninitialized);
         assert(featureInput.isPresent());
         assert(featureInput.get().getPlacement() == inputPlacement);
+
+        if (outputPlacement.getMemDevice() == TensorPlacement::MemDevices::CPU)
+            otherDeviceStream = stream;
+        else
+            otherDeviceStream = Stream(outputPlacement.getDeviceNum());
+
         return Layer::connectToPreviousLayer(previousLayer, featureInput, stream, backPropagateError);
     }
 

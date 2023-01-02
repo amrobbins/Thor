@@ -12,7 +12,8 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     sigmoidBuilder.featureInput(currentFeatureInput);
     sigmoidBuilder.backwardComputedExternally();
     shared_ptr<Layer> sigmoid = sigmoidBuilder.build();
-    currentFeatureInput = sigmoid->getFeatureOutput();
+    sigmoidOutput = sigmoid->getFeatureOutput();
+    currentFeatureInput = sigmoidOutput;
 
     BinaryCrossEntropy::Builder binaryCrossEntropyBuilder = BinaryCrossEntropy::Builder()
                                                                 .network(*network)
@@ -22,7 +23,7 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                                                 .reportsElementwiseLoss()
                                                                 .lossDataType(lossDataType);
     BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
-    currentFeatureInput = crossEntropy.getFeatureOutput();
+    currentFeatureInput = crossEntropy.getLoss();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
@@ -30,6 +31,6 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     } else {
         // No loss shaper needed in this case
         assert(lossType == ThorImplementation::Loss::LossType::ELEMENTWISE);
-        lossTensor = crossEntropy.getFeatureOutput();
+        lossTensor = currentFeatureInput;
     }
 }

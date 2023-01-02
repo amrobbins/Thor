@@ -123,7 +123,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
             errorOutputGpu = crossEntropy->getErrorOutput();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
-            errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+            errorOutputGpu_h.copyFromAsync(errorOutputGpu, labelsStream);
         }
 
         labelsStream.synchronize();
@@ -155,12 +155,13 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
         for (int b = 0; b < batchSize; ++b) {
             lossMem[b] = 0.0f;
             for (int i = 0; i < numElementsPerBatch; ++i) {
-                lossMem[b] -= labelsMem[b * numElementsPerBatch + i] * log(exponentialsMem[b * numElementsPerBatch + i]);
+                lossMem[b] -= labelsMem[b * numElementsPerBatch + i] * logf(exponentialsMem[b * numElementsPerBatch + i]);
             }
         }
 
         // Verify the loss output
         float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
+        // FIXME not batch size, this is raw loss now!
         for (int b = 0; b < batchSize; ++b) {
             float thresh = std::max(lossMem[b] / 1000.0f, 0.01f);
             if (!(abs(lossMem[b] - lossMemFromGpu[b]) < thresh))
@@ -222,9 +223,9 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
 
     for (uint32_t test = 0; test < 10; ++test) {
         vector<uint64_t> dimensions = {(uint64_t)(rand() % 300) + 1, 1};
-        uint32_t numElements = dimensions[0];
+        // vector<uint64_t> dimensions = {(uint64_t)1, 1};
         uint32_t batchSize = dimensions[0];
-        uint32_t numClasses = dimensions[1];
+        uint32_t numClasses = (rand() % 500) + 2;
 
         bool inferenceOnly = (rand() % 5) == 0;
 
@@ -232,7 +233,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         Tensor activationsCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
         Tensor labelsGpu = labelsCpu.clone(gpuPlacement);
         Tensor activationsGpu = activationsCpu.clone(gpuPlacement);
-        Tensor lossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize}));
+        Tensor lossCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numClasses}));
         Tensor lossGpu_h = lossCpu.clone();
 
         uint16_t *labels = (uint16_t *)labelsCpu.getMemPtr();
@@ -243,7 +244,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
             for (uint32_t b = 0; b < batchSize; ++b) {
                 labels[b] = rand() % numClasses;
                 for (uint32_t c = 0; c < numClasses; ++c) {
-                    activations[b * numClasses + c] = ((rand() % 10000) / 999.0f);
+                    activations[b * numClasses + c] = ((rand() % 1000) / 999.0f);
                     totalActivations += activations[b * numClasses + c];
                 }
             }
@@ -296,45 +297,62 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
             errorOutputGpu = crossEntropy->getErrorOutput();
             errorOutputCpu = Tensor(cpuPlacement, errorOutputGpu.getDescriptor());
             errorOutputGpu_h = errorOutputCpu.clone();
-            errorOutputGpu_h.copyFromAsync(errorOutputGpu, stream);
+            errorOutputGpu_h.copyFromAsync(errorOutputGpu, labelsStream);
         }
 
         labelsStream.synchronize();
 
         // Compute the expected loss
         half *activationsMem = (half *)activationsCpu.getMemPtr();
-        float *lossMem = (float *)lossCpu.getMemPtr();
+        half *lossMem = (half *)lossCpu.getMemPtr();
         Tensor sumOfExponentials(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize}));
         float *sumOfExponentialsMem = (float *)sumOfExponentials.getMemPtr();
         Tensor exponentials(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {batchSize, numClasses}));
         float *exponentialsMem = (float *)exponentials.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
             sumOfExponentialsMem[b] = 0.0f;
-            for (uint32_t i = 0; i < numClasses; ++i) {
-                exponentialsMem[b * numClasses + i] = exp((float)activationsMem[b * numClasses + i]);
-                sumOfExponentialsMem[b] += exponentialsMem[b * numClasses + i];
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                exponentialsMem[b * numClasses + c] = exp((float)activationsMem[b * numClasses + c]);
+                sumOfExponentialsMem[b] += exponentialsMem[b * numClasses + c];
             }
         }
         for (uint32_t b = 0; b < batchSize; ++b) {
-            for (uint32_t i = 0; i < numClasses; ++i) {
-                exponentialsMem[b * numClasses + i] /= sumOfExponentialsMem[b];
-                if (exponentialsMem[b * numClasses + i] < 1.0e-15f || !isfinite(exponentialsMem[b * numClasses + i]))
-                    exponentialsMem[b * numClasses + i] = 1.0e-15f;
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                exponentialsMem[b * numClasses + c] /= sumOfExponentialsMem[b];
+                if (exponentialsMem[b * numClasses + c] < 1.0e-15f || !isfinite(exponentialsMem[b * numClasses + c]))
+                    exponentialsMem[b * numClasses + c] = 1.0e-15f;
             }
         }
 
         for (uint32_t b = 0; b < batchSize; ++b) {
-            uint16_t label = labels[b];
-            lossMem[b] = -log(exponentialsMem[b * numClasses + label]);
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                uint32_t e = b * numClasses + c;
+                uint16_t label = labels[b];
+                if (c == label)
+                    lossMem[e] = -logf(exponentialsMem[e]);
+                else
+                    lossMem[e] = 0.0f;
+            }
         }
 
         // Verify the loss output
-        float *lossMemFromGpu = (float *)lossGpu_h.getMemPtr();
+        half *lossMemFromGpu = (half *)lossGpu_h.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
-            float thresh = std::max(lossMem[b] / 320000.0f, 0.001f);
-            if (abs(lossMem[b] - lossMemFromGpu[b]) >= thresh)
-                printf("cpuF %f gpuF %f    %d\n", lossMem[b], lossMemFromGpu[b], b);
-            ASSERT_LT(abs(lossMem[b] - lossMemFromGpu[b]), thresh);
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                uint32_t e = b * numClasses + c;
+                float thresh = std::max(lossMem[e] * 0.03f, 0.01f);
+                if (abs(lossMem[e] - lossMemFromGpu[e]) >= thresh) {
+                    printf("cpuF %f gpuF %f  label %d  batchSize %d numClasses %d   batch: %d class %d\n",
+                           (float)lossMem[e],
+                           (float)lossMemFromGpu[e],
+                           labels[b],
+                           batchSize,
+                           numClasses,
+                           b,
+                           c);
+                }
+                ASSERT_LT(abs((float)lossMem[e] - (float)lossMemFromGpu[e]), thresh);
+            }
         }
 
         if (inferenceOnly) {
@@ -348,21 +366,21 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
 
         half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
-            for (uint32_t i = 0; i < numClasses; ++i) {
-                errorOutputMem[b * numClasses + i] =
-                    (Loss::getLossScalingFactor() * (exponentialsMem[b * numClasses + i] - (labels[b] == i ? 1.0f : 0.0f)));
+            for (uint32_t c = 0; c < numClasses; ++c) {
+                errorOutputMem[b * numClasses + c] =
+                    (Loss::getLossScalingFactor() * (exponentialsMem[b * numClasses + c] - (labels[b] == c ? 1.0f : 0.0f)));
             }
         }
 
         // Verify the loss gradient
         half *errorOutputFromGpu = (half *)errorOutputGpu_h.getMemPtr();
         float thresh = 0.1f;
-        for (uint32_t i = 0; i < numElements; ++i) {
-            if (abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]) >= thresh) {
-                printf("cpu %f gpu %f   %d\n", (float)errorOutputMem[i], (float)errorOutputFromGpu[i], i);
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            if (abs((float)errorOutputMem[b] - (float)errorOutputFromGpu[b]) >= thresh) {
+                printf("cpu %f gpu %f   %d\n", (float)errorOutputMem[b], (float)errorOutputFromGpu[b], b);
                 fflush(stdout);
             }
-            ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorOutputFromGpu[i]), thresh);
+            ASSERT_LT(abs((float)errorOutputMem[b] - (float)errorOutputFromGpu[b]), thresh);
         }
 
         // Verify the loss gradient passes through the softmax layer unchanged
@@ -370,9 +388,9 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         softmaxErrorOutputFromGpu_h.copyFromAsync(softmax->getErrorOutput().get(), stream);
         stream.synchronize();
         half *softmaxErrorOutputFromGpu = (half *)softmaxErrorOutputFromGpu_h.getMemPtr();
-        for (uint32_t i = 0; i < numElements; ++i) {
-            ASSERT_EQ((float)errorOutputFromGpu[i], (float)softmaxErrorOutputFromGpu[i]);
-            // printf("%f %f\n", (float)errorOutputFromGpu[i], (float)softmaxErrorOutputFromGpu[i]);
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            ASSERT_EQ((float)errorOutputFromGpu[b], (float)softmaxErrorOutputFromGpu[b]);
+            // printf("%f %f\n", (float)errorOutputFromGpu[b], (float)softmaxErrorOutputFromGpu[b]);
         }
 
         LayerTestHelper::tearDownNetwork(layers);

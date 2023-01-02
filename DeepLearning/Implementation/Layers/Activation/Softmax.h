@@ -24,6 +24,8 @@ class Softmax : public Activation {
 
     virtual std::string getType();
 
+    virtual bool isBackwardComputedExternally();
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;
