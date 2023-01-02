@@ -33,7 +33,25 @@ class Loss : public Layer {
    public:
     Loss() {}
 
-    // The feature input to this layer is the (unnormalized) likelihood predictions per batch item per classification class
+    virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+        assert(!compiled);
+
+        assert(this->nextLayer.isEmpty());
+        this->nextLayer = nextLayer;
+        if (nextLayer->hasFeatureInput())
+            featureOutput = createFeatureOutputTensor();
+        else
+            featureOutput = Optional<Tensor>::empty();
+
+        // Losses are the origin of the back prop path and will fill the errorOutput directly.
+        errorInput = Optional<Tensor>::empty();
+        nextLayer->connectToPreviousLayer(
+            this, featureOutput, stream, shouldConnectToBackPropErrorIn() && !isBackPropStub(), loaderConnectionType);
+
+        ensureNoDeviceCrossing();
+    }
+
+    // The feature input to this layer is the likelihood predictions per batch item per classification class
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
         if (connectionType == (int)ConnectionType::FORWARD_BACKWARD) {

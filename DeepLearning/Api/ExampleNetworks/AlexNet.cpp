@@ -228,8 +228,6 @@ Network buildAlexNet() {
                               .build()
                               .getFeatureOutput();
 
-    printf("predictions id %ld labels id %ld\n", latestOutputTensor.getId(), labelsTensor.getId());
-
     CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
                                             .network(alexNet)
                                             .predictions(latestOutputTensor)

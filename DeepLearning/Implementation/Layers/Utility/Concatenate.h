@@ -103,19 +103,21 @@ class Concatenate : public MultiConnectionLayer {
         assert(cudaStatus == cudaSuccess);
         delete[] splitTensorFeatureInputMemoriesArray;
 
-        cudaStatus = cudaMalloc(&splitTensorErrorOutputMemoriesArray_d, numPresentTensors(errorOutputs) * sizeof(half *));
-        assert(cudaStatus == cudaSuccess);
-        half **splitTensorErrorOutputMemoriesArray = new half *[numSplitTensors];
-        for (int i = 0; i < numSplitTensors; ++i) {
-            if (errorOutputs[i].isPresent())
-                splitTensorErrorOutputMemoriesArray[i] = (half *)errorOutputs[i].get().getMemPtr();
+        if (errorInputs[0].isPresent()) {
+            cudaStatus = cudaMalloc(&splitTensorErrorOutputMemoriesArray_d, numPresentTensors(errorOutputs) * sizeof(half *));
+            assert(cudaStatus == cudaSuccess);
+            half **splitTensorErrorOutputMemoriesArray = new half *[numSplitTensors];
+            for (int i = 0; i < numSplitTensors; ++i) {
+                if (errorOutputs[i].isPresent())
+                    splitTensorErrorOutputMemoriesArray[i] = (half *)errorOutputs[i].get().getMemPtr();
+            }
+            cudaStatus = cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
+                                    splitTensorErrorOutputMemoriesArray,
+                                    numPresentTensors(errorOutputs) * sizeof(half *),
+                                    cudaMemcpyHostToDevice);
+            assert(cudaStatus == cudaSuccess);
+            delete[] splitTensorErrorOutputMemoriesArray;
         }
-        cudaStatus = cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
-                                splitTensorErrorOutputMemoriesArray,
-                                numPresentTensors(errorOutputs) * sizeof(half *),
-                                cudaMemcpyHostToDevice);
-        assert(cudaStatus == cudaSuccess);
-        delete[] splitTensorErrorOutputMemoriesArray;
 
         long *axisElementsPerSplitTensor = new long[numSplitTensors];
         for (int i = 0; i < numSplitTensors; ++i)
@@ -230,6 +232,11 @@ class Concatenate : public MultiConnectionLayer {
         cudaStatus = cudaFree(splitTensorFeatureInputMemoriesArray_d);
         assert(cudaStatus == cudaSuccess);
         splitTensorFeatureInputMemoriesArray_d = nullptr;
+        if (splitTensorErrorOutputMemoriesArray_d != nullptr) {
+            cudaStatus = cudaFree(splitTensorErrorOutputMemoriesArray_d);
+            assert(cudaStatus == cudaSuccess);
+            splitTensorErrorOutputMemoriesArray_d = nullptr;
+        }
         cudaStatus = cudaFree(axisElementsPerSplitTensor_d);
         assert(cudaStatus == cudaSuccess);
         axisElementsPerSplitTensor_d = nullptr;
@@ -239,6 +246,7 @@ class Concatenate : public MultiConnectionLayer {
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
+        // FIXME: Reuse MultiConnectionLayer connectToNextLayer and add any additional logic here if needed
         assert(!running);
         nextLayers.push_back(nextLayer);
         featureOutputs.emplace_back(createFeatureOutputTensor());
@@ -252,6 +260,15 @@ class Concatenate : public MultiConnectionLayer {
             assert(errorInputs.back().get().getPlacement() == errorInputs.front().get().getPlacement());
             assert(errorInputs.back().get().getPlacement() == featureOutputs.back().get().getPlacement());
         }
+
+        if (errorInputs.back().isEmpty()) {
+            for (uint32_t i = 0; i < errorOutputs.size(); ++i) {
+                assert(previousLayers[i].isPresent());
+                if (errorOutputs[i].isPresent())
+                    previousLayers[i].get()->replaceErrorInput(errorOutputs[i], Optional<Tensor>::empty());
+            }
+        }
+
         ensureNoDeviceCrossing();
     }
 
@@ -269,7 +286,7 @@ class Concatenate : public MultiConnectionLayer {
 
         previousLayers.push_back(previousLayer);
         featureInputs.emplace_back(featureInput);
-        if (backPropagateError)
+        if (backPropagateError && !isInferenceOnly())
             errorOutputs.emplace_back(featureInput.get().clone());
         else
             errorOutputs.emplace_back(Optional<Tensor>::empty());

@@ -187,7 +187,7 @@ class Network {
     virtual std::string getNetworkName() { return networkName; }
 
    private:
-    static const bool DEBUG_STAMP = true;
+    static const bool DEBUG_STAMP = false;
 
    protected:
     std::set<std::shared_ptr<Layer>> network;

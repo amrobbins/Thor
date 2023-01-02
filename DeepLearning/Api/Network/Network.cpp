@@ -211,15 +211,16 @@ Network::StatusCode Network::evaluateGraph() {
         Loss *loss = dynamic_cast<Loss *>(layer);
         if (loss) {
             // Predictions and Labels in, Loss out
-            Tensor predictionsTensor = loss->getPredictions();
+            // Note: getPredictions() does not return the featureInput tensor when there is an initial transformation layer, like sigmoid
+            Tensor rawPredictionsTensor = loss->getFeatureInput();
             Tensor labelsTensor = loss->getLabels();
             Tensor lossTensor = loss->getLoss();
-            allTensors.insert(predictionsTensor);
+            allTensors.insert(rawPredictionsTensor);
             allTensors.insert(labelsTensor);
             allTensors.insert(lossTensor);
-            apiTensorToApiLoadingLayers[predictionsTensor].push_back(loss);
+            apiTensorToApiLoadingLayers[rawPredictionsTensor].push_back(loss);
             apiTensorToApiLoadingLayers[labelsTensor].push_back(loss);
-            apiLayerToApiInputTensors[loss].push_back(predictionsTensor);
+            apiLayerToApiInputTensors[loss].push_back(rawPredictionsTensor);
             apiLayerToApiInputTensors[loss].push_back(labelsTensor);
             assert(apiTensorToApiDrivingLayer.count(lossTensor) == 0);
             apiTensorToApiDrivingLayer[lossTensor] = loss;
@@ -335,8 +336,10 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
 Network::StatusCode Network::checkForFloatingInputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiDrivingLayer.count(tensor) == 0)
+        if (apiTensorToApiDrivingLayer.count(tensor) == 0) {
+            printf("Tensor with id = %ld is not driven.\n", tensor.getId());
             return StatusCode::FLOATING_INPUT;
+        }
     }
     return StatusCode::SUCCESS;
 }
@@ -523,27 +526,40 @@ void Network::stampLayer(
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
     assert(numLoadingLayers > 0);
     ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
-    if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
-        implementationTensorFanout = new ThorImplementation::TensorFanout();
-        Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
-        physicalDrivingLayer = implementationTensorFanout;
+    if (apiTensorToApiLoadingLayers[inputTensor].size() != 1) {
+        if (implementationTensorFanout == nullptr) {
+            implementationTensorFanout = new ThorImplementation::TensorFanout();
+            Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
+            physicalDrivingLayer = implementationTensorFanout;
 
-        stampedNetwork.otherLayers.push_back(implementationTensorFanout);
-        apiDrivingLayer = nullptr;
-        stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
+            stampedNetwork.otherLayers.push_back(implementationTensorFanout);
+            apiDrivingLayer = nullptr;
+            stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
 
-        if (DEBUG_STAMP) {
-            printf("stamped tensor fanout - layer\n");
-            fflush(stdout);
+            if (DEBUG_STAMP) {
+                printf("stamped tensor fanout - id %ld - driving %s - num output connections afterward %ld\n",
+                       physicalDrivingLayer->getId(),
+                       layer->getLayerType().c_str(),
+                       implementationTensorFanout->getStreams().size());
+                fflush(stdout);
+            }
+        } else {
+            if (DEBUG_STAMP) {
+                printf("connecting existing tensor fanout - id %ld - driving %s - num output connections before hand %ld\n",
+                       physicalDrivingLayer->getId(),
+                       layer->getLayerType().c_str(),
+                       implementationTensorFanout->getStreams().size());
+                fflush(stdout);
+            }
         }
     }
 
     // Stamp the layer
     // Unless it was previously stamped on a prior pass, if so just connect the tensor.
     ThorImplementation::Layer *implementationLayer = nullptr;
-    bool layerPreviouslyStamped = false;
-    if (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1) {
-        layerPreviouslyStamped = true;
+    bool layerPreviouslyStamped = (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1);
+    // In case of a tensor fanout, there is no apiLayer...
+    if (layerPreviouslyStamped) {
         implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer->getId()];
         Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
 
@@ -557,7 +573,10 @@ void Network::stampLayer(
         stampedNetwork.physicalLayerToApiLayer[implementationLayer] = layer->getId();
 
         if (DEBUG_STAMP) {
-            printf("stamped %s\n", layer->getLayerType().c_str());
+            printf("stamped %s (physical layer id = %ld) driven by physical layer id = %ld\n",
+                   layer->getLayerType().c_str(),
+                   implementationLayer->getId(),
+                   physicalDrivingLayer->getId());
             fflush(stdout);
         }
     }

@@ -19,6 +19,8 @@ class BinaryCrossEntropy : public Loss {
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<BinaryCrossEntropy>(*this); }
 
+    virtual Tensor getPredictions() const { return sigmoidOutput; }
+
     virtual std::string getLayerType() const { return "BinaryCrossEntropy"; }
 
    private:
@@ -52,6 +54,7 @@ class BinaryCrossEntropy : public Loss {
     Network *network;
     bool sigmoidStamped;
     Tensor::DataType lossDataType;
+    Tensor sigmoidOutput;
 };
 
 class BinaryCrossEntropy::Builder {

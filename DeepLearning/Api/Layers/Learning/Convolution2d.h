@@ -74,6 +74,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
+        // FIXME: It doesn't look like this would work for multiple input/output connections. Check this on all multi-connection
         ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
         Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);

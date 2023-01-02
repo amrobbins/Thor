@@ -14,7 +14,7 @@
 using namespace std;
 
 using namespace Thor;
-/*
+
 TEST(Network, SimplestNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
@@ -527,7 +527,16 @@ TEST(Network, BranchedNetworkProperlyFormed) {
 
     stampedNetwork.clear();
 }
-*/
+
+unsigned int numPresentTensors(std::vector<Optional<ThorImplementation::Tensor>> tensors) {
+    unsigned int numPresent = 0;
+    for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+        if (it->isPresent())
+            numPresent += 1;
+    }
+    return numPresent;
+}
+
 TEST(Network, AlexnetIsProperlyFormed) {
     ThorImplementation::StampedNetwork stampedNetwork;
 
@@ -685,8 +694,26 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(ls.size(), 1u);
 
     // Forward
-    ASSERT_EQ(images->getFeatureOutput().get(), imagesFO->getFeatureInputs()[0].get());
-    ASSERT_EQ(imagesFO->getFeatureOutputs()[0].get(), cv[0]->getFeatureInputs()[0].get());
+
+    // Fanouts
+    // Note: All tensor fanouts must be optimized away since they each have 0 or 1 populated error inputs
+    //       Optimization applies by forwarding the errorInput from the previous layer rather than instatiating one.
+    ASSERT_EQ(labels->getFeatureOutput().get(), fo[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[0]->getFeatureOutputs()[0].get(), fo[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[0]->getStreams().size(), 2U);
+    ASSERT_EQ(fo[0]->getFeatureOutputs().size(), 1U);
+    ASSERT_EQ(images->getFeatureOutput().get(), fo[1]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[1]->getFeatureOutputs()[0].get(), fo[1]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[1]->getStreams().size(), 2U);
+    ASSERT_EQ(fo[1]->getFeatureOutputs().size(), 1U);
+    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), fo[2]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[2]->getStreams().size(), 3U);
+    ASSERT_EQ(fo[2]->getFeatureOutputs().size(), 1U);
+
+    // Conv top
+    ASSERT_EQ(images->getFeatureOutput().get(), fo[1]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[1]->getFeatureOutputs()[0].get(), cv[0]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[0]->getFeatureOutputs()[0].get(), r[0]->getFeatureInput().get());
     ASSERT_EQ(r[0]->getFeatureOutput().get(), cv[1]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[1]->getFeatureOutputs()[0].get(), r[1]->getFeatureInput().get());
@@ -699,9 +726,10 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(r[3]->getFeatureOutput().get(), cv[4]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[4]->getFeatureOutputs()[0].get(), r[4]->getFeatureInput().get());
     ASSERT_EQ(r[4]->getFeatureOutput().get(), p[2]->getFeatureInput().get());
-    ASSERT_EQ(p[2]->getFeatureOutput().get(), cat[0]->getFeatureInputs()[0].get());
 
-    ASSERT_EQ(imagesFO->getFeatureInputs()[0].get(), cv[5]->getFeatureInputs()[0].get());
+    // Conv bottom
+    ASSERT_EQ(images->getFeatureOutput().get(), fo[1]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[1]->getFeatureOutputs()[0].get(), cv[5]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[5]->getFeatureOutputs()[0].get(), r[5]->getFeatureInput().get());
     ASSERT_EQ(r[5]->getFeatureOutput().get(), cv[6]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[6]->getFeatureOutputs()[0].get(), r[6]->getFeatureInput().get());
@@ -714,8 +742,12 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(r[8]->getFeatureOutput().get(), cv[9]->getFeatureInputs()[0].get());
     ASSERT_EQ(cv[9]->getFeatureOutputs()[0].get(), r[9]->getFeatureInput().get());
     ASSERT_EQ(r[9]->getFeatureOutput().get(), p[5]->getFeatureInput().get());
+
+    // Concatenate
+    ASSERT_EQ(p[2]->getFeatureOutput().get(), cat[0]->getFeatureInputs()[0].get());
     ASSERT_EQ(p[5]->getFeatureOutput().get(), cat[0]->getFeatureInputs()[1].get());
 
+    // Fully Connected
     ASSERT_EQ(cat[0]->getFeatureOutputs()[0].get(), d[0]->getFeatureInput().get());
     ASSERT_EQ(d[0]->getFeatureOutput().get(), fc0->getFeatureInputs()[0].get());
     ASSERT_EQ(fc0->getFeatureOutputs()[0].get(), r[10]->getFeatureInput().get());
@@ -723,27 +755,49 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(d[1]->getFeatureOutput().get(), fc1->getFeatureInputs()[0].get());
     ASSERT_EQ(fc1->getFeatureOutputs()[0].get(), r[11]->getFeatureInput().get());
     ASSERT_EQ(r[11]->getFeatureOutput().get(), fc2->getFeatureInputs()[0].get());
+
+    // Categorical Cross Entropy
     ASSERT_EQ(fc2->getFeatureOutputs()[0].get(), sm[0]->getFeatureInput().get());
     ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
-    // I think the problem is that I referenced the tensor when building to connect it,
-    // but then I swapped the tensor later when flattening to a single layer.
-    // Maybe a fix is to assign the ids of the proper tensors of the flattened layer
-    // to be those that are reported during building
-    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), ccl[2]->getFeatureInput().get());
+    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), ccl[0]->getFeatureInput().get());
     ASSERT_EQ(ccl[0]->getFeatureOutput().get(), ls[0]->getFeatureInput().get());
+    ASSERT_EQ(labels->getFeatureOutput().get(), fo[0]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[0]->getFeatureOutputs()[0].get(), ccl[0]->getLabelsInput().get());
 
-    ASSERT_EQ(labels->getFeatureOutput().get(), ccl[0]->getLabelsInput().get());
-    ASSERT_EQ(fo[2]->getFeatureOutputs()[1].get(), predictions->getFeatureInput().get());
+    // Categorical accuracy
+    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo[2]->getFeatureInputs()[0].get(), acc[0]->getFeatureInput().get());
+    ASSERT_EQ(labels->getFeatureOutput().get(), fo[0]->getFeatureOutputs()[0].get());
+    ASSERT_EQ(fo[0]->getFeatureOutputs()[0].get(), ccl[0]->getLabelsInput().get());
+
+    // Loss Output
     ASSERT_EQ(ls[0]->getFeatureOutput().get(), loss->getFeatureInput().get());
 
-    ASSERT_EQ(fo[2]->getFeatureOutputs()[1].get(), acc[0]->getFeatureInput().get());
-    ASSERT_EQ(labels->getFeatureOutput().get(), acc[0]->getLabelsInput().get());
+    // Predictions output
+    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), tc[0]->getFeatureInput().get());
+    ASSERT_EQ(tc[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
+
+    // Accuracy Output
     ASSERT_EQ(acc[0]->getFeatureOutput().get(), accuracy->getFeatureInput().get());
 
     // Backward
-    ASSERT_TRUE(fo[0]->getErrorOutputs()[0].isEmpty());
-    ASSERT_TRUE(fo[0]->getErrorInputs()[0].isEmpty());
+
+    // Back Prop stubs - conv top
     ASSERT_TRUE(cv[0]->getErrorOutputs()[0].isEmpty());
+    ASSERT_TRUE(cv[5]->getErrorOutputs()[0].isEmpty());
+    ASSERT_EQ(fo[0]->getErrorInputs().size(), 2U);
+    ASSERT_EQ(numPresentTensors(fo[0]->getErrorInputs()), 0U);
+    ASSERT_EQ(fo[0]->getErrorOutputs().size(), 1U);
+    ASSERT_TRUE(fo[0]->getErrorOutputs()[0].isEmpty());
+    ASSERT_EQ(fo[1]->getErrorInputs().size(), 2U);
+    ASSERT_EQ(numPresentTensors(fo[1]->getErrorInputs()), 0U);
+    ASSERT_EQ(fo[1]->getErrorOutputs().size(), 1U);
+    ASSERT_TRUE(fo[1]->getErrorOutputs()[0].isEmpty());
+    ASSERT_EQ(fo[2]->getErrorInputs().size(), 3U);
+    ASSERT_EQ(numPresentTensors(fo[2]->getErrorInputs()), 1U);
+    ASSERT_EQ(fo[2]->getErrorOutputs().size(), 1U);
+    ASSERT_TRUE(fo[2]->getErrorOutputs()[0].isPresent());
+
     ASSERT_EQ(cv[0]->getErrorOutputs().size(), 1U);
     ASSERT_EQ(cv[0]->getErrorInputs()[0].get(), r[0]->getErrorOutput().get());
     ASSERT_EQ(r[0]->getErrorInput().get(), cv[1]->getErrorOutputs()[0].get());
@@ -759,8 +813,6 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(r[4]->getErrorInput().get(), p[2]->getErrorOutput().get());
     ASSERT_EQ(p[2]->getErrorInput().get(), cat[0]->getErrorOutputs()[0].get());
 
-    ASSERT_TRUE(fo[0]->getErrorInputs()[1].isEmpty());
-    ASSERT_TRUE(cv[5]->getErrorOutputs()[0].isEmpty());
     ASSERT_EQ(cv[5]->getErrorOutputs().size(), 1U);
     ASSERT_EQ(cv[5]->getErrorInputs()[0].get(), r[5]->getErrorOutput().get());
     ASSERT_EQ(r[5]->getErrorInput().get(), cv[6]->getErrorOutputs()[0].get());
@@ -787,9 +839,32 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(r[11]->getErrorInput().get(), fc2->getErrorOutputs()[0].get());
     ASSERT_EQ(fc2->getErrorInputs()[0].get(), ccl[0]->getErrorOutput().get());
 
+    // Loss
     ASSERT_TRUE(ccl[0]->getErrorInput().isEmpty());
+    ASSERT_TRUE(ccl[0]->getErrorOutput().isPresent());
+    if (fo[2]->getErrorInputs()[0].isPresent()) {
+        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo[2]->getErrorInputs()[0].get());
+    }
+    if (fo[2]->getErrorInputs()[1].isPresent()) {
+        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo[2]->getErrorInputs()[1].get());
+    }
+    if (fo[2]->getErrorInputs()[2].isPresent()) {
+        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo[2]->getErrorInputs()[2].get());
+    }
+    ASSERT_EQ(fo[2]->getErrorOutputs()[0].get(), sm[0]->getErrorInput().get());
+    ASSERT_EQ(ccl[0]->getErrorOutput().get(), sm[0]->getErrorInput().get());
+    ASSERT_TRUE(sm[0]->isBackwardComputedExternally());
+    ASSERT_EQ(ccl[0]->getErrorOutput().get(), fc2->getErrorInputs()[0].get());
+
+    // Outputs
+    ASSERT_TRUE(acc[0]->getErrorInput().isEmpty());
+    ASSERT_TRUE(acc[0]->getErrorOutput().isEmpty());
     ASSERT_TRUE(labels->getErrorInput().isEmpty());
+    ASSERT_TRUE(labels->getErrorOutput().isEmpty());
     ASSERT_TRUE(predictions->getErrorInput().isEmpty());
+    ASSERT_TRUE(predictions->getErrorOutput().isEmpty());
+    ASSERT_TRUE(images->getErrorInput().isEmpty());
+    ASSERT_TRUE(images->getErrorOutput().isEmpty());
 
     // Check tensor dimensions
     // Forward
