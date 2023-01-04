@@ -245,9 +245,8 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     remove_all(tempDirectoryPath);
 }
 */
-
 /*
-bool alexnetImagePreproccessorUint8(uint8_t *rgbPixelArray) {
+bool alexnetImagePreprocessorUint8(uint8_t *rgbPixelArray) {
     for (uint32_t row = 0; row < 224; ++row) {
         for (uint32_t col = 0; col < 224; ++col) {
             rgbPixelArray[row * 224 + col] = rgbPixelArray[row * 224 + col] - 124;
@@ -258,7 +257,7 @@ bool alexnetImagePreproccessorUint8(uint8_t *rgbPixelArray) {
     return true;
 }
 
-bool alexnetImagePreproccessorHalf(half *rgbPixelArray) {
+bool alexnetImagePreprocessorHalf(half *rgbPixelArray) {
     for (uint32_t row = 0; row < 224; ++row) {
         for (uint32_t col = 0; col < 224; ++col) {
             rgbPixelArray[row * 224 + col] = (rgbPixelArray[row * 224 + col] - 124.0f) / 255.0f;
@@ -281,10 +280,9 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224)), shards);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, alexnetImagePreprocessorHalf)), shards);
 }
 */
-
 /*
 class MnistDataProcessor : public DataProcessor {
    public:
