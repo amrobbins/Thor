@@ -86,7 +86,6 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 
 
 				# FIXME: rebuild and put back
-				#
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
 				# Improve coverage of tensorFanout
 
@@ -217,6 +216,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Layers/Utility/NetworkOutput.o \
                    build/DeepLearning/Api/Layers/Learning/Inception.o \
                    build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o \
+                   build/Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.o \
                    build/DeepLearning/Api/ExampleNetworks/AlexNet.o \
                    build/DeepLearning/Api/ExampleNetworks/DeepFullyConnected.o \
                    build/DeepLearning/Api/ExampleNetworks/FewLayerFullyConnected.o \
@@ -412,6 +412,10 @@ build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o: Utilities/TensorOper
 build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o: Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
+
+build/Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.o: Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.cu
+	mkdir -p build/Utilities/TensorOperations/Misc
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.cu
 
 build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o: Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic

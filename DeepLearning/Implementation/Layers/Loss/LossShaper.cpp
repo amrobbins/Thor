@@ -10,12 +10,7 @@ LossShaper::LossShaper(OutputLossType outputLossType) {
     batchReduce = nullptr;
 }
 
-LossShaper::~LossShaper() {
-    if (batchReduce != nullptr) {
-        delete batchReduce;
-        batchReduce = nullptr;
-    }
-}
+LossShaper::~LossShaper() {}
 
 Optional<Tensor> LossShaper::createFeatureOutputTensor() {
     assert(featureInput.isPresent());
@@ -50,14 +45,14 @@ void LossShaper::compile() {
             featureInput.get().getDimensions()[1] != 1)
             reduceClassDim = true;
 
-        batchReduce = new BatchReduce(batchSize,
-                                      batchSize,
-                                      classDimSize,
-                                      reduceBatchDim,
-                                      reduceClassDim,
-                                      featureInput.get().getDescriptor().getDataType(),
-                                      featureOutput.get().getDescriptor().getDataType(),
-                                      stream);
+        batchReduce = make_shared<BatchReduce>(batchSize,
+                                               batchSize,
+                                               classDimSize,
+                                               reduceBatchDim,
+                                               reduceClassDim,
+                                               featureInput.get().getDescriptor().getDataType(),
+                                               featureOutput.get().getDescriptor().getDataType(),
+                                               stream);
     }
 
     uninitialized = false;

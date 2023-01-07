@@ -17,8 +17,10 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
     for (uint32_t t = 0; t < 10; ++t) {
         Network network;
 
+        vector<uint64_t> labelDimensions = {1};
         vector<uint64_t> dimensions;
-        dimensions = {1UL + (rand() % 1000), 1};
+        uint64_t numClasses = 2UL + (rand() % 1000);
+        dimensions = {numClasses};
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType accuracyDataType = Tensor::DataType::FP32;
 
@@ -32,10 +34,10 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
             labelsDataType = Tensor::DataType::UINT32;
 
         Tensor predictions(predictionsDataType, dimensions);
-        Tensor labels(labelsDataType, dimensions);
+        Tensor labels(labelsDataType, labelDimensions);
 
         CategoricalAccuracy::Builder categoricalAccuracyBuilder =
-            CategoricalAccuracy::Builder().network(network).predictions(predictions).labels(labels).receivesClassIndexLabels();
+            CategoricalAccuracy::Builder().network(network).predictions(predictions).labels(labels).receivesClassIndexLabels(numClasses);
         CategoricalAccuracy categoricalAccuracy = categoricalAccuracyBuilder.build();
 
         ASSERT_TRUE(categoricalAccuracy.isInitialized());
@@ -48,7 +50,7 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
         Optional<Tensor> actualLabels = categoricalAccuracy.getLabels();
         ASSERT_TRUE(actualLabels.isPresent());
         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-        ASSERT_EQ(actualLabels.get().getDimensions(), dimensions);
+        ASSERT_EQ(actualLabels.get().getDimensions(), labelDimensions);
 
         Optional<Tensor> actualAccuracy = categoricalAccuracy.getFeatureOutput();
         ASSERT_TRUE(actualAccuracy.isPresent());
@@ -65,6 +67,11 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
         ASSERT_TRUE(cloneInput.isPresent());
         ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
         ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+
+        Optional<Tensor> cloneLabels = clone->getLabels();
+        ASSERT_TRUE(cloneLabels.isPresent());
+        ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
+        ASSERT_EQ(cloneLabels.get().getDimensions(), labelDimensions);
 
         Optional<Tensor> cloneAccuracy = clone->getFeatureOutput();
         ASSERT_TRUE(cloneAccuracy.isPresent());

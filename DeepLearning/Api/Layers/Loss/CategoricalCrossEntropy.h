@@ -74,22 +74,18 @@ class CategoricalCrossEntropy::Builder {
         CategoricalCrossEntropy categoricalCrossEntropy;
         if (_labelType == LabelType::ONE_HOT) {
             std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
-            assert(labelDimensions.size() == 1);
-            assert(labelDimensions[0] > 1);
+            assert(labelDimensions.size() == 1 && labelDimensions[0] > 1);
             assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
             categoricalCrossEntropy.numClasses = _predictions.get().getDimensions()[0];
         } else {
             std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
-            assert(labelDimensions.size() == 0 || labelDimensions.size() == 1);
-            if (labelDimensions.size() == 1)
-                assert(_labels.get().getDimensions()[0] == 1);
-            else
-                _labels.get().reshape({predictionDimensions[0], 1});
+            assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
             Tensor::DataType labelsDataType = _labels.get().getDataType();
             assert(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
                    labelsDataType == Tensor::DataType::UINT32);
             assert(_numClasses.isPresent());
+            assert(predictionDimensions.size() == 1 && predictionDimensions[0] == _numClasses);
             categoricalCrossEntropy.numClasses = _numClasses;
         }
 

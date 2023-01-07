@@ -19,7 +19,7 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsBatchLossBuilds) {
 
         // API layer does not have a batch dimension
         vector<uint64_t> labelDimensions = {1};
-        uint64_t numClasses = 1UL + (rand() % 1000);
+        uint64_t numClasses = 2UL + (rand() % 1000);
         vector<uint64_t> predictionsDimensions = {numClasses};
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
@@ -40,7 +40,7 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsBatchLossBuilds) {
                                                                    .network(network)
                                                                    .predictions(predictions)
                                                                    .reportsBatchLoss()
-                                                                   .receivesClassIndexLabels(2 + (rand() % 10000))
+                                                                   .receivesClassIndexLabels(numClasses)
                                                                    .lossDataType(lossDataType)
                                                                    .labels(labels);
         CategoricalCrossEntropy crossEntropy = crossEntropyBuilder.build();
@@ -298,8 +298,9 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
     for (uint32_t t = 0; t < 10; ++t) {
         Network network;
 
-        vector<uint64_t> dimensions;
-        dimensions = {1};
+        vector<uint64_t> labelDimensions = {1};
+        uint64_t numClasses = 2UL + (rand() % 1000);
+        vector<uint64_t> predictionsDimensions = {numClasses};
         Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
 
@@ -312,10 +313,9 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
         else
             labelsDataType = Tensor::DataType::UINT32;
 
-        Tensor predictions(predictionsDataType, dimensions);
-        Tensor labels(labelsDataType, dimensions);
+        Tensor predictions(predictionsDataType, predictionsDimensions);
+        Tensor labels(labelsDataType, labelDimensions);
 
-        uint32_t numClasses = 2 + (rand() % 10000);
         CategoricalCrossEntropy::Builder crossEntropyBuilder = CategoricalCrossEntropy::Builder()
                                                                    .network(network)
                                                                    .predictions(predictions)
@@ -330,17 +330,17 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
         Optional<Tensor> actualInput = crossEntropy.getFeatureInput();
         ASSERT_TRUE(actualInput.isPresent());
         ASSERT_EQ(actualInput.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
+        ASSERT_EQ(actualInput.get().getDimensions(), predictionsDimensions);
 
         Optional<Tensor> actualLabels = crossEntropy.getLabels();
         ASSERT_TRUE(actualLabels.isPresent());
         ASSERT_EQ(actualLabels.get().getDataType(), labelsDataType);
-        ASSERT_EQ(actualLabels.get().getDimensions(), dimensions);
+        ASSERT_EQ(actualLabels.get().getDimensions(), labelDimensions);
 
         Optional<Tensor> actualPredictions = crossEntropy.getPredictions();
         ASSERT_TRUE(actualPredictions.isPresent());
         ASSERT_EQ(actualPredictions.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(actualPredictions.get().getDimensions(), dimensions);
+        ASSERT_EQ(actualPredictions.get().getDimensions(), predictionsDimensions);
 
         Optional<Tensor> actualLoss = crossEntropy.getLoss();
         ASSERT_TRUE(actualLoss.isPresent());
@@ -356,12 +356,17 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
         Optional<Tensor> cloneInput = clone->getFeatureInput();
         ASSERT_TRUE(cloneInput.isPresent());
         ASSERT_EQ(cloneInput.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
+        ASSERT_EQ(cloneInput.get().getDimensions(), predictionsDimensions);
+
+        Optional<Tensor> cloneLabels = clone->getLabels();
+        ASSERT_TRUE(cloneLabels.isPresent());
+        ASSERT_EQ(cloneLabels.get().getDataType(), labelsDataType);
+        ASSERT_EQ(cloneLabels.get().getDimensions(), labelDimensions);
 
         Optional<Tensor> clonePredictions = clone->getPredictions();
         ASSERT_TRUE(clonePredictions.isPresent());
         ASSERT_EQ(clonePredictions.get().getDataType(), predictionsDataType);
-        ASSERT_EQ(clonePredictions.get().getDimensions(), dimensions);
+        ASSERT_EQ(clonePredictions.get().getDimensions(), predictionsDimensions);
 
         Optional<Tensor> cloneLoss = clone->getLoss();
         ASSERT_TRUE(cloneLoss.isPresent());
