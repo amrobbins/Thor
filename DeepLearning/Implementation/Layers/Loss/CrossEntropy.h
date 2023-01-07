@@ -5,6 +5,7 @@
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include <cudnn_ops_infer.h>
+#include <memory>
 
 #include <assert.h>
 #include <chrono>
@@ -41,7 +42,6 @@ class CrossEntropy : public Loss {
     void launchCrossEntropyWithFP32PredictionsAndFP32Loss();
 
     unsigned int batchSize;
-    BatchReduce *batchReduce;
 
     // Either takes an integer index (one per batch item) or a vector of floats (one per class per batch item)
     // to indicate an example's true class

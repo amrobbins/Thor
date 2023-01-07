@@ -36,7 +36,6 @@ class MeanSquaredError : public Loss {
     void launchMeanSquaredErrorWithFP32PredictionsAndFP32Loss();
 
     unsigned int batchSize;
-    BatchReduce *batchReduce;
     cudnnTensorDescriptor_t errorOutputCudnnTensorDescriptor;
 };
 

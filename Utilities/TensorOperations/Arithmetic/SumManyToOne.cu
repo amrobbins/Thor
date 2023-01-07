@@ -1,6 +1,6 @@
 #include "SumManyToOne.h"
 
-// 1. A block is 256 threads, each thread accumulates one element at a time, untill all elements have been accumulated for one item in a
+// 1. A block is 256 threads, each thread accumulates one element at a time, until all elements have been accumulated for one item in a
 // batch
 // 2. A reduction is performed across these 256 threads, resulting in one sum per batch, which is the summation of every element in that
 // batch. batchSize blocks are launched to handle the whole batch

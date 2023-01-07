@@ -3,27 +3,19 @@
 using namespace ThorImplementation;
 using namespace std;
 
-CrossEntropy::CrossEntropy() : Loss() {
-    batchReduce = nullptr;
-    crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED;
-}
+CrossEntropy::CrossEntropy() : Loss() { crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED; }
 
 CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, bool indexLabels) : Loss() {
     // Just to be clear, index labels is a feature for categorical only:
     assert(!(crossEntropyLossType == CrossEntropyLossType::BINARY && indexLabels == true));
 
-    batchReduce = nullptr;
     this->indexLabels = indexLabels;
 
     assert(crossEntropyLossType == CrossEntropyLossType::BINARY || crossEntropyLossType == CrossEntropyLossType::CATEGORICAL);
     this->crossEntropyLossType = crossEntropyLossType;
 }
 
-CrossEntropy::~CrossEntropy() {
-    if (batchReduce)
-        delete batchReduce;
-    batchReduce = nullptr;
-}
+CrossEntropy::~CrossEntropy() {}
 
 void CrossEntropy::compile() {
     assert(featureInput.isPresent());

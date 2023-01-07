@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/TensorOperations/Loss/MeanSquaredError.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include <chrono>
 #include <thread>
@@ -10,13 +9,9 @@
 using namespace ThorImplementation;
 using namespace std;
 
-MeanSquaredError::~MeanSquaredError() {
-    if (batchReduce)
-        delete batchReduce;
-    batchReduce = nullptr;
-}
+MeanSquaredError::~MeanSquaredError() {}
 
-MeanSquaredError::MeanSquaredError() : Loss() { batchReduce = nullptr; }
+MeanSquaredError::MeanSquaredError() : Loss() {}
 
 void MeanSquaredError::compile() {
     assert(featureInput.isPresent());

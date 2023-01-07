@@ -89,6 +89,12 @@ class Layer {
                                  const Thor::Layer *loadingApiLayer = nullptr,
                                  const Thor::Tensor connectingApiTensor = Thor::Tensor());
 
+    static void connectTwoLayers(std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                 std::shared_ptr<ThorImplementation::Layer> loadingLayer,
+                                 const std::shared_ptr<Thor::Layer> drivingApiLayer = nullptr,
+                                 const std::shared_ptr<Thor::Layer> loadingApiLayer = nullptr,
+                                 const Thor::Tensor connectingApiTensor = Thor::Tensor());
+
     bool initialized;
 
    private:

@@ -216,6 +216,76 @@ template void launchComputeCategoricalAccuracy_perClassLabels<float, uint8_t>(fl
                                                                               uint32_t batchSize,
                                                                               Stream stream);
 
+template void launchComputeCategoricalAccuracy_perClassLabels<half, uint16_t>(float *accuracy_d,
+                                                                              half *predictions_d,
+                                                                              uint16_t *labels_d,
+                                                                              uint8_t *workspace_d,
+                                                                              uint32_t numClasses,
+                                                                              uint32_t batchSize,
+                                                                              Stream stream);
+template void launchComputeCategoricalAccuracy_perClassLabels<float, uint16_t>(float *accuracy_d,
+                                                                               float *predictions_d,
+                                                                               uint16_t *labels_d,
+                                                                               uint8_t *workspace_d,
+                                                                               uint32_t numClasses,
+                                                                               uint32_t batchSize,
+                                                                               Stream stream);
+
+template void launchComputeCategoricalAccuracy_perClassLabels<half, uint32_t>(float *accuracy_d,
+                                                                              half *predictions_d,
+                                                                              uint32_t *labels_d,
+                                                                              uint8_t *workspace_d,
+                                                                              uint32_t numClasses,
+                                                                              uint32_t batchSize,
+                                                                              Stream stream);
+template void launchComputeCategoricalAccuracy_perClassLabels<float, uint32_t>(float *accuracy_d,
+                                                                               float *predictions_d,
+                                                                               uint32_t *labels_d,
+                                                                               uint8_t *workspace_d,
+                                                                               uint32_t numClasses,
+                                                                               uint32_t batchSize,
+                                                                               Stream stream);
+
+template void launchComputeCategoricalAccuracy_perClassLabels<half, int8_t>(
+    float *accuracy_d, half *predictions_d, int8_t *labels_d, uint8_t *workspace_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchComputeCategoricalAccuracy_perClassLabels<float, int8_t>(float *accuracy_d,
+                                                                             float *predictions_d,
+                                                                             int8_t *labels_d,
+                                                                             uint8_t *workspace_d,
+                                                                             uint32_t numClasses,
+                                                                             uint32_t batchSize,
+                                                                             Stream stream);
+
+template void launchComputeCategoricalAccuracy_perClassLabels<half, int16_t>(float *accuracy_d,
+                                                                             half *predictions_d,
+                                                                             int16_t *labels_d,
+                                                                             uint8_t *workspace_d,
+                                                                             uint32_t numClasses,
+                                                                             uint32_t batchSize,
+                                                                             Stream stream);
+template void launchComputeCategoricalAccuracy_perClassLabels<float, int16_t>(float *accuracy_d,
+                                                                              float *predictions_d,
+                                                                              int16_t *labels_d,
+                                                                              uint8_t *workspace_d,
+                                                                              uint32_t numClasses,
+                                                                              uint32_t batchSize,
+                                                                              Stream stream);
+
+template void launchComputeCategoricalAccuracy_perClassLabels<half, int32_t>(float *accuracy_d,
+                                                                             half *predictions_d,
+                                                                             int32_t *labels_d,
+                                                                             uint8_t *workspace_d,
+                                                                             uint32_t numClasses,
+                                                                             uint32_t batchSize,
+                                                                             Stream stream);
+template void launchComputeCategoricalAccuracy_perClassLabels<float, int32_t>(float *accuracy_d,
+                                                                              float *predictions_d,
+                                                                              int32_t *labels_d,
+                                                                              uint8_t *workspace_d,
+                                                                              uint32_t numClasses,
+                                                                              uint32_t batchSize,
+                                                                              Stream stream);
+
 template void launchComputeCategoricalAccuracy_perClassLabels<half, half>(
     float *accuracy_d, half *predictions_d, half *labels_d, uint8_t *workspace_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
 template void launchComputeCategoricalAccuracy_perClassLabels<float, half>(
@@ -270,3 +340,43 @@ template void launchComputeCategoricalAccuracy_classIndexLabels<float, uint32_t>
                                                                                  uint32_t numClasses,
                                                                                  uint32_t batchSize,
                                                                                  Stream stream);
+
+template void launchComputeCategoricalAccuracy_classIndexLabels<half, int8_t>(
+    float *accuracy_d, half *predictions_d, int8_t *labels_d, uint8_t *workspace_d, uint32_t numClasses, uint32_t batchSize, Stream stream);
+template void launchComputeCategoricalAccuracy_classIndexLabels<float, int8_t>(float *accuracy_d,
+                                                                               float *predictions_d,
+                                                                               int8_t *labels_d,
+                                                                               uint8_t *workspace_d,
+                                                                               uint32_t numClasses,
+                                                                               uint32_t batchSize,
+                                                                               Stream stream);
+
+template void launchComputeCategoricalAccuracy_classIndexLabels<half, int16_t>(float *accuracy_d,
+                                                                               half *predictions_d,
+                                                                               int16_t *labels_d,
+                                                                               uint8_t *workspace_d,
+                                                                               uint32_t numClasses,
+                                                                               uint32_t batchSize,
+                                                                               Stream stream);
+template void launchComputeCategoricalAccuracy_classIndexLabels<float, int16_t>(float *accuracy_d,
+                                                                                float *predictions_d,
+                                                                                int16_t *labels_d,
+                                                                                uint8_t *workspace_d,
+                                                                                uint32_t numClasses,
+                                                                                uint32_t batchSize,
+                                                                                Stream stream);
+
+template void launchComputeCategoricalAccuracy_classIndexLabels<half, int32_t>(float *accuracy_d,
+                                                                               half *predictions_d,
+                                                                               int32_t *labels_d,
+                                                                               uint8_t *workspace_d,
+                                                                               uint32_t numClasses,
+                                                                               uint32_t batchSize,
+                                                                               Stream stream);
+template void launchComputeCategoricalAccuracy_classIndexLabels<float, int32_t>(float *accuracy_d,
+                                                                                float *predictions_d,
+                                                                                int32_t *labels_d,
+                                                                                uint8_t *workspace_d,
+                                                                                uint32_t numClasses,
+                                                                                uint32_t batchSize,
+                                                                                Stream stream);

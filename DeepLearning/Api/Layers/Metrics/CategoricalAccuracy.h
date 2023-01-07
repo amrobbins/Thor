@@ -40,6 +40,7 @@ class CategoricalAccuracy : public Metric {
     }
 
     LabelType labelType;
+    uint32_t numClasses;
 };
 
 class CategoricalAccuracy::Builder {
@@ -51,23 +52,24 @@ class CategoricalAccuracy::Builder {
         assert(_predictions.get() != _labels.get());
         assert(_labelType.isPresent());
         assert(_labelType == LabelType::INDEX || _labelType == LabelType::ONE_HOT);
+        CategoricalAccuracy categoricalAccuracy;
         if (_labelType == LabelType::ONE_HOT) {
+            std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
+            assert(labelDimensions.size() == 1 && labelDimensions[0] > 1);
             assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
+            categoricalAccuracy.numClasses = _predictions.get().getDimensions()[0];
         } else {
             std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
-            assert(labelDimensions.size() == 1 || labelDimensions.size() == 2);
-            assert(predictionDimensions[0] == labelDimensions[0]);
-            if (labelDimensions.size() == 2)
-                assert(_labels.get().getDimensions()[1] == 1);
-            else
-                _labels.get().reshape({predictionDimensions[0], 1});
+            assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
             Tensor::DataType labelsDataType = _labels.get().getDataType();
             assert(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
                    labelsDataType == Tensor::DataType::UINT32);
+            assert(_numClasses.isPresent());
+            assert(predictionDimensions.size() == 1 && predictionDimensions[0] == _numClasses);
+            categoricalAccuracy.numClasses = _numClasses;
         }
 
-        CategoricalAccuracy categoricalAccuracy;
         categoricalAccuracy.featureInput = _predictions;
         categoricalAccuracy.labelsTensor = _labels;
         categoricalAccuracy.metricTensor = Tensor(Tensor::DataType::FP32, {1});
@@ -102,9 +104,11 @@ class CategoricalAccuracy::Builder {
      * One number is passed per item in the batch.
      * Soft labels are not supported in this case.
      */
-    virtual CategoricalAccuracy::Builder &receivesClassIndexLabels() {
+    virtual CategoricalAccuracy::Builder &receivesClassIndexLabels(uint32_t numClasses) {
         assert(!_labelType.isPresent());
+        assert(numClasses > 1);
         _labelType = LabelType::INDEX;
+        this->_numClasses = numClasses;
         return *this;
     }
 
@@ -124,6 +128,7 @@ class CategoricalAccuracy::Builder {
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
     Optional<LabelType> _labelType;
+    Optional<uint32_t> _numClasses;
 };
 
 }  // namespace Thor

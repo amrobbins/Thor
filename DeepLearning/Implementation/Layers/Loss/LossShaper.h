@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
+#include <memory>
+
 namespace ThorImplementation {
 
 /**
@@ -36,7 +38,7 @@ class LossShaper : public Layer {
     bool uninitialized;
 
     OutputLossType outputLossType;
-    BatchReduce *batchReduce;
+    std::shared_ptr<BatchReduce> batchReduce;
 };
 
 }  // namespace ThorImplementation

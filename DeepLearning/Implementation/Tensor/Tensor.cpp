@@ -82,10 +82,10 @@ void Tensor::allocateMemory() {
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
-    // All tensors end on an 8 byte boundary so that kernels can overshoot when writing arrays of type half4
+    // All tensors end on an 16 byte boundary so that kernels can overshoot when writing arrays of type half4 or float4
     // without risking accessing another memory block
-    memBytes = (memBytes + 7) / 8;
-    memBytes *= 8;
+    memBytes = (memBytes + 15) / 16;
+    memBytes *= 16;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
