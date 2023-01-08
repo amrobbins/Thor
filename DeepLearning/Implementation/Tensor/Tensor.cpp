@@ -1,7 +1,5 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
-#include "Thor.h"
-
 using namespace ThorImplementation;
 using namespace std;
 

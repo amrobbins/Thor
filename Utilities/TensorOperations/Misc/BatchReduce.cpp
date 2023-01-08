@@ -30,10 +30,17 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
 
     doubleType = sourceDataType == TensorDescriptor::DataType::FP64;
 
+    this->batchletSize = batchSize;
+    this->batchSize = batchSize;
+    this->classDimSize = classDimSize;
     this->reduceBatch = reduceBatch;
     this->reduceClass = reduceClass;
 
     assert(batchSize > 0);
+    assert(classDimSize > 0);
+    if (isWire() || isScalarDivide()) {
+        return;
+    }
 
     if (doubleType) {
         assert(destDataType == TensorDescriptor::DataType::FP64);
@@ -55,14 +62,23 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     workspaceSizeInBytes = computeWorkspaceSizeInBytes(batchletSize, batchSize, classDimSize, sourceDataType, destDataType);
     if (workspaceSizeInBytes > 0)
         workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
-                           TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+                           TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 }
+
+bool BatchReduce::isWire() { return batchletSize == 1 && classDimSize == 1 && batchSize == 1; }
+
+bool BatchReduce::isScalarDivide() { return batchletSize == 1 && classDimSize == 1 && batchSize != 1; }
 
 uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                                   uint32_t batchSize,
                                                   uint32_t classDimSize,
                                                   TensorDescriptor::DataType sourceDataType,
                                                   TensorDescriptor::DataType destDataType) {
+    if (isWire() || isScalarDivide()) {
+        workspaceSizeInBytes = 0;
+        return workspaceSizeInBytes;
+    }
+
     cudnnStatus_t cudnnStatus;
     cudnnStatus = cudnnCreateReduceTensorDescriptor(&reduceTensorDescriptor);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -88,26 +104,59 @@ uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
 uint64_t BatchReduce::getWorkspaceSizeInBytes() { return workspaceSizeInBytes; }
 
 BatchReduce::~BatchReduce() {
+    if (isWire() || isScalarDivide())
+        return;
+
     cudnnStatus_t cudnnStatus;
 
     cudnnStatus = cudnnDestroyReduceTensorDescriptor(reduceTensorDescriptor);
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
     if (doubleType) {
-        delete (double *)zero;
-        delete (double *)one;
-        delete (double *)batchScale;
+        if (zero != nullptr) {
+            delete (double *)zero;
+            zero = nullptr;
+        }
+        if (one != nullptr) {
+            delete (double *)one;
+            one = nullptr;
+        }
+        if (batchScale != nullptr) {
+            delete (double *)batchScale;
+            batchScale = nullptr;
+        }
     } else {
-        delete (float *)zero;
-        delete (float *)one;
-        delete (float *)batchScale;
+        if (zero != nullptr) {
+            delete (float *)zero;
+            zero = nullptr;
+        }
+        if (one != nullptr) {
+            delete (float *)one;
+            one = nullptr;
+        }
+        if (batchScale != nullptr) {
+            delete (float *)batchScale;
+            batchScale = nullptr;
+        }
     }
 }
 
 Stream BatchReduce::getStream() { return stream; }
 
-void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
+void BatchReduce::reduce(Tensor source, Tensor dest) {
+    if (isWire()) {
+        if (source != dest)
+            dest.copyFromAsync(source, stream);
+        return;
+    } else if (isScalarDivide()) {
+        dest.divide(source, batchSize, stream);
+        return;
+    }
+
     cudnnStatus_t cudnnStatus;
+
+    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
     cudnnStatus = cudnnReduceTensor(stream.getCudnnHandle(),
                                     reduceTensorDescriptor,
@@ -117,10 +166,14 @@ void BatchReduce::reduce(void *sourceMem_d, void *destMem_d) {
                                     workspaceSizeInBytes,
                                     reduceBatch ? batchScale : one,
                                     sourceTensorDescriptor,
-                                    sourceMem_d,
+                                    source.getMemPtr(),
                                     zero,
                                     destTensorDescriptor,
-                                    destMem_d);
+                                    dest.getMemPtr());
 
+    if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
+        printf("cudnnStatus %d : %s\n", cudnnStatus, cudnnGetErrorString(cudnnStatus));
+        fflush(stdout);
+    }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }

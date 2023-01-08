@@ -86,7 +86,7 @@ void GpuConvolution::chooseOptimalKernelForward(ConvolutionKernelRequirement con
         // if (workspaceSizeInBytes > maxWorkspaceSizeInBytes)
         //    continue;
         if (workspaceSizeInBytes > 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
         assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
@@ -202,7 +202,7 @@ void GpuConvolution::chooseOptimalKernelBackwardData(ConvolutionKernelRequiremen
 
         Optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
         assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);
@@ -317,7 +317,7 @@ void GpuConvolution::chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirem
         //    continue;
         Optional<Tensor> workspace;
         if (workspaceSizeInBytes > 0)
-            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes));
+            workspace = Tensor(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 
         // Clear any possible runtime errors
         assert(cudnnQueryRuntimeError(stream.getCudnnHandle(), &cudnnStatus, CUDNN_ERRQUERY_BLOCKING, nullptr) == CUDNN_STATUS_SUCCESS);

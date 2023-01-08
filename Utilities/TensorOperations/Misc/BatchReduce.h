@@ -28,9 +28,12 @@ class BatchReduce {
 
     uint64_t getWorkspaceSizeInBytes();
 
-    void reduce(void *sourceMem_d, void *destMem_d);
+    void reduce(Tensor source, Tensor dest);
 
     Stream getStream();
+
+    bool isWire();
+    bool isScalarDivide();
 
    protected:
     uint64_t computeWorkspaceSizeInBytes(uint32_t batchletSize,
@@ -46,11 +49,14 @@ class BatchReduce {
     ThorImplementation::Tensor workspace;
     uint64_t workspaceSizeInBytes;
     bool doubleType;
+    uint32_t batchletSize;
+    uint32_t batchSize;
+    uint32_t classDimSize;
     bool reduceBatch;
     bool reduceClass;
-    void *batchScale;
-    void *zero;
-    void *one;
+    void *batchScale = nullptr;
+    void *zero = nullptr;
+    void *one = nullptr;
 };
 
 }  // namespace ThorImplementation

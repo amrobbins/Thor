@@ -22,8 +22,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(featureInputs.back().isPresent());
 
         return Tensor(featureInputs.back().get().getPlacement(),
-                      TensorDescriptor(
-                          TensorDescriptor::DataType::FP16, featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures));
+                      TensorDescriptor(TensorDescriptor::DataType::FP16,
+                                       {featureInputs[0].get().getDescriptor().getDimensions()[0], numOutputFeatures}));
     }
 
     virtual void createWeightsIfNecessary() {
@@ -37,7 +37,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                 weightsGradient = weights.clone();
             if (hasBias) {
                 biases = Tensor(featureInputs.front().get().getPlacement(),
-                                TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputFeatures));
+                                TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputFeatures}));
                 if (!isInferenceOnly())
                     biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
             }

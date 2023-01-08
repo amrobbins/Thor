@@ -730,13 +730,16 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     C.reserve(numInstances);
     workspace.reserve(numWorkspaceInstances);
     for (int i = 0; i < numInstances; ++i) {
-        A.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(ABCDataType, rowsA, ldA));
-        B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(ABCDataType, rowsB, ldB));
-        C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(ABCDataType, rowsC, ldC));
+        A.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                       TensorDescriptor(ABCDataType, {(uint64_t)rowsA, (uint64_t)ldA}));
+        B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                       TensorDescriptor(ABCDataType, {(uint64_t)rowsB, (uint64_t)ldB}));
+        C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                       TensorDescriptor(ABCDataType, {(uint64_t)rowsC, (uint64_t)ldC}));
     }
     for (int i = 0; i < numWorkspaceInstances; ++i) {
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                               TensorDescriptor(TensorDescriptor::DataType::UINT8, maxWorkspaceSizeInBytes));
+                               TensorDescriptor(TensorDescriptor::DataType::UINT8, {maxWorkspaceSizeInBytes}));
     }
 
     vector<CublasKernel> prunedKernels;

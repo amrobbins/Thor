@@ -49,6 +49,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
 				build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
+				build/test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest && \
 				build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
 				build/test/DeepLearning/Api/Layers/Learning/FullyConnectedTest && \
                 build/test/DeepLearning/Api/Layers/Learning/Convolution2dTest && \
@@ -87,6 +88,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 
 				# FIXME: rebuild and put back
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
+				# Tests for Tensor add/multiply etc
 				# Improve coverage of tensorFanout
 
 
@@ -133,6 +135,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Api/Layers/Loss/LossShaperTest \
 			build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest \
 			build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
+			build/test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest \
 			build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest \
 
 
@@ -183,6 +186,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
                    build/Utilities/ComputeTopology/MachineEvaluator.o \
                    build/DeepLearning/Implementation/Tensor/Tensor.o \
+                   build/DeepLearning/Implementation/Tensor/TensorKernels.o \
                    build/DeepLearning/Implementation/Layers/Layer.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
@@ -300,6 +304,10 @@ build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o:
 build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o: Utilities/TensorOperations/TypeConversions/TypeConverter.h Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
+
+build/DeepLearning/Implementation/Tensor/TensorKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorKernels.cu
+	mkdir -p build/DeepLearning/Implementation/Tensor
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorKernels.cu
 
 #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
 #	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
@@ -798,6 +806,10 @@ build/test/Utilities/TensorOperations/Misc/MiscTest: build/test/googletest/libgt
 build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/Misc/
 	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest -std=c++11 -pthread test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest.cpp $(THOR)
+	mkdir -p build/test/Utilities/TensorOperations/Misc/
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest -std=c++11 -pthread test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest.cpp $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/Misc/BatchReduceTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Misc/BatchReduceTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/Misc/

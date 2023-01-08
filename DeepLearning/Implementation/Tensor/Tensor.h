@@ -63,6 +63,7 @@ class Tensor : private ReferenceCounted {
     void *getMemPtr() { return mem; }
     void *getElement(std::vector<unsigned long> dimensionIndex);
     TensorDescriptor getDescriptor();
+
     unsigned long getTensorId() { return instanceId; }
 
     void copyFromAsync(Tensor source, Stream stream);
@@ -73,6 +74,19 @@ class Tensor : private ReferenceCounted {
     void resize(std::vector<unsigned long> dimensions);
     void concatenateFrom(std::vector<Tensor> sources);
     void splitInto(std::vector<Tensor> destinations);
+
+    // The multiplier is casted to the type of the source tensor, same behavior for the other scalar operations:
+    // The functions that have a source tensor perform the operation on the source tensor and write into this tensor
+    // Both tensors must be on the same device.
+    // The functions without a source tensor perform the operation in place on this tensor
+    void add(Tensor source, double addend, Stream stream);
+    void subtract(Tensor source, double subtrahend, Stream stream);
+    void multiply(Tensor source, double multiplier, Stream stream);
+    void divide(Tensor source, double divisor, Stream stream);
+    void add(double addend, Stream stream);
+    void subtract(double subtrahend, Stream stream);
+    void multiply(double multiplier, Stream stream);
+    void divide(double divisor, Stream stream);
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
