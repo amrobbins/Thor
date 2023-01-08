@@ -15,6 +15,11 @@ class CategoricalAccuracy : public Metric {
     virtual ~CategoricalAccuracy() {}
     CategoricalAccuracy() {}
 
+    virtual Optional<Tensor> createFeatureOutputTensor() {
+        TensorPlacement placement = featureInput.get().getPlacement();
+        return Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1U}));
+    }
+
     virtual void compile() {
         assert(labelsInput.isPresent());
         assert(labelsInput.get().isInitialized());

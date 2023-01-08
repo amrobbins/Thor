@@ -24,28 +24,6 @@ class TensorDescriptor {
         construct();
     }
 
-    TensorDescriptor(DataType dataType, unsigned long dimension0Size) : dataType(dataType) {
-        dimensions.push_back(dimension0Size);
-
-        construct();
-    }
-
-    TensorDescriptor(DataType dataType, unsigned long dimension0Size, unsigned long dimension1Size) : dataType(dataType) {
-        dimensions.push_back(dimension0Size);
-        dimensions.push_back(dimension1Size);
-
-        construct();
-    }
-
-    TensorDescriptor(DataType dataType, unsigned long dimension0Size, unsigned long dimension1Size, unsigned long dimension2Size)
-        : dataType(dataType) {
-        dimensions.push_back(dimension0Size);
-        dimensions.push_back(dimension1Size);
-        dimensions.push_back(dimension2Size);
-
-        construct();
-    }
-
     TensorDescriptor(DataType dataType,
                      unsigned long dimension0Size,
                      unsigned long dimension1Size,
