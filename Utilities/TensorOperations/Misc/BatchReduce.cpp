@@ -30,7 +30,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
 
     doubleType = sourceDataType == TensorDescriptor::DataType::FP64;
 
-    this->batchletSize = batchSize;
+    this->batchletSize = batchletSize;
     this->batchSize = batchSize;
     this->classDimSize = classDimSize;
     this->reduceBatch = reduceBatch;
