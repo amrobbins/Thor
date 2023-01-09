@@ -14,7 +14,21 @@ TEST(BatchReduce, reduce) {
     for (uint32_t i = 0; i < 10; ++i) {
         uint32_t dim0 = (rand() % 500) + 1;
         uint32_t dim1 = (rand() % 100) + 1;
+        uint32_t scale = dim0;
+        if (i == 0) {
+            // Test hard-wire optimization
+            dim0 = 1;
+            dim1 = 1;
+            scale = 1;
+        } else if (i == 1) {
+            // Test scalar divide optimization
+            dim0 = 1;
+            dim1 = 1;
+            scale = 2 + (rand() % 100);
+        }
+
         Tensor sourceT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim0, dim1}));
+        Tensor brSourceT(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim0, dim1}));
         Tensor destT(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim1}));
         Tensor brdestT(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim1}));
         Tensor brdestTCpu(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {dim1}));
@@ -32,23 +46,24 @@ TEST(BatchReduce, reduce) {
             }
         }
 
+        brSourceT.copyFromAsync(sourceT, stream);
         brdestT.copyFromAsync(destT, stream);
         BatchReduce batchReduce(dim0,
-                                dim0,
+                                scale,
                                 dim1,
                                 true,
                                 false,
                                 ThorImplementation::TensorDescriptor::DataType::FP32,
                                 ThorImplementation::TensorDescriptor::DataType::FP32,
                                 stream);
-        batchReduce.reduce(source, brdestT.getMemPtr());
+        batchReduce.reduce(brSourceT, brdestT);
         brdestTCpu.copyFromAsync(brdestT, stream);
         stream.synchronize();
 
         float *brdest = (float *)brdestTCpu.getMemPtr();
         const float thresh = 0.001;
         for (uint32_t col = 0; col < dim1; ++col) {
-            ASSERT_LT(abs(dest[col] / (float)dim0 - brdest[col]), thresh);
+            ASSERT_LT(abs(dest[col] / (float)scale - brdest[col]), thresh);
         }
     }
 }
