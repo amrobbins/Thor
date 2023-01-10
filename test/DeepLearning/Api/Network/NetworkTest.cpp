@@ -696,17 +696,51 @@ TEST(Network, AlexnetIsProperlyFormed) {
     // Forward
     ThorImplementation::TensorFanout *fo0;
     ThorImplementation::TensorFanout *fo1;
+    ThorImplementation::TensorFanout *fo2;
     if (labels->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get()) {
         fo0 = fo[0];
-        fo1 = fo[1];
-    } else {
+        if (images->getFeatureOutput().get() == fo[1]->getFeatureInputs()[0].get()) {
+            fo1 = fo[1];
+            fo2 = fo[2];
+        } else {
+            fo1 = fo[2];
+            fo2 = fo[1];
+        }
+    } else if (labels->getFeatureOutput().get() == fo[1]->getFeatureInputs()[0].get()) {
         fo0 = fo[1];
+        if (images->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get()) {
+            fo1 = fo[0];
+            fo2 = fo[2];
+        } else {
+            fo1 = fo[2];
+            fo2 = fo[0];
+        }
+        fo1 = fo[0];
+    } else {
+        fo0 = fo[2];
+        if (images->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get()) {
+            fo1 = fo[0];
+            fo2 = fo[1];
+        } else {
+            fo1 = fo[1];
+            fo2 = fo[0];
+        }
         fo1 = fo[0];
     }
 
     // Fanouts
     // Note: All tensor fanouts must be optimized away since they each have 0 or 1 populated error inputs
     //       Optimization applies by forwarding the errorInput from the previous layer rather than instatiating one.
+    if (labels->getFeatureOutput().get() != fo0->getFeatureInputs()[0].get()) {
+        printf("labels = fo0 ? %i fo1 %i fo2 %i fo[0] %i fo[1] %i fo[2] %i\n",
+               labels->getFeatureOutput().get() == fo0->getFeatureInputs()[0].get(),
+               labels->getFeatureOutput().get() == fo1->getFeatureInputs()[0].get(),
+               labels->getFeatureOutput().get() == fo2->getFeatureInputs()[0].get(),
+               labels->getFeatureOutput().get() == fo[0]->getFeatureInputs()[0].get(),
+               labels->getFeatureOutput().get() == fo[1]->getFeatureInputs()[0].get(),
+               labels->getFeatureOutput().get() == fo[2]->getFeatureInputs()[0].get());
+        fflush(stdout);
+    }
     ASSERT_EQ(labels->getFeatureOutput().get(), fo0->getFeatureInputs()[0].get());
     ASSERT_EQ(fo0->getFeatureOutputs()[0].get(), fo0->getFeatureInputs()[0].get());
     ASSERT_EQ(fo0->getStreams().size(), 2U);
@@ -715,10 +749,10 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(fo1->getFeatureOutputs()[0].get(), fo1->getFeatureInputs()[0].get());
     ASSERT_EQ(fo1->getStreams().size(), 2U);
     ASSERT_EQ(fo1->getFeatureOutputs().size(), 1U);
-    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
-    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), fo[2]->getFeatureInputs()[0].get());
-    ASSERT_EQ(fo[2]->getStreams().size(), 3U);
-    ASSERT_EQ(fo[2]->getFeatureOutputs().size(), 1U);
+    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo2->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo2->getFeatureOutputs()[0].get(), fo2->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo2->getStreams().size(), 3U);
+    ASSERT_EQ(fo2->getFeatureOutputs().size(), 1U);
 
     // Conv top
     ASSERT_EQ(images->getFeatureOutput().get(), fo1->getFeatureInputs()[0].get());
@@ -767,15 +801,15 @@ TEST(Network, AlexnetIsProperlyFormed) {
 
     // Categorical Cross Entropy
     ASSERT_EQ(fc2->getFeatureOutputs()[0].get(), sm[0]->getFeatureInput().get());
-    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
-    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), ccl[0]->getFeatureInput().get());
+    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo2->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo2->getFeatureOutputs()[0].get(), ccl[0]->getFeatureInput().get());
     ASSERT_EQ(ccl[0]->getFeatureOutput().get(), ls[0]->getFeatureInput().get());
     ASSERT_EQ(labels->getFeatureOutput().get(), fo0->getFeatureInputs()[0].get());
     ASSERT_EQ(fo0->getFeatureOutputs()[0].get(), ccl[0]->getLabelsInput().get());
 
     // Categorical accuracy
-    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo[2]->getFeatureInputs()[0].get());
-    ASSERT_EQ(fo[2]->getFeatureInputs()[0].get(), acc[0]->getFeatureInput().get());
+    ASSERT_EQ(sm[0]->getFeatureOutput().get(), fo2->getFeatureInputs()[0].get());
+    ASSERT_EQ(fo2->getFeatureInputs()[0].get(), acc[0]->getFeatureInput().get());
     ASSERT_EQ(labels->getFeatureOutput().get(), fo0->getFeatureOutputs()[0].get());
     ASSERT_EQ(fo0->getFeatureOutputs()[0].get(), ccl[0]->getLabelsInput().get());
 
@@ -783,7 +817,7 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(ls[0]->getFeatureOutput().get(), loss->getFeatureInput().get());
 
     // Predictions output
-    ASSERT_EQ(fo[2]->getFeatureOutputs()[0].get(), tc[0]->getFeatureInput().get());
+    ASSERT_EQ(fo2->getFeatureOutputs()[0].get(), tc[0]->getFeatureInput().get());
     ASSERT_EQ(tc[0]->getFeatureOutput().get(), predictions->getFeatureInput().get());
 
     // Accuracy Output
@@ -802,10 +836,10 @@ TEST(Network, AlexnetIsProperlyFormed) {
     ASSERT_EQ(numPresentTensors(fo1->getErrorInputs()), 0U);
     ASSERT_EQ(fo1->getErrorOutputs().size(), 1U);
     ASSERT_TRUE(fo1->getErrorOutputs()[0].isEmpty());
-    ASSERT_EQ(fo[2]->getErrorInputs().size(), 3U);
-    ASSERT_EQ(numPresentTensors(fo[2]->getErrorInputs()), 1U);
-    ASSERT_EQ(fo[2]->getErrorOutputs().size(), 1U);
-    ASSERT_TRUE(fo[2]->getErrorOutputs()[0].isPresent());
+    ASSERT_EQ(fo2->getErrorInputs().size(), 3U);
+    ASSERT_EQ(numPresentTensors(fo2->getErrorInputs()), 1U);
+    ASSERT_EQ(fo2->getErrorOutputs().size(), 1U);
+    ASSERT_TRUE(fo2->getErrorOutputs()[0].isPresent());
 
     ASSERT_EQ(cv[0]->getErrorOutputs().size(), 1U);
     ASSERT_EQ(cv[0]->getErrorInputs()[0].get(), r[0]->getErrorOutput().get());
@@ -851,16 +885,16 @@ TEST(Network, AlexnetIsProperlyFormed) {
     // Loss
     ASSERT_TRUE(ccl[0]->getErrorInput().isEmpty());
     ASSERT_TRUE(ccl[0]->getErrorOutput().isPresent());
-    if (fo[2]->getErrorInputs()[0].isPresent()) {
-        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo[2]->getErrorInputs()[0].get());
+    if (fo2->getErrorInputs()[0].isPresent()) {
+        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo2->getErrorInputs()[0].get());
     }
-    if (fo[2]->getErrorInputs()[1].isPresent()) {
-        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo[2]->getErrorInputs()[1].get());
+    if (fo2->getErrorInputs()[1].isPresent()) {
+        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo2->getErrorInputs()[1].get());
     }
-    if (fo[2]->getErrorInputs()[2].isPresent()) {
-        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo[2]->getErrorInputs()[2].get());
+    if (fo2->getErrorInputs()[2].isPresent()) {
+        ASSERT_EQ(ccl[0]->getErrorOutput().get(), fo2->getErrorInputs()[2].get());
     }
-    ASSERT_EQ(fo[2]->getErrorOutputs()[0].get(), sm[0]->getErrorInput().get());
+    ASSERT_EQ(fo2->getErrorOutputs()[0].get(), sm[0]->getErrorInput().get());
     ASSERT_EQ(ccl[0]->getErrorOutput().get(), sm[0]->getErrorInput().get());
     ASSERT_TRUE(sm[0]->isBackwardComputedExternally());
     ASSERT_EQ(ccl[0]->getErrorOutput().get(), fc2->getErrorInputs()[0].get());

@@ -20,55 +20,7 @@ class TensorDescriptor {
 
     TensorDescriptor() {}
 
-    TensorDescriptor(DataType dataType, const std::vector<unsigned long> &dimensions) : dataType(dataType), dimensions(dimensions) {
-        construct();
-    }
-
-    TensorDescriptor(DataType dataType,
-                     unsigned long dimension0Size,
-                     unsigned long dimension1Size,
-                     unsigned long dimension2Size,
-                     unsigned long dimension3Size)
-        : dataType(dataType) {
-        dimensions.push_back(dimension0Size);
-        dimensions.push_back(dimension1Size);
-        dimensions.push_back(dimension2Size);
-        dimensions.push_back(dimension3Size);
-
-        construct();
-    }
-
-    TensorDescriptor(DataType dataType,
-                     unsigned long dimension0Size,
-                     unsigned long dimension1Size,
-                     unsigned long dimension2Size,
-                     unsigned long dimension3Size,
-                     unsigned long dimension4Size)
-        : dataType(dataType) {
-        dimensions.push_back(dimension0Size);
-        dimensions.push_back(dimension1Size);
-        dimensions.push_back(dimension2Size);
-        dimensions.push_back(dimension3Size);
-        dimensions.push_back(dimension4Size);
-
-        construct();
-    }
-
-    TensorDescriptor(DataType dataType,
-                     unsigned long dimension0Size,
-                     unsigned long dimension1Size,
-                     unsigned long dimension2Size,
-                     unsigned long dimension3Size,
-                     unsigned long dimension4Size,
-                     unsigned long dimension5Size)
-        : dataType(dataType) {
-        dimensions.push_back(dimension0Size);
-        dimensions.push_back(dimension1Size);
-        dimensions.push_back(dimension2Size);
-        dimensions.push_back(dimension3Size);
-        dimensions.push_back(dimension4Size);
-        dimensions.push_back(dimension5Size);
-
+    TensorDescriptor(DataType dataType, const std::vector<uint64_t> &dimensions) : dataType(dataType), dimensions(dimensions) {
         construct();
     }
 

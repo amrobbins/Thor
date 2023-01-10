@@ -52,7 +52,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         const int leftAndRightPadWidth = filterWidth < 10 ? rand() % filterWidth : rand() % 10;
         const int topAndBottomPadHeight = filterHeight < 10 ? rand() % filterHeight : rand() % 10;
         const int numInputChannels = 1 + (rand() % 10);
-        const int numOutputChannels = 1 + (rand() % 10);
+        const uint64_t numOutputChannels = 1 + (rand() % 10);
         const int batchSize = 1 + (rand() % 10);
         const bool inferenceOnly = (rand() % 4) == 0;
         const bool hasBias = (rand() % 4) != 0;
@@ -106,10 +106,10 @@ TEST(Convolution2d, Convolution2dWorks) {
         TensorDescriptor biasesDescriptor;
         half *biasesMem = nullptr;
         if (hasBias) {
-            biasesDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, numOutputChannels);
+            biasesDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputChannels});
             biasesCpu = Tensor(cpuPlacement, biasesDescriptor);
             biasesMem = (half *)biasesCpu.get().getMemPtr();
-            for (int i = 0; i < numOutputChannels; ++i) {
+            for (uint64_t i = 0; i < numOutputChannels; ++i) {
                 biasesMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
             }
         }
@@ -230,7 +230,7 @@ TEST(Convolution2d, Convolution2dWorks) {
             weightsMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
         if (hasBias) {
-            for (int i = 0; i < numOutputChannels; ++i) {
+            for (uint64_t i = 0; i < numOutputChannels; ++i) {
                 biasesMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
             }
         }

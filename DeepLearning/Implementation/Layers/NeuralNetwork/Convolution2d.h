@@ -89,7 +89,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         numOutputColumns = tempConvolutionKernelRequirement.getNumOutputColumns();
 
         return Tensor(featureInputs.back().get().getPlacement(),
-                      TensorDescriptor(TensorDescriptor::DataType::FP16, batchSize, numOutputChannels, numOutputRows, numOutputColumns));
+                      TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numOutputChannels, numOutputRows, numOutputColumns}));
     }
 
     virtual void compile() {
@@ -266,19 +266,19 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     }
 
    private:
-    const int filterWidth;
-    const int filterHeight;
-    const int filterHorizontalStride;
-    const int filterVerticalStride;
-    const int leftAndRightPadWidth;
-    const int topAndBottomPadHeight;
-    int numInputChannels;
-    const int numOutputChannels;
-    int batchSize;
-    int numInputColumns;
-    int numInputRows;
-    int numOutputColumns;
-    int numOutputRows;
+    const uint32_t filterWidth;
+    const uint32_t filterHeight;
+    const uint32_t filterHorizontalStride;
+    const uint32_t filterVerticalStride;
+    const uint32_t leftAndRightPadWidth;
+    const uint32_t topAndBottomPadHeight;
+    uint64_t numInputChannels;
+    const uint64_t numOutputChannels;
+    uint64_t batchSize;
+    uint64_t numInputColumns;
+    uint64_t numInputRows;
+    uint64_t numOutputColumns;
+    uint64_t numOutputRows;
 
     Optional<ConvolutionKernelRequirement> convolutionKernelRequirement;
 
