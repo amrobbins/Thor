@@ -25,14 +25,14 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 4; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
-        int rowsA = 128 + (rand() % 1500);
-        int colsA = 128 + (rand() % 1500);
-        int rowsB = 128 + (rand() % 1500);
-        int colsB = 128 + (rand() % 1500);
+        uint64_t rowsA = 128 + (rand() % 1500);
+        uint64_t colsA = 128 + (rand() % 1500);
+        uint64_t rowsB = 128 + (rand() % 1500);
+        uint64_t colsB = 128 + (rand() % 1500);
 
         // Now make the operation legal
         if (!transposeA && !transposeB)
@@ -44,9 +44,9 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         if (transposeA && transposeB)
             colsB = rowsA;
 
-        int ldA = colsA;
-        int ldB = colsB;
-        int ldC = transposeB == false ? colsB : rowsB;
+        uint64_t ldA = colsA;
+        uint64_t ldB = colsB;
+        uint64_t ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -55,15 +55,15 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
             ldC += rand() % 10;
         }
 
-        int rowsC = transposeA == false ? rowsA : colsA;
-        int colsC = transposeB == false ? colsB : rowsB;
+        uint64_t rowsC = transposeA == false ? rowsA : colsA;
+        uint64_t colsC = transposeB == false ? colsB : rowsB;
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, rowsB, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, rowsC, ldC);
+        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, {rowsA, ldA});
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, {rowsB, ldB});
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -74,20 +74,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         Tensor C_gpu_h(cpuPlacement, CDescriptor);
 
         float *AMem = (float *)A.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsA; ++col) {
+        for (uint64_t row = 0; row < rowsA; ++row) {
+            for (uint64_t col = 0; col < colsA; ++col) {
                 AMem[row * ldA + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         float *BMem = (float *)B.getMemPtr();
-        for (int row = 0; row < rowsB; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (uint64_t row = 0; row < rowsB; ++row) {
+            for (uint64_t col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         float *CMem = (float *)C.getMemPtr();
-        for (int row = 0; row < rowsC; ++row) {
-            for (int col = 0; col < colsC; ++col) {
+        for (uint64_t row = 0; row < rowsC; ++row) {
+            for (uint64_t col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -134,12 +134,12 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            int workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
+            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
                 0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP32, kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes);
+                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes});
                 workspace_d = Tensor(gpuPlacement, workspaceDescriptor);
             }
         }
@@ -227,19 +227,19 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsC; ++i) {
-            for (int j = 0; j < colsC; ++j) {
+        for (uint64_t i = 0; i < rowsC; ++i) {
+            for (uint64_t j = 0; j < colsC; ++j) {
                 float diff = abs(CMem[i * ldC + j] - CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                    printf("arows %ld acols %ld brows %ld bcols %ld transposeA %i transposeB %i\n",
                            rowsA,
                            colsA,
                            rowsB,
                            colsB,
                            transposeA,
                            transposeB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, CMem[i * ldC + j], CMemGpu[i * ldC + j]);
+                    printf("row %ld col %ld : CPU %f vs %f GPU\n", i, j, CMem[i * ldC + j], CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
@@ -254,14 +254,14 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 4; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
-        int rowsA = 128 + (rand() % 1500);
-        int colsA = 128 + (rand() % 1500);
-        int rowsB = 128 + (rand() % 1500);
-        int colsB = 128 + (rand() % 1500);
+        uint64_t rowsA = 128 + (rand() % 1500);
+        uint64_t colsA = 128 + (rand() % 1500);
+        uint64_t rowsB = 128 + (rand() % 1500);
+        uint64_t colsB = 128 + (rand() % 1500);
 
         // Now make the operation legal
         if (!transposeA && !transposeB)
@@ -273,9 +273,9 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         if (transposeA && transposeB)
             colsB = rowsA;
 
-        int ldA = colsA;
-        int ldB = colsB;
-        int ldC = transposeB == false ? colsB : rowsB;
+        uint64_t ldA = colsA;
+        uint64_t ldB = colsB;
+        uint64_t ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -284,15 +284,15 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
             ldC += rand() % 10;
         }
 
-        int rowsC = transposeA == false ? rowsA : colsA;
-        int colsC = transposeB == false ? colsB : rowsB;
+        uint64_t rowsC = transposeA == false ? rowsA : colsA;
+        uint64_t colsC = transposeB == false ? colsB : rowsB;
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, rowsB, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, rowsC, ldC);
+        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, {rowsA, ldA});
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, {rowsB, ldB});
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -303,20 +303,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         Tensor C_gpu_h(cpuPlacement, CDescriptor);
 
         half *AMem = (half *)A.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsA; ++col) {
+        for (uint64_t row = 0; row < rowsA; ++row) {
+            for (uint64_t col = 0; col < colsA; ++col) {
                 AMem[row * ldA + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         half *BMem = (half *)B.getMemPtr();
-        for (int row = 0; row < rowsB; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (uint64_t row = 0; row < rowsB; ++row) {
+            for (uint64_t col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         half *CMem = (half *)C.getMemPtr();
-        for (int row = 0; row < rowsC; ++row) {
-            for (int col = 0; col < colsC; ++col) {
+        for (uint64_t row = 0; row < rowsC; ++row) {
+            for (uint64_t col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -363,12 +363,12 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            int workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
+            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
                 0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
-                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceSizeInBytes);
+                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes});
                 workspace_d = Tensor(gpuPlacement, workspaceDescriptor);
             }
         }
@@ -456,19 +456,19 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsC; ++i) {
-            for (int j = 0; j < colsC; ++j) {
+        for (uint64_t i = 0; i < rowsC; ++i) {
+            for (uint64_t j = 0; j < colsC; ++j) {
                 float diff = abs((float)CMem[i * ldC + j] - (float)CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                    printf("arows %ld acols %ld brows %ld bcols %ld transposeA %i transposeB %i\n",
                            rowsA,
                            colsA,
                            rowsB,
                            colsB,
                            transposeA,
                            transposeB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, (float)CMem[i * ldC + j], (float)CMemGpu[i * ldC + j]);
+                    printf("row %ld col %ld : CPU %f vs %f GPU\n", i, j, (float)CMem[i * ldC + j], (float)CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
@@ -483,14 +483,14 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 4; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
-        int rowsA = 128 + (rand() % 1500);
-        int colsA = 128 + (rand() % 1500);
-        int rowsB = 128 + (rand() % 1500);
-        int colsB = 128 + (rand() % 1500);
+        uint64_t rowsA = 128 + (rand() % 1500);
+        uint64_t colsA = 128 + (rand() % 1500);
+        uint64_t rowsB = 128 + (rand() % 1500);
+        uint64_t colsB = 128 + (rand() % 1500);
 
         // Now make the operation legal
         if (!transposeA && !transposeB)
@@ -502,9 +502,9 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
         if (transposeA && transposeB)
             colsB = rowsA;
 
-        int ldA = colsA;
-        int ldB = colsB;
-        int ldC = transposeB == false ? colsB : rowsB;
+        uint64_t ldA = colsA;
+        uint64_t ldB = colsB;
+        uint64_t ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -513,15 +513,15 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
             ldC += rand() % 10;
         }
 
-        int rowsC = transposeA == false ? rowsA : colsA;
-        int colsC = transposeB == false ? colsB : rowsB;
+        uint64_t rowsC = transposeA == false ? rowsA : colsA;
+        uint64_t colsC = transposeB == false ? colsB : rowsB;
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, rowsB, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, rowsC, ldC);
+        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP32, {rowsA, ldA});
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP32, {rowsB, ldB});
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP32, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -532,20 +532,20 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
         Tensor C_gpu_h(cpuPlacement, CDescriptor);
 
         float *AMem = (float *)A.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsA; ++col) {
+        for (uint64_t row = 0; row < rowsA; ++row) {
+            for (uint64_t col = 0; col < colsA; ++col) {
                 AMem[row * ldA + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         float *BMem = (float *)B.getMemPtr();
-        for (int row = 0; row < rowsB; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (uint64_t row = 0; row < rowsB; ++row) {
+            for (uint64_t col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         float *CMem = (float *)C.getMemPtr();
-        for (int row = 0; row < rowsC; ++row) {
-            for (int col = 0; col < colsC; ++col) {
+        for (uint64_t row = 0; row < rowsC; ++row) {
+            for (uint64_t col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -617,19 +617,19 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsC; ++i) {
-            for (int j = 0; j < colsC; ++j) {
+        for (uint64_t i = 0; i < rowsC; ++i) {
+            for (uint64_t j = 0; j < colsC; ++j) {
                 float diff = abs(CMem[i * ldC + j] - CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                    printf("arows %ld acols %ld brows %ld bcols %ld transposeA %i transposeB %i\n",
                            rowsA,
                            colsA,
                            rowsB,
                            colsB,
                            transposeA,
                            transposeB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, CMem[i * ldC + j], CMemGpu[i * ldC + j]);
+                    printf("row %ld col %ld : CPU %f vs %f GPU\n", i, j, CMem[i * ldC + j], CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
@@ -644,14 +644,14 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (int i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 4; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
-        int rowsA = 128 + (rand() % 1500);
-        int colsA = 128 + (rand() % 1500);
-        int rowsB = 128 + (rand() % 1500);
-        int colsB = 128 + (rand() % 1500);
+        uint64_t rowsA = 128 + (rand() % 1500);
+        uint64_t colsA = 128 + (rand() % 1500);
+        uint64_t rowsB = 128 + (rand() % 1500);
+        uint64_t colsB = 128 + (rand() % 1500);
 
         // Now make the operation legal
         if (!transposeA && !transposeB)
@@ -663,9 +663,9 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         if (transposeA && transposeB)
             colsB = rowsA;
 
-        int ldA = colsA;
-        int ldB = colsB;
-        int ldC = transposeB == false ? colsB : rowsB;
+        uint64_t ldA = colsA;
+        uint64_t ldB = colsB;
+        uint64_t ldC = transposeB == false ? colsB : rowsB;
         bool useLdVersion = false;
         if (rand() % 2) {
             useLdVersion = true;
@@ -674,15 +674,15 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
             ldC += rand() % 10;
         }
 
-        int rowsC = transposeA == false ? rowsA : colsA;
-        int colsC = transposeB == false ? colsB : rowsB;
+        uint64_t rowsC = transposeA == false ? rowsA : colsA;
+        uint64_t colsC = transposeB == false ? colsB : rowsB;
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, rowsA, ldA);
-        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, rowsB, ldB);
-        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, rowsC, ldC);
+        TensorDescriptor ADescriptor(TensorDescriptor::DataType::FP16, {rowsA, ldA});
+        TensorDescriptor BDescriptor(TensorDescriptor::DataType::FP16, {rowsB, ldB});
+        TensorDescriptor CDescriptor(TensorDescriptor::DataType::FP16, {rowsC, ldC});
 
         Tensor A(cpuPlacement, ADescriptor);
         Tensor B(cpuPlacement, BDescriptor);
@@ -693,20 +693,20 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         Tensor C_gpu_h(cpuPlacement, CDescriptor);
 
         half *AMem = (half *)A.getMemPtr();
-        for (int row = 0; row < rowsA; ++row) {
-            for (int col = 0; col < colsA; ++col) {
+        for (uint64_t row = 0; row < rowsA; ++row) {
+            for (uint64_t col = 0; col < colsA; ++col) {
                 AMem[row * ldA + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         half *BMem = (half *)B.getMemPtr();
-        for (int row = 0; row < rowsB; ++row) {
-            for (int col = 0; col < colsB; ++col) {
+        for (uint64_t row = 0; row < rowsB; ++row) {
+            for (uint64_t col = 0; col < colsB; ++col) {
                 BMem[row * ldB + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
         half *CMem = (half *)C.getMemPtr();
-        for (int row = 0; row < rowsC; ++row) {
-            for (int col = 0; col < colsC; ++col) {
+        for (uint64_t row = 0; row < rowsC; ++row) {
+            for (uint64_t col = 0; col < colsC; ++col) {
                 CMem[row * ldC + col] = ((rand() % 100) - 50) / 10.0f;
             }
         }
@@ -785,19 +785,19 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         // printf("\n\nGPU C:\n");
         // printMatrix(CMemGpu, rowsA, colsB, ldC);
 
-        for (int i = 0; i < rowsC; ++i) {
-            for (int j = 0; j < colsC; ++j) {
+        for (uint64_t i = 0; i < rowsC; ++i) {
+            for (uint64_t j = 0; j < colsC; ++j) {
                 float diff = abs((float)CMem[i * ldC + j] - (float)CMemGpu[i * ldC + j]);
 
                 if (diff >= maxDiff) {
-                    printf("arows %d acols %d brows %d bcols %d transposeA %d transposeB %d\n",
+                    printf("arows %ld acols %ld brows %ld bcols %ld transposeA %i transposeB %i\n",
                            rowsA,
                            colsA,
                            rowsB,
                            colsB,
                            transposeA,
                            transposeB);
-                    printf("row %d col %d : CPU %f vs %f GPU\n", i, j, (float)CMem[i * ldC + j], (float)CMemGpu[i * ldC + j]);
+                    printf("row %ld col %ld : CPU %f vs %f GPU\n", i, j, (float)CMem[i * ldC + j], (float)CMemGpu[i * ldC + j]);
                     fflush(stdout);
                 }
                 ASSERT_LT(diff, maxDiff);
