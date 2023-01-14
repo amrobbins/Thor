@@ -14,6 +14,7 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <assert.h>
@@ -212,6 +213,8 @@ class FullyConnected::Builder {
 
     virtual FullyConnected::Builder &featureInput(Tensor _featureInput) {
         assert(!_featureInput.getDimensions().empty());
+        if (!_featureInputs.empty())
+            throw NotYetImplementedError("Multiple connections are not yet implemented.");
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
