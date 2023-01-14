@@ -427,9 +427,6 @@ void Network::topologicalSort() {
         vector<Tensor> outputTensorsT = layer->getOutputsFromInput(inputTensor);
         for (uint32_t t = 0; t < outputTensorsT.size(); ++t) {
             Tensor outputTensor = outputTensorsT[t];
-            if (outputTensor.getId() == 10099 || outputTensor.getId() == 10097) {
-                printf("layer %ld is connecting tensor id %ld as an input to CE\n", layer->getId(), outputTensor.getId());
-            }
         }
 
         // For layers, such as concatenate, that need all inputs to be connected before creating the output
