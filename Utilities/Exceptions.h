@@ -1,11 +1,18 @@
+#pragma once
+
 #include <stdexcept>
+#include <string>
 
 class NotYetImplementedException : public std::logic_error {
    public:
-    virtual char const* what() const _GLIBCXX_NOTHROW { return "Function not yet implemented."; }
+    NotYetImplementedException() : std::logic_error("Not yet implemented.") {}
+
+    NotYetImplementedException(std::string message) : std::logic_error(message.c_str()) {}
 };
 
 class NotImplementedException : public std::logic_error {
    public:
-    virtual char const* what() const _GLIBCXX_NOTHROW { return "Function not implemented."; }
+    NotImplementedException() : std::logic_error("Not implemented.") {}
+
+    NotImplementedException(std::string message) : std::logic_error(message.c_str()) {}
 };
