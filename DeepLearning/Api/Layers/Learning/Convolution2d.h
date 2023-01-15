@@ -11,6 +11,7 @@
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
+#include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
@@ -69,16 +70,19 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // FIXME: It doesn't look like this would work for multiple input/output connections. Check this on all multi-connection
         ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
             filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
-        Thor::Layer::connectTwoLayers(drivingLayer, convolution2d, drivingApiLayer, this, connectingApiTensor);
+        return convolution2d;
+    }
 
+    virtual void initialize(ThorImplementation::Layer *layer, std::vector<std::shared_ptr<Initializer>> &initializers) const {
+        assert(dynamic_cast<ThorImplementation::Convolution2d *>(layer) != nullptr);
+        ThorImplementation::Convolution2d *convolution2d = dynamic_cast<ThorImplementation::Convolution2d *>(layer);
         std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(convolution2d->getWeights());
         weightsInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
@@ -90,8 +94,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             biasInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
             initializers.push_back(biasInitializerBuilderClone->build());
         }
-
-        return convolution2d;
     }
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {

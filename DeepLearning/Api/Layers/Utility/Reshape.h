@@ -21,14 +21,12 @@ class Reshape : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension, this is handled by the builder
         ThorImplementation::Reshape *Reshape = new ThorImplementation::Reshape(newDimensions);
-        Thor::Layer::connectTwoLayers(drivingLayer, Reshape, drivingApiLayer, this, connectingApiTensor);
         return Reshape;
     }
 

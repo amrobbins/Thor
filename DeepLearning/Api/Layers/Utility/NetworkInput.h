@@ -27,9 +27,7 @@ class NetworkInput : public Layer {
     virtual std::string getLayerType() const { return "NetworkInput"; }
 
    protected:
-    virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement,
-                                                    uint32_t batchSize,
-                                                    std::vector<std::shared_ptr<Initializer>> &initializers) const {
+    virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
         assert(initialized);
 
         std::vector<uint64_t> batchDimensions;
@@ -47,8 +45,7 @@ class NetworkInput : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(false);
     }
 

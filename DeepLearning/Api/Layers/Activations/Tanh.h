@@ -20,13 +20,11 @@ class Tanh : public Activation {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::Tanh *tanh = new ThorImplementation::Tanh();
-        Thor::Layer::connectTwoLayers(drivingLayer, tanh, drivingApiLayer, this, connectingApiTensor);
         return tanh;
     }
 

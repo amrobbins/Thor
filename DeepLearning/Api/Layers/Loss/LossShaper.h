@@ -29,8 +29,7 @@ class LossShaper : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == lossInput || connectingApiTensor == lossOutput);
 
@@ -44,11 +43,9 @@ class LossShaper : public Layer {
             // Tell reshape to match the batch size:
             implementationOutputLossDimensions[0] = 0;
             ThorImplementation::Reshape *nopReshape = new ThorImplementation::Reshape(implementationOutputLossDimensions);
-            Thor::Layer::connectTwoLayers(drivingLayer, nopReshape, drivingApiLayer, this, connectingApiTensor);
             return nopReshape;
         } else {
             ThorImplementation::LossShaper *lossShaper = new ThorImplementation::LossShaper(outputLossType);
-            Thor::Layer::connectTwoLayers(drivingLayer, lossShaper, drivingApiLayer, this, connectingApiTensor);
             return lossShaper;
         }
     }

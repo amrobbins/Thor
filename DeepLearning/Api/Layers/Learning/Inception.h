@@ -30,8 +30,7 @@ class Inception : public TrainableWeightsBiasesLayer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         // Inception is purely a compound layer consisting of other layers, each which stamp themselves.
         // So when an inception layer converts itself to single layers, none of those layers is an inception layer
         // so it will never be added to the network as a stampable layer, and so stamp will never be called for inception.

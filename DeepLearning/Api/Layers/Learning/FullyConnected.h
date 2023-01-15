@@ -81,13 +81,18 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
+        // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
         ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
-        Thor::Layer::connectTwoLayers(drivingLayer, fullyConnected, drivingApiLayer, this, connectingApiTensor);
+        return fullyConnected;
+    }
+
+    virtual void initialize(ThorImplementation::Layer *layer, std::vector<std::shared_ptr<Initializer>> &initializers) const {
+        assert(dynamic_cast<ThorImplementation::FullyConnected *>(layer) != nullptr);
+        ThorImplementation::FullyConnected *fullyConnected = dynamic_cast<ThorImplementation::FullyConnected *>(layer);
 
         std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(fullyConnected->getWeights());
@@ -100,8 +105,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
             initializers.push_back(biasInitializerBuilderClone->build());
         }
-
-        return fullyConnected;
     }
 
     // mem requirements are the weights
@@ -213,8 +216,6 @@ class FullyConnected::Builder {
 
     virtual FullyConnected::Builder &featureInput(Tensor _featureInput) {
         assert(!_featureInput.getDimensions().empty());
-        if (!_featureInputs.empty())
-            throw NotYetImplementedException("Multiple connections are not yet implemented.");
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());

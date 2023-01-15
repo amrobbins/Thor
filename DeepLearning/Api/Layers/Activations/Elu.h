@@ -20,13 +20,11 @@ class Elu : public Activation {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::Elu *elu = new ThorImplementation::Elu(alpha);
-        Thor::Layer::connectTwoLayers(drivingLayer, elu, drivingApiLayer, this, connectingApiTensor);
         return elu;
     }
 

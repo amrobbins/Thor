@@ -29,13 +29,11 @@ class MeanSquaredError : public Loss {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         ThorImplementation::MeanSquaredError *meanSquaredError = new ThorImplementation::MeanSquaredError();
-        Thor::Layer::connectTwoLayers(drivingLayer, meanSquaredError, drivingApiLayer, this, connectingApiTensor);
 
         return meanSquaredError;
     }

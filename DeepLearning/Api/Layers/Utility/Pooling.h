@@ -30,8 +30,7 @@ class Pooling : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -41,7 +40,6 @@ class Pooling : public Layer {
 
         ThorImplementation::Pooling *pooling = new ThorImplementation::Pooling(
             implementationPoolingType, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
-        Thor::Layer::connectTwoLayers(drivingLayer, pooling, drivingApiLayer, this, connectingApiTensor);
         return pooling;
     }
 
