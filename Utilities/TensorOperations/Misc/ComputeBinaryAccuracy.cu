@@ -21,14 +21,14 @@ __global__ void computeBinaryAccuracyPerBatchItemResult21(PREDICTION_TYPE_2_BYTE
     ((double2 *)predictionsBuffer)[0] = ((double2 *)predictions)[offset8Elements];
     ((uint64_t *)labelsBuffer)[0] = ((uint64_t *)labels)[offset8Elements];
 
-    resultsBuffer[0] = labelsBuffer[0] && ((float)predictionsBuffer[0] >= 0.5f);
-    resultsBuffer[1] = labelsBuffer[1] && ((float)predictionsBuffer[1] >= 0.5f);
-    resultsBuffer[2] = labelsBuffer[2] && ((float)predictionsBuffer[2] >= 0.5f);
-    resultsBuffer[3] = labelsBuffer[3] && ((float)predictionsBuffer[3] >= 0.5f);
-    resultsBuffer[4] = labelsBuffer[4] && ((float)predictionsBuffer[4] >= 0.5f);
-    resultsBuffer[5] = labelsBuffer[5] && ((float)predictionsBuffer[5] >= 0.5f);
-    resultsBuffer[6] = labelsBuffer[6] && ((float)predictionsBuffer[6] >= 0.5f);
-    resultsBuffer[7] = labelsBuffer[7] && ((float)predictionsBuffer[7] >= 0.5f);
+    resultsBuffer[0] = ((float)labelsBuffer[0] != 0.0f) == ((float)predictionsBuffer[0] >= 0.5f);
+    resultsBuffer[1] = ((float)labelsBuffer[1] != 0.0f) == ((float)predictionsBuffer[1] >= 0.5f);
+    resultsBuffer[2] = ((float)labelsBuffer[2] != 0.0f) == ((float)predictionsBuffer[2] >= 0.5f);
+    resultsBuffer[3] = ((float)labelsBuffer[3] != 0.0f) == ((float)predictionsBuffer[3] >= 0.5f);
+    resultsBuffer[4] = ((float)labelsBuffer[4] != 0.0f) == ((float)predictionsBuffer[4] >= 0.5f);
+    resultsBuffer[5] = ((float)labelsBuffer[5] != 0.0f) == ((float)predictionsBuffer[5] >= 0.5f);
+    resultsBuffer[6] = ((float)labelsBuffer[6] != 0.0f) == ((float)predictionsBuffer[6] >= 0.5f);
+    resultsBuffer[7] = ((float)labelsBuffer[7] != 0.0f) == ((float)predictionsBuffer[7] >= 0.5f);
 
     ((double2 *)workspace)[offset8Elements] = ((double2 *)resultsBuffer)[0];
 }
@@ -51,10 +51,10 @@ __global__ void computeBinaryAccuracyPerBatchItemResult22(PREDICTION_TYPE_2_BYTE
     ((uint64_t *)predictionsBuffer)[0] = ((uint64_t *)predictions)[offset4Elements];
     ((uint64_t *)labelsBuffer)[0] = ((uint64_t *)labels)[offset4Elements];
 
-    resultsBuffer[0] = labelsBuffer[0] && ((float)predictionsBuffer[0] >= 0.5f);
-    resultsBuffer[1] = labelsBuffer[1] && ((float)predictionsBuffer[1] >= 0.5f);
-    resultsBuffer[2] = labelsBuffer[2] && ((float)predictionsBuffer[2] >= 0.5f);
-    resultsBuffer[3] = labelsBuffer[3] && ((float)predictionsBuffer[3] >= 0.5f);
+    resultsBuffer[0] = ((float)labelsBuffer[0] != 0.0f) == ((float)predictionsBuffer[0] >= 0.5f);
+    resultsBuffer[1] = ((float)labelsBuffer[1] != 0.0f) == ((float)predictionsBuffer[1] >= 0.5f);
+    resultsBuffer[2] = ((float)labelsBuffer[2] != 0.0f) == ((float)predictionsBuffer[2] >= 0.5f);
+    resultsBuffer[3] = ((float)labelsBuffer[3] != 0.0f) == ((float)predictionsBuffer[3] >= 0.5f);
 
     ((uint64_t *)workspace)[offset4Elements] = ((uint64_t *)resultsBuffer)[0];
 }
@@ -77,10 +77,10 @@ __global__ void computeBinaryAccuracyPerBatchItemResult24(PREDICTION_TYPE_2_BYTE
     ((uint64_t *)predictionsBuffer)[0] = ((uint64_t *)predictions)[offset4Elements];
     ((double2 *)labelsBuffer)[0] = ((double2 *)labels)[offset4Elements];
 
-    resultsBuffer[0] = labelsBuffer[0] && ((float)predictionsBuffer[0] >= 0.5f);
-    resultsBuffer[1] = labelsBuffer[1] && ((float)predictionsBuffer[1] >= 0.5f);
-    resultsBuffer[2] = labelsBuffer[2] && ((float)predictionsBuffer[2] >= 0.5f);
-    resultsBuffer[3] = labelsBuffer[3] && ((float)predictionsBuffer[3] >= 0.5f);
+    resultsBuffer[0] = ((float)labelsBuffer[0] != 0.0f) == ((float)predictionsBuffer[0] >= 0.5f);
+    resultsBuffer[1] = ((float)labelsBuffer[1] != 0.0f) == ((float)predictionsBuffer[1] >= 0.5f);
+    resultsBuffer[2] = ((float)labelsBuffer[2] != 0.0f) == ((float)predictionsBuffer[2] >= 0.5f);
+    resultsBuffer[3] = ((float)labelsBuffer[3] != 0.0f) == ((float)predictionsBuffer[3] >= 0.5f);
 
     ((uint64_t *)workspace)[offset4Elements] = ((uint64_t *)resultsBuffer)[0];
 }
@@ -103,14 +103,14 @@ __global__ void computeBinaryAccuracyPerBatchItemResult41(PREDICTION_TYPE_4_BYTE
     ((double4 *)predictionsBuffer)[0] = ((double4 *)predictions)[offset8Elements];
     ((uint64_t *)labelsBuffer)[0] = ((uint64_t *)labels)[offset8Elements];
 
-    resultsBuffer[0] = labelsBuffer[0] && ((float)predictionsBuffer[0] >= 0.5f);
-    resultsBuffer[1] = labelsBuffer[1] && ((float)predictionsBuffer[1] >= 0.5f);
-    resultsBuffer[2] = labelsBuffer[2] && ((float)predictionsBuffer[2] >= 0.5f);
-    resultsBuffer[3] = labelsBuffer[3] && ((float)predictionsBuffer[3] >= 0.5f);
-    resultsBuffer[4] = labelsBuffer[4] && ((float)predictionsBuffer[4] >= 0.5f);
-    resultsBuffer[5] = labelsBuffer[5] && ((float)predictionsBuffer[5] >= 0.5f);
-    resultsBuffer[6] = labelsBuffer[6] && ((float)predictionsBuffer[6] >= 0.5f);
-    resultsBuffer[7] = labelsBuffer[7] && ((float)predictionsBuffer[7] >= 0.5f);
+    resultsBuffer[0] = ((float)labelsBuffer[0] != 0.0f) == ((float)predictionsBuffer[0] >= 0.5f);
+    resultsBuffer[1] = ((float)labelsBuffer[1] != 0.0f) == ((float)predictionsBuffer[1] >= 0.5f);
+    resultsBuffer[2] = ((float)labelsBuffer[2] != 0.0f) == ((float)predictionsBuffer[2] >= 0.5f);
+    resultsBuffer[3] = ((float)labelsBuffer[3] != 0.0f) == ((float)predictionsBuffer[3] >= 0.5f);
+    resultsBuffer[4] = ((float)labelsBuffer[4] != 0.0f) == ((float)predictionsBuffer[4] >= 0.5f);
+    resultsBuffer[5] = ((float)labelsBuffer[5] != 0.0f) == ((float)predictionsBuffer[5] >= 0.5f);
+    resultsBuffer[6] = ((float)labelsBuffer[6] != 0.0f) == ((float)predictionsBuffer[6] >= 0.5f);
+    resultsBuffer[7] = ((float)labelsBuffer[7] != 0.0f) == ((float)predictionsBuffer[7] >= 0.5f);
 
     ((double2 *)workspace)[offset8Elements] = ((double2 *)resultsBuffer)[0];
 }
@@ -133,10 +133,10 @@ __global__ void computeBinaryAccuracyPerBatchItemResult42(PREDICTION_TYPE_4_BYTE
     ((double2 *)predictionsBuffer)[0] = ((double2 *)predictions)[offset4Elements];
     ((uint64_t *)labelsBuffer)[0] = ((uint64_t *)labels)[offset4Elements];
 
-    resultsBuffer[0] = labelsBuffer[0] && ((float)predictionsBuffer[0] >= 0.5f);
-    resultsBuffer[1] = labelsBuffer[1] && ((float)predictionsBuffer[1] >= 0.5f);
-    resultsBuffer[2] = labelsBuffer[2] && ((float)predictionsBuffer[2] >= 0.5f);
-    resultsBuffer[3] = labelsBuffer[3] && ((float)predictionsBuffer[3] >= 0.5f);
+    resultsBuffer[0] = ((float)labelsBuffer[0] != 0.0f) == ((float)predictionsBuffer[0] >= 0.5f);
+    resultsBuffer[1] = ((float)labelsBuffer[1] != 0.0f) == ((float)predictionsBuffer[1] >= 0.5f);
+    resultsBuffer[2] = ((float)labelsBuffer[2] != 0.0f) == ((float)predictionsBuffer[2] >= 0.5f);
+    resultsBuffer[3] = ((float)labelsBuffer[3] != 0.0f) == ((float)predictionsBuffer[3] >= 0.5f);
 
     ((uint64_t *)workspace)[offset4Elements] = ((uint64_t *)resultsBuffer)[0];
 }
@@ -159,10 +159,10 @@ __global__ void computeBinaryAccuracyPerBatchItemResult44(PREDICTION_TYPE_4_BYTE
     ((double2 *)predictionsBuffer)[0] = ((double2 *)predictions)[offset4Elements];
     ((double2 *)labelsBuffer)[0] = ((double2 *)labels)[offset4Elements];
 
-    resultsBuffer[0] = labelsBuffer[0] && ((float)predictionsBuffer[0] >= 0.5f);
-    resultsBuffer[1] = labelsBuffer[1] && ((float)predictionsBuffer[1] >= 0.5f);
-    resultsBuffer[2] = labelsBuffer[2] && ((float)predictionsBuffer[2] >= 0.5f);
-    resultsBuffer[3] = labelsBuffer[3] && ((float)predictionsBuffer[3] >= 0.5f);
+    resultsBuffer[0] = ((float)labelsBuffer[0] != 0.0f) == ((float)predictionsBuffer[0] >= 0.5f);
+    resultsBuffer[1] = ((float)labelsBuffer[1] != 0.0f) == ((float)predictionsBuffer[1] >= 0.5f);
+    resultsBuffer[2] = ((float)labelsBuffer[2] != 0.0f) == ((float)predictionsBuffer[2] >= 0.5f);
+    resultsBuffer[3] = ((float)labelsBuffer[3] != 0.0f) == ((float)predictionsBuffer[3] >= 0.5f);
 
     ((uint64_t *)workspace)[offset4Elements] = ((uint64_t *)resultsBuffer)[0];
 }
