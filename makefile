@@ -58,6 +58,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest && \
                 build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest && \
                 build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest && \
+                build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest && \
                 build/test/DeepLearning/Api/Layers/Utility/UtilityLayerTests && \
                 build/test/DeepLearning/Implementation/SimpleNetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalizationTest && \
@@ -86,13 +87,9 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 				build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
 				build/test/Utilities/WorkQueue/WorkQueueTest \
 
-
 				# FIXME: rebuild and put back
-				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
-				#	-> Finish testing binary accuracy
 				# Tests for Tensor add/multiply etc
 				# Improve coverage of tensorFanout
-				# Add exception to mutli connection API layers saying not yet implemented
 
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
@@ -100,6 +97,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
 			build/test/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropyTest \
 			build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest \
 			build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest \
+			build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest \
 			build/test/Utilities/Random/FullPeriodRandomTest \
             build/test/Utilities/WorkQueue/AsyncQueueTest \
             build/test/Utilities/WorkQueue/AsyncTensorQueueTest \
@@ -885,6 +883,10 @@ build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest: build/test/googl
 build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Metric
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Metric
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
