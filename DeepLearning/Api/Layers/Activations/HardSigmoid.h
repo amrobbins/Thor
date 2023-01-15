@@ -20,13 +20,11 @@ class HardSigmoid : public Activation {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::HardSigmoid *hardSigmoid = new ThorImplementation::HardSigmoid();
-        Thor::Layer::connectTwoLayers(drivingLayer, hardSigmoid, drivingApiLayer, this, connectingApiTensor);
         return hardSigmoid;
     }
 

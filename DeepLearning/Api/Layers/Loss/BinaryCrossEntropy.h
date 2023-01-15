@@ -32,14 +32,12 @@ class BinaryCrossEntropy : public Loss {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         // Softmax and LossShaper are connected during multi-layer flattening
         ThorImplementation::CrossEntropy *crossEntropy = new ThorImplementation::CrossEntropy(CrossEntropyLossType::BINARY);
-        Thor::Layer::connectTwoLayers(drivingLayer, crossEntropy, drivingApiLayer, this, connectingApiTensor);
         return crossEntropy;
     }
 

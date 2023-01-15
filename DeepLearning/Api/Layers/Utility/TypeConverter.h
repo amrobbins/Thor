@@ -21,8 +21,7 @@ class TypeConverter : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
         assert(getFeatureOutput().isPresent());
@@ -30,7 +29,6 @@ class TypeConverter : public Layer {
         // Implementation has 1 extra dimension due to having the batchSize dimension
         ThorImplementation::TypeConversion *typeConverter =
             new ThorImplementation::TypeConversion(Tensor::convertToImplementationDataType(getFeatureOutput().get().getDataType()));
-        Thor::Layer::connectTwoLayers(drivingLayer, typeConverter, drivingApiLayer, this, connectingApiTensor);
         return typeConverter;
     }
 

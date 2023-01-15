@@ -20,13 +20,11 @@ class Swish : public Activation {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::Swish *swish = new ThorImplementation::Swish();
-        Thor::Layer::connectTwoLayers(drivingLayer, swish, drivingApiLayer, this, connectingApiTensor);
         return swish;
     }
 

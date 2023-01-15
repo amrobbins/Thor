@@ -36,13 +36,11 @@ class Divide : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             vector<shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
         ThorImplementation::Divide *divide = new ThorImplementation::DivideTensorByConstantScalar();
-        Thor::Layer::connectTwoLayers(drivingLayer, divide, drivingApiLayer, this, connectingApiTensor);
         return divide;
     }
 

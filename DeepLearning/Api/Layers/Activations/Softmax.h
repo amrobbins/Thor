@@ -22,13 +22,11 @@ class Softmax : public Activation {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::Softmax *softmax = new ThorImplementation::Softmax(backwardComputedExternally);
-        Thor::Layer::connectTwoLayers(drivingLayer, softmax, drivingApiLayer, this, connectingApiTensor);
         return softmax;
     }
 

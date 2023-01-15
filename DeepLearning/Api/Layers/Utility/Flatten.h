@@ -21,14 +21,12 @@ class Flatten : public Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
         // Implemenattion has 1 extra dimension due to having the batchSize dimension
         ThorImplementation::Flatten *flatten = new ThorImplementation::Flatten(getFeatureOutput().get().getDimensions().size() + 1);
-        Thor::Layer::connectTwoLayers(drivingLayer, flatten, drivingApiLayer, this, connectingApiTensor);
         return flatten;
     }
 

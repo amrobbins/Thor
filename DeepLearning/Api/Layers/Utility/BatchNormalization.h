@@ -28,13 +28,11 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
 
         ThorImplementation::BatchNormalization *batchNormalization =
             new ThorImplementation::BatchNormalization(true, exponentialRunningAverageFactor, epsilon);
-        Thor::Layer::connectTwoLayers(drivingLayer, batchNormalization, drivingApiLayer, this, connectingApiTensor);
         return batchNormalization;
     }
 
@@ -102,7 +100,7 @@ class BatchNormalization::Builder {
         return *this;
     }
 
-    virtual BatchNormalization::Builder featureInput(Tensor _featureInput) {
+    virtual BatchNormalization::Builder &featureInput(Tensor _featureInput) {
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             assert(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());

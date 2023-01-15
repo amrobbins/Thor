@@ -20,13 +20,11 @@ class SoftPlus : public Activation {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const {
+                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
         ThorImplementation::SoftPlus *softPlus = new ThorImplementation::SoftPlus();
-        Thor::Layer::connectTwoLayers(drivingLayer, softPlus, drivingApiLayer, this, connectingApiTensor);
         return softPlus;
     }
 

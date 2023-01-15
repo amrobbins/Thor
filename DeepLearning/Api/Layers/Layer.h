@@ -76,8 +76,11 @@ class Layer {
     virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
                                              ThorImplementation::Layer *drivingLayer,
                                              Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor,
-                                             std::vector<std::shared_ptr<Initializer>> &initializers) const = 0;
+                                             Thor::Tensor connectingApiTensor) const = 0;
+
+    // initialize() is called for a layer after it has been stamped, the first connection that is made to the layer.
+    // often layers will not need initialize() at all.
+    virtual void initialize(ThorImplementation::Layer *layer, std::vector<std::shared_ptr<Initializer>> &initializers) const {}
 
     virtual void addToNetwork(Network *network);
 
