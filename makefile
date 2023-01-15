@@ -89,7 +89,6 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 				# FIXME: rebuild and put back
 				# Create BinaryAccuracy to keep symmetry with BinaryCrossEntropy
 				#	-> Finish testing binary accuracy
-				# Implementation Reshape always copies batch dimension
 				# Tests for Tensor add/multiply etc
 				# Improve coverage of tensorFanout
 				# Add exception to mutli connection API layers saying not yet implemented
