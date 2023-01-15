@@ -83,7 +83,7 @@ __global__ void scalarMultiply4B(DATA_TYPE *source, DATA_TYPE *dest, DATA_TYPE m
     uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 2;
+    uint64_t offset2Elements = offset >> 1;
 
     ((float2 *)buffer)[0] = ((float2 *)source)[offset2Elements];
     buffer[0] = buffer[0] * multiplier;
@@ -175,7 +175,7 @@ __global__ void scalarAdd4B(DATA_TYPE *source, DATA_TYPE *dest, DATA_TYPE addend
     uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 2;
+    uint64_t offset2Elements = offset >> 1;
 
     ((float2 *)buffer)[0] = ((float2 *)source)[offset2Elements];
     buffer[0] = buffer[0] + addend;
@@ -184,6 +184,8 @@ __global__ void scalarAdd4B(DATA_TYPE *source, DATA_TYPE *dest, DATA_TYPE addend
 }
 
 void Tensor::add(Tensor source, double addend, Stream stream) {
+    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
     TensorDescriptor::DataType dataType = source.getDataType();
     uint64_t numElements = source.getTotalNumElements();
     void *sourceMem = source.getMemPtr();
@@ -198,7 +200,7 @@ void Tensor::add(Tensor source, double addend, Stream stream) {
         scalarAdd4B<float><<<gridSize, blockSize, 0, stream>>>((float *)sourceMem, (float *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
-        scalarAdd4B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)sourceMem, (uint8_t *)destMem, addend, numElements);
+        scalarAdd1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)sourceMem, (uint8_t *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT16) {
         dim3 gridSize((numElements + 1023) / 1024);
         scalarAdd2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)sourceMem, (uint16_t *)destMem, addend, numElements);
@@ -207,7 +209,7 @@ void Tensor::add(Tensor source, double addend, Stream stream) {
         scalarAdd4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)sourceMem, (uint32_t *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
-        scalarAdd4B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)sourceMem, (int8_t *)destMem, addend, numElements);
+        scalarAdd1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)sourceMem, (int8_t *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT16) {
         dim3 gridSize((numElements + 1023) / 1024);
         scalarAdd2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)sourceMem, (int16_t *)destMem, addend, numElements);
@@ -219,9 +221,14 @@ void Tensor::add(Tensor source, double addend, Stream stream) {
     }
 }
 
-void Tensor::subtract(Tensor source, double subtrahend, Stream stream) { add(source, -subtrahend, stream); }
+void Tensor::subtract(Tensor source, double subtrahend, Stream stream) {
+    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    add(source, -subtrahend, stream);
+}
 
 void Tensor::multiply(Tensor source, double multiplier, Stream stream) {
+    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
     TensorDescriptor::DataType dataType = source.getDataType();
     uint64_t numElements = source.getTotalNumElements();
     void *sourceMem = source.getMemPtr();
@@ -236,7 +243,7 @@ void Tensor::multiply(Tensor source, double multiplier, Stream stream) {
         scalarMultiply4B<float><<<gridSize, blockSize, 0, stream>>>((float *)sourceMem, (float *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
-        scalarMultiply4B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)sourceMem, (uint8_t *)destMem, multiplier, numElements);
+        scalarMultiply1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)sourceMem, (uint8_t *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT16) {
         dim3 gridSize((numElements + 1023) / 1024);
         scalarMultiply2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)sourceMem, (uint16_t *)destMem, multiplier, numElements);
@@ -245,7 +252,7 @@ void Tensor::multiply(Tensor source, double multiplier, Stream stream) {
         scalarMultiply4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)sourceMem, (uint32_t *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
-        scalarMultiply4B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)sourceMem, (int8_t *)destMem, multiplier, numElements);
+        scalarMultiply1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)sourceMem, (int8_t *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT16) {
         dim3 gridSize((numElements + 1023) / 1024);
         scalarMultiply2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)sourceMem, (int16_t *)destMem, multiplier, numElements);
@@ -258,6 +265,8 @@ void Tensor::multiply(Tensor source, double multiplier, Stream stream) {
 }
 
 void Tensor::divide(Tensor source, double divisor, Stream stream) {
+    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
     assert(divisor != 0);
     multiply(source, 1.0 / divisor, stream);
 }

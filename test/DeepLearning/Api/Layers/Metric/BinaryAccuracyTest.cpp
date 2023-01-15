@@ -22,7 +22,7 @@ TEST(BinaryAccuracy, Builds) {
         Tensor::DataType accuracyDataType = Tensor::DataType::FP32;
 
         Tensor::DataType labelsDataType;
-        uint32_t r = rand() % 3;
+        uint32_t r = rand() % 8;
         if (r == 0)
             labelsDataType = Tensor::DataType::UINT8;
         else if (r == 1)
