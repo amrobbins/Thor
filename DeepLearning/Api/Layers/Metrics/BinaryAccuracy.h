@@ -47,7 +47,7 @@ class BinaryAccuracy::Builder {
         std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
         assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
-        assert(predictionDimensions.size() == 1 && predictionDimensions[1] == 1);
+        assert(predictionDimensions.size() == 1 && predictionDimensions[0] == 1);
 
         BinaryAccuracy binaryAccuracy;
         binaryAccuracy.featureInput = _predictions;
