@@ -308,7 +308,7 @@ build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o: Utiliti
 
 build/DeepLearning/Implementation/Tensor/TensorKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorKernels.cu
 	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorKernels.cu
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorKernels.cu
 
 #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
 #	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply

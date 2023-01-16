@@ -21,9 +21,9 @@
 
 #include <assert.h>
 
-#include "cuda.h"
-#include "cuda_fp16.h"
-#include "cuda_runtime.h"
+#include <cuda.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
 
 namespace ThorImplementation {
 
@@ -76,17 +76,38 @@ class Tensor : private ReferenceCounted {
     void splitInto(std::vector<Tensor> destinations);
 
     // The multiplier is casted to the type of the source tensor, same behavior for the other scalar operations:
-    // The functions that have a source tensor perform the operation on the source tensor and write into this tensor
+    // These functions perform the operation on the source tensor and write into this tensor
     // Both tensors must be on the same device.
-    // The functions without a source tensor perform the operation in place on this tensor
-    void add(Tensor source, double addend, Stream stream);
-    void subtract(Tensor source, double subtrahend, Stream stream);
-    void multiply(Tensor source, double multiplier, Stream stream);
-    void divide(Tensor source, double divisor, Stream stream);
-    void add(double addend, Stream stream);
-    void subtract(double subtrahend, Stream stream);
-    void multiply(double multiplier, Stream stream);
-    void divide(double divisor, Stream stream);
+
+    /**
+     * [thisTensor] = [augend] + addend, elementwise
+     */
+    void add(Tensor augend, double addend, Stream stream);
+    /**
+     * [thisTensor] = [minuend] - subtrahend, elementwise
+     */
+    void subtract(Tensor minuend, double subtrahend, Stream stream);
+    /**
+     * [thisTensor] = minuend - [subtrahend], elementwise
+     */
+    void subtract(double minuend, Tensor subtrahend, Stream stream);
+    /**
+     * [thisTensor] = [multiplicand] * multiplier, elementwise
+     */
+    void multiply(Tensor multiplicand, double multiplier, Stream stream);
+    /**
+     * [thisTensor] = [numerator] / denominator, elementwise, elementwise
+     */
+    void divide(Tensor numerator, double denominator, Stream stream);
+    /**
+     * [thisTensor] = numerator / [denominator], elementwise, elementwise
+     */
+    void divide(double numerator, Tensor denominator, Stream stream);
+    // pow(float power)
+    // log(float base)
+    // ln()
+    // abs()
+    // trig functions
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
