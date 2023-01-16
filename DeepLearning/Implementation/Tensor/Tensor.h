@@ -75,7 +75,7 @@ class Tensor : private ReferenceCounted {
     void concatenateFrom(std::vector<Tensor> sources);
     void splitInto(std::vector<Tensor> destinations);
 
-    // The multiplier is casted to the type of the source tensor, same behavior for the other scalar operations:
+    // The scalar is casted to the type of the argument tensor, same behavior for the other scalar operations:
     // These functions perform the operation on the source tensor and write into this tensor
     // Both tensors must be on the same device.
 
