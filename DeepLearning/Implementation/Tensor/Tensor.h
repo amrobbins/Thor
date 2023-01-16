@@ -81,28 +81,88 @@ class Tensor : private ReferenceCounted {
 
     /**
      * [thisTensor] = [augend] + addend, elementwise
+     * <div/>
+     * addend is first cast to the data type of augend.
      */
     void add(Tensor augend, double addend, Stream stream);
+
+    /**
+     * [thisTensor] = augend + [addend], elementwise
+     * <div/>
+     * augend is first cast to the data type of addend.
+     */
+    void add(double augend, Tensor addend, Stream stream);
+
+    /**
+     * [thisTensor] = [augend] + [addend], elementwise
+     * <div/>
+     * augend and addend need to be of the same data type.
+     */
+    void add(Tensor augend, Tensor addend, Stream stream);
+
     /**
      * [thisTensor] = [minuend] - subtrahend, elementwise
+     * <div/>
+     * subtrahend is first cast to the data type of minuend.
      */
     void subtract(Tensor minuend, double subtrahend, Stream stream);
+
     /**
      * [thisTensor] = minuend - [subtrahend], elementwise
+     * <div/>
+     * minuend is first cast to the data type of subtrahend.
      */
     void subtract(double minuend, Tensor subtrahend, Stream stream);
+
+    /**
+     * [thisTensor] = [minuend] - [subtrahend], elementwise
+     * <div/>
+     * minuend and subtrahend need to be of the same data type.
+     */
+    void subtract(Tensor minuend, Tensor subtrahend, Stream stream);
+
     /**
      * [thisTensor] = [multiplicand] * multiplier, elementwise
+     * <div/>
+     * multiplier is first cast to the data type of multiplicand.
      */
     void multiply(Tensor multiplicand, double multiplier, Stream stream);
+
     /**
-     * [thisTensor] = [numerator] / denominator, elementwise, elementwise
+     * [thisTensor] = multiplicand * [multiplier], elementwise
+     * <div/>
+     * multiplicand is first cast to the data type of multiplier.
+     */
+    void multiply(double multiplicand, Tensor multiplier, Stream stream);
+
+    /**
+     * [thisTensor] = [multiplicand] * [multiplier], elementwise
+     * <div/>
+     * multiplicand and multiplier need to be of the same data type.
+     */
+    void multiply(Tensor multiplicand, Tensor multiplier, Stream stream);
+
+    /**
+     * [thisTensor] = [numerator] / denominator, elementwise
+     *
+     * denominator is first cast to the data type of numerator.
      */
     void divide(Tensor numerator, double denominator, Stream stream);
+
     /**
-     * [thisTensor] = numerator / [denominator], elementwise, elementwise
+     * [thisTensor] = numerator / [denominator], elementwise
+     * <div/>
+     * numerator is first cast to the data type of denominator.
      */
     void divide(double numerator, Tensor denominator, Stream stream);
+
+    /**
+     * [thisTensor] = [numerator] / [denominator], elementwise
+     * <div/>
+     * numerator and denominator need to be of the same data type.
+     */
+    void divide(Tensor numerator, Tensor denominator, Stream stream);
+
     // pow(float power)
     // log(float base)
     // ln()
