@@ -163,7 +163,48 @@ class Tensor : private ReferenceCounted {
      */
     void divide(Tensor numerator, Tensor denominator, Stream stream);
 
-    // pow(float power)
+    /**
+     * [thisTensor] = [base] ^ exponent, elementwise
+     * <div/>
+     * base must have data type FP32.
+     */
+    void pow(Tensor base, float exponent, Stream stream);
+
+    /**
+     * [thisTensor] = base ^ [exponent], elementwise
+     * <div/>
+     * exponent must have data type FP32.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void pow(float base, Tensor exponent, Stream stream);
+
+    /**
+     * [thisTensor] = [base] ^ [exponent], elementwise
+     * <div/>
+     * exponent and base must have data type FP32.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void pow(Tensor base, Tensor exponent, Stream stream);
+
+    /**
+     * [thisTensor] = [base] ^ exponent, elementwise
+     * <div/>
+     * the computation will be done in FP32,
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void exp(float exponent, Stream stream);
+
+    /**
+     * [thisTensor] = base ^ [exponent], elementwise
+     * <div/>
+     * exponent must have data type FP32,
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void exp(Tensor exponent, Stream stream);
+
+    // FIXME: expand this pattern to cover all useful functions...
+    // exp(float power)
+    // exp(tensor power)
     // log(float base)
     // ln()
     // abs()

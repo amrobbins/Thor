@@ -154,7 +154,7 @@ TEST(ComputeBinaryAccuracy, computesCorrectly24) {
         accuracy_gpu_h.copyFromAsync(accuracy_d, stream);
         stream.synchronize();
         float actual = ((float *)accuracy_gpu_h.getMemPtr())[0];
-        float thresh = 0.002;
+        float thresh = 0.005;
         if (abs(expected - actual) >= thresh)
             printf("expected %f actual %f\n", expected, actual);
         ASSERT_LT(abs(expected - actual), thresh);

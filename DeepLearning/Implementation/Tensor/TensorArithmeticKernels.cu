@@ -81,21 +81,34 @@ __global__ void multiplyScalarMultiplierHalf(half *multiplicand, half *dest, hal
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void multiplyScalarMultiplier4B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE multiplier, uint64_t numElements) {
-    DATA_TYPE buffer[2];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)buffer)[0] = ((float2 *)multiplicand)[offset2Elements];
+    ((double2 *)buffer)[0] = ((double2 *)multiplicand)[offset4Elements];
     buffer[0] = buffer[0] * multiplier;
     buffer[1] = buffer[1] * multiplier;
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    buffer[2] = buffer[2] * multiplier;
+    buffer[3] = buffer[3] * multiplier;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)multiplicand)[offset4Elements];
+    buffer[0] = buffer[0] * multiplier;
+    buffer[1] = buffer[1] * multiplier;
+    buffer[2] = buffer[2] * multiplier;
+    buffer[3] = buffer[3] * multiplier;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -181,23 +194,37 @@ __global__ void multiplyElementwiseHalf(half *multiplicand, half *dest, half *mu
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void multiplyElementwise4B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE *multiplier, uint64_t numElements) {
-    DATA_TYPE multiplicandBuffer[2];
-    DATA_TYPE multiplierBuffer[2];
+    DATA_TYPE multiplicandBuffer[4];
+    DATA_TYPE multiplierBuffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)multiplicandBuffer)[0] = ((float2 *)multiplicand)[offset2Elements];
-    ((float2 *)multiplierBuffer)[0] = ((float2 *)multiplier)[offset2Elements];
+    ((double2 *)multiplicandBuffer)[0] = ((double2 *)multiplicand)[offset4Elements];
+    ((double2 *)multiplierBuffer)[0] = ((double2 *)multiplier)[offset4Elements];
     multiplicandBuffer[0] = multiplicandBuffer[0] * multiplierBuffer[0];
     multiplicandBuffer[1] = multiplicandBuffer[1] * multiplierBuffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)multiplicandBuffer)[0];
+    multiplicandBuffer[2] = multiplicandBuffer[2] * multiplierBuffer[2];
+    multiplicandBuffer[3] = multiplicandBuffer[3] * multiplierBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)multiplicandBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)multiplicandBuffer)[0] = ((double2 *)multiplicand)[offset4Elements];
+    ((double2 *)multiplierBuffer)[0] = ((double2 *)multiplier)[offset4Elements];
+    multiplicandBuffer[0] = multiplicandBuffer[0] * multiplierBuffer[0];
+    multiplicandBuffer[1] = multiplicandBuffer[1] * multiplierBuffer[1];
+    multiplicandBuffer[2] = multiplicandBuffer[2] * multiplierBuffer[2];
+    multiplicandBuffer[3] = multiplicandBuffer[3] * multiplierBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)multiplicandBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -279,21 +306,34 @@ __global__ void addScalarHalf(half *augend, half *dest, half addend, uint64_t nu
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void addScalar4B(DATA_TYPE *augend, DATA_TYPE *dest, DATA_TYPE addend, uint64_t numElements) {
-    DATA_TYPE buffer[2];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)buffer)[0] = ((float2 *)augend)[offset2Elements];
+    ((double2 *)buffer)[0] = ((double2 *)augend)[offset4Elements];
     buffer[0] = buffer[0] + addend;
     buffer[1] = buffer[1] + addend;
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    buffer[2] = buffer[2] + addend;
+    buffer[3] = buffer[3] + addend;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)augend)[offset4Elements];
+    buffer[0] = buffer[0] + addend;
+    buffer[1] = buffer[1] + addend;
+    buffer[2] = buffer[2] + addend;
+    buffer[3] = buffer[3] + addend;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -379,23 +419,37 @@ __global__ void addElementwiseHalf(half *augend, half *dest, half *addend, uint6
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void addElementwise4B(DATA_TYPE *augend, DATA_TYPE *dest, DATA_TYPE *addend, uint64_t numElements) {
-    DATA_TYPE augendBuffer[2];
-    DATA_TYPE addendBuffer[2];
+    DATA_TYPE augendBuffer[4];
+    DATA_TYPE addendBuffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)augendBuffer)[0] = ((float2 *)augend)[offset2Elements];
-    ((float2 *)addendBuffer)[0] = ((float2 *)addend)[offset2Elements];
+    ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
+    ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
     augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
     augendBuffer[1] = augendBuffer[1] + addendBuffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)augendBuffer)[0];
+    augendBuffer[2] = augendBuffer[2] + addendBuffer[2];
+    augendBuffer[3] = augendBuffer[3] + addendBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)augendBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
+    ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
+    augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
+    augendBuffer[1] = augendBuffer[1] + addendBuffer[1];
+    augendBuffer[2] = augendBuffer[2] + addendBuffer[2];
+    augendBuffer[3] = augendBuffer[3] + addendBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)augendBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -477,21 +531,34 @@ __global__ void subtractScalarMinuendHalf(half *subtrahend, half *dest, half min
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void subtractScalarMinuend4B(DATA_TYPE *subtrahend, DATA_TYPE *dest, DATA_TYPE minuend, uint64_t numElements) {
-    DATA_TYPE buffer[2];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)buffer)[0] = ((float2 *)subtrahend)[offset2Elements];
+    ((double2 *)buffer)[0] = ((double2 *)subtrahend)[offset4Elements];
     buffer[0] = minuend - buffer[0];
     buffer[1] = minuend - buffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    buffer[2] = minuend - buffer[2];
+    buffer[3] = minuend - buffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)subtrahend)[offset4Elements];
+    buffer[0] = minuend - buffer[0];
+    buffer[1] = minuend - buffer[1];
+    buffer[2] = minuend - buffer[2];
+    buffer[3] = minuend - buffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -573,21 +640,34 @@ __global__ void subtractScalarSubtrahendHalf(half *minuend, half *dest, half sub
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void subtractScalarSubtrahend4B(DATA_TYPE *minuend, DATA_TYPE *dest, DATA_TYPE subtrahend, uint64_t numElements) {
-    DATA_TYPE buffer[2];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)buffer)[0] = ((float2 *)minuend)[offset2Elements];
+    ((double2 *)buffer)[0] = ((double2 *)minuend)[offset4Elements];
     buffer[0] = buffer[0] - subtrahend;
     buffer[1] = buffer[1] - subtrahend;
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    buffer[2] = buffer[2] - subtrahend;
+    buffer[3] = buffer[3] - subtrahend;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)minuend)[offset4Elements];
+    buffer[0] = buffer[0] - subtrahend;
+    buffer[1] = buffer[1] - subtrahend;
+    buffer[2] = buffer[2] - subtrahend;
+    buffer[3] = buffer[3] - subtrahend;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -673,23 +753,37 @@ __global__ void subtractElementwiseHalf(half *minuend, half *dest, half *subtrah
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void subtractElementwise4B(DATA_TYPE *minuend, DATA_TYPE *dest, DATA_TYPE *subtrahend, uint64_t numElements) {
-    DATA_TYPE minuendBuffer[2];
-    DATA_TYPE subtrahendBuffer[2];
+    DATA_TYPE minuendBuffer[4];
+    DATA_TYPE subtrahendBuffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)minuendBuffer)[0] = ((float2 *)minuend)[offset2Elements];
-    ((float2 *)subtrahendBuffer)[0] = ((float2 *)subtrahend)[offset2Elements];
+    ((double2 *)minuendBuffer)[0] = ((double2 *)minuend)[offset4Elements];
+    ((double2 *)subtrahendBuffer)[0] = ((double2 *)subtrahend)[offset4Elements];
     minuendBuffer[0] = minuendBuffer[0] - subtrahendBuffer[0];
     minuendBuffer[1] = minuendBuffer[1] - subtrahendBuffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)minuendBuffer)[0];
+    minuendBuffer[2] = minuendBuffer[2] - subtrahendBuffer[2];
+    minuendBuffer[3] = minuendBuffer[3] - subtrahendBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)minuendBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)minuendBuffer)[0] = ((double2 *)minuend)[offset4Elements];
+    ((double2 *)subtrahendBuffer)[0] = ((double2 *)subtrahend)[offset4Elements];
+    minuendBuffer[0] = minuendBuffer[0] - subtrahendBuffer[0];
+    minuendBuffer[1] = minuendBuffer[1] - subtrahendBuffer[1];
+    minuendBuffer[2] = minuendBuffer[2] - subtrahendBuffer[2];
+    minuendBuffer[3] = minuendBuffer[3] - subtrahendBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)minuendBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -771,21 +865,34 @@ __global__ void divideScalarDenominatorHalf(half *numerator, half *dest, half de
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void divideScalarDenominator4B(DATA_TYPE *numerator, DATA_TYPE *dest, DATA_TYPE denominator, uint64_t numElements) {
-    DATA_TYPE buffer[2];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)buffer)[0] = ((float2 *)numerator)[offset2Elements];
+    ((double2 *)buffer)[0] = ((double2 *)numerator)[offset4Elements];
     buffer[0] = buffer[0] / denominator;
     buffer[1] = buffer[1] / denominator;
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    buffer[2] = buffer[2] / denominator;
+    buffer[3] = buffer[3] / denominator;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)numerator)[offset4Elements];
+    buffer[0] = buffer[0] / denominator;
+    buffer[1] = buffer[1] / denominator;
+    buffer[2] = buffer[2] / denominator;
+    buffer[3] = buffer[3] / denominator;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -867,21 +974,34 @@ __global__ void divideScalarNumeratorHalf(half *denominator, half *dest, half nu
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void divideScalarNumerator4B(DATA_TYPE *denominator, DATA_TYPE *dest, DATA_TYPE numerator, uint64_t numElements) {
-    DATA_TYPE buffer[2];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)buffer)[0] = ((float2 *)denominator)[offset2Elements];
+    ((double2 *)buffer)[0] = ((double2 *)denominator)[offset4Elements];
     buffer[0] = numerator / buffer[0];
     buffer[1] = numerator / buffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    buffer[2] = numerator / buffer[2];
+    buffer[3] = numerator / buffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)denominator)[offset4Elements];
+    buffer[0] = numerator / buffer[0];
+    buffer[1] = numerator / buffer[1];
+    buffer[2] = numerator / buffer[2];
+    buffer[3] = numerator / buffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -967,23 +1087,37 @@ __global__ void divideElementwiseHalf(half *numerator, half *dest, half *denomin
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void divideElementwise4B(DATA_TYPE *numerator, DATA_TYPE *dest, DATA_TYPE *denominator, uint64_t numElements) {
-    DATA_TYPE numeratorBuffer[2];
-    DATA_TYPE denominatorBuffer[2];
+    DATA_TYPE numeratorBuffer[4];
+    DATA_TYPE denominatorBuffer[4];
 
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)numeratorBuffer)[0] = ((float2 *)numerator)[offset2Elements];
-    ((float2 *)denominatorBuffer)[0] = ((float2 *)denominator)[offset2Elements];
+    ((double2 *)numeratorBuffer)[0] = ((double2 *)numerator)[offset4Elements];
+    ((double2 *)denominatorBuffer)[0] = ((double2 *)denominator)[offset4Elements];
     numeratorBuffer[0] = numeratorBuffer[0] / denominatorBuffer[0];
     numeratorBuffer[1] = numeratorBuffer[1] / denominatorBuffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)numeratorBuffer)[0];
+    numeratorBuffer[2] = numeratorBuffer[2] / denominatorBuffer[2];
+    numeratorBuffer[3] = numeratorBuffer[3] / denominatorBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)numeratorBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)numeratorBuffer)[0] = ((double2 *)numerator)[offset4Elements];
+    ((double2 *)denominatorBuffer)[0] = ((double2 *)denominator)[offset4Elements];
+    numeratorBuffer[0] = numeratorBuffer[0] / denominatorBuffer[0];
+    numeratorBuffer[1] = numeratorBuffer[1] / denominatorBuffer[1];
+    numeratorBuffer[2] = numeratorBuffer[2] / denominatorBuffer[2];
+    numeratorBuffer[3] = numeratorBuffer[3] / denominatorBuffer[3];
+    ((double2 *)dest)[offset4Elements] = ((double2 *)numeratorBuffer)[0];
 }
 
 void Tensor::add(Tensor augend, double addend, Stream stream) {
@@ -1000,7 +1134,7 @@ void Tensor::add(Tensor augend, double addend, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         addScalarHalf<<<gridSize, blockSize, 0, stream>>>((half *)augendMem, (half *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<float><<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
@@ -1009,7 +1143,7 @@ void Tensor::add(Tensor augend, double addend, Stream stream) {
         dim3 gridSize((numElements + 1023) / 1024);
         addScalar2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)augendMem, (uint16_t *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)augendMem, (uint32_t *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 2047) / 2048);
@@ -1018,7 +1152,7 @@ void Tensor::add(Tensor augend, double addend, Stream stream) {
         dim3 gridSize((numElements + 1023) / 1024);
         addScalar2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, addend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         addScalar4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, addend, numElements);
     } else {
         assert(false);
@@ -1045,7 +1179,7 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         addElementwiseHalf<<<gridSize, blockSize, 0, stream>>>((half *)augendMem, (half *)destMem, (half *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<float><<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, (float *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
@@ -1056,7 +1190,7 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
         addElementwise2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)augendMem, (uint16_t *)destMem, (uint16_t *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)augendMem, (uint32_t *)destMem, (uint32_t *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1068,7 +1202,7 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
         addElementwise2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, (int16_t *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         addElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, (int32_t *)addendMem, numElements);
     } else {
@@ -1090,7 +1224,7 @@ void Tensor::subtract(double minuend, Tensor subtrahend, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractScalarMinuendHalf<<<gridSize, blockSize, 0, stream>>>((half *)subtrahendMem, (half *)destMem, minuend, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend4B<float><<<gridSize, blockSize, 0, stream>>>((float *)subtrahendMem, (float *)destMem, minuend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 2047) / 2048);
@@ -1101,7 +1235,7 @@ void Tensor::subtract(double minuend, Tensor subtrahend, Stream stream) {
         subtractScalarMinuend2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)subtrahendMem, (uint16_t *)destMem, minuend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)subtrahendMem, (uint32_t *)destMem, minuend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1113,7 +1247,7 @@ void Tensor::subtract(double minuend, Tensor subtrahend, Stream stream) {
         subtractScalarMinuend2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)subtrahendMem, (int16_t *)destMem, minuend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarMinuend4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)subtrahendMem, (int32_t *)destMem, minuend, numElements);
     } else {
@@ -1135,7 +1269,7 @@ void Tensor::subtract(Tensor minuend, double subtrahend, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         subtractScalarSubtrahendHalf<<<gridSize, blockSize, 0, stream>>>((half *)minuendMem, (half *)destMem, subtrahend, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)minuendMem, (float *)destMem, subtrahend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1147,7 +1281,7 @@ void Tensor::subtract(Tensor minuend, double subtrahend, Stream stream) {
         subtractScalarSubtrahend2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)minuendMem, (uint16_t *)destMem, subtrahend, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)minuendMem, (uint32_t *)destMem, subtrahend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1159,7 +1293,7 @@ void Tensor::subtract(Tensor minuend, double subtrahend, Stream stream) {
         subtractScalarSubtrahend2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)minuendMem, (int16_t *)destMem, subtrahend, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractScalarSubtrahend4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)minuendMem, (int32_t *)destMem, subtrahend, numElements);
     } else {
@@ -1186,7 +1320,7 @@ void Tensor::subtract(Tensor minuend, Tensor subtrahend, Stream stream) {
         subtractElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)minuendMem, (half *)destMem, (half *)subtrahendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)minuendMem, (float *)destMem, (float *)subtrahendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1198,7 +1332,7 @@ void Tensor::subtract(Tensor minuend, Tensor subtrahend, Stream stream) {
         subtractElementwise2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)minuendMem, (uint16_t *)destMem, (uint16_t *)subtrahendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)minuendMem, (uint32_t *)destMem, (uint32_t *)subtrahendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1210,7 +1344,7 @@ void Tensor::subtract(Tensor minuend, Tensor subtrahend, Stream stream) {
         subtractElementwise2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)minuendMem, (int16_t *)destMem, (int16_t *)subtrahendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         subtractElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)minuendMem, (int32_t *)destMem, (int32_t *)subtrahendMem, numElements);
     } else {
@@ -1232,7 +1366,7 @@ void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         multiplyScalarMultiplierHalf<<<gridSize, blockSize, 0, stream>>>((half *)multiplicandMem, (half *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)multiplicandMem, (float *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1244,7 +1378,7 @@ void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
         multiplyScalarMultiplier2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)multiplicandMem, (uint16_t *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)multiplicandMem, (uint32_t *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1256,7 +1390,7 @@ void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
         multiplyScalarMultiplier2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)multiplicandMem, (int16_t *)destMem, multiplier, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         multiplyScalarMultiplier4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)multiplicandMem, (int32_t *)destMem, multiplier, numElements);
     } else {
@@ -1285,7 +1419,7 @@ void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
         multiplyElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)multiplicandMem, (half *)destMem, (half *)multiplierMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)multiplicandMem, (float *)destMem, (float *)multiplierMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1297,7 +1431,7 @@ void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
         multiplyElementwise2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)multiplicandMem, (uint16_t *)destMem, (uint16_t *)multiplierMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)multiplicandMem, (uint32_t *)destMem, (uint32_t *)multiplierMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1309,7 +1443,7 @@ void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
         multiplyElementwise2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)multiplicandMem, (int16_t *)destMem, (int16_t *)multiplierMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         multiplyElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)multiplicandMem, (int32_t *)destMem, (int32_t *)multiplierMem, numElements);
     } else {
@@ -1331,7 +1465,7 @@ void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         divideScalarDenominatorHalf<<<gridSize, blockSize, 0, stream>>>((half *)numeratorMem, (half *)destMem, denominator, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)numeratorMem, (float *)destMem, denominator, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1343,7 +1477,7 @@ void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
         divideScalarDenominator2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)numeratorMem, (uint16_t *)destMem, denominator, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)numeratorMem, (uint32_t *)destMem, denominator, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1355,7 +1489,7 @@ void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
         divideScalarDenominator2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)numeratorMem, (int16_t *)destMem, denominator, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideScalarDenominator4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)numeratorMem, (int32_t *)destMem, denominator, numElements);
     } else {
@@ -1377,7 +1511,7 @@ void Tensor::divide(double numerator, Tensor denominator, Stream stream) {
         dim3 gridSize((numElements + 4095) / 4096);
         divideScalarNumeratorHalf<<<gridSize, blockSize, 0, stream>>>((half *)denominatorMem, (half *)destMem, numerator, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)denominatorMem, (float *)destMem, numerator, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1389,7 +1523,7 @@ void Tensor::divide(double numerator, Tensor denominator, Stream stream) {
         divideScalarNumerator2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)denominatorMem, (uint16_t *)destMem, numerator, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)denominatorMem, (uint32_t *)destMem, numerator, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1401,7 +1535,7 @@ void Tensor::divide(double numerator, Tensor denominator, Stream stream) {
         divideScalarNumerator2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)denominatorMem, (int16_t *)destMem, numerator, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideScalarNumerator4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)denominatorMem, (int32_t *)destMem, numerator, numElements);
     } else {
@@ -1428,7 +1562,7 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
         divideElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
             (half *)numeratorMem, (half *)destMem, (half *)denominatorMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise4B<float>
             <<<gridSize, blockSize, 0, stream>>>((float *)numeratorMem, (float *)destMem, (float *)denominatorMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
@@ -1440,7 +1574,7 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
         divideElementwise2B<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)numeratorMem, (uint16_t *)destMem, (uint16_t *)denominatorMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)numeratorMem, (uint32_t *)destMem, (uint32_t *)denominatorMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1452,7 +1586,7 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
         divideElementwise2B<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)numeratorMem, (int16_t *)destMem, (int16_t *)denominatorMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
+        dim3 gridSize((numElements + 2047) / 2048);
         divideElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)numeratorMem, (int32_t *)destMem, (int32_t *)denominatorMem, numElements);
     } else {
