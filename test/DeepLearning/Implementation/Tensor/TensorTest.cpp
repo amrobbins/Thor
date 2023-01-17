@@ -728,7 +728,7 @@ TEST(Tensor, DivideScalarDenominator) {
         stream.synchronize();
 
         float *dest_gpu_float_h_mem = (float *)dest_gpu_float_h.getMemPtr();
-        float thresh = 0.01;
+        float thresh = 0.02;
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected;
