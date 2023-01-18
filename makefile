@@ -695,6 +695,10 @@ build/Demos/AlexNetDemo: build/test/googletest/libgtest.a Demos/AlexNetDemo.cpp 
 	mkdir -p build/Demos
 	$(Gpp) -o build/Demos/AlexNetDemo -std=c++11 -pthread Demos/AlexNetDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
+build/Demos/KernelProfilerScaffold: build/test/googletest/libgtest.a Demos/KernelProfilerScaffold.cpp $(THOR)
+	mkdir -p build/Demos
+	$(Gpp) -o build/Demos/KernelProfilerScaffold -std=c++11 -pthread Demos/KernelProfilerScaffold.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
 build/Demos/FewLayerFullyConnectedDemo: build/test/googletest/libgtest.a Demos/FewLayerFullyConnectedDemo.cpp $(THOR)
 	mkdir -p build/Demos
 	$(Gpp) -o build/Demos/FewLayerFullyConnectedDemo -std=c++11 -pthread Demos/FewLayerFullyConnectedDemo.cpp $(CUDA) $(INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
