@@ -22,7 +22,7 @@ TEST(Tensor, Copies) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, dimensions);
 
@@ -68,7 +68,7 @@ TEST(Tensor, Reshapes) {
     for (uint32_t t = 0; t < 5; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, dimensions);
 
@@ -115,7 +115,7 @@ TEST(Tensor, Resizes) {
     for (uint32_t t = 0; t < 5; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, dimensions);
 
@@ -130,7 +130,7 @@ TEST(Tensor, Resizes) {
         ASSERT_EQ(tensor.getDescriptor().getDimensions(), dimensions);
 
         dimensions.clear();
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         tensor.resize(dimensions);
         ASSERT_EQ(tensor.getDescriptor().getDimensions(), dimensions);
@@ -146,7 +146,7 @@ TEST(Tensor, AddScalar) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -218,7 +218,7 @@ TEST(Tensor, AddTensor) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -260,6 +260,13 @@ TEST(Tensor, AddTensor) {
                 } else {
                     augend_float_h_mem[i * dimensions[1] + j] = rand() % 10;
                     addend_float_h_mem[i * dimensions[1] + j] = rand() % 10;
+                    if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                        dataType != TensorDescriptor::DataType::UINT32) {
+                        if (rand() % 2 == 0)
+                            augend_float_h_mem[i * dimensions[1] + j] *= -1;
+                        if (rand() % 2 == 0)
+                            addend_float_h_mem[i * dimensions[1] + j] *= -1;
+                    }
                 }
             }
         }
@@ -278,7 +285,7 @@ TEST(Tensor, AddTensor) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = augend_float_h_mem[i * dimensions[1] + j] + addend_float_h_mem[i * dimensions[1] + j];
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
-                // augend_float_h_mem[i * dimensions[1] + j], addend_float_h_mem[i * dimensions[1] + j], (int)dataType);
+                //    augend_float_h_mem[i * dimensions[1] + j], addend_float_h_mem[i * dimensions[1] + j], (int)dataType);
                 ASSERT_LT(abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]), thresh);
             }
         }
@@ -294,7 +301,7 @@ TEST(Tensor, SubtractScalarSubtrahend) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -333,6 +340,11 @@ TEST(Tensor, SubtractScalarSubtrahend) {
                     source_float_h_mem[i * dimensions[1] + j] = 19 + rand() % 20;
                 else
                     source_float_h_mem[i * dimensions[1] + j] = rand() % 50;
+                if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32) {
+                    if (rand() % 2 == 0)
+                        source_float_h_mem[i * dimensions[1] + j] *= -1;
+                }
             }
         }
         float scalar;
@@ -343,6 +355,11 @@ TEST(Tensor, SubtractScalarSubtrahend) {
             scalar = rand() % 20;
         else
             scalar = rand() % 50;
+        if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32) {
+            if (rand() % 2 == 0)
+                scalar *= -1;
+        }
 
         source_h.copyFromAsync(source_float_h, stream);
         source_d.copyFromAsync(source_h, stream);
@@ -354,9 +371,10 @@ TEST(Tensor, SubtractScalarSubtrahend) {
         float thresh = 0.01;
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
-                // printf("%f %f [%ld]\n", (source_float_h_mem[i * dimensions[1] + j] - scalar), dest_gpu_float_h_mem[i * dimensions[1] +
-                // j], i * dimensions[1] + j);
-                ASSERT_LT(abs((source_float_h_mem[i * dimensions[1] + j] - scalar) - dest_gpu_float_h_mem[i * dimensions[1] + j]), thresh);
+                float expected = source_float_h_mem[i * dimensions[1] + j] - scalar;
+                // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
+                //       source_float_h_mem[i * dimensions[1] + j], scalar, (int)dataType);
+                ASSERT_LT(abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]), thresh);
             }
         }
     }
@@ -371,7 +389,7 @@ TEST(Tensor, SubtractScalarMinuend) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -410,6 +428,11 @@ TEST(Tensor, SubtractScalarMinuend) {
                     source_float_h_mem[i * dimensions[1] + j] = rand() % 20;
                 else
                     source_float_h_mem[i * dimensions[1] + j] = rand() % 50;
+                if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32) {
+                    if (rand() % 2 == 0)
+                        source_float_h_mem[i * dimensions[1] + j] *= -1;
+                }
             }
         }
         float scalar;
@@ -420,6 +443,11 @@ TEST(Tensor, SubtractScalarMinuend) {
             scalar = 19 + rand() % 20;
         else
             scalar = rand() % 50;
+        if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32) {
+            if (rand() % 2 == 0)
+                scalar *= -1;
+        }
 
         source_h.copyFromAsync(source_float_h, stream);
         source_d.copyFromAsync(source_h, stream);
@@ -446,7 +474,7 @@ TEST(Tensor, SubtractTensor) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -493,6 +521,13 @@ TEST(Tensor, SubtractTensor) {
                     minuend_float_h_mem[i * dimensions[1] + j] = rand() % 10;
                     subtrahend_float_h_mem[i * dimensions[1] + j] = rand() % 10;
                 }
+                if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32) {
+                    if (rand() % 2 == 0)
+                        minuend_float_h_mem[i * dimensions[1] + j] *= -1;
+                    if (rand() % 2 == 0)
+                        subtrahend_float_h_mem[i * dimensions[1] + j] *= -1;
+                }
             }
         }
 
@@ -526,7 +561,7 @@ TEST(Tensor, MultiplyScalar) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -601,7 +636,7 @@ TEST(Tensor, MultiplyTensor) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -677,7 +712,7 @@ TEST(Tensor, DivideScalarDenominator) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -753,7 +788,7 @@ TEST(Tensor, DivideScalarNumerator) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;
@@ -827,7 +862,7 @@ TEST(Tensor, DivideTensor) {
     for (uint32_t t = 0; t < 20; ++t) {
         Stream stream(0);
         vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 100));
+        dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 8;

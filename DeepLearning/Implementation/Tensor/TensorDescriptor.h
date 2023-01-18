@@ -16,7 +16,21 @@ namespace ThorImplementation {
 
 class TensorDescriptor {
    public:
-    enum class DataType { FP16 = 10, FP32, FP64, INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64, BOOLEAN, PACKED_BOOLEAN };
+    enum class DataType {
+        FP16 = 10,
+        FP32 = 11,
+        FP64 = 12,
+        INT8 = 13,
+        INT16 = 14,
+        INT32 = 15,
+        INT64 = 16,
+        UINT8 = 17,
+        UINT16 = 18,
+        UINT32 = 19,
+        UINT64 = 20,
+        BOOLEAN = 21,
+        PACKED_BOOLEAN = 22
+    };
 
     TensorDescriptor() {}
 
