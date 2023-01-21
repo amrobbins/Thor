@@ -202,13 +202,29 @@ class Tensor : private ReferenceCounted {
      */
     void exp(Tensor exponent, Stream stream);
 
+    /**
+     * [thisTensor] = ln([argument]), elementwise
+     * <div/>
+     * Compute the natural log of the argument tensor
+     * argument must be float or half
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void log(Tensor argument, Stream stream);
+
+    /**
+     * [thisTensor] = ln([argument]), elementwise
+     * <div/>
+     * Compute the log with the specified base of the argument tensor
+     * argument must be float or half.
+     * base will be converted into the type of argument.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void log(Tensor argument, float base, Stream stream);
+
     // FIXME: expand this pattern to cover all useful functions...
-    // exp(float power)
-    // exp(tensor power)
-    // log(float base)
-    // ln()
-    // abs()
-    // trig functions
+    // sin(), cos(), trig functions
+    // sqrt()
+    // ciel(), floor()
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
