@@ -1,302 +1,1569 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 using namespace ThorImplementation;
-/*
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DATA_TYPE>
-__global__ void multiplyScalarMultiplier1B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE multiplier, uint64_t numElements) {
-    DATA_TYPE buffer[8];
-
-    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
-    if (offset >= numElements)
-        return;
-    uint64_t offset8Elements = offset >> 3;
-
-    ((float2 *)buffer)[0] = ((float2 *)multiplicand)[offset8Elements];
-    buffer[0] = buffer[0] * multiplier;
-    buffer[1] = buffer[1] * multiplier;
-    buffer[2] = buffer[2] * multiplier;
-    buffer[3] = buffer[3] * multiplier;
-    buffer[4] = buffer[4] * multiplier;
-    buffer[5] = buffer[5] * multiplier;
-    buffer[6] = buffer[6] * multiplier;
-    buffer[7] = buffer[7] * multiplier;
-    ((float2 *)dest)[offset8Elements] = ((float2 *)buffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 4 elements : 1024 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DATA_TYPE>
-__global__ void multiplyScalarMultiplier2B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE multiplier, uint64_t numElements) {
-    DATA_TYPE buffer[4];
-
-    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    ((float2 *)buffer)[0] = ((float2 *)multiplicand)[offset4Elements];
-    buffer[0] = buffer[0] * multiplier;
-    buffer[1] = buffer[1] * multiplier;
-    buffer[2] = buffer[2] * multiplier;
-    buffer[3] = buffer[3] * multiplier;
-    ((float2 *)dest)[offset4Elements] = ((float2 *)buffer)[0];
-}
+using namespace std;
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
-__global__ void multiplyScalarMultiplierHalf(half *multiplicand, half *dest, half multiplier, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 4096 + 512 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+template <typename DEST_DATA_TYPE>
+__global__ void powElementwiseDest1B(float *base, DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
     if (offset >= numElements)
         return;
     uint64_t offset8Elements = offset >> 3;
 
-    half2 buffer[4];
-    half2 multiplierHalf2;
-    multiplierHalf2.x = multiplier;
-    multiplierHalf2.y = multiplier;
+    float baseBuffer[8];
+    float exponentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
 
-    // Note: all tensors end on 16 byte boundary
-    ((float4 *)buffer)[0] = ((float4 *)multiplicand)[offset8Elements];
-    buffer[0] = __hmul2(buffer[0], multiplierHalf2);
-    buffer[1] = __hmul2(buffer[1], multiplierHalf2);
-    buffer[2] = __hmul2(buffer[2], multiplierHalf2);
-    buffer[3] = __hmul2(buffer[3], multiplierHalf2);
-    ((float4 *)dest)[offset8Elements] = ((float4 *)buffer)[0];
-
-    offset += 256;
-    if (offset >= numElements)
-        return;
-    offset8Elements = offset >> 3;
-    ((float4 *)buffer)[0] = ((float4 *)multiplicand)[offset8Elements];
-    buffer[0] = __hmul2(buffer[0], multiplierHalf2);
-    buffer[1] = __hmul2(buffer[1], multiplierHalf2);
-    buffer[2] = __hmul2(buffer[2], multiplierHalf2);
-    buffer[3] = __hmul2(buffer[3], multiplierHalf2);
-    ((float4 *)dest)[offset8Elements] = ((float4 *)buffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DATA_TYPE>
-__global__ void multiplyScalarMultiplier4B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE multiplier, uint64_t numElements) {
-    DATA_TYPE buffer[2];
-
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
-    if (offset >= numElements)
-        return;
-    uint64_t offset2Elements = offset >> 1;
-
-    ((float2 *)buffer)[0] = ((float2 *)multiplicand)[offset2Elements];
-    buffer[0] = buffer[0] * multiplier;
-    buffer[1] = buffer[1] * multiplier;
-    ((float2 *)dest)[offset2Elements] = ((float2 *)buffer)[0];
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((double4 *)baseBuffer)[0] = ((double4 *)base)[offset8Elements];
+    ((double4 *)exponentBuffer)[0] = ((double4 *)exponent)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponentBuffer[3]);
+    destBuffer[4] = (DEST_DATA_TYPE)powf(baseBuffer[4], exponentBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)powf(baseBuffer[5], exponentBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)powf(baseBuffer[6], exponentBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)powf(baseBuffer[7], exponentBuffer[7]);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
-template <typename DATA_TYPE>
-__global__ void multiplyElementwise1B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE *multiplier, uint64_t numElements) {
-    DATA_TYPE multiplicandBuffer[8];
-    DATA_TYPE multiplierBuffer[8];
-
-    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
-    if (offset >= numElements)
-        return;
-    uint64_t offset8Elements = offset >> 3;
-
-    ((float2 *)multiplicandBuffer)[0] = ((float2 *)multiplicand)[offset8Elements];
-    ((float2 *)multiplierBuffer)[0] = ((float2 *)multiplier)[offset8Elements];
-    multiplicandBuffer[0] = multiplicandBuffer[0] * multiplierBuffer[0];
-    multiplicandBuffer[1] = multiplicandBuffer[1] * multiplierBuffer[1];
-    multiplicandBuffer[2] = multiplicandBuffer[2] * multiplierBuffer[2];
-    multiplicandBuffer[3] = multiplicandBuffer[3] * multiplierBuffer[3];
-    multiplicandBuffer[4] = multiplicandBuffer[4] * multiplierBuffer[4];
-    multiplicandBuffer[5] = multiplicandBuffer[5] * multiplierBuffer[5];
-    multiplicandBuffer[6] = multiplicandBuffer[6] * multiplierBuffer[6];
-    multiplicandBuffer[7] = multiplicandBuffer[7] * multiplierBuffer[7];
-    ((float2 *)dest)[offset8Elements] = ((float2 *)multiplicandBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 4 elements : 1024 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DATA_TYPE>
-__global__ void multiplyElementwise2B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE *multiplier, uint64_t numElements) {
-    DATA_TYPE multiplicandBuffer[4];
-    DATA_TYPE multiplierBuffer[4];
-
-    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
+template <typename DEST_DATA_TYPE>
+__global__ void powElementwiseDest2B(float *base, DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
     uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)multiplicandBuffer)[0] = ((float2 *)multiplicand)[offset4Elements];
-    ((float2 *)multiplierBuffer)[0] = ((float2 *)multiplier)[offset4Elements];
-    multiplicandBuffer[0] = multiplicandBuffer[0] * multiplierBuffer[0];
-    multiplicandBuffer[1] = multiplicandBuffer[1] * multiplierBuffer[1];
-    multiplicandBuffer[2] = multiplicandBuffer[2] * multiplierBuffer[2];
-    multiplicandBuffer[3] = multiplicandBuffer[3] * multiplierBuffer[3];
-    ((float2 *)dest)[offset4Elements] = ((float2 *)multiplicandBuffer)[0];
+    float baseBuffer[4];
+    float exponentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void powElementwiseDest4B(float *base, DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float baseBuffer[4];
+    float exponentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
-__global__ void multiplyElementwiseHalf(half *multiplicand, half *dest, half *multiplier, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 4096 + 512 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+template <typename DEST_DATA_TYPE>
+__global__ void powScalarExponentDest1B(float *base, DEST_DATA_TYPE *dest, float exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
     if (offset >= numElements)
         return;
     uint64_t offset8Elements = offset >> 3;
 
-    half2 multiplicandBuffer[4];
-    half2 multiplierBuffer[4];
+    float baseBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
 
-    // Note: all tensors end on 16 byte boundary
-    ((float4 *)multiplicandBuffer)[0] = ((float4 *)multiplicand)[offset8Elements];
-    ((float4 *)multiplierBuffer)[0] = ((float4 *)multiplier)[offset8Elements];
-    multiplicandBuffer[0] = __hmul2(multiplicandBuffer[0], multiplierBuffer[0]);
-    multiplicandBuffer[1] = __hmul2(multiplicandBuffer[1], multiplierBuffer[1]);
-    multiplicandBuffer[2] = __hmul2(multiplicandBuffer[2], multiplierBuffer[2]);
-    multiplicandBuffer[3] = __hmul2(multiplicandBuffer[3], multiplierBuffer[3]);
-    ((float4 *)dest)[offset8Elements] = ((float4 *)multiplicandBuffer)[0];
-
-    offset += 256;
-    if (offset >= numElements)
-        return;
-    offset8Elements = offset >> 3;
-    ((float4 *)multiplicandBuffer)[0] = ((float4 *)multiplicand)[offset8Elements];
-    ((float4 *)multiplierBuffer)[0] = ((float4 *)multiplier)[offset8Elements];
-    multiplicandBuffer[0] = __hmul2(multiplicandBuffer[0], multiplierBuffer[0]);
-    multiplicandBuffer[1] = __hmul2(multiplicandBuffer[1], multiplierBuffer[1]);
-    multiplicandBuffer[2] = __hmul2(multiplicandBuffer[2], multiplierBuffer[2]);
-    multiplicandBuffer[3] = __hmul2(multiplicandBuffer[3], multiplierBuffer[3]);
-    ((float4 *)dest)[offset8Elements] = ((float4 *)multiplicandBuffer)[0];
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((double4 *)baseBuffer)[0] = ((double4 *)base)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponent);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponent);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponent);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponent);
+    destBuffer[4] = (DEST_DATA_TYPE)powf(baseBuffer[4], exponent);
+    destBuffer[5] = (DEST_DATA_TYPE)powf(baseBuffer[5], exponent);
+    destBuffer[6] = (DEST_DATA_TYPE)powf(baseBuffer[6], exponent);
+    destBuffer[7] = (DEST_DATA_TYPE)powf(baseBuffer[7], exponent);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 2 elements : 512 elements processed per block
+// each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
-template <typename DATA_TYPE>
-__global__ void multiplyElementwise4B(DATA_TYPE *multiplicand, DATA_TYPE *dest, DATA_TYPE *multiplier, uint64_t numElements) {
-    DATA_TYPE multiplicandBuffer[2];
-    DATA_TYPE multiplierBuffer[2];
-
-    uint64_t offset = blockIdx.x * 512 + threadIdx.x * 2;
+template <typename DEST_DATA_TYPE>
+__global__ void powScalarExponentDest2B(float *base, DEST_DATA_TYPE *dest, float exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset2Elements = offset >> 1;
+    uint64_t offset4Elements = offset >> 2;
 
-    ((float2 *)multiplicandBuffer)[0] = ((float2 *)multiplicand)[offset2Elements];
-    ((float2 *)multiplierBuffer)[0] = ((float2 *)multiplier)[offset2Elements];
-    multiplicandBuffer[0] = multiplicandBuffer[0] * multiplierBuffer[0];
-    multiplicandBuffer[1] = multiplicandBuffer[1] * multiplierBuffer[1];
-    ((float2 *)dest)[offset2Elements] = ((float2 *)multiplicandBuffer)[0];
+    float baseBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponent);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponent);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponent);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponent);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponent);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponent);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponent);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponent);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 }
 
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void powScalarExponentDest4B(float *base, DEST_DATA_TYPE *dest, float exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
 
-void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
-    assert(multiplicand.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(multiplicand.getDataType() == getDataType());
+    float baseBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
 
-    TensorDescriptor::DataType dataType = multiplicand.getDataType();
-    uint64_t numElements = multiplicand.getTotalNumElements();
-    void *multiplicandMem = multiplicand.getMemPtr();
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponent);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponent);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponent);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponent);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)baseBuffer)[0] = ((float4 *)base)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(baseBuffer[0], exponent);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(baseBuffer[1], exponent);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(baseBuffer[2], exponent);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(baseBuffer[3], exponent);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void powScalarBaseDest1B(float base, DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    float exponentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((double4 *)exponentBuffer)[0] = ((double4 *)exponent)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(base, exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(base, exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(base, exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(base, exponentBuffer[3]);
+    destBuffer[4] = (DEST_DATA_TYPE)powf(base, exponentBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)powf(base, exponentBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)powf(base, exponentBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)powf(base, exponentBuffer[7]);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void powScalarBaseDest2B(float base, DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float exponentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(base, exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(base, exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(base, exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(base, exponentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(base, exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(base, exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(base, exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(base, exponentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void powScalarBaseDest4B(float base, DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float exponentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(base, exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(base, exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(base, exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(base, exponentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)powf(base, exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)powf(base, exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)powf(base, exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)powf(base, exponentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void expDest1B(DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    float exponentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((double4 *)exponentBuffer)[0] = ((double4 *)exponent)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)expf(exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)expf(exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)expf(exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)expf(exponentBuffer[3]);
+    destBuffer[4] = (DEST_DATA_TYPE)expf(exponentBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)expf(exponentBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)expf(exponentBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)expf(exponentBuffer[7]);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void expDest2B(DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float exponentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)expf(exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)expf(exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)expf(exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)expf(exponentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)expf(exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)expf(exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)expf(exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)expf(exponentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void expDest4B(DEST_DATA_TYPE *dest, float *exponent, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float exponentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and exponent
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)expf(exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)expf(exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)expf(exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)expf(exponentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)exponentBuffer)[0] = ((float4 *)exponent)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)expf(exponentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)expf(exponentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)expf(exponentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)expf(exponentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logDest1B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    float argumentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((double4 *)argumentBuffer)[0] = ((double4 *)argument)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)logf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)logf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)logf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)logf(argumentBuffer[3]);
+    destBuffer[4] = (DEST_DATA_TYPE)logf(argumentBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)logf(argumentBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)logf(argumentBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)logf(argumentBuffer[7]);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)logf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)logf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)logf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)logf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)logf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)logf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)logf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)logf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)logf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)logf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)logf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)logf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)logf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)logf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)logf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)logf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logDest1B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    half2 argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset8Elements];
+    argumentBuffer[0] = h2log(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    argumentBuffer[2] = h2log(argumentBuffer[2]);
+    destBuffer[4] = (DEST_DATA_TYPE)(float)argumentBuffer[2].x;
+    destBuffer[5] = (DEST_DATA_TYPE)(float)argumentBuffer[2].y;
+    argumentBuffer[3] = h2log(argumentBuffer[3]);
+    destBuffer[6] = (DEST_DATA_TYPE)(float)argumentBuffer[3].x;
+    destBuffer[7] = (DEST_DATA_TYPE)(float)argumentBuffer[3].y;
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logDest2B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logDest4B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logXDest1B(DEST_DATA_TYPE *dest, float *argument, float log2ConversionFactor, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    float argumentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((double4 *)argumentBuffer)[0] = ((double4 *)argument)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(log2f(argumentBuffer[0]) * log2ConversionFactor);
+    destBuffer[1] = (DEST_DATA_TYPE)(log2f(argumentBuffer[1]) * log2ConversionFactor);
+    destBuffer[2] = (DEST_DATA_TYPE)(log2f(argumentBuffer[2]) * log2ConversionFactor);
+    destBuffer[3] = (DEST_DATA_TYPE)(log2f(argumentBuffer[3]) * log2ConversionFactor);
+    destBuffer[4] = (DEST_DATA_TYPE)(log2f(argumentBuffer[4]) * log2ConversionFactor);
+    destBuffer[5] = (DEST_DATA_TYPE)(log2f(argumentBuffer[5]) * log2ConversionFactor);
+    destBuffer[6] = (DEST_DATA_TYPE)(log2f(argumentBuffer[6]) * log2ConversionFactor);
+    destBuffer[7] = (DEST_DATA_TYPE)(log2f(argumentBuffer[7]) * log2ConversionFactor);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logXDest2B(DEST_DATA_TYPE *dest, float *argument, float log2ConversionFactor, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(log2f(argumentBuffer[0]) * log2ConversionFactor);
+    destBuffer[1] = (DEST_DATA_TYPE)(log2f(argumentBuffer[1]) * log2ConversionFactor);
+    destBuffer[2] = (DEST_DATA_TYPE)(log2f(argumentBuffer[2]) * log2ConversionFactor);
+    destBuffer[3] = (DEST_DATA_TYPE)(log2f(argumentBuffer[3]) * log2ConversionFactor);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(log2f(argumentBuffer[0]) * log2ConversionFactor);
+    destBuffer[1] = (DEST_DATA_TYPE)(log2f(argumentBuffer[1]) * log2ConversionFactor);
+    destBuffer[2] = (DEST_DATA_TYPE)(log2f(argumentBuffer[2]) * log2ConversionFactor);
+    destBuffer[3] = (DEST_DATA_TYPE)(log2f(argumentBuffer[3]) * log2ConversionFactor);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logXDest4B(DEST_DATA_TYPE *dest, float *argument, float log2ConversionFactor, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(log2f(argumentBuffer[0]) * log2ConversionFactor);
+    destBuffer[1] = (DEST_DATA_TYPE)(log2f(argumentBuffer[1]) * log2ConversionFactor);
+    destBuffer[2] = (DEST_DATA_TYPE)(log2f(argumentBuffer[2]) * log2ConversionFactor);
+    destBuffer[3] = (DEST_DATA_TYPE)(log2f(argumentBuffer[3]) * log2ConversionFactor);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(log2f(argumentBuffer[0]) * log2ConversionFactor);
+    destBuffer[1] = (DEST_DATA_TYPE)(log2f(argumentBuffer[1]) * log2ConversionFactor);
+    destBuffer[2] = (DEST_DATA_TYPE)(log2f(argumentBuffer[2]) * log2ConversionFactor);
+    destBuffer[3] = (DEST_DATA_TYPE)(log2f(argumentBuffer[3]) * log2ConversionFactor);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logXDest1B(DEST_DATA_TYPE *dest, half *argument, half log2ConversionFactor, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    half2 argumentBuffer[4];
+    half2 conversionBuffer;
+    DEST_DATA_TYPE destBuffer[8];
+
+    conversionBuffer.x = log2ConversionFactor;
+    conversionBuffer.y = log2ConversionFactor;
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset8Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    argumentBuffer[0] = __hmul2(argumentBuffer[0], conversionBuffer);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    argumentBuffer[1] = __hmul2(argumentBuffer[1], conversionBuffer);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    argumentBuffer[2] = h2log2(argumentBuffer[2]);
+    argumentBuffer[2] = __hmul2(argumentBuffer[2], conversionBuffer);
+    destBuffer[4] = (DEST_DATA_TYPE)(float)argumentBuffer[2].x;
+    destBuffer[5] = (DEST_DATA_TYPE)(float)argumentBuffer[2].y;
+    argumentBuffer[3] = h2log2(argumentBuffer[3]);
+    argumentBuffer[3] = __hmul2(argumentBuffer[3], conversionBuffer);
+    destBuffer[6] = (DEST_DATA_TYPE)(float)argumentBuffer[3].x;
+    destBuffer[7] = (DEST_DATA_TYPE)(float)argumentBuffer[3].y;
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logXDest2B(DEST_DATA_TYPE *dest, half *argument, half log2ConversionFactor, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    half2 conversionBuffer;
+    DEST_DATA_TYPE destBuffer[4];
+
+    conversionBuffer.x = log2ConversionFactor;
+    conversionBuffer.y = log2ConversionFactor;
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    argumentBuffer[0] = __hmul2(argumentBuffer[0], conversionBuffer);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    argumentBuffer[1] = __hmul2(argumentBuffer[1], conversionBuffer);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    argumentBuffer[0] = __hmul2(argumentBuffer[0], conversionBuffer);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    argumentBuffer[1] = __hmul2(argumentBuffer[1], conversionBuffer);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void logXDest4B(DEST_DATA_TYPE *dest, half *argument, half log2ConversionFactor, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    half2 conversionBuffer;
+    DEST_DATA_TYPE destBuffer[4];
+
+    conversionBuffer.x = log2ConversionFactor;
+    conversionBuffer.y = log2ConversionFactor;
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    argumentBuffer[0] = __hmul2(argumentBuffer[0], conversionBuffer);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    argumentBuffer[1] = __hmul2(argumentBuffer[1], conversionBuffer);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    argumentBuffer[0] = __hmul2(argumentBuffer[0], conversionBuffer);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    argumentBuffer[1] = __hmul2(argumentBuffer[1], conversionBuffer);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log2Dest1B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    float argumentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((double4 *)argumentBuffer)[0] = ((double4 *)argument)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log2f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log2f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log2f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log2f(argumentBuffer[3]);
+    destBuffer[4] = (DEST_DATA_TYPE)log2f(argumentBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)log2f(argumentBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)log2f(argumentBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)log2f(argumentBuffer[7]);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log2Dest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log2f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log2f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log2f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log2f(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log2f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log2f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log2f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log2f(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log2Dest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log2f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log2f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log2f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log2f(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log2f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log2f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log2f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log2f(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log2Dest1B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    half2 argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset8Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    argumentBuffer[2] = h2log2(argumentBuffer[2]);
+    destBuffer[4] = (DEST_DATA_TYPE)(float)argumentBuffer[2].x;
+    destBuffer[5] = (DEST_DATA_TYPE)(float)argumentBuffer[2].y;
+    argumentBuffer[3] = h2log2(argumentBuffer[3]);
+    destBuffer[6] = (DEST_DATA_TYPE)(float)argumentBuffer[3].x;
+    destBuffer[7] = (DEST_DATA_TYPE)(float)argumentBuffer[3].y;
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log2Dest2B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log2Dest4B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log2(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log2(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log10Dest1B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    float argumentBuffer[8];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((double4 *)argumentBuffer)[0] = ((double4 *)argument)[offset8Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log10f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log10f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log10f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log10f(argumentBuffer[3]);
+    destBuffer[4] = (DEST_DATA_TYPE)log10f(argumentBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)log10f(argumentBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)log10f(argumentBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)log10f(argumentBuffer[7]);
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log10Dest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log10f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log10f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log10f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log10f(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log10f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log10f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log10f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log10f(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log10Dest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log10f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log10f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log10f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log10f(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)log10f(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)log10f(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)log10f(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)log10f(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log10Dest1B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    half2 argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset8Elements];
+    argumentBuffer[0] = h2log10(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log10(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    argumentBuffer[2] = h2log10(argumentBuffer[2]);
+    destBuffer[4] = (DEST_DATA_TYPE)(float)argumentBuffer[2].x;
+    destBuffer[5] = (DEST_DATA_TYPE)(float)argumentBuffer[2].y;
+    argumentBuffer[3] = h2log10(argumentBuffer[3]);
+    destBuffer[6] = (DEST_DATA_TYPE)(float)argumentBuffer[3].x;
+    destBuffer[7] = (DEST_DATA_TYPE)(float)argumentBuffer[3].y;
+    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log10Dest2B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log10(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log10(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log10(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log10(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void log10Dest4B(DEST_DATA_TYPE *dest, half *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    half2 argumentBuffer[2];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log10(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log10(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float2 *)argumentBuffer)[0] = ((float2 *)argument)[offset4Elements];
+    argumentBuffer[0] = h2log10(argumentBuffer[0]);
+    destBuffer[0] = (DEST_DATA_TYPE)(float)argumentBuffer[0].x;
+    destBuffer[1] = (DEST_DATA_TYPE)(float)argumentBuffer[0].y;
+    argumentBuffer[1] = h2log10(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)(float)argumentBuffer[1].x;
+    destBuffer[3] = (DEST_DATA_TYPE)(float)argumentBuffer[1].y;
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+/**
+ * [thisTensor] = [base] ^ [exponent], elementwise
+ * <div/>
+ * exponent and base must both have data type FP32
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
+    assert(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(base.getPlacement() == exponent.getPlacement());
+    assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert((base.getDataType() == TensorDescriptor::DataType::FP32 && exponent.getDataType() == TensorDescriptor::DataType::FP32));
+    assert(base.getTotalNumElements() == exponent.getTotalNumElements());
+    assert(base.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = base.getTotalNumElements();
+    void *baseMem = base.getMemPtr();
+    void *exponentMem = exponent.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
-        dim3 gridSize((numElements + 4095) / 4096);
-        multiplyScalarMultiplierHalf<<<gridSize, blockSize, 0, stream>>>((half *)multiplicandMem, (half *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
-        multiplyScalarMultiplier4B<float>
-            <<<gridSize, blockSize, 0, stream>>>((float *)multiplicandMem, (float *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
-        dim3 gridSize((numElements + 2047) / 2048);
-        multiplyScalarMultiplier1B<uint8_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint8_t *)multiplicandMem, (uint8_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
-        dim3 gridSize((numElements + 1023) / 1024);
-        multiplyScalarMultiplier2B<uint16_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint16_t *)multiplicandMem, (uint16_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
-        multiplyScalarMultiplier4B<uint32_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint32_t *)multiplicandMem, (uint32_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
-        dim3 gridSize((numElements + 2047) / 2048);
-        multiplyScalarMultiplier1B<int8_t>
-            <<<gridSize, blockSize, 0, stream>>>((int8_t *)multiplicandMem, (int8_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
-        dim3 gridSize((numElements + 1023) / 1024);
-        multiplyScalarMultiplier2B<int16_t>
-            <<<gridSize, blockSize, 0, stream>>>((int16_t *)multiplicandMem, (int16_t *)destMem, multiplier, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
-        multiplyScalarMultiplier4B<int32_t>
-            <<<gridSize, blockSize, 0, stream>>>((int32_t *)multiplicandMem, (int32_t *)destMem, multiplier, numElements);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        powElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (half *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (float *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        powElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint8_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        powElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint16_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint32_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        powElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int8_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        powElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int16_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        powElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int32_t *)destMem, (float *)exponentMem, numElements);
     } else {
         assert(false);
     }
 }
 
-void Tensor::multiply(double multiplicand, Tensor multiplier, Stream stream) { multiply(multiplier, multiplicand, stream); }
+/**
+ * [thisTensor] = [base] ^ exponent, elementwise
+ * <div/>
+ * base must have data type FP32.
+ */
+void Tensor::pow(Tensor base, float exponent, Stream stream) {
+    assert(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(base.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(base.getTotalNumElements() == getTotalNumElements());
 
-void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
-    assert(multiplicand.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(multiplicand.getDataType() == multiplier.getDataType());
-    assert(multiplicand.getDataType() == getDataType());
-    assert(multiplicand.getTotalNumElements() == multiplier.getTotalNumElements());
-    assert(multiplicand.getTotalNumElements() == getTotalNumElements());
-
-    TensorDescriptor::DataType dataType = multiplicand.getDataType();
-    uint64_t numElements = multiplicand.getTotalNumElements();
-    void *multiplicandMem = multiplicand.getMemPtr();
-    void *multiplierMem = multiplier.getMemPtr();
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = base.getTotalNumElements();
+    void *baseMem = base.getMemPtr();
     void *destMem = getMemPtr();
 
     dim3 blockSize(256);
-    if (dataType == TensorDescriptor::DataType::FP16) {
-        dim3 gridSize((numElements + 4095) / 4096);
-        multiplyElementwiseHalf<<<gridSize, blockSize, 0, stream>>>(
-            (half *)multiplicandMem, (half *)destMem, (half *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 511) / 512);
-        multiplyElementwise4B<float>
-            <<<gridSize, blockSize, 0, stream>>>((float *)multiplicandMem, (float *)destMem, (float *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
-        dim3 gridSize((numElements + 2047) / 2048);
-        multiplyElementwise1B<uint8_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint8_t *)multiplicandMem, (uint8_t *)destMem, (uint8_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
-        dim3 gridSize((numElements + 1023) / 1024);
-        multiplyElementwise2B<uint16_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint16_t *)multiplicandMem, (uint16_t *)destMem, (uint16_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 511) / 512);
-        multiplyElementwise4B<uint32_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint32_t *)multiplicandMem, (uint32_t *)destMem, (uint32_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
-        dim3 gridSize((numElements + 2047) / 2048);
-        multiplyElementwise1B<int8_t>
-            <<<gridSize, blockSize, 0, stream>>>((int8_t *)multiplicandMem, (int8_t *)destMem, (int8_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
-        dim3 gridSize((numElements + 1023) / 1024);
-        multiplyElementwise2B<int16_t>
-            <<<gridSize, blockSize, 0, stream>>>((int16_t *)multiplicandMem, (int16_t *)destMem, (int16_t *)multiplierMem, numElements);
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 511) / 512);
-        multiplyElementwise4B<int32_t>
-            <<<gridSize, blockSize, 0, stream>>>((int32_t *)multiplicandMem, (int32_t *)destMem, (int32_t *)multiplierMem, numElements);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        powScalarExponentDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (half *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (float *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        powScalarExponentDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint8_t *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        powScalarExponentDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint16_t *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (uint32_t *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        powScalarExponentDest1B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int8_t *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        powScalarExponentDest2B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int16_t *)destMem, exponent, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        powScalarExponentDest4B<<<gridSize, blockSize, 0, stream>>>((float *)baseMem, (int32_t *)destMem, exponent, numElements);
     } else {
         assert(false);
     }
 }
-*/
+
+/**
+ * [thisTensor] = base ^ [exponent], elementwise
+ * <div/>
+ * exponent must have data type FP32.
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::pow(float base, Tensor exponent, Stream stream) {
+    assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(exponent.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(exponent.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = exponent.getTotalNumElements();
+    void *exponentMem = exponent.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        powScalarBaseDest2B<<<gridSize, blockSize, 0, stream>>>(base, (half *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (float *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        powScalarBaseDest1B<<<gridSize, blockSize, 0, stream>>>(base, (uint8_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        powScalarBaseDest2B<<<gridSize, blockSize, 0, stream>>>(base, (uint16_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (uint32_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        powScalarBaseDest1B<<<gridSize, blockSize, 0, stream>>>(base, (int8_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        powScalarBaseDest2B<<<gridSize, blockSize, 0, stream>>>(base, (int16_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        powScalarBaseDest4B<<<gridSize, blockSize, 0, stream>>>(base, (int32_t *)destMem, (float *)exponentMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = e ^ [exponent], elementwise
+ * <div/>
+ * where e is euler's constant.
+ * exponent must have data type FP32,
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::exp(Tensor exponent, Stream stream) {
+    assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(exponent.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(exponent.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = exponent.getTotalNumElements();
+    void *exponentMem = exponent.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        expDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        expDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+        expDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+        expDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+        expDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT8) {
+        expDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT16) {
+        expDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)exponentMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::INT32) {
+        expDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)exponentMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = ln([argument]), elementwise
+ * <div/>
+ * Compute the natural log of the argument tensor
+ * argument must be float or half
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::log(Tensor argument, Stream stream) {
+    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = argument.getTotalNumElements();
+    void *argumentMem = argument.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
+        if (destDataType == TensorDescriptor::DataType::FP16) {
+            logDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            logDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            logDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            logDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            logDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            logDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            logDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            logDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
+        } else {
+            assert(false);
+        }
+    } else {
+        if (destDataType == TensorDescriptor::DataType::FP16) {
+            logDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::FP32) {
+            logDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+            logDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+            logDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+            logDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::INT8) {
+            logDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::INT16) {
+            logDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
+        } else if (destDataType == TensorDescriptor::DataType::INT32) {
+            logDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
+        } else {
+            assert(false);
+        }
+    }
+}
+
+float getLog2ConversionFactor(float base) { return 1.0f / log2f(base); }
+
+/**
+ * [thisTensor] = log<base>([argument]), elementwise
+ * <div/>
+ * Compute the log with the specified base of the argument tensor.
+ * base must be positive and not equal to 1.
+ * argument must be float or half.
+ * base will be converted into the type of argument.
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::log(Tensor argument, float base, Stream stream) {
+    assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
+    assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(base > 0.0f && base != 1.0f);
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = argument.getTotalNumElements();
+    void *argumentMem = argument.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+
+    if (base == 2.0f) {
+        if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
+            if (destDataType == TensorDescriptor::DataType::FP16) {
+                log2Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+                log2Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+                log2Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+                log2Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+                log2Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+                log2Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+                log2Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+                log2Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
+            } else {
+                assert(false);
+            }
+        } else {
+            if (destDataType == TensorDescriptor::DataType::FP16) {
+                log2Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+                log2Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+                log2Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+                log2Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+                log2Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+                log2Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+                log2Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+                log2Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
+            } else {
+                assert(false);
+            }
+        }
+    } else if (base == 10.0f) {
+        if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
+            if (destDataType == TensorDescriptor::DataType::FP16) {
+                log10Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+                log10Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+                log10Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+                log10Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+                log10Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+                log10Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+                log10Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+                log10Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, numElements);
+            } else {
+                assert(false);
+            }
+        } else {
+            if (destDataType == TensorDescriptor::DataType::FP16) {
+                log10Dest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+                log10Dest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+                log10Dest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+                log10Dest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+                log10Dest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+                log10Dest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+                log10Dest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+                log10Dest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, numElements);
+            } else {
+                assert(false);
+            }
+        }
+    } else {
+        float log2ConversionFactor = getLog2ConversionFactor(base);
+
+        if (argument.getDataType() == TensorDescriptor::DataType::FP16) {
+            if (destDataType == TensorDescriptor::DataType::FP16) {
+                logXDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+                logXDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+                logXDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+                logXDest2B<<<gridSize, blockSize, 0, stream>>>((uint16_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+                logXDest4B<<<gridSize, blockSize, 0, stream>>>((uint32_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+                logXDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+                logXDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+                logXDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (half *)argumentMem, log2ConversionFactor, numElements);
+            } else {
+                assert(false);
+            }
+        } else {
+            if (destDataType == TensorDescriptor::DataType::FP16) {
+                logXDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::FP32) {
+                logXDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT8) {
+                logXDest1B<<<gridSize, blockSize, 0, stream>>>((uint8_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT16) {
+                logXDest2B<<<gridSize, blockSize, 0, stream>>>(
+                    (uint16_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::UINT32) {
+                logXDest4B<<<gridSize, blockSize, 0, stream>>>(
+                    (uint32_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT8) {
+                logXDest1B<<<gridSize, blockSize, 0, stream>>>((int8_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT16) {
+                logXDest2B<<<gridSize, blockSize, 0, stream>>>((int16_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else if (destDataType == TensorDescriptor::DataType::INT32) {
+                logXDest4B<<<gridSize, blockSize, 0, stream>>>((int32_t *)destMem, (float *)argumentMem, log2ConversionFactor, numElements);
+            } else {
+                assert(false);
+            }
+        }
+    }
+}

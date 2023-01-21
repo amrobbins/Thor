@@ -87,10 +87,6 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 				build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
 				build/test/Utilities/WorkQueue/WorkQueueTest \
 
-				# FIXME: rebuild and put back
-				# Tests for Tensor add/multiply etc
-				# Improve coverage of tensorFanout
-
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
 			build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest \
