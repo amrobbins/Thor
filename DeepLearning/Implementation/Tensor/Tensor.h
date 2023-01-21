@@ -254,7 +254,7 @@ class Tensor : private ReferenceCounted {
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      */
-    void multiplyAccumulate(Tensor a, Tensor b, Tensor c, float base, Stream stream);
+    void multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream);
 
     /**
      * [thisTensor] = 1 / [argument], elementwise
