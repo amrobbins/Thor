@@ -1439,6 +1439,34 @@ TEST(Tensor, LogBaseX) {
     }
 }
 
+TEST(Tensor, MultiplyAccumulate) {
+    // FIXME
+}
+
+TEST(Tensor, Ceil) {
+    // FIXME
+}
+
+TEST(Tensor, Floor) {
+    // FIXME
+}
+
+TEST(Tensor, Round) {
+    // FIXME
+}
+
+TEST(Tensor, Reciprocal) {
+    // FIXME
+}
+
+TEST(Tensor, Sqrt) {
+    // FIXME
+}
+
+TEST(Tensor, ReciprocalSqrt) {
+    // FIXME
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

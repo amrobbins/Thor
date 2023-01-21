@@ -216,15 +216,77 @@ class Tensor : private ReferenceCounted {
      * <div/>
      * Compute the log with the specified base of the argument tensor
      * argument must be float or half.
-     * base will be converted into the type of argument.
      * there is no restriction on the data type of this destination tensor.
      */
     void log(Tensor argument, float base, Stream stream);
 
+    /**
+     * [thisTensor] = ⌈ [argument] ⌉, elementwise
+     * <div/>
+     * Compute the ceil of each element in the argument tensor
+     * argument must be float or half.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void ceil(Tensor argument, float base, Stream stream);
+
+    /**
+     * [thisTensor] = ⌊ [argument] ⌋, elementwise
+     * <div/>
+     * Compute the floor of each element in the argument tensor
+     * argument must be float or half.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void floor(Tensor argument, float base, Stream stream);
+
+    /**
+     * [thisTensor] = round([argument]), elementwise
+     * <div/>
+     * Round to nearest integer, 0.5 rounds up.
+     * argument must be float or half.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void round(Tensor argument, float base, Stream stream);
+
+    /**
+     * [thisTensor] = [a] * [b] + [c], elementwise
+     * <div/>
+     * Round to nearest integer, 0.5 rounds up.
+     * argument must be float or half.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void multiplyAccumulate(Tensor a, Tensor b, Tensor c, float base, Stream stream);
+
+    /**
+     * [thisTensor] = 1 / [argument], elementwise
+     * <div/>
+     * Compute the reciprocal of each element in the argument tensor
+     * argument must be half. use divide for other data types.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void reciprocal(Tensor argument, float base, Stream stream);
+
+    /**
+     * [thisTensor] = √([argument]), elementwise
+     * <div/>
+     * Compute the square root of each element in the argument tensor
+     * argument must be float or half.
+     * base will be converted into the type of argument.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void sqrt(Tensor argument, float base, Stream stream);
+
+    /**
+     * [thisTensor] = 1 / sqrt([argument]), elementwise
+     * <div/>
+     * Compute the reciprocal of the square root of each element in the argument tensor
+     * argument must be float or half.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void reciprocalSqrt(Tensor argument, float base, Stream stream);
+
     // FIXME: expand this pattern to cover all useful functions...
+    // abs
     // sin(), cos(), trig functions
-    // sqrt()
-    // ciel(), floor()
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
