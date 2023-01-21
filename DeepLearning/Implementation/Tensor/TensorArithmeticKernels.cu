@@ -1341,38 +1341,28 @@ __global__ void divideElementwise4B(DATA_TYPE *numerator, DATA_TYPE *dest, DATA_
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
 __global__ void multiplyAccumulateDest1B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
     if (offset >= numElements)
         return;
-    uint64_t offset4Elements = offset >> 2;
     uint64_t offset8Elements = offset >> 3;
 
-    float aBuffer[4];
-    float bBuffer[4];
-    float cBuffer[4];
+    float aBuffer[8];
+    float bBuffer[8];
+    float cBuffer[8];
     DEST_DATA_TYPE destBuffer[8];
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)aBuffer)[0] = ((float4 *)a)[offset4Elements];
-    ((float4 *)bBuffer)[0] = ((float4 *)b)[offset4Elements];
-    ((float4 *)cBuffer)[0] = ((float4 *)c)[offset4Elements];
+    ((double4 *)aBuffer)[0] = ((double4 *)a)[offset8Elements];
+    ((double4 *)bBuffer)[0] = ((double4 *)b)[offset8Elements];
+    ((double4 *)cBuffer)[0] = ((double4 *)c)[offset8Elements];
     destBuffer[0] = (DEST_DATA_TYPE)fmaf(aBuffer[0], bBuffer[0], cBuffer[0]);
     destBuffer[1] = (DEST_DATA_TYPE)fmaf(aBuffer[1], bBuffer[1], cBuffer[1]);
     destBuffer[2] = (DEST_DATA_TYPE)fmaf(aBuffer[2], bBuffer[2], cBuffer[2]);
     destBuffer[3] = (DEST_DATA_TYPE)fmaf(aBuffer[3], bBuffer[3], cBuffer[3]);
-
-    offset += 128;
-    if (offset < numElements) {
-        offset4Elements = offset >> 2;
-        ((float4 *)aBuffer)[0] = ((float4 *)a)[offset4Elements];
-        ((float4 *)bBuffer)[0] = ((float4 *)b)[offset4Elements];
-        ((float4 *)cBuffer)[0] = ((float4 *)c)[offset4Elements];
-        destBuffer[4] = (DEST_DATA_TYPE)fmaf(aBuffer[0], bBuffer[0], cBuffer[0]);
-        destBuffer[5] = (DEST_DATA_TYPE)fmaf(aBuffer[1], bBuffer[1], cBuffer[1]);
-        destBuffer[6] = (DEST_DATA_TYPE)fmaf(aBuffer[2], bBuffer[2], cBuffer[2]);
-        destBuffer[7] = (DEST_DATA_TYPE)fmaf(aBuffer[3], bBuffer[3], cBuffer[3]);
-    }
-
+    destBuffer[4] = (DEST_DATA_TYPE)fmaf(aBuffer[4], bBuffer[4], cBuffer[4]);
+    destBuffer[5] = (DEST_DATA_TYPE)fmaf(aBuffer[5], bBuffer[5], cBuffer[5]);
+    destBuffer[6] = (DEST_DATA_TYPE)fmaf(aBuffer[6], bBuffer[6], cBuffer[6]);
+    destBuffer[7] = (DEST_DATA_TYPE)fmaf(aBuffer[7], bBuffer[7], cBuffer[7]);
     ((float2 *)dest)[offset8Elements] = ((float2 *)destBuffer)[0];
 }
 
@@ -1489,7 +1479,7 @@ __global__ void multiplyAccumulateDest1B(DEST_DATA_TYPE *dest, half *a, half *b,
     aBuffer[3] = __hadd2(aBuffer[3], cBuffer[3]);
     destBuffer[6] = (DEST_DATA_TYPE)(float)aBuffer[3].x;
     destBuffer[7] = (DEST_DATA_TYPE)(float)aBuffer[3].y;
-    ((double *)dest)[offset8Elements] = ((double *)destBuffer)[0];
+    ((float2 *)dest)[offset8Elements] = ((float2 *)destBuffer)[0];
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
@@ -1508,9 +1498,9 @@ __global__ void multiplyAccumulateDest2B(DEST_DATA_TYPE *dest, half *a, half *b,
     DEST_DATA_TYPE destBuffer[4];
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)aBuffer)[0] = ((float4 *)a)[offset4Elements];
-    ((float4 *)bBuffer)[0] = ((float4 *)b)[offset4Elements];
-    ((float4 *)cBuffer)[0] = ((float4 *)c)[offset4Elements];
+    ((float2 *)aBuffer)[0] = ((float2 *)a)[offset4Elements];
+    ((float2 *)bBuffer)[0] = ((float2 *)b)[offset4Elements];
+    ((float2 *)cBuffer)[0] = ((float2 *)c)[offset4Elements];
     aBuffer[0] = __hmul2(aBuffer[0], bBuffer[0]);
     aBuffer[0] = __hadd2(aBuffer[0], cBuffer[0]);
     destBuffer[0] = (DEST_DATA_TYPE)(float)aBuffer[0].x;
@@ -1525,9 +1515,9 @@ __global__ void multiplyAccumulateDest2B(DEST_DATA_TYPE *dest, half *a, half *b,
     if (offset >= numElements)
         return;
     offset4Elements = offset >> 2;
-    ((float4 *)aBuffer)[0] = ((float4 *)a)[offset4Elements];
-    ((float4 *)bBuffer)[0] = ((float4 *)b)[offset4Elements];
-    ((float4 *)cBuffer)[0] = ((float4 *)c)[offset4Elements];
+    ((float2 *)aBuffer)[0] = ((float2 *)a)[offset4Elements];
+    ((float2 *)bBuffer)[0] = ((float2 *)b)[offset4Elements];
+    ((float2 *)cBuffer)[0] = ((float2 *)c)[offset4Elements];
     aBuffer[0] = __hmul2(aBuffer[0], bBuffer[0]);
     aBuffer[0] = __hadd2(aBuffer[0], cBuffer[0]);
     destBuffer[0] = (DEST_DATA_TYPE)(float)aBuffer[0].x;
@@ -1555,9 +1545,9 @@ __global__ void multiplyAccumulateDest4B(DEST_DATA_TYPE *dest, half *a, half *b,
     DEST_DATA_TYPE destBuffer[4];
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)aBuffer)[0] = ((float4 *)a)[offset4Elements];
-    ((float4 *)bBuffer)[0] = ((float4 *)b)[offset4Elements];
-    ((float4 *)cBuffer)[0] = ((float4 *)c)[offset4Elements];
+    ((float2 *)aBuffer)[0] = ((float2 *)a)[offset4Elements];
+    ((float2 *)bBuffer)[0] = ((float2 *)b)[offset4Elements];
+    ((float2 *)cBuffer)[0] = ((float2 *)c)[offset4Elements];
     aBuffer[0] = __hmul2(aBuffer[0], bBuffer[0]);
     aBuffer[0] = __hadd2(aBuffer[0], cBuffer[0]);
     destBuffer[0] = (DEST_DATA_TYPE)(float)aBuffer[0].x;
@@ -1573,9 +1563,9 @@ __global__ void multiplyAccumulateDest4B(DEST_DATA_TYPE *dest, half *a, half *b,
     if (offset >= numElements)
         return;
     offset4Elements = offset >> 2;
-    ((float4 *)aBuffer)[0] = ((float4 *)a)[offset4Elements];
-    ((float4 *)bBuffer)[0] = ((float4 *)b)[offset4Elements];
-    ((float4 *)cBuffer)[0] = ((float4 *)c)[offset4Elements];
+    ((float2 *)aBuffer)[0] = ((float2 *)a)[offset4Elements];
+    ((float2 *)bBuffer)[0] = ((float2 *)b)[offset4Elements];
+    ((float2 *)cBuffer)[0] = ((float2 *)c)[offset4Elements];
     aBuffer[0] = __hmul2(aBuffer[0], bBuffer[0]);
     aBuffer[0] = __hadd2(aBuffer[0], cBuffer[0]);
     destBuffer[0] = (DEST_DATA_TYPE)(float)aBuffer[0].x;
@@ -2069,7 +2059,7 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, float base, Stream stream) {
+void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream) {
     assert(a.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(b.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(c.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
