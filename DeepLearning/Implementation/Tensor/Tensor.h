@@ -227,7 +227,7 @@ class Tensor : private ReferenceCounted {
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      */
-    void ceil(Tensor argument, float base, Stream stream);
+    void ceil(Tensor argument, Stream stream);
 
     /**
      * [thisTensor] = ⌊ [argument] ⌋, elementwise
@@ -236,7 +236,7 @@ class Tensor : private ReferenceCounted {
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      */
-    void floor(Tensor argument, float base, Stream stream);
+    void floor(Tensor argument, Stream stream);
 
     /**
      * [thisTensor] = round([argument]), elementwise
@@ -245,7 +245,7 @@ class Tensor : private ReferenceCounted {
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      */
-    void round(Tensor argument, float base, Stream stream);
+    void round(Tensor argument, Stream stream);
 
     /**
      * [thisTensor] = [a] * [b] + [c], elementwise
@@ -263,7 +263,7 @@ class Tensor : private ReferenceCounted {
      * argument must be half. use divide for other data types.
      * there is no restriction on the data type of this destination tensor.
      */
-    void reciprocal(Tensor argument, float base, Stream stream);
+    void reciprocal(Tensor argument, Stream stream);
 
     /**
      * [thisTensor] = √([argument]), elementwise
@@ -273,7 +273,7 @@ class Tensor : private ReferenceCounted {
      * base will be converted into the type of argument.
      * there is no restriction on the data type of this destination tensor.
      */
-    void sqrt(Tensor argument, float base, Stream stream);
+    void sqrt(Tensor argument, Stream stream);
 
     /**
      * [thisTensor] = 1 / sqrt([argument]), elementwise
@@ -282,7 +282,7 @@ class Tensor : private ReferenceCounted {
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      */
-    void reciprocalSqrt(Tensor argument, float base, Stream stream);
+    void reciprocalSqrt(Tensor argument, Stream stream);
 
     // FIXME: expand this pattern to cover all useful functions...
     // abs
