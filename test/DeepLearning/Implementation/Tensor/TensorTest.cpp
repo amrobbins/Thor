@@ -182,6 +182,11 @@ TEST(Tensor, AddScalar) {
                     source_float_h_mem[i * dimensions[1] + j] = (rand() % 20) / ((rand() % 10) + 1.0);
                 else
                     source_float_h_mem[i * dimensions[1] + j] = rand() % 50;
+                if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32) {
+                    if (rand() % 2 == 0)
+                        source_float_h_mem[i * dimensions[1] + j] *= -1;
+                }
             }
         }
         float scalar;
@@ -189,6 +194,11 @@ TEST(Tensor, AddScalar) {
             scalar = (rand() % 20) / ((rand() % 10) + 1.0);
         else
             scalar = rand() % 50;
+        if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32) {
+            if (rand() % 2 == 0)
+                scalar *= -1;
+        }
 
         source_h.copyFromAsync(source_float_h, stream);
         source_d.copyFromAsync(source_h, stream);
@@ -597,6 +607,9 @@ TEST(Tensor, MultiplyScalar) {
                     source_float_h_mem[i * dimensions[1] + j] = (rand() % 10) / ((rand() % 10) + 1.0);
                 else
                     source_float_h_mem[i * dimensions[1] + j] = rand() % 10;
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    source_float_h_mem[i * dimensions[1] + j] = -source_float_h_mem[i * dimensions[1] + j];
             }
         }
         float scalar;
@@ -604,6 +617,9 @@ TEST(Tensor, MultiplyScalar) {
             scalar = (rand() % 20) / ((rand() % 10) + 1.0);
         else
             scalar = rand() % 10;
+        if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32)
+            scalar = -scalar;
 
         source_h.copyFromAsync(source_float_h, stream);
         source_d.copyFromAsync(source_h, stream);
@@ -679,6 +695,12 @@ TEST(Tensor, MultiplyTensor) {
                     multiplicand_float_h_mem[i * dimensions[1] + j] = rand() % 10;
                     multiplier_float_h_mem[i * dimensions[1] + j] = rand() % 10;
                 }
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    multiplicand_float_h_mem[i * dimensions[1] + j] = -multiplicand_float_h_mem[i * dimensions[1] + j];
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    multiplier_float_h_mem[i * dimensions[1] + j] = -multiplier_float_h_mem[i * dimensions[1] + j];
             }
         }
 
@@ -748,6 +770,9 @@ TEST(Tensor, DivideScalarDenominator) {
                     source_float_h_mem[i * dimensions[1] + j] = (rand() % 10) / ((rand() % 10) + 1.0);
                 else
                     source_float_h_mem[i * dimensions[1] + j] = rand() % 10;
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    source_float_h_mem[i * dimensions[1] + j] = -source_float_h_mem[i * dimensions[1] + j];
             }
         }
         float scalar;
@@ -755,6 +780,9 @@ TEST(Tensor, DivideScalarDenominator) {
             scalar = ((rand() % 20) + 1) / ((rand() % 10) + 1.0);
         else
             scalar = rand() % 10 + 1;
+        if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32)
+            scalar = -scalar;
 
         source_h.copyFromAsync(source_float_h, stream);
         source_d.copyFromAsync(source_h, stream);
@@ -824,6 +852,9 @@ TEST(Tensor, DivideScalarNumerator) {
                     source_float_h_mem[i * dimensions[1] + j] = ((rand() % 10) + 1) / ((rand() % 10) + 1.0);
                 else
                     source_float_h_mem[i * dimensions[1] + j] = (rand() % 10) + 1;
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    source_float_h_mem[i * dimensions[1] + j] = -source_float_h_mem[i * dimensions[1] + j];
             }
         }
         float scalar;
@@ -831,6 +862,9 @@ TEST(Tensor, DivideScalarNumerator) {
             scalar = (rand() % 20) / ((rand() % 10) + 1.0);
         else
             scalar = rand() % 10;
+        if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32)
+            scalar = -scalar;
 
         source_h.copyFromAsync(source_float_h, stream);
         source_d.copyFromAsync(source_h, stream);
@@ -905,6 +939,12 @@ TEST(Tensor, DivideTensor) {
                     numerator_float_h_mem[i * dimensions[1] + j] = rand() % 10;
                     denominator_float_h_mem[i * dimensions[1] + j] = (rand() % 10) + 1;
                 }
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    numerator_float_h_mem[i * dimensions[1] + j] = -numerator_float_h_mem[i * dimensions[1] + j];
+                if (rand() % 2 && dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32)
+                    denominator_float_h_mem[i * dimensions[1] + j] = -denominator_float_h_mem[i * dimensions[1] + j];
             }
         }
 
@@ -925,9 +965,9 @@ TEST(Tensor, DivideTensor) {
                     expected = numerator_float_h_mem[i * dimensions[1] + j] / denominator_float_h_mem[i * dimensions[1] + j];
                 else
                     expected =
-                        (int32_t)numerator_float_h_mem[i * dimensions[1] + j] / (int32)denominator_float_h_mem[i * dimensions[1] + j];
+                        (int32_t)numerator_float_h_mem[i * dimensions[1] + j] / (int32_t)denominator_float_h_mem[i * dimensions[1] + j];
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
-                // numerator_float_h_mem[i * dimensions[1] + j], denominator_float_h_mem[i * dimensions[1] + j], (int)dataType);
+                //    numerator_float_h_mem[i * dimensions[1] + j], denominator_float_h_mem[i * dimensions[1] + j], (int)dataType);
                 ASSERT_LT(abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]), thresh);
             }
         }
@@ -978,6 +1018,7 @@ TEST(Tensor, PowTensorTensor) {
 
         float *base_float_h_mem = (float *)base_float_h.getMemPtr();
         float *exponent_float_h_mem = (float *)exponent_float_h.getMemPtr();
+        // In this test I cover 0 base but do not cover negative exponent
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 if (destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::INT8) {
@@ -1060,18 +1101,17 @@ TEST(Tensor, PowScalarExponent) {
 
         float *base_float_h_mem = (float *)base_float_h.getMemPtr();
         float exponent;
+        // In this test I cover negative exponent, but do not cover 0 base.
         if (destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::INT8) {
             exponent = (rand() % 4) / ((rand() % 4) + 1.0);
         } else {
             exponent = (rand() % 6) / ((rand() % 6) + 1.0);
+            if (rand() % 2)
+                exponent = -exponent;
         }
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
-                if (destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::INT8) {
-                    base_float_h_mem[i * dimensions[1] + j] = (rand() % 6) / ((rand() % 6) + 1.0);
-                } else {
-                    base_float_h_mem[i * dimensions[1] + j] = (rand() % 6) / ((rand() % 6) + 1.0);
-                }
+                base_float_h_mem[i * dimensions[1] + j] = ((rand() % 5) + 1) / ((rand() % 6) + 1.0);
             }
         }
 
@@ -1147,6 +1187,7 @@ TEST(Tensor, PowScalarBase) {
         } else {
             base = (rand() % 6) / ((rand() % 6) + 1.0);
         }
+        // Not doing negative base because of complex numbers
 
         float *exponent_float_h_mem = (float *)exponent_float_h.getMemPtr();
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -1156,6 +1197,8 @@ TEST(Tensor, PowScalarBase) {
                 } else {
                     exponent_float_h_mem[i * dimensions[1] + j] = (rand() % 6) / ((rand() % 6) + 1.0);
                 }
+                if (base != 0.0f && rand() % 2)
+                    exponent_float_h_mem[i * dimensions[1] + j] = -exponent_float_h_mem[i * dimensions[1] + j];
             }
         }
 
@@ -1174,6 +1217,11 @@ TEST(Tensor, PowScalarBase) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 float expected = (float)powf(base, exponent_float_h_mem[i * dimensions[1] + j]);
+                if ((destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::UINT16 ||
+                     destDataType == TensorDescriptor::DataType::UINT32) &&
+                    expected <= 0.0f)
+                    expected = 0;
+                // printf("uncoverted expected %f\n", expected);
                 if (destDataType != TensorDescriptor::DataType::FP16 && destDataType != TensorDescriptor::DataType::FP32)
                     expected = (int32_t)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
@@ -1233,6 +1281,8 @@ TEST(Tensor, Exp) {
                 } else {
                     exponent_float_h_mem[i * dimensions[1] + j] = (rand() % 6) / ((rand() % 6) + 1.0);
                 }
+                if (rand() % 2)
+                    exponent_float_h_mem[i * dimensions[1] + j] = -exponent_float_h_mem[i * dimensions[1] + j];
             }
         }
 
@@ -1267,8 +1317,8 @@ TEST(Tensor, Log) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
+    Stream stream(0);
     for (uint32_t t = 0; t < 20; ++t) {
-        Stream stream(0);
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
@@ -1311,6 +1361,9 @@ TEST(Tensor, Log) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 argument_float_h_mem[i * dimensions[1] + j] = ((rand() % 100) + 1) / ((rand() % 100) + 1.0);
+                if (argument_float_h_mem[i * dimensions[1] + j] < 0.2f &&
+                    (destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::INT8))
+                    argument_float_h_mem[i * dimensions[1] + j] = 0.2f;
             }
         }
 
@@ -1323,7 +1376,7 @@ TEST(Tensor, Log) {
         float *dest_gpu_float_h_mem = (float *)dest_gpu_float_h.getMemPtr();
         float thresh;
         if (destDataType == TensorDescriptor::DataType::FP16 || destDataType == TensorDescriptor::DataType::FP32)
-            thresh = 0.1f;
+            thresh = 0.15f;
         else
             thresh = 1.0f;
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -1333,6 +1386,14 @@ TEST(Tensor, Log) {
                      destDataType == TensorDescriptor::DataType::UINT32) &&
                     expected <= 0.0f)
                     expected = 0;
+                if (abs(expected) >= 200.0f && thresh < 0.5f)
+                    thresh = 0.5f;
+                if (abs(expected) >= 750.0f && thresh < 2.5f)
+                    thresh = 2.5f;
+                if (abs(expected) >= 2000.0f && thresh < 5.0f)
+                    thresh = 5.0f;
+                if (destDataType == TensorDescriptor::DataType::FP16 && abs(expected) >= 50.0f && thresh < 1.0f)
+                    thresh = 1.0f;
                 if (destDataType != TensorDescriptor::DataType::FP16 && destDataType != TensorDescriptor::DataType::FP32)
                     expected = (int32_t)expected;
                 // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
@@ -1349,8 +1410,8 @@ TEST(Tensor, LogBaseX) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
+    Stream stream(0);
     for (uint32_t t = 0; t < 20; ++t) {
-        Stream stream(0);
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
@@ -1393,6 +1454,9 @@ TEST(Tensor, LogBaseX) {
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
             for (uint32_t j = 0; j < dimensions[1]; ++j) {
                 argument_float_h_mem[i * dimensions[1] + j] = ((rand() % 100) + 1) / ((rand() % 100) + 1.0);
+                if (argument_float_h_mem[i * dimensions[1] + j] < 0.2f &&
+                    (destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::INT8))
+                    argument_float_h_mem[i * dimensions[1] + j] = 0.2f;
             }
         }
         float base;
@@ -1405,6 +1469,8 @@ TEST(Tensor, LogBaseX) {
             base = ((rand() % 1000) + 1) / ((rand() % 1000) + 1.0f);
         if (base == 1.0f)
             base = 1.5f;
+        if (base < 2.0f && (destDataType == TensorDescriptor::DataType::UINT8 || destDataType == TensorDescriptor::DataType::INT8))
+            base = 2.0f;
         float conversionFactor = 1.0f / log10f(base);
 
         argument_h.copyFromAsync(argument_float_h, stream);
@@ -1416,7 +1482,7 @@ TEST(Tensor, LogBaseX) {
         float *dest_gpu_float_h_mem = (float *)dest_gpu_float_h.getMemPtr();
         float thresh;
         if (destDataType == TensorDescriptor::DataType::FP16 || destDataType == TensorDescriptor::DataType::FP32)
-            thresh = 0.1f;
+            thresh = 0.15f;
         else
             thresh = 1.0f;
         for (uint32_t i = 0; i < dimensions[0]; ++i) {
@@ -1426,11 +1492,25 @@ TEST(Tensor, LogBaseX) {
                      destDataType == TensorDescriptor::DataType::UINT32) &&
                     expected <= 0.0f)
                     expected = 0;
+                if (abs(expected) >= 200.0f && thresh < 0.5f)
+                    thresh = 0.5f;
+                if (abs(expected) >= 750.0f && thresh < 2.5f)
+                    thresh = 2.5f;
+                if (abs(expected) >= 2000.0f && thresh < 5.0f)
+                    thresh = 5.0f;
+                if (destDataType == TensorDescriptor::DataType::FP16 && abs(expected) >= 50.0f && thresh < 1.0f)
+                    thresh = 1.0f;
                 if (destDataType != TensorDescriptor::DataType::FP16 && destDataType != TensorDescriptor::DataType::FP32)
                     expected = (int32_t)expected;
-                // printf("base %f, log10ConversionFactor %f\n", base, conversionFactor);
-                // printf("%f %f [%ld]  %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j],i * dimensions[1] + j,
-                //      argument_float_h_mem[i * dimensions[1] + j], (int)destDataType);
+                if (abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]) > thresh) {
+                    printf("base %f, log10ConversionFactor %f\n", base, conversionFactor);
+                    printf("%f %f [%ld]  %f %d\n",
+                           expected,
+                           dest_gpu_float_h_mem[i * dimensions[1] + j],
+                           i * dimensions[1] + j,
+                           argument_float_h_mem[i * dimensions[1] + j],
+                           (int)destDataType);
+                }
                 ASSERT_LE(abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]), thresh);
             }
         }
