@@ -2659,7 +2659,7 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::ceil(Tensor argument, float base, Stream stream) {
+void Tensor::ceil(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
@@ -2721,7 +2721,7 @@ void Tensor::ceil(Tensor argument, float base, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::floor(Tensor argument, float base, Stream stream) {
+void Tensor::floor(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
@@ -2783,7 +2783,7 @@ void Tensor::floor(Tensor argument, float base, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::round(Tensor argument, float base, Stream stream) {
+void Tensor::round(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
@@ -2845,7 +2845,7 @@ void Tensor::round(Tensor argument, float base, Stream stream) {
  * argument must be half. Use divide for other data types.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::reciprocal(Tensor argument, float base, Stream stream) {
+void Tensor::reciprocal(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(argument.getDataType() == TensorDescriptor::DataType::FP16);
     assert(argument.getTotalNumElements() == getTotalNumElements());
@@ -2885,7 +2885,7 @@ void Tensor::reciprocal(Tensor argument, float base, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::sqrt(Tensor argument, float base, Stream stream) {
+void Tensor::sqrt(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
@@ -2947,7 +2947,7 @@ void Tensor::sqrt(Tensor argument, float base, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::reciprocalSqrt(Tensor argument, float base, Stream stream) {
+void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
