@@ -284,6 +284,49 @@ class Tensor : private ReferenceCounted {
      */
     void reciprocalSqrt(Tensor argument, Stream stream);
 
+    /**
+     * [thisTensor] = erf(x), elementwise
+     * <div/>
+     * Compute the error function: https://mathworld.wolfram.com/Erf.html
+     * x must be float.
+     * The return type may be float or half
+     */
+    void erf(Tensor x, Stream stream);
+
+    /**
+     * [thisTensor] = erfinv(x), elementwise
+     * <div/>
+     * Compute the inverse error function defined as erfinv(erf(x))=x : https://www.mathworks.com/help/symbolic/erfinv.html
+     * x must be float.
+     * The return type may be float or half
+     */
+    void erfinv(Tensor x, Stream stream);
+
+    /**
+     * [thisTensor] = erfc(x), elementwise
+     * <div/>
+     * Compute the complementary error function: https://mathworld.wolfram.com/Erfc.html
+     * x must be float.
+     * The return type may be float or half
+     */
+    void erfc(Tensor x, Stream stream);
+
+    /**
+     * [thisTensor] = erfcinv(x), elementwise
+     * <div/>
+     * Compute the inverse complementary error function defined as erfcinv(erfc(x))=x :
+     * https://www.mathworks.com/help/matlab/ref/erfcinv.html#bup512o-2 x must be float. The return type may be float or half
+     */
+    void erfcinv(Tensor x, Stream stream);
+
+    /**
+     * [thisTensor] = erfcx(x), elementwise
+     * <div/>
+     * Compute the scaled complementary error function that is equal to exp(x^2)*erfc(x):
+     * https://www.mathworks.com/help/matlab/ref/erfcx.html x must be float. The return type may be float or half
+     */
+    void erfcx(Tensor x, Stream stream);
+
     // FIXME: expand this pattern to cover all useful functions...
     // abs
     // sin(), cos(), trig functions

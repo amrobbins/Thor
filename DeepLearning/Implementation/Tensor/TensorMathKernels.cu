@@ -2495,6 +2495,336 @@ __global__ void reciprocalSqrtDest4B(DEST_DATA_TYPE *dest, half *argument, uint6
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erff(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erff(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erff(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erff(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erff(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erff(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erff(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erff(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erff(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erff(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erff(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erff(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erff(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erff(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erff(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erff(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfinvDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfinvDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfinvf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfcDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfcDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfcinvDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfcinvDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcinvf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfcxDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void erfcxDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)erfcxf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
 /**
  * [thisTensor] = log<base>([argument]), elementwise
  * <div/>
@@ -2999,5 +3329,146 @@ void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
         } else {
             assert(false);
         }
+    }
+}
+
+/**
+ * [thisTensor] = erf(x), elementwise
+ * <div/>
+ * Compute the error function: https://mathworld.wolfram.com/Erf.html
+ * x must be float.
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::erf(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        erfDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        erfDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = erfinv(x), elementwise
+ * <div/>
+ * Compute the inverse error function defined as erfinv(erf(x))=x : https://www.mathworks.com/help/symbolic/erfinv.html
+ * x must be float.
+ * The return type may be float or half
+ */
+void Tensor::erfinv(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        erfinvDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        erfinvDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = erfc(x), elementwise
+ * <div/>
+ * Compute the complementary error function: https://mathworld.wolfram.com/Erfc.html
+ * x must be float.
+ * there is no restriction on the data type of this destination tensor.
+ */
+void Tensor::erfc(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        erfcDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        erfcDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = erfcinv(x), elementwise
+ * <div/>
+ * Compute the inverse complementary error function defined as erfcinv(erfc(x))=x :
+ * https://www.mathworks.com/help/matlab/ref/erfcinv.html#bup512o-2 x must be float. The return type may be float or half
+ */
+void Tensor::erfcinv(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        erfcinvDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        erfcinvDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = erfcx(x), elementwise
+ * <div/>
+ * Compute the scaled complementary error function that is equal to exp(x^2)*erfc(x): https://www.mathworks.com/help/matlab/ref/erfcx.html
+ * x must be float.
+ * The return type may be float or half
+ */
+void Tensor::erfcx(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        erfcxDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        erfcxDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
     }
 }
