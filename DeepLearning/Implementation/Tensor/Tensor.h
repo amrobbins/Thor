@@ -327,6 +327,22 @@ class Tensor : private ReferenceCounted {
      */
     void erfcx(Tensor x, Stream stream);
 
+    /**
+     * [thisTensor] = gamma(x), elementwise
+     * <div/>
+     * Compute the gamma(x): https://mathworld.wolfram.com/GammaFunction.html
+     * x must be float. The return type may be float or half
+     */
+    void tgamma(Tensor x, Stream stream);
+
+    /**
+     * [thisTensor] = ln(gamma(x)), elementwise
+     * <div/>
+     * gamma(x): https://mathworld.wolfram.com/GammaFunction.html
+     * x must be float. The return type may be float or half
+     */
+    void lgamma(Tensor x, Stream stream);
+
     // FIXME: expand this pattern to cover all useful functions...
     // abs
     // sin(), cos(), trig functions
