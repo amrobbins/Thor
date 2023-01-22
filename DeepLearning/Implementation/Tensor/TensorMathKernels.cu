@@ -2825,6 +2825,138 @@ __global__ void erfcxDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numE
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void tgammaDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void tgammaDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tgammaf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void lgammaDest2B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE>
+__global__ void lgammaDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)lgammaf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
 /**
  * [thisTensor] = log<base>([argument]), elementwise
  * <div/>
@@ -3468,6 +3600,60 @@ void Tensor::erfcx(Tensor x, Stream stream) {
         erfcxDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
         erfcxDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = gamma(x), elementwise
+ * <div/>
+ * Compute the gamma(x): https://mathworld.wolfram.com/GammaFunction.html
+ * x must be float. The return type may be float or half
+ */
+void Tensor::tgamma(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        tgammaDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        tgammaDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+/**
+ * [thisTensor] = ln(gamma(x)), elementwise
+ * <div/>
+ * gamma(x): https://mathworld.wolfram.com/GammaFunction.html
+ * x must be float. The return type may be float or half
+ */
+void Tensor::lgamma(Tensor x, Stream stream) {
+    assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(x.getTotalNumElements() == getTotalNumElements());
+
+    TensorDescriptor::DataType destDataType = getDataType();
+    uint64_t numElements = x.getTotalNumElements();
+    void *xMem = x.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    dim3 gridSize((numElements + 2047) / 2048);
+    if (destDataType == TensorDescriptor::DataType::FP16) {
+        lgammaDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)xMem, numElements);
+    } else if (destDataType == TensorDescriptor::DataType::FP32) {
+        lgammaDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)xMem, numElements);
     } else {
         assert(false);
     }
