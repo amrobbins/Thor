@@ -343,8 +343,64 @@ class Tensor : private ReferenceCounted {
      */
     void lgamma(Tensor x, Stream stream);
 
+    /**
+     * [thisTensor] = sin(r), elementwise
+     * <div/>
+     * Compute the sine of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void sin(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = cos(r), elementwise
+     * <div/>
+     * Compute the cosine of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void cos(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = tan(r), elementwise
+     * <div/>
+     * Compute the tangent of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void tan(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = sec(r), elementwise
+     * <div/>
+     * Compute the secant of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void csc(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = csc(r), elementwise
+     * <div/>
+     * Compute the cosecant of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void sec(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = cot(r), elementwise
+     * <div/>
+     * Compute the cotangent of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void cot(Tensor r, Stream stream);
+
+    /*
+        __device__​ float coshf ( float  x )
+            Calculate the hyperbolic cosine of the input argument.
+        __device__​ float sinhf ( float  x )
+            Calculate the hyperbolic sine of the input argument.
+        __device__​ float tanhf ( float  x )
+            Calculate the hyperbolic tangent of the input argument.
+    */
     // FIXME: expand this pattern to cover all useful functions...
-    // abs
+    // abs, max, min
     // sin(), cos(), trig functions
 
     bool operator==(const Tensor &other) const;
