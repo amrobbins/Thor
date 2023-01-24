@@ -391,6 +391,54 @@ class Tensor : private ReferenceCounted {
      */
     void cot(Tensor r, Stream stream);
 
+    /**
+     * [thisTensor] = asin(r), elementwise
+     * <div/>
+     * Compute the arcsine of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void asin(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = acos(r), elementwise
+     * <div/>
+     * Compute the arccosine of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void acos(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = atan(r), elementwise
+     * <div/>
+     * Compute the arctangent of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void atan(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = acsc(r), elementwise
+     * <div/>
+     * Compute the arccosecant of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void acsc(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = asec(r), elementwise
+     * <div/>
+     * Compute the arcsecant of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void asec(Tensor r, Stream stream);
+
+    /**
+     * [thisTensor] = acot(r), elementwise
+     * <div/>
+     * Compute the arccotangent of r, where r is in radians
+     * r must be float. The return type may be float or half
+     */
+    void acot(Tensor r, Stream stream);
+
     /*
         __device__​ float coshf ( float  x )
             Calculate the hyperbolic cosine of the input argument.
