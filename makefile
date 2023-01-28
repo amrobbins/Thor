@@ -78,6 +78,8 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest && \
                 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest && \
                 build/test/DeepLearning/Implementation/Tensor/TensorTest && \
+                build/test/DeepLearning/Implementation/Tensor/TensorTrigonometricKernelsTest && \
+                build/test/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometricKernelsTest && \
                 build/test/Utilities/ComputeTopology/machineEvaluatorTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
@@ -112,6 +114,8 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Implementation/Layers/Activations/ActivationsLayerTest \
             build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest \
             build/test/DeepLearning/Implementation/Tensor/TensorTest \
+			build/test/DeepLearning/Implementation/Tensor/TensorTrigonometricKernelsTest \
+			build/test/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometricKernelsTest \
             build/test/Utilities/WorkQueue/WorkQueueUnorderedTest \
             build/test/Utilities/WorkQueue/WorkQueueTest \
             build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest \
@@ -186,6 +190,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Tensor/TensorArithmeticKernels.o \
                    build/DeepLearning/Implementation/Tensor/TensorMathKernels.o \
                    build/DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.o \
+                   build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o \
                    build/DeepLearning/Implementation/Layers/Layer.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
@@ -315,6 +320,10 @@ build/DeepLearning/Implementation/Tensor/TensorMathKernels.o: DeepLearning/Imple
 build/DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.cu
 	mkdir -p build/DeepLearning/Implementation/Tensor
 	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.cu
+
+build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.cu
+	mkdir -p build/DeepLearning/Implementation/Tensor
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.cu
 
 #build/Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.o: Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiply.h Utilities/TensorOperations/GpuMatrixMultiply/TensorCoreMatrixMultiplyBatch16Reg64.cu
 #	mkdir -p build/Utilities/TensorOperations/GpuMatrixMultiply
@@ -801,6 +810,14 @@ build/test/Utilities/WorkQueue/AsyncTensorQueueTest: test/Utilities/WorkQueue/As
 build/test/DeepLearning/Implementation/Tensor/TensorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Tensor/TensorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Tensor
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Tensor/TensorTest test/DeepLearning/Implementation/Tensor/TensorTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Tensor/TensorTrigonometricKernelsTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Tensor/TensorTrigonometricKernelsTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Tensor
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Tensor/TensorTrigonometricKernelsTest test/DeepLearning/Implementation/Tensor/TensorTrigonometricKernelsTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometricKernelsTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometricKernelsTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Tensor
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometricKernelsTest test/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometricKernelsTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/Utilities/TensorOperations/TypeConversions/TypeConverterTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/TypeConversions/TypeConverterTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/TensorOperations/TypeConversions

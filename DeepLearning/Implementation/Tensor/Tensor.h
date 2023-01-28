@@ -285,7 +285,7 @@ class Tensor : private ReferenceCounted {
     void reciprocalSqrt(Tensor argument, Stream stream);
 
     /**
-     * [thisTensor] = erf(x), elementwise
+     * [thisTensor] = erf([x]), elementwise
      * <div/>
      * Compute the error function: https://mathworld.wolfram.com/Erf.html
      * x must be float.
@@ -294,7 +294,7 @@ class Tensor : private ReferenceCounted {
     void erf(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = erfinv(x), elementwise
+     * [thisTensor] = erfinv([x]), elementwise
      * <div/>
      * Compute the inverse error function defined as erfinv(erf(x))=x : https://www.mathworks.com/help/symbolic/erfinv.html
      * x must be float.
@@ -303,7 +303,7 @@ class Tensor : private ReferenceCounted {
     void erfinv(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = erfc(x), elementwise
+     * [thisTensor] = erfc([x]), elementwise
      * <div/>
      * Compute the complementary error function: https://mathworld.wolfram.com/Erfc.html
      * x must be float.
@@ -312,7 +312,7 @@ class Tensor : private ReferenceCounted {
     void erfc(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = erfcinv(x), elementwise
+     * [thisTensor] = erfcinv([x]), elementwise
      * <div/>
      * Compute the inverse complementary error function defined as erfcinv(erfc(x))=x :
      * https://www.mathworks.com/help/matlab/ref/erfcinv.html#bup512o-2 x must be float. The return type may be float or half
@@ -320,7 +320,7 @@ class Tensor : private ReferenceCounted {
     void erfcinv(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = erfcx(x), elementwise
+     * [thisTensor] = erfcx([x]), elementwise
      * <div/>
      * Compute the scaled complementary error function that is equal to exp(x^2)*erfc(x):
      * https://www.mathworks.com/help/matlab/ref/erfcx.html x must be float. The return type may be float or half
@@ -328,7 +328,7 @@ class Tensor : private ReferenceCounted {
     void erfcx(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = gamma(x), elementwise
+     * [thisTensor] = gamma([x]), elementwise
      * <div/>
      * Compute the gamma(x): https://mathworld.wolfram.com/GammaFunction.html
      * x must be float. The return type may be float or half
@@ -336,7 +336,7 @@ class Tensor : private ReferenceCounted {
     void tgamma(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = ln(gamma(x)), elementwise
+     * [thisTensor] = ln(gamma([x])), elementwise
      * <div/>
      * gamma(x): https://mathworld.wolfram.com/GammaFunction.html
      * x must be float. The return type may be float or half
@@ -344,109 +344,197 @@ class Tensor : private ReferenceCounted {
     void lgamma(Tensor x, Stream stream);
 
     /**
-     * [thisTensor] = sin(r), elementwise
+     * [thisTensor] = sin([radians]), elementwise
      * <div/>
-     * Compute the sine of r, where r is in radians
+     * Compute the sine of radians
      * r must be float. The return type may be float or half
      */
-    void sin(Tensor r, Stream stream);
+    void sin(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = cos(r), elementwise
+     * [thisTensor] = cos([radians]), elementwise
      * <div/>
-     * Compute the cosine of r, where r is in radians
+     * Compute the cosine of radians
      * r must be float. The return type may be float or half
      */
-    void cos(Tensor r, Stream stream);
+    void cos(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = tan(r), elementwise
+     * [thisTensor] = tan([radians]), elementwise
      * <div/>
-     * Compute the tangent of r, where r is in radians
+     * Compute the tangent of radians
      * r must be float. The return type may be float or half
      */
-    void tan(Tensor r, Stream stream);
+    void tan(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = sec(r), elementwise
+     * [thisTensor] = csc([radians]), elementwise
      * <div/>
-     * Compute the secant of r, where r is in radians
+     * Compute the cosecant of radians
      * r must be float. The return type may be float or half
      */
-    void csc(Tensor r, Stream stream);
+    void csc(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = csc(r), elementwise
+     * [thisTensor] = sec([radians]), elementwise
      * <div/>
-     * Compute the cosecant of r, where r is in radians
+     * Compute the secant of radians
      * r must be float. The return type may be float or half
      */
-    void sec(Tensor r, Stream stream);
+    void sec(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = cot(r), elementwise
+     * [thisTensor] = cot([radians]), elementwise
      * <div/>
-     * Compute the cotangent of r, where r is in radians
+     * Compute the cotangent of radians
      * r must be float. The return type may be float or half
      */
-    void cot(Tensor r, Stream stream);
+    void cot(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = asin(r), elementwise
+     * [thisTensor] = asin([radians]), elementwise
      * <div/>
-     * Compute the arcsine of r, where r is in radians
+     * Compute the arcsine of radians
      * r must be float. The return type may be float or half
      */
-    void asin(Tensor r, Stream stream);
+    void asin(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = acos(r), elementwise
+     * [thisTensor] = acos([radians]), elementwise
      * <div/>
-     * Compute the arccosine of r, where r is in radians
+     * Compute the arccosine of radians
      * r must be float. The return type may be float or half
      */
-    void acos(Tensor r, Stream stream);
+    void acos(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = atan(r), elementwise
+     * [thisTensor] = atan([radians]), elementwise
      * <div/>
-     * Compute the arctangent of r, where r is in radians
+     * Compute the arctangent of radians
      * r must be float. The return type may be float or half
      */
-    void atan(Tensor r, Stream stream);
+    void atan(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = acsc(r), elementwise
+     * [thisTensor] = acsc([radians]), elementwise
      * <div/>
-     * Compute the arccosecant of r, where r is in radians
+     * Compute the arccosecant of radians
      * r must be float. The return type may be float or half
      */
-    void acsc(Tensor r, Stream stream);
+    void acsc(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = asec(r), elementwise
+     * [thisTensor] = asec([radians]), elementwise
      * <div/>
-     * Compute the arcsecant of r, where r is in radians
+     * Compute the arcsecant of radians
      * r must be float. The return type may be float or half
      */
-    void asec(Tensor r, Stream stream);
+    void asec(Tensor radians, Stream stream);
 
     /**
-     * [thisTensor] = acot(r), elementwise
+     * [thisTensor] = acot([radians]), elementwise
      * <div/>
-     * Compute the arccotangent of r, where r is in radians
+     * Compute the arccotangent of radians
      * r must be float. The return type may be float or half
      */
-    void acot(Tensor r, Stream stream);
+    void acot(Tensor radians, Stream stream);
 
-    /*
-        __device__​ float coshf ( float  x )
-            Calculate the hyperbolic cosine of the input argument.
-        __device__​ float sinhf ( float  x )
-            Calculate the hyperbolic sine of the input argument.
-        __device__​ float tanhf ( float  x )
-            Calculate the hyperbolic tangent of the input argument.
-    */
+    /**
+     * [thisTensor] = sinh([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic sine of radians
+     * r must be float. The return type may be float or half
+     */
+    void sinh(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = cosh([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic cosine of radians
+     * r must be float. The return type may be float or half
+     */
+    void cosh(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = tanh([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic tangent of radians
+     * r must be float. The return type may be float or half
+     */
+    void tanh(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = csch([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic cosecant of radians
+     * r must be float. The return type may be float or half
+     */
+    void csch(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = sech([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic secant of radians
+     * r must be float. The return type may be float or half
+     */
+    void sech(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = coth([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic cotangent of radians
+     * r must be float. The return type may be float or half
+     */
+    void coth(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = asinh([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic arcsine of radians
+     * r must be float. The return type may be float or half
+     */
+    void asinh(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = acosh([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic arccosine of radians
+     * r must be float. The return type may be float or half
+     */
+    void acosh(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = atanh([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic arctangent of radians
+     * r must be float. The return type may be float or half
+     */
+    void atanh(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = acsch([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic arccosecant of radians
+     * r must be float. The return type may be float or half
+     */
+    void acsch(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = asech([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic arcsecant of radians
+     * r must be float. The return type may be float or half
+     */
+    void asech(Tensor radians, Stream stream);
+
+    /**
+     * [thisTensor] = acoth([radians]), elementwise
+     * <div/>
+     * Compute the hyperbolic arccotangent of radians
+     * r must be float. The return type may be float or half
+     */
+    void acoth(Tensor radians, Stream stream);
+
     // FIXME: expand this pattern to cover all useful functions...
     // abs, max, min
     // sin(), cos(), trig functions

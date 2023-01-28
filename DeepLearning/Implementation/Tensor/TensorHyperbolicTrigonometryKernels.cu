@@ -7,7 +7,7 @@ using namespace std;
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void sinDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void sinhDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -18,10 +18,10 @@ __global__ void sinDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)sinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)sinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)sinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)sinf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)sinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)sinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)sinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)sinhf(argumentBuffer[3]);
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 
     offset += 128;
@@ -29,76 +29,10 @@ __global__ void sinDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)sinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)sinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)sinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)sinf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void sinDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)sinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)sinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)sinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)sinf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)sinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)sinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)sinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)sinf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void cosDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)cosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)cosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)cosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)cosf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)cosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)cosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)cosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)cosf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)sinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)sinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)sinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)sinhf(argumentBuffer[3]);
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 }
 
@@ -106,7 +40,7 @@ __global__ void cosDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void cosDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void sinhDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -117,10 +51,10 @@ __global__ void cosDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)cosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)cosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)cosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)cosf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)sinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)sinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)sinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)sinhf(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 
     offset += 128;
@@ -128,76 +62,10 @@ __global__ void cosDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)cosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)cosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)cosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)cosf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void tanDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)tanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)tanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)tanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)tanf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)tanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)tanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)tanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)tanf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void tanDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)tanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)tanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)tanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)tanf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)tanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)tanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)tanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)tanf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)sinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)sinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)sinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)sinhf(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
@@ -205,7 +73,7 @@ __global__ void tanDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void cscDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void coshDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -216,10 +84,10 @@ __global__ void cscDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[3]));
+    destBuffer[0] = (DEST_DATA_TYPE)coshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)coshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)coshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)coshf(argumentBuffer[3]);
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 
     offset += 128;
@@ -227,76 +95,10 @@ __global__ void cscDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[3]));
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void cscDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[3]));
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinf(argumentBuffer[3]));
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void secDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[3]));
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[3]));
+    destBuffer[0] = (DEST_DATA_TYPE)coshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)coshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)coshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)coshf(argumentBuffer[3]);
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 }
 
@@ -304,7 +106,7 @@ __global__ void secDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void secDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void coshDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -315,10 +117,10 @@ __global__ void secDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[3]));
+    destBuffer[0] = (DEST_DATA_TYPE)coshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)coshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)coshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)coshf(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 
     offset += 128;
@@ -326,76 +128,10 @@ __global__ void secDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / cosf(argumentBuffer[3]));
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void cotDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[3]));
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[3]));
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void cotDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[3]));
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[0]));
-    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[1]));
-    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[2]));
-    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanf(argumentBuffer[3]));
+    destBuffer[0] = (DEST_DATA_TYPE)coshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)coshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)coshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)coshf(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
@@ -403,7 +139,7 @@ __global__ void cotDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void asinDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void tanhDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -414,10 +150,10 @@ __global__ void asinDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)tanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tanhf(argumentBuffer[3]);
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 
     offset += 128;
@@ -425,76 +161,10 @@ __global__ void asinDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void asinDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void acosDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)tanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tanhf(argumentBuffer[3]);
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 }
 
@@ -502,7 +172,7 @@ __global__ void acosDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void acosDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void tanhDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -513,10 +183,10 @@ __global__ void acosDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)tanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tanhf(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 
     offset += 128;
@@ -524,76 +194,10 @@ __global__ void acosDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void atanDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void atanDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)tanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)tanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)tanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)tanhf(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
@@ -601,7 +205,7 @@ __global__ void atanDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void acscDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void cschDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -612,10 +216,10 @@ __global__ void acscDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[3]));
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 
     offset += 128;
@@ -623,76 +227,10 @@ __global__ void acscDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void acscDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)asinf(1.0f / argumentBuffer[3]);
-    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
-}
-
-// Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
-// Note that this kernel is memory bandwidth bound
-template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void asecDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
-    if (offset >= numElements)
-        return;
-    uint64_t offset4Elements = offset >> 2;
-
-    float argumentBuffer[4];
-    DEST_DATA_TYPE destBuffer[4];
-
-    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[3]);
-    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[3]));
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 }
 
@@ -700,7 +238,7 @@ __global__ void asecDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void asecDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void cschDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -711,10 +249,10 @@ __global__ void asecDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[3]));
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 
     offset += 128;
@@ -722,10 +260,10 @@ __global__ void asecDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)acosf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / sinhf(argumentBuffer[3]));
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
@@ -733,7 +271,7 @@ __global__ void asecDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void acotDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void sechDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -744,10 +282,10 @@ __global__ void acotDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[3]));
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 
     offset += 128;
@@ -755,10 +293,10 @@ __global__ void acotDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[3]));
     ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
 }
 
@@ -766,7 +304,7 @@ __global__ void acotDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
-__global__ void acotDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+__global__ void sechDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -777,10 +315,10 @@ __global__ void acotDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
 
     // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[3]));
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 
     offset += 128;
@@ -788,20 +326,482 @@ __global__ void acotDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uin
         return;
     offset4Elements = offset >> 2;
     ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
-    destBuffer[0] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[0]);
-    destBuffer[1] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[1]);
-    destBuffer[2] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[2]);
-    destBuffer[3] = (DEST_DATA_TYPE)atanf(1.0f / argumentBuffer[3]);
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / coshf(argumentBuffer[3]));
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void cothDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[3]));
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[3]));
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void cothDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[3]));
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[0]));
+    destBuffer[1] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[1]));
+    destBuffer[2] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[2]));
+    destBuffer[3] = (DEST_DATA_TYPE)(1.0f / tanhf(argumentBuffer[3]));
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void asinhDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void asinhDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void acoshDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void acoshDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void atanhDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void atanhDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void acschDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void acschDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)asinhf(1.0f / argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void asechDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void asechDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)acoshf(1.0f / argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void acothDest2B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[3]);
+    ((float2 *)dest)[offset4Elements] = ((float2 *)destBuffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DEST_DATA_TYPE, typename SOURCE_DATA_TYPE>
+__global__ void acothDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    float argumentBuffer[4];
+    DEST_DATA_TYPE destBuffer[4];
+
+    // Note: all tensors end on 16 byte boundary, here I don't want to read past the end of base and argument
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[3]);
+    ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((float4 *)argumentBuffer)[0] = ((float4 *)argument)[offset4Elements];
+    destBuffer[0] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[0]);
+    destBuffer[1] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[1]);
+    destBuffer[2] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[2]);
+    destBuffer[3] = (DEST_DATA_TYPE)atanhf(1.0f / argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
 /**
- * [thisTensor] = sin([radians]), elementwise
+ * [thisTensor] = sinh([radians]), elementwise
  * <div/>
- * Compute the sine of radians
+ * Compute the hyperbolic sine of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::sin(Tensor radians, Stream stream) {
+void Tensor::sinh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -816,21 +816,21 @@ void Tensor::sin(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        sinDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        sinhDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        sinDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        sinhDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
 }
 
 /**
- * [thisTensor] = cos([radians]), elementwise
+ * [thisTensor] = cosh([radians]), elementwise
  * <div/>
- * Compute the cosine of radians
+ * Compute the hyperbolic cosine of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::cos(Tensor radians, Stream stream) {
+void Tensor::cosh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -845,21 +845,21 @@ void Tensor::cos(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        cosDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        coshDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        cosDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        coshDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
 }
 
 /**
- * [thisTensor] = tan([radians]), elementwise
+ * [thisTensor] = tanh([radians]), elementwise
  * <div/>
- * Compute the tangent of radians
+ * Compute the hyperbolic tangent of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::tan(Tensor radians, Stream stream) {
+void Tensor::tanh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -874,21 +874,21 @@ void Tensor::tan(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        tanDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        tanhDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        tanDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        tanhDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
 }
 
 /**
- * [thisTensor] = csc([radians]), elementwise
+ * [thisTensor] = csch([radians]), elementwise
  * <div/>
- * Compute the cosecant of radians
+ * Compute the hyperbolic cosecant of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::csc(Tensor radians, Stream stream) {
+void Tensor::csch(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -903,9 +903,9 @@ void Tensor::csc(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        cscDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        cschDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        cscDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        cschDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -914,10 +914,10 @@ void Tensor::csc(Tensor radians, Stream stream) {
 /**
  * [thisTensor] = sec([radians]), elementwise
  * <div/>
- * Compute the secant of radians
+ * Compute the hyperbolic secant of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::sec(Tensor radians, Stream stream) {
+void Tensor::sech(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -932,9 +932,9 @@ void Tensor::sec(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        secDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        sechDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        secDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        sechDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -943,10 +943,10 @@ void Tensor::sec(Tensor radians, Stream stream) {
 /**
  * [thisTensor] = cot([radians]), elementwise
  * <div/>
- * Compute the cotangent of radians
+ * Compute the hyperbolic cotangent of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::cot(Tensor radians, Stream stream) {
+void Tensor::coth(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -961,9 +961,9 @@ void Tensor::cot(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        cotDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        cothDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        cotDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        cothDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -975,7 +975,7 @@ void Tensor::cot(Tensor radians, Stream stream) {
  * Compute the arcsine of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::asin(Tensor radians, Stream stream) {
+void Tensor::asinh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -990,9 +990,9 @@ void Tensor::asin(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        asinDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        asinhDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        asinDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        asinhDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -1004,7 +1004,7 @@ void Tensor::asin(Tensor radians, Stream stream) {
  * Compute the arccosine of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::acos(Tensor radians, Stream stream) {
+void Tensor::acosh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -1019,9 +1019,9 @@ void Tensor::acos(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        acosDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        acoshDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        acosDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        acoshDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -1033,7 +1033,7 @@ void Tensor::acos(Tensor radians, Stream stream) {
  * Compute the arctangent of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::atan(Tensor radians, Stream stream) {
+void Tensor::atanh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -1048,9 +1048,9 @@ void Tensor::atan(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        atanDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        atanhDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        atanDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        atanhDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -1062,7 +1062,7 @@ void Tensor::atan(Tensor radians, Stream stream) {
  * Compute the arccosecant of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::acsc(Tensor radians, Stream stream) {
+void Tensor::acsch(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -1077,9 +1077,9 @@ void Tensor::acsc(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        acscDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        acschDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        acscDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        acschDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -1091,7 +1091,7 @@ void Tensor::acsc(Tensor radians, Stream stream) {
  * Compute the arcsecant of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::asec(Tensor radians, Stream stream) {
+void Tensor::asech(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -1106,9 +1106,9 @@ void Tensor::asec(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        asecDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        asechDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        asecDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        asechDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
@@ -1120,7 +1120,7 @@ void Tensor::asec(Tensor radians, Stream stream) {
  * Compute the arccotangent of radians
  * radians must be float. The return type may be float or half
  */
-void Tensor::acot(Tensor radians, Stream stream) {
+void Tensor::acoth(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
@@ -1135,9 +1135,9 @@ void Tensor::acot(Tensor radians, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize((numElements + 2047) / 2048);
     if (destDataType == TensorDescriptor::DataType::FP16) {
-        acotDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
+        acothDest2B<<<gridSize, blockSize, 0, stream>>>((half *)destMem, (float *)rMem, numElements);
     } else if (destDataType == TensorDescriptor::DataType::FP32) {
-        acotDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
+        acothDest4B<<<gridSize, blockSize, 0, stream>>>((float *)destMem, (float *)rMem, numElements);
     } else {
         assert(false);
     }
