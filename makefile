@@ -48,6 +48,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest && \
 				build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest && \
+				build/test/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteErrorTest && \
 				build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest && \
 				build/test/Utilities/TensorOperations/Misc/ComputeBinaryAccuracyTest && \
 				build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest && \
@@ -85,6 +86,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiplyTest && \
                 build/test/DeepLearning/Api/Layers/Loss/LossShaperTest && \
                 build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest && \
+                build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest && \
 				build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
 				build/test/Utilities/WorkQueue/WorkQueueTest \
@@ -123,6 +125,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnectedTest \
             build/test/DeepLearning/Implementation/Layers/Loss/LossShaperTest \
             build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest \
+            build/test/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteErrorTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest \
             build/test/DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2dTest \
             build/test/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeTest \
@@ -132,6 +135,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest \
             build/test/DeepLearning/Api/Optimizers/SgdTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest \
+            build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/LossShaperTest \
 			build/test/Utilities/TensorOperations/Loss/CrossEntropyLossTest \
 			build/test/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracyTest \
@@ -158,6 +162,8 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Arithmetic/Sum.o \
                    build/Utilities/TensorOperations/Loss/MeanSquaredError.o \
                    build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o \
+                   build/Utilities/TensorOperations/Loss/MeanAbsoluteError.o \
+                   build/DeepLearning/Api/Layers/Loss/MeanAbsoluteError.o \
                    build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o \
                    build/DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.o \
                    build/Utilities/TensorOperations/Misc/BatchReduce.o \
@@ -180,6 +186,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o \
                    build/DeepLearning/Implementation/Layers/Loss/LossShaper.o \
                    build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o \
+                   build/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.o \
                    build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
                    build/Utilities/Common/ReferenceCounted.o \
@@ -421,6 +428,10 @@ build/Utilities/TensorOperations/Loss/MeanSquaredError.o: Utilities/TensorOperat
 	mkdir -p build/Utilities/TensorOperations/Loss
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanSquaredError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanSquaredError.cu
 
+build/Utilities/TensorOperations/Loss/MeanAbsoluteError.o: Utilities/TensorOperations/Loss/MeanAbsoluteError.h Utilities/TensorOperations/Loss/MeanAbsoluteError.cu
+	mkdir -p build/Utilities/TensorOperations/Loss
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanAbsoluteError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanAbsoluteError.cu
+
 build/Utilities/TensorOperations/DeepLearning/Add1dBias.o: Utilities/TensorOperations/DeepLearning/Add1dBias.h Utilities/TensorOperations/DeepLearning/Add1dBias.cu
 	mkdir -p build/Utilities/TensorOperations/DeepLearning
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/DeepLearning/Add1dBias.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/DeepLearning/Add1dBias.cu
@@ -525,6 +536,10 @@ build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o: DeepLearning/I
 	mkdir -p build/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) -c -std=c++11 DeepLearning/Implementation/Layers/Loss/MeanSquaredError.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o
 
+build/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.o: DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.h DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.cpp
+	mkdir -p build/DeepLearning/Implementation/Layers/Loss
+	$(Gpp) -c -std=c++11 DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.o
+
 build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o: DeepLearning/Implementation/Layers/Loss/CrossEntropy.h DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) -c $(DEBUG) -std=c++11 DeepLearning/Implementation/Layers/Loss/CrossEntropy.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o
@@ -612,6 +627,10 @@ build/Utilities/TensorOperations/Misc/BatchReduce.o: Utilities/TensorOperations/
 build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o: DeepLearning/Api/Layers/Loss/MeanSquaredError.h DeepLearning/Api/Layers/Loss/MeanSquaredError.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Loss
 	$(Gpp) -c -std=c++11 DeepLearning/Api/Layers/Loss/MeanSquaredError.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/MeanSquaredError.o
+
+build/DeepLearning/Api/Layers/Loss/MeanAbsoluteError.o: DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h DeepLearning/Api/Layers/Loss/MeanAbsoluteError.cpp
+	mkdir -p build/DeepLearning/Api/Layers/Loss
+	$(Gpp) -c -std=c++11 DeepLearning/Api/Layers/Loss/MeanAbsoluteError.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Loss/MeanAbsoluteError.o
 
 build/DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.o: DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.cpp
 	mkdir -p build/DeepLearning/Api/Layers/Loss
@@ -779,6 +798,10 @@ build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest: build/t
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest test/DeepLearning/Implementation/Layers/Loss/MeanSquaredErrorTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
+build/test/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteErrorTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
+	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteErrorTest test/DeepLearning/Implementation/Layers/Loss/MeanAbsoluteErrorTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
 build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
@@ -918,6 +941,10 @@ build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest: build/test/googlet
 build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Layers/Loss
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 build/test/DeepLearning/Api/Layers/Loss/LossShaperTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Loss/LossShaperTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
