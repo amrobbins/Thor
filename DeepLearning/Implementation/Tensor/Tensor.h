@@ -248,9 +248,16 @@ class Tensor : private ReferenceCounted {
     void round(Tensor argument, Stream stream);
 
     /**
+     * [thisTensor] = the integer componet of [argument], elementwise
+     * <div/>
+     * argument must be float or half.
+     * there is no restriction on the data type of this destination tensor.
+     */
+    void truncateFloatingPoint(Tensor argument, Stream stream);
+
+    /**
      * [thisTensor] = [a] * [b] + [c], elementwise
      * <div/>
-     * Round to nearest integer, 0.5 rounds up.
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      */

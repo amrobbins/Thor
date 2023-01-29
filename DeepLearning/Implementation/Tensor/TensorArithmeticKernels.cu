@@ -2055,7 +2055,6 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
 /**
  * [thisTensor] = [a] * [b] + [c], elementwise
  * <div/>
- * Round to nearest integer, 0.5 rounds up.
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
