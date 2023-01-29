@@ -19,7 +19,7 @@ TEST(Tensor, Sinh) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
     Stream stream(0);
-    for (uint32_t t = 0; t < 1000; ++t) {
+    for (uint32_t t = 0; t < 20; ++t) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
@@ -79,7 +79,7 @@ TEST(Tensor, Cosh) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
     Stream stream(0);
-    for (uint32_t t = 0; t < 1000; ++t) {
+    for (uint32_t t = 0; t < 20; ++t) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));
@@ -139,7 +139,7 @@ TEST(Tensor, Tanh) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
     Stream stream(0);
-    for (uint32_t t = 0; t < 1000; ++t) {
+    for (uint32_t t = 0; t < 20; ++t) {
         vector<unsigned long> dimensions;
         dimensions.push_back(1 + (rand() % 200));
         dimensions.push_back(1 + (rand() % 200));

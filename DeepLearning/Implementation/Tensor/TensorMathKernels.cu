@@ -2195,7 +2195,6 @@ __global__ void roundDest4B(DEST_DATA_TYPE *dest, half *argument, uint64_t numEl
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
-
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
@@ -2288,8 +2287,6 @@ __global__ void truncateFloatingPointDest4B(DEST_DATA_TYPE *dest, float *argumen
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
 
-
-
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
@@ -2381,7 +2378,6 @@ __global__ void truncateFloatingPointDest4B(DEST_DATA_TYPE *dest, half *argument
     destBuffer[3] = (DEST_DATA_TYPE)(float)htrunc(argumentBuffer[3]);
     ((float4 *)dest)[offset4Elements] = ((float4 *)destBuffer)[0];
 }
-
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 16 elements : 4096 elements processed per block
@@ -3488,12 +3484,11 @@ void Tensor::round(Tensor argument, Stream stream) {
     }
 }
 
-
 /**
-     * [thisTensor] = the integer componet of [argument], elementwise
-     * <div/>
-     * argument must be float or half.
-     * there is no restriction on the data type of this destination tensor.
+ * [thisTensor] = the integer componet of [argument], elementwise
+ * <div/>
+ * argument must be float or half.
+ * there is no restriction on the data type of this destination tensor.
  */
 void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -3549,7 +3544,6 @@ void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
         }
     }
 }
-
 
 /**
  * [thisTensor] = 1 / [argument], elementwise
