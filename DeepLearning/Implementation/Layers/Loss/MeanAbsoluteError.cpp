@@ -24,7 +24,8 @@ void MeanAbsoluteError::compile() {
         assert(errorOutput.get().isInitialized());
         assert(errorOutput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         assert(errorOutput.get().getPlacement().getDeviceNum() == featureInput.get().getPlacement().getDeviceNum());
-        assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+        assert(errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
+               errorOutput.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
         assert(labelsInput.isPresent());
         assert(labelsInput.get().isInitialized());
@@ -53,7 +54,8 @@ void MeanAbsoluteError::infer(Optional<Tensor> predictions, Optional<Tensor> ele
     ScopedGpu scopedGpu(predictions.get().getPlacement().getDeviceNum());
 
     assert(compiled);
-    assert(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    assert(predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 ||
+           predictions.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32);
 
     stream.waitEvent(labelsStream.putEvent());
 

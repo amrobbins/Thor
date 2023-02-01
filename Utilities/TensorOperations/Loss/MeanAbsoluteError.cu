@@ -3,7 +3,7 @@
 using namespace std;
 
 /**
- * MAE(batch_of_predictions, batch_of_labels) = (1/batchSize) * abs(batch_of_predictions - batch_of_labels)
+ * MAE(batch_of_predictions, batch_of_labels) = (1/batchSize) * abs(batch_of_labels - batch_of_predictions)
  *
  * Where the subtraction and squaring are performed element-wise.
  *
@@ -77,18 +77,15 @@ __global__ void meanAbsoluteError(
 
     // Always process 4 elements, even when past last element because tensors are always padded to
     // be multiples of 8 bytes (4 half variables) to allow this. This is done for performance reasons.
-    float2 *labels_float2 = (float2 *)labels;
-    float2 labelsBuffer_float2;
+    float4 *labels_float4 = (float4 *)labels;
+    float4 labelsBuffer_float4;
+    float2 *labelsBuffer_float2 = (float2 *)&labelsBuffer_float4;
     half labelsBuffer_half4[4];
 
-    labelsBuffer_float2 = labels_float2[element / 2];
-    ((half2 *)labelsBuffer_half4)[0] = __float22half2_rn(labelsBuffer_float2);
-    if (numElements + 2 >= numElements) {
-        ((half2 *)labelsBuffer_half4)[1] = zero;
-    } else {
-        labelsBuffer_float2 = labels_float2[(element / 2) + 1];
-        ((half2 *)labelsBuffer_half4)[1] = __float22half2_rn(labelsBuffer_float2);
-    }
+    labelsBuffer_float4 = labels_float4[element / 4];
+    ((half2 *)labelsBuffer_half4)[0] = __float22half2_rn(labelsBuffer_float2[0]);
+    ((half2 *)labelsBuffer_half4)[1] = __float22half2_rn(labelsBuffer_float2[1]);
+
     half *labelsBuffer = (half *)labelsBuffer_half4;
 
     double *predictions_half4 = (double *)predictions;
@@ -143,14 +140,26 @@ __global__ void meanAbsoluteError(
     labelsBuffer = labels_float2[element / 2];
     predictionsBuffer = predictions_float2[element / 2];
 
-    buffer0 = labelsBuffer.x - predictionsBuffer.x;
-    elementLossBuffer.x = buffer0 * buffer0;
-    buffer1 = labelsBuffer.y - predictionsBuffer.y;
-    elementLossBuffer.y = buffer1 * buffer1;
+    buffer0 = predictionsBuffer.x - labelsBuffer.x;
+    elementLossBuffer.x = fabsf(buffer0);
+    buffer1 = predictionsBuffer.y - labelsBuffer.y;
+    elementLossBuffer.y = fabsf(buffer1);
 
     if (computeGradient) {
-        gradientBuffer.x = 2.0f * buffer0;
-        gradientBuffer.y = 2.0f * buffer1;
+        if (buffer0 > 0.0f)
+            gradientBuffer.x = 1.0f;
+        else if (buffer0 < 0.0f)
+            gradientBuffer.x = -1.0f;
+        else
+            gradientBuffer.x = 0.0f;
+
+        if (buffer1 > 0.0f)
+            gradientBuffer.y = 1.0f;
+        else if (buffer1 < 0.0f)
+            gradientBuffer.y = -1.0f;
+        else
+            gradientBuffer.y = 0.0f;
+
         gradient_float2[element / 2] = gradientBuffer;
     }
 
@@ -167,7 +176,6 @@ __global__ void meanAbsoluteError(
 
     buffer0 = predictionsBuffer.x - labelsBuffer.x;
     elementLossBuffer.x = fabsf(buffer0);
-    ;
     buffer1 = predictionsBuffer.y - labelsBuffer.y;
     elementLossBuffer.y = fabsf(buffer1);
 
@@ -264,34 +272,66 @@ __global__ void meanAbsoluteError(LABEL_TYPE *labels,
 
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
-    elementLoss[element] = buffer * buffer;
-    if (computeGradient)
-        gradient[element] = (LOSS_TYPE)2 * buffer;
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
+    elementLoss[element] = fabsf((float)buffer);
+    if (computeGradient) {
+        LOSS_TYPE gradientBuffer;
+        if ((float)buffer > 0.0f)
+            gradientBuffer = 1.0f;
+        else if ((float)buffer < 0.0f)
+            gradientBuffer = -1.0f;
+        else
+            gradientBuffer = 0.0f;
+        gradient[element] = gradientBuffer;
+    }
 
     element += 256;
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
-    elementLoss[element] = buffer * buffer;
-    if (computeGradient)
-        gradient[element] = (LOSS_TYPE)2 * buffer;
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
+    elementLoss[element] = fabsf((float)buffer);
+    if (computeGradient) {
+        LOSS_TYPE gradientBuffer;
+        if ((float)buffer > 0.0f)
+            gradientBuffer = 1.0f;
+        else if ((float)buffer < 0.0f)
+            gradientBuffer = -1.0f;
+        else
+            gradientBuffer = 0.0f;
+        gradient[element] = gradientBuffer;
+    }
 
     element += 256;
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
-    elementLoss[element] = buffer * buffer;
-    if (computeGradient)
-        gradient[element] = (LOSS_TYPE)2 * buffer;
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
+    elementLoss[element] = fabsf((float)buffer);
+    if (computeGradient) {
+        LOSS_TYPE gradientBuffer;
+        if ((float)buffer > 0.0f)
+            gradientBuffer = 1.0f;
+        else if ((float)buffer < 0.0f)
+            gradientBuffer = -1.0f;
+        else
+            gradientBuffer = 0.0f;
+        gradient[element] = gradientBuffer;
+    }
 
     element += 256;
     if (element >= numElements)
         return;
-    buffer = (LOSS_TYPE)(float)labels[element] - (LOSS_TYPE)(float)predictions[element];
-    elementLoss[element] = buffer * buffer;
-    if (computeGradient)
-        gradient[element] = (LOSS_TYPE)2 * buffer;
+    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
+    elementLoss[element] = fabsf((float)buffer);
+    if (computeGradient) {
+        LOSS_TYPE gradientBuffer;
+        if ((float)buffer > 0.0f)
+            gradientBuffer = 1.0f;
+        else if ((float)buffer < 0.0f)
+            gradientBuffer = -1.0f;
+        else
+            gradientBuffer = 0.0f;
+        gradient[element] = gradientBuffer;
+    }
 }
 
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
