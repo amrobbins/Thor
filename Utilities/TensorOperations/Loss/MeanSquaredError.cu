@@ -74,18 +74,15 @@ __global__ void meanSquaredError(
 
     // Always process 4 elements, even when past last element because tensors are always padded to
     // be multiples of 8 bytes (4 half variables) to allow this. This is done for performance reasons.
-    float2 *labels_float2 = (float2 *)labels;
-    float2 labelsBuffer_float2;
+    float4 *labels_float4 = (float4 *)labels;
+    float4 labelsBuffer_float4;
+    float2 *labelsBuffer_float2 = (float2 *)&labelsBuffer_float4;
     half labelsBuffer_half4[4];
 
-    labelsBuffer_float2 = labels_float2[element / 2];
-    ((half2 *)labelsBuffer_half4)[0] = __float22half2_rn(labelsBuffer_float2);
-    if (numElements + 2 >= numElements) {
-        ((half2 *)labelsBuffer_half4)[1] = ((half2 *)zero)[0];
-    } else {
-        labelsBuffer_float2 = labels_float2[(element / 2) + 1];
-        ((half2 *)labelsBuffer_half4)[1] = __float22half2_rn(labelsBuffer_float2);
-    }
+    labelsBuffer_float4 = labels_float4[element / 4];
+
+    ((half2 *)labelsBuffer_half4)[0] = __float22half2_rn(labelsBuffer_float2[0]);
+    ((half2 *)labelsBuffer_half4)[1] = __float22half2_rn(labelsBuffer_float2[1]);
     half *labelsBuffer = (half *)labelsBuffer_half4;
 
     double *predictions_half4 = (double *)predictions;
