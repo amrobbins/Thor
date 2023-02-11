@@ -3,9 +3,7 @@
 using namespace std;
 
 /**
- * MAE(batch_of_predictions, batch_of_labels) = (1/batchSize) * abs(batch_of_labels - batch_of_predictions)
- *
- * Where the subtraction and squaring are performed element-wise.
+ * MAE(batch_of_predictions, batch_of_labels) = abs(batch_of_labels - batch_of_predictions)
  *
  * When there are multiple predictions, there must be the corresponding number of labels.
  * This is enforced via assertion, the loss layer will not run if the size is not correct.
@@ -15,7 +13,7 @@ using namespace std;
  * MSE(batch_of_predictions[1], batch_of_labels[1]) = (1/batchSize) * abs(batch_of_predictions[1] - batch_of_labels[1])
  * ...
  *
- * So, the number of losses computed is equal to the number of predictions that are made, and each loss back propagates
+ * So, the number of losses computed is equal to the number of predictions that are made, and each loss gradient back propagates
  * through the associated prediction only.
  */
 __global__ void meanAbsoluteError(
