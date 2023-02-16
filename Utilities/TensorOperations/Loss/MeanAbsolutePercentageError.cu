@@ -624,69 +624,6 @@ __global__ void meanAbsolutePercentageError(float *labels,
     elementLoss_float2[element / 2] = elementLossBuffer;
 }
 
-__global__ void meanAbsolutePercentageError(float *labels,
-                                            half *predictions,
-                                            float *elementLoss,
-                                            half *gradient,
-                                            uint32_t numElements,
-                                            bool computeGradient,
-                                            float epsilon,
-                                            float maxMagnitude) {
-    int element = blockIdx.x * 1024 + (2 * threadIdx.x);
-
-    if (element >= numElements)
-        return;
-
-    const half2 zero(0.0f, 0.0f);
-    const half2 negativeOne(-1.0f, -1.0f);
-
-    float2 *labels_float2 = (float2 *)labels;
-    float2 labelsBuffer;
-
-    half2 *predictions_half2 = (half2 *)predictions;
-    half2 predictionsBuffer;
-
-    float2 *elementLoss_float2 = (float2 *)elementLoss;
-    float2 elementLossBuffer;
-
-    half2 *gradient_half2 = (half2 *)gradient;
-    half2 gradientBuffer;
-
-    half2 buffer;
-
-    labelsBuffer = labels_float2[element / 2];
-    predictionsBuffer = predictions_half2[element / 2];
-
-    buffer = __hsub2(predictionsBuffer, __float22half2_rn(labelsBuffer));
-    elementLossBuffer = __half22float2(__habs2(buffer));
-
-    // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
-    // of indexing out of bounds.
-    elementLoss_float2[element / 2] = elementLossBuffer;
-
-    if (computeGradient) {
-        gradientBuffer = zero;
-        gradientBuffer = __hadd2(__hgt2(buffer, zero), __hmul2(__hlt2(buffer, zero), negativeOne));
-        gradient_half2[element / 2] = gradientBuffer;
-    }
-
-    labelsBuffer = labels_float2[element / 2];
-    predictionsBuffer = predictions_half2[element / 2];
-
-    buffer = __hsub2(predictionsBuffer, __float22half2_rn(labelsBuffer));
-    elementLossBuffer = __half22float2(__habs2(buffer));
-
-    // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
-    // of indexing out of bounds.
-    elementLoss_float2[element / 2] = elementLossBuffer;
-
-    if (computeGradient) {
-        gradientBuffer = zero;
-        gradientBuffer = __hadd2(__hgt2(buffer, zero), __hmul2(__hlt2(buffer, zero), negativeOne));
-        gradient_half2[element / 2] = gradientBuffer;
-    }
-}
-
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
 __global__ void meanAbsolutePercentageError(LABEL_TYPE *labels,
                                             PREDICTION_TYPE *predictions,
@@ -696,71 +633,68 @@ __global__ void meanAbsolutePercentageError(LABEL_TYPE *labels,
                                             bool computeGradient,
                                             float epsilon,
                                             float maxMagnitude) {
-    int32_t element = blockIdx.x * 1024 + threadIdx.x;
+    for (int32_t element = blockIdx.x * 1024 + threadIdx.x, iteration = 0; element < numElements && iteration < 4;
+         element += 256, iteration += 1) {
+        float labelsBuffer;
+        float predictionsBuffer;
+        float elementLossBuffer;
+        float gradientBuffer;
 
-    LOSS_TYPE buffer;
+        float xMinusY;
+        float yMinusXSquared;
+        const float positiveEpsilon = epsilon;
+        const float negativeEpsilon = -epsilon;
+        const float maxValue = maxMagnitude;
+        const float minValue = -maxMagnitude;
+        bool labelsPredictionsEqual;
 
-    if (element >= numElements)
-        return;
-    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
-    elementLoss[element] = fabsf((float)buffer);
-    if (computeGradient) {
-        LOSS_TYPE gradientBuffer;
-        if ((float)buffer > 0.0f)
-            gradientBuffer = 1.0f;
-        else if ((float)buffer < 0.0f)
-            gradientBuffer = -1.0f;
-        else
-            gradientBuffer = 0.0f;
-        gradient[element] = gradientBuffer;
-    }
+        labelsBuffer = (float)labels[element];
+        predictionsBuffer = (float)predictions[element];
+        labelsPredictionsEqual = labelsBuffer == predictionsBuffer;
 
-    element += 256;
-    if (element >= numElements)
-        return;
-    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
-    elementLoss[element] = fabsf((float)buffer);
-    if (computeGradient) {
-        LOSS_TYPE gradientBuffer;
-        if ((float)buffer > 0.0f)
-            gradientBuffer = 1.0f;
-        else if ((float)buffer < 0.0f)
-            gradientBuffer = -1.0f;
-        else
-            gradientBuffer = 0.0f;
-        gradient[element] = gradientBuffer;
-    }
+        if (positiveEpsilon > 0.0f) {
+            if (labelsBuffer < 0.0f) {
+                if (labelsBuffer > negativeEpsilon)
+                    labelsBuffer = negativeEpsilon;
+            } else {
+                if (!(labelsBuffer > positiveEpsilon))
+                    labelsBuffer = positiveEpsilon;
+            }
+        }
 
-    element += 256;
-    if (element >= numElements)
-        return;
-    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
-    elementLoss[element] = fabsf((float)buffer);
-    if (computeGradient) {
-        LOSS_TYPE gradientBuffer;
-        if ((float)buffer > 0.0f)
-            gradientBuffer = 1.0f;
-        else if ((float)buffer < 0.0f)
-            gradientBuffer = -1.0f;
-        else
-            gradientBuffer = 0.0f;
-        gradient[element] = gradientBuffer;
-    }
+        // MAPE(batch_of_predictions, batch_of_labels) = abs( (batch_of_labels - batch_of_predictions) / batch_of_labels ) * 100
+        // d/dx(100 abs((y - x)/y)) = 100 * (x - y) * (sqrt( (y-x)^2 / y^2 ) / (y - x)^2)
+        xMinusY = predictionsBuffer - labelsBuffer;
+        elementLossBuffer = 100.0f * fabsf(xMinusY / labelsBuffer);
+        if (maxMagnitude > 0.0f) {
+            if (!(elementLossBuffer < maxValue)) {
+                elementLossBuffer = maxValue;
+            }
+        }
 
-    element += 256;
-    if (element >= numElements)
-        return;
-    buffer = (LOSS_TYPE)(float)predictions[element] - (LOSS_TYPE)(float)labels[element];
-    elementLoss[element] = fabsf((float)buffer);
-    if (computeGradient) {
-        LOSS_TYPE gradientBuffer;
-        if ((float)buffer > 0.0f)
-            gradientBuffer = 1.0f;
-        else if ((float)buffer < 0.0f)
-            gradientBuffer = -1.0f;
-        else
-            gradientBuffer = 0.0f;
-        gradient[element] = gradientBuffer;
+        if (computeGradient) {
+            yMinusXSquared = xMinusY * xMinusY;
+            gradientBuffer = 100.0f * xMinusY * sqrtf(yMinusXSquared / (labelsBuffer * labelsBuffer)) / yMinusXSquared;
+
+            if (maxMagnitude > 0.0f) {
+                if (gradientBuffer < maxValue) {
+                    if (gradientBuffer < minValue)
+                        gradientBuffer = minValue;
+                } else {
+                    gradientBuffer = maxValue;
+                }
+            }
+
+            if (labelsPredictionsEqual)
+                gradientBuffer = 0.0f;
+            gradient[element] = (PREDICTION_TYPE)gradientBuffer;
+        }
+
+        // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
+        // of indexing out of bounds.
+        if (labelsPredictionsEqual)
+            elementLossBuffer = 0.0f;
+        elementLoss[element] = (LOSS_TYPE)elementLossBuffer;
     }
 }
 
