@@ -540,7 +540,7 @@ build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o: DeepLea
 	$(Gpp) -c -std=c++11 DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o
 
 build/DeepLearning/Implementation/Layers/Loss/LossShaper.o: DeepLearning/Implementation/Layers/Loss/LossShaper.h DeepLearning/Implementation/Layers/Loss/LossShaper.cpp
-	mkdir -p build/DeepLearning/Implementation/Layers/Utility
+	mkdir -p build/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) -c -std=c++11 DeepLearning/Implementation/Layers/Loss/LossShaper.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Implementation/Layers/Loss/LossShaper.o
 
 build/DeepLearning/Implementation/Layers/Loss/MeanSquaredError.o: DeepLearning/Implementation/Layers/Loss/MeanSquaredError.h DeepLearning/Implementation/Layers/Loss/MeanSquaredError.cpp
@@ -700,7 +700,7 @@ build/DeepLearning/Api/Layers/Learning/Convolution2d.o: DeepLearning/Api/Layers/
 	$(Gpp) -c -std=c++11 DeepLearning/Api/Layers/Learning/Convolution2d.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Learning/Convolution2d.o
 
 build/DeepLearning/Api/Layers/Utility/BatchNormalization.o: DeepLearning/Api/Layers/Utility/BatchNormalization.h DeepLearning/Api/Layers/Utility/BatchNormalization.cpp
-	mkdir -p build/DeepLearning/Api/Layers/Learning
+	mkdir -p build/DeepLearning/Api/Layers/Utility
 	$(Gpp) -c -std=c++11 DeepLearning/Api/Layers/Utility/BatchNormalization.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Layers/Utility/BatchNormalization.o
 
 build/DeepLearning/Api/Layers/Utility/DropOut.o: DeepLearning/Api/Layers/Utility/DropOut.h DeepLearning/Api/Layers/Utility/DropOut.cpp
