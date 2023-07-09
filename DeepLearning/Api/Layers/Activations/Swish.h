@@ -17,14 +17,14 @@ class Swish : public Activation {
     virtual std::string getLayerType() const { return "Swish"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::Swish *swish = new ThorImplementation::Swish();
+        std::shared_ptr<ThorImplementation::Swish> swish = std::make_shared<ThorImplementation::Swish>();
         return swish;
     }
 

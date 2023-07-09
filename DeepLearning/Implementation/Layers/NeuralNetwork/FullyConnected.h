@@ -3,6 +3,9 @@
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "Utilities/TensorOperations/DeepLearning/Add1dBias.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/TensorOperations/Misc/BatchReduce.h"
+
+#include <memory>
 
 namespace ThorImplementation {
 
@@ -10,11 +13,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    public:
     virtual ~FullyConnected() {}
 
-    FullyConnected(const uint32_t numOutputFeatures, const bool hasBias)
-        : TrainableWeightsBiasesLayer(hasBias), numOutputFeatures(numOutputFeatures) {}
+    FullyConnected(const uint32_t numOutputFeatures, const bool hasBias, int64_t stampedId = -1)
+        : TrainableWeightsBiasesLayer(hasBias, stampedId), numOutputFeatures(numOutputFeatures) {}
 
-    FullyConnected(SharedWeightsPackage sharedWeightsPackage)
-        : TrainableWeightsBiasesLayer(sharedWeightsPackage),
+    FullyConnected(SharedWeightsPackage sharedWeightsPackage, int64_t stampedId = -1)
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage, stampedId),
           numOutputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[1]) {}
 
     virtual Optional<Tensor> createFeatureOutputTensor() {
@@ -33,13 +36,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             weightsDimensions.push_back(numOutputFeatures);
             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
             weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-            if (!isInferenceOnly())
-                weightsGradient = weights.clone();
             if (hasBias) {
                 biases = Tensor(featureInputs.front().get().getPlacement(),
                                 TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputFeatures}));
-                if (!isInferenceOnly())
-                    biasesGradient = biases.get().clone(TensorDescriptor::DataType::FP16);
             }
         }
     }
@@ -79,7 +78,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
         }
 
-        if (!isBackPropStub() && !isInferenceOnly()) {
+        if (!isBackPropStub()) {
             CublasMatrixMultiply::instance().chooseOptimalKernel(
                 gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, TensorDescriptor::DataType::FP16);
 
@@ -125,6 +124,25 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         if (hasBias) {
             createFeatureOutputCudnnTensorDescriptor();
             createBiasesCudnnTensorDescriptor();
+        }
+    }
+
+    virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> optimizer) {
+        TrainableWeightsBiasesLayer::setOptimizer(optimizer);
+
+        if (!isInferenceOnly()) {
+            assert(optimizer.isPresent());
+            Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
+            assert(anErrorInput.isPresent());
+            biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
+                                                                           batchSize,
+                                                                           anErrorInput.get().getDimensions()[1],
+                                                                           true,
+                                                                           false,
+                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                           optimizer.get()->getGradientUpdateStream(),
+                                                                           false));
         }
     }
 
@@ -177,10 +195,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
     }
 
+    // Note: backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
     virtual void backProp(Optional<Tensor> dataIn,
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
-                          Stream gradientStream,
                           Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
@@ -220,8 +238,58 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             }
         }
 
+        if (!isInferenceOnly()) {
+            assert(optimizer.isPresent());
+
+            // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
+            optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+
+            // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
+            // so to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and gradient are
+            // computed
+            optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
+            // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
+
+            // Upon processing the last connection, schedule the upate to the weights memory.
+            if (stillWaitingForErrorInputTensors.empty()) {
+                optimizer.get()->updateWeights(weights, biases, batchSize);
+            }
+
+            // weights will be updated at the current end of the gradientUpdateStream
+            // so Forward() must wait until gradientUpdateStream is finished.
+            // This is accomplished in TrainableWeightsBiasesLayer::forward().
+        }
+    }
+
+    // Compute the weights gradient for the specified connection number, accumulate as necessary.
+    // This computation runs on optimizer.gradientUpdateStream.
+    virtual void computeWeightsGradient(Optional<Tensor> weightsGradient,
+                                        Optional<Tensor> biasesGradient,
+                                        Optional<Tensor> featureIn,
+                                        Optional<Tensor> errorIn,
+                                        Stream gradientUpdateStream,
+                                        bool accumulateGradient) {
+        // Ensure all memory properly allocated
+        assert(weightsGradient.isPresent());
+        assert(weightsGradient.get().getDescriptor() == weights.getDescriptor());
+        assert(weightsGradient.get().getPlacement() == weights.getPlacement());
+        assert(weightsGradient.get().getMemPtr() != weights.getMemPtr());
+        if (hasBias) {
+            assert(biasesGradient.isPresent());
+            assert(biases.isPresent());
+            assert(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
+            assert(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
+            assert(biasesGradient.get().getPlacement() == biases.get().getPlacement());
+        } else {
+            assert(biasesGradient.isEmpty());
+        }
+
+        if (errorIn.isEmpty())
+            return;
+        assert(featureIn.isPresent());
+
         if (workspaceBackwardWeights.isPresent()) {
-            CublasMatrixMultiply::instance().multiply(dataIn,
+            CublasMatrixMultiply::instance().multiply(featureIn,
                                                       errorIn,
                                                       weightsGradient,
                                                       workspaceBackwardWeights,
@@ -233,9 +301,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                       false,
                                                       accumulateGradient,
                                                       TensorDescriptor::DataType::FP16,
-                                                      gradientStream);
+                                                      gradientUpdateStream);
         } else {
-            CublasMatrixMultiply::instance().multiply(dataIn,
+            CublasMatrixMultiply::instance().multiply(featureIn,
                                                       errorIn,
                                                       weightsGradient,
                                                       batchSize,
@@ -246,16 +314,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                       false,
                                                       accumulateGradient,
                                                       TensorDescriptor::DataType::FP16,
-                                                      gradientStream);
+                                                      gradientUpdateStream);
         }
 
         if (hasBias) {
-            launchSumBatch((half *)errorIn.get().getMemPtr(),
-                           (half *)biasesGradient.get().getMemPtr(),
-                           numOutputFeatures,
-                           batchSize,
-                           accumulateGradient,
-                           gradientStream);
+            biasBatchReduce->reduce(errorIn, biasesGradient, accumulateGradient);
         }
     }
 
@@ -362,6 +425,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     Optional<Tensor> workspaceForward;
     Optional<Tensor> workspaceBackwardData;
     Optional<Tensor> workspaceBackwardWeights;
+
+    std::unique_ptr<BatchReduce> biasBatchReduce;
 };
 
 }  // namespace ThorImplementation

@@ -16,7 +16,7 @@ namespace ThorImplementation {
 class CrossEntropy : public Loss {
    public:
     CrossEntropy();
-    CrossEntropy(CrossEntropyLossType crossEntropyLossType, bool indexLabels = false);
+    CrossEntropy(CrossEntropyLossType crossEntropyLossType, TensorDescriptor::DataType lossDataType, bool indexLabels = false);
 
     virtual ~CrossEntropy();
 

@@ -34,7 +34,7 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 
     for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
         Optional<Tensor> inputTensor = it->first;
-        Layer *layer = it->second;
+        shared_ptr<Layer> layer = it->second;
 
         if (inputTensor.isPresent()) {
             layer->preOptimize(inputTensor.get(), batchSize, MachineEvaluator::instance().getCopyStreamFromCpu(gpuNum));
@@ -73,21 +73,21 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 
         for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
             Optional<Tensor> inputTensor = it->first;
-            Layer *layer = it->second;
+            shared_ptr<Layer> layer = it->second;
 
-            const NetworkInput *networkInput = dynamic_cast<const NetworkInput *>(layer);
+            const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
             if (networkInput) {
                 stampNetworkInput(networkInput, gpuNum, batchSize, stampedNetwork);
                 continue;
             }
 
-            const NetworkOutput *networkOutput = dynamic_cast<const NetworkOutput *>(layer);
+            const shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
             if (networkOutput) {
                 stampNetworkOutput(inputTensor, networkOutput, gpuNum, batchSize, stampedNetwork);
                 continue;
             }
 
-            const Stub *stub = dynamic_cast<const Stub *>(layer);
+            const shared_ptr<Stub> stub = dynamic_pointer_cast<Stub>(layer);
             if (stub) {
                 // FIXME: Stub should cause all dangling tensors to be optimized away.
                 //        currently when forward is called for a layer that is a stub, output tensor will not have been allocated
@@ -143,6 +143,86 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
     return StatusCode::SUCCESS;
 }
 
+Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
+    // FIXME: multiple stamps, multiple gpus
+    // FIXME: smart placement and stamping
+    assert(forcedNumStampsPerGpu = 1);
+    vector<int32_t> gpu0 = {0};
+    assert(forcedDevices == gpu0);
+
+    StatusCode statusCode;
+
+    vector<int32_t> devices;
+    vector<uint32_t> numStampsPerDevice;
+    if (forcedDevices.empty())
+        devices = {0};
+    else
+        devices = forcedDevices;
+    for (uint32_t i = 0; i < devices.size(); ++i) {
+        if (forcedNumStampsPerGpu > 0) {
+            numStampsPerDevice.push_back(forcedNumStampsPerGpu);
+        } else {
+            numStampsPerDevice.push_back(1);
+        }
+    }
+
+    for (uint32_t i = 0; i < forcedDevices.size(); ++i) {
+        for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
+            ThorImplementation::StampedNetwork ignoredStampedNetwork;
+            statusCode = stampNetwork(devices[i], batchSize, ignoredStampedNetwork);
+            if (statusCode != StatusCode::SUCCESS)
+                return statusCode;
+        }
+    }
+
+    // Each layer could possible be assigned its own optimizer by the user, rather than specifying a default at the network level.
+    if (optimizer != nullptr) {
+        optimizer->attachToNetwork();
+    }
+
+    return StatusCode::SUCCESS;
+}
+
+void Network::save(string filename, bool keep_optimizer) {
+    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
+        Stream::deviceSynchronize(gpu);
+
+    // FIXME:
+    assert(false);
+}
+
+void Network::save_as_keras(string filename, bool keep_optimizer) {
+    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
+        Stream::deviceSynchronize(gpu);
+
+    // FIXME:
+    assert(false);
+}
+
+void Network::load(string filename) {
+    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
+        Stream::deviceSynchronize(gpu);
+
+    // FIXME:
+    assert(false);
+}
+
+void Network::load_from_keras(string filename) {
+    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
+    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
+    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
+        Stream::deviceSynchronize(gpu);
+
+    // FIXME:
+    assert(false);
+}
+
 /*
 void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork) {
     StampedNetwork initialStampedNework = stampedNetwork;
@@ -177,10 +257,10 @@ Network::StatusCode Network::evaluateGraph() {
     apiLayerToApiOutputTensors.clear();
 
     for (auto it = network.begin(); it != network.end(); ++it) {
-        Layer *layer = it->get();
+        shared_ptr<Layer> layer = *it;
 
         // Handle each class of layers
-        NetworkInput *networkInput = dynamic_cast<NetworkInput *>(layer);
+        shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
             Tensor outputTensor = networkInput->getFeatureOutput();
             allTensors.insert(outputTensor);
@@ -190,7 +270,7 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
-        NetworkOutput *networkOutput = dynamic_cast<NetworkOutput *>(layer);
+        shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
         if (networkOutput) {
             Tensor inputTensor = networkOutput->getFeatureInput();
             allTensors.insert(inputTensor);
@@ -199,7 +279,7 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
-        Stub *stub = dynamic_cast<Stub *>(layer);
+        shared_ptr<Stub> stub = dynamic_pointer_cast<Stub>(layer);
         if (stub) {
             Tensor inputTensor = stub->getFeatureInput();
             allTensors.insert(inputTensor);
@@ -208,7 +288,7 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
-        Loss *loss = dynamic_cast<Loss *>(layer);
+        shared_ptr<Loss> loss = dynamic_pointer_cast<Loss>(layer);
         if (loss) {
             // Predictions and Labels in, Loss out
             // Note: getPredictions() does not return the featureInput tensor when there is an initial transformation layer, like sigmoid
@@ -228,7 +308,7 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
-        Metric *metric = dynamic_cast<Metric *>(layer);
+        shared_ptr<Metric> metric = dynamic_pointer_cast<Metric>(layer);
         if (metric) {
             Tensor inputTensor = metric->getFeatureInput();
             Tensor labelsTensor = metric->getLabels();
@@ -246,7 +326,7 @@ Network::StatusCode Network::evaluateGraph() {
             continue;
         }
 
-        MultiConnectionLayer *multiConnectionLayer = dynamic_cast<MultiConnectionLayer *>(layer);
+        shared_ptr<MultiConnectionLayer> multiConnectionLayer = dynamic_pointer_cast<MultiConnectionLayer>(layer);
         if (multiConnectionLayer) {
             vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();
             vector<Tensor> outputTensors = multiConnectionLayer->getFeatureOutputs();
@@ -303,8 +383,8 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
 
     set<string> inputNames;
     for (auto it = network.begin(); it != network.end(); ++it) {
-        Layer *layer = it->get();
-        const NetworkInput *networkInput = dynamic_cast<const NetworkInput *>(layer);
+        shared_ptr<Layer> layer = *it;
+        const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput != nullptr) {
             if (inputNames.count(networkInput->getName()) != 0) {
                 printf("Duplicate network input name used: %s\n", networkInput->getName().c_str());
@@ -316,8 +396,8 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
 
     set<string> outputNames;
     for (auto it = network.begin(); it != network.end(); ++it) {
-        Layer *layer = it->get();
-        const NetworkOutput *networkOutput = dynamic_cast<const NetworkOutput *>(layer);
+        shared_ptr<Layer> layer = *it;
+        const shared_ptr<NetworkOutput> networkOutput = dynamic_pointer_cast<NetworkOutput>(layer);
         if (networkOutput != nullptr) {
             if (outputNames.count(networkOutput->getName()) != 0) {
                 printf("Duplicate network output name used: %s\n", networkOutput->getName().c_str());
@@ -362,7 +442,7 @@ Network::StatusCode Network::checkForDanglingOutputs() {
  */
 Network::StatusCode Network::checkForDeadlockCycles() {
     for (auto it = network.begin(); it != network.end(); ++it) {
-        Layer *layer = it->get();
+        shared_ptr<Layer> layer = *it;
         if (layer->mustConnectAllInputsToDriveOutput()) {
             vector<Tensor> outputs = apiLayerToApiOutputTensors[layer];
             for (uint32_t i = 0; i < outputs.size(); ++i) {
@@ -374,10 +454,10 @@ Network::StatusCode Network::checkForDeadlockCycles() {
     return StatusCode::SUCCESS;
 }
 
-bool Network::terminatesWithoutHitting(Tensor tensor, Layer *layer) {
-    vector<Layer *> tensorLoadingLayers = apiTensorToApiLoadingLayers[tensor];
+bool Network::terminatesWithoutHitting(Tensor tensor, shared_ptr<Layer> layer) {
+    vector<shared_ptr<Layer>> tensorLoadingLayers = apiTensorToApiLoadingLayers[tensor];
     for (uint32_t i = 0; i < tensorLoadingLayers.size(); ++i) {
-        Layer *loadingLayer = tensorLoadingLayers[i];
+        shared_ptr<Layer> loadingLayer = tensorLoadingLayers[i];
         if (loadingLayer == layer) {
             return false;
         } else {
@@ -393,18 +473,18 @@ bool Network::terminatesWithoutHitting(Tensor tensor, Layer *layer) {
 }
 
 void Network::topologicalSort() {
-    deque<pair<Optional<Tensor>, Layer *>> workQueue;
+    deque<pair<Optional<Tensor>, shared_ptr<Layer>>> workQueue;
 
     orderedNetwork.clear();
 
     // Put all network inputs into the work queue
     for (auto it = network.begin(); it != network.end(); ++it) {
-        Layer *layer = it->get();
+        shared_ptr<Layer> layer = *it;
 
-        const NetworkInput *networkInput = dynamic_cast<const NetworkInput *>(layer);
+        const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput) {
             Tensor outputTensor = layer->getFeatureOutput();
-            vector<Layer *> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
+            vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
             for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
                 workQueue.push_back(make_pair(outputTensor, loadingLayers[i]));
             }
@@ -417,10 +497,10 @@ void Network::topologicalSort() {
         // Visit a node, connect the output tensor that corresponds to this input tensor by adding the loading layer and its input tensor to
         // orderedNetwork
         // After connecting an output tensor to its loading layer, add that loading layer and its input tensor to the work queue.
-        pair<Optional<Tensor>, Layer *> workNode = workQueue.back();
+        pair<Optional<Tensor>, shared_ptr<Layer>> workNode = workQueue.back();
         workQueue.pop_back();
         Optional<Tensor> inputTensor = workNode.first;
-        Layer *layer = workNode.second;
+        shared_ptr<Layer> layer = workNode.second;
 
         // FIXME: TEMP
         // printf("connecting tensor %ld into layer id %ld\n", inputTensor.get().getId(), layer->getId());
@@ -435,7 +515,7 @@ void Network::topologicalSort() {
         vector<Tensor> outputTensors = layer->getOutputsFromInput(inputTensor);
         for (uint32_t t = 0; t < outputTensors.size(); ++t) {
             Tensor outputTensor = outputTensors[t];
-            vector<Layer *> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
+            vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
             for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
                 workQueue.push_back(make_pair(outputTensor, loadingLayers[i]));
             }
@@ -450,7 +530,7 @@ uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, Tensor
     uint64_t bytes = 0;
 
     for (auto it = network.begin(); it != network.end(); ++it) {
-        const Layer *layer = it->get();
+        const shared_ptr<Layer> layer = *it;
         // It is only valid to get first instance bytes on single layers
         bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
@@ -461,7 +541,7 @@ uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize, Ten
     uint64_t bytes = 0;
 
     for (auto it = network.begin(); it != network.end(); ++it) {
-        const Layer *layer = it->get();
+        const shared_ptr<Layer> layer = *it;
         bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
     }
     return bytes;
@@ -481,16 +561,16 @@ void Network::createBatchDimensions(vector<uint64_t> &batchDimensions, vector<ui
 // A stamped layer may be implemented by serveral actual layers, in that case
 // the intermediate layers are connected to form a single logical layer
 // that is ready to connect to its inputs and outputs.
-void Network::stampNetworkInput(const Thor::NetworkInput *networkInput,
+void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInput,
                                 uint32_t gpuNum,
                                 uint32_t batchSize,
                                 ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    ThorImplementation::Layer *outputLayer;
+    shared_ptr<ThorImplementation::Layer> outputLayer;
     Tensor outputTensor = networkInput->getFeatureOutput();
 
     // Stamp network input
-    ThorImplementation::NetworkInput *implementationNetworkInput = networkInput->stamp(placement, batchSize);
+    shared_ptr<ThorImplementation::NetworkInput> implementationNetworkInput = networkInput->stamp(placement, batchSize);
     if (DEBUG_STAMP) {
         printf("stamped network input\n");
         fflush(stdout);
@@ -513,20 +593,41 @@ void Network::addToNetwork(Layer *layer) {
     addLayerToNetwork(layer);
 }
 
-void Network::stampLayer(
-    Tensor inputTensor, const Thor::Layer *layer, uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
+void Network::addLayerToNetwork(const Layer *layer) { network.insert(layer->clone()); }
+
+// An initializer initializes one tensor
+void Network::addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
+
+#include "DeepLearning/Api/Optimizers/Sgd.h"
+// An optimizer is used to optimize all weights and biases in a network
+// If a new optimizer is added to the network it will replace the old one.
+void Network::addToNetwork(Optimizer *optimizer) {
+    if (this->optimizer != nullptr)
+        this->optimizer->disconnectFromNetwork();
+    this->optimizer = optimizer->clone();
+}
+
+shared_ptr<Optimizer> Network::getOptimizer() { return optimizer; }
+
+void Network::stampLayer(Tensor inputTensor,
+                         const shared_ptr<Thor::Layer> layer,
+                         uint32_t gpuNum,
+                         uint32_t batchSize,
+                         ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    ThorImplementation::Layer *physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
-    Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
+    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
+    shared_ptr<Thor::Layer> apiDrivingLayer =
+        apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
     assert(numLoadingLayers > 0);
-    ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
+    shared_ptr<ThorImplementation::TensorFanout> implementationTensorFanout =
+        dynamic_pointer_cast<ThorImplementation::TensorFanout>(physicalDrivingLayer);
     if (apiTensorToApiLoadingLayers[inputTensor].size() != 1) {
         if (implementationTensorFanout == nullptr) {
-            implementationTensorFanout = new ThorImplementation::TensorFanout();
+            implementationTensorFanout = make_shared<ThorImplementation::TensorFanout>();
             Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
             physicalDrivingLayer = implementationTensorFanout;
 
@@ -554,7 +655,7 @@ void Network::stampLayer(
 
     // Stamp the layer
     // Unless it was previously stamped on a prior pass, if so just connect the tensor.
-    ThorImplementation::Layer *implementationLayer = nullptr;
+    shared_ptr<ThorImplementation::Layer> implementationLayer = nullptr;
     bool layerPreviouslyStamped = (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1);
     // In case of a tensor fanout, there is no apiLayer...
     if (layerPreviouslyStamped) {
@@ -586,8 +687,8 @@ void Network::stampLayer(
         stampedNetwork.apiTensorToPhysicalDrivingLayer[apiOutputTensors[i]] = implementationLayer;
 
     if (!layerPreviouslyStamped) {
-        ThorImplementation::TrainableWeightsBiasesLayer *implementationTrainableLayer =
-            dynamic_cast<ThorImplementation::TrainableWeightsBiasesLayer *>(implementationLayer);
+        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
+            dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
         if (implementationTrainableLayer != nullptr) {
             stampedNetwork.trainableLayers.push_back(implementationTrainableLayer);
         } else {
@@ -597,21 +698,23 @@ void Network::stampLayer(
 }
 
 void Network::stampNetworkOutput(Tensor inputTensor,
-                                 const Thor::NetworkOutput *networkOutput,
+                                 const shared_ptr<Thor::NetworkOutput> networkOutput,
                                  uint32_t gpuNum,
                                  uint32_t batchSize,
                                  ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    ThorImplementation::Layer *physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
-    Thor::Layer *apiDrivingLayer = apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
+    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
+    shared_ptr<Thor::Layer> apiDrivingLayer =
+        apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
-    ThorImplementation::TensorFanout *implementationTensorFanout = dynamic_cast<ThorImplementation::TensorFanout *>(physicalDrivingLayer);
+    shared_ptr<ThorImplementation::TensorFanout> implementationTensorFanout =
+        dynamic_pointer_cast<ThorImplementation::TensorFanout>(physicalDrivingLayer);
     assert(numLoadingLayers > 0);
     if (apiTensorToApiLoadingLayers[inputTensor].size() != 1 && implementationTensorFanout == nullptr) {
-        implementationTensorFanout = new ThorImplementation::TensorFanout();
+        implementationTensorFanout = make_shared<ThorImplementation::TensorFanout>();
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTensorFanout;
 
@@ -625,9 +728,11 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     }
 
     // Stamp the network output
-    ThorImplementation::NetworkOutput *implementationNetworkOutput = dynamic_cast<ThorImplementation::NetworkOutput *>(
-        ((Layer *)networkOutput)
-            ->stamp(ThorImplementation::TensorPlacement::MemDevices::CPU, physicalDrivingLayer, apiDrivingLayer, inputTensor));
+    shared_ptr<ThorImplementation::Layer> implementationLayer =
+        ((Layer *)networkOutput.get())
+            ->stamp(ThorImplementation::TensorPlacement::MemDevices::CPU, physicalDrivingLayer, apiDrivingLayer, inputTensor);
+    shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
+        dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);
     networkOutput->initialize(implementationNetworkOutput, stampedNetwork.initializers);
     assert(implementationNetworkOutput != nullptr);

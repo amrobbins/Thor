@@ -19,14 +19,14 @@ class Softmax : public Activation {
     virtual std::string getLayerType() const { return "Softmax"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::Softmax *softmax = new ThorImplementation::Softmax(backwardComputedExternally);
+        std::shared_ptr<ThorImplementation::Softmax> softmax = std::make_shared<ThorImplementation::Softmax>(backwardComputedExternally);
         return softmax;
     }
 

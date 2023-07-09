@@ -40,7 +40,7 @@ class NetworkOutput : public Layer {
             // Create an on device output buffer so that the main stream is not blocked
             // during offloading of the output across devices
             outputBuffer = featureInput.get().clone();
-            outputStream = Stream(featureInput.get().getPlacement());
+            outputStream = Stream::getNextDownloadStream(featureInput.get().getPlacement().getDeviceNum());
             outputReadyEvent = outputStream.get().putEvent(false, true);
             return featureInput.get().clone(outputPlacement.get());
         } else {

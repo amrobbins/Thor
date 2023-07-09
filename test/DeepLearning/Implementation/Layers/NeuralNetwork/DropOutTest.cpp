@@ -13,8 +13,7 @@
 #include <set>
 #include <vector>
 
-using std::set;
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -45,22 +44,22 @@ TEST(DropOut, InferenceWorks) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
-        layers.push_back(new NoOpLayer());
-        DropOut *dropOutLayer = new DropOut(0.25, false);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(0.25, false);
         layers.push_back(dropOutLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -123,22 +122,22 @@ TEST(DropOut, TrainingNoDropOut) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
-        layers.push_back(new NoOpLayer());
-        DropOut *dropOutLayer = new DropOut(0.0f, true);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(0.0f, true);
         layers.push_back(dropOutLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -201,22 +200,22 @@ TEST(DropOut, TrainingAllDropOut) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
-        layers.push_back(new NoOpLayer());
-        DropOut *dropOutLayer = new DropOut(1.0f, true);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(1.0f, true);
         layers.push_back(dropOutLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -281,8 +280,8 @@ TEST(DropOut, TrainingSomeDropOut) {
                 sourceMem[i] = 1.2f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
 
         Stream stream = layers.front()->getStream();
 
@@ -291,18 +290,18 @@ TEST(DropOut, TrainingSomeDropOut) {
         if (dropOutRate < 1.0f)
             scalingFactor = 1 / (1.0f - dropOutRate);
 
-        layers.push_back(new NoOpLayer());
-        DropOut *dropOutLayer = new DropOut(dropOutRate, true);
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(dropOutRate, true);
         layers.push_back(dropOutLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
-        Tensor outputGpu = ((NetworkOutput *)layers.back())->getFeatureOutput();
+        Tensor outputGpu = dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());

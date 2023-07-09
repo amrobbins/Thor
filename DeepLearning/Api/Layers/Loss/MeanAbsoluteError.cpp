@@ -6,13 +6,8 @@ using namespace std;
 void MeanAbsoluteError::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = predictionsTensor;
 
-    MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
-                                              .network(*network)
-                                              .predictions(predictionsTensor)
-                                              .labels(labelsTensor)
-                                              .reportsRawLoss()
-                                              .lossDataType(lossDataType)
-                                              .build();
+    MeanAbsoluteError meanAbsoluteError =
+        MeanAbsoluteError::Builder().network(*network).predictions(predictionsTensor).labels(labelsTensor).reportsRawLoss().build();
 
     if (lossType == ThorImplementation::Loss::LossType::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(meanAbsoluteError.getLoss()).reportsBatchLoss().build();

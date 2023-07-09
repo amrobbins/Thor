@@ -196,6 +196,10 @@ class Split : public MultiConnectionLayer {
     }
 
     virtual void backward(Optional<Tensor> errorInput) {
+        // Experimental - back propagation stops at empty error input
+        if (errorInput.isEmpty())
+            return;
+
         if (errorInputs.size() > 1) {
             // Locked section
             std::unique_lock<std::mutex> lck(mtx);
@@ -203,15 +207,11 @@ class Split : public MultiConnectionLayer {
             if (errorInput.isPresent()) {
                 assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
-            } else {
-                assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-                stillWaitingForNumEmptyErrorInputConnections -= 1;
             }
-            if (!stillWaitingForErrorInputTensors.empty() || stillWaitingForNumEmptyErrorInputConnections != 0)
+            if (!stillWaitingForErrorInputTensors.empty())
                 return;
 
             stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-            stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
         }
 
         for (unsigned int i = 1; i < errorInputs.size(); ++i)

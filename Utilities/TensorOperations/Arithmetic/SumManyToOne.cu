@@ -85,6 +85,8 @@ __global__ void sumBatch(SOURCE_TYPE *source, DEST_TYPE *dest, uint32_t numEleme
         return;
 
     float buff = 0.0f;
+    if (accumulate)
+        buff = dest[elementOffset];
     for (uint32_t i = 0; i < batchSize; ++i) {
         buff += (float)source[i * numElementsPerBatchItem + elementOffset];
     }

@@ -18,17 +18,17 @@ class TypeConverter : public Layer {
     virtual std::string getLayerType() const { return "TypeConverter"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
         assert(getFeatureOutput().isPresent());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension
-        ThorImplementation::TypeConversion *typeConverter =
-            new ThorImplementation::TypeConversion(Tensor::convertToImplementationDataType(getFeatureOutput().get().getDataType()));
+        std::shared_ptr<ThorImplementation::TypeConversion> typeConverter = std::make_shared<ThorImplementation::TypeConversion>(
+            Tensor::convertToImplementationDataType(getFeatureOutput().get().getDataType()));
         return typeConverter;
     }
 

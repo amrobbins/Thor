@@ -32,7 +32,7 @@ class NetworkInput : public Layer {
         if (networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU)
             gpuNum = networkPlacement.getDeviceNum();
         this->stream = Stream(gpuNum);
-        this->loadStream = Stream(gpuNum);
+        this->loadStream = Stream::getNextUploadStream(gpuNum);
     }
 
     virtual bool isInput() { return true; }

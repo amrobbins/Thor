@@ -1,3 +1,4 @@
+
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
@@ -40,13 +41,13 @@ TEST(Relu, Works) {
         Tensor destCpu(cpuPlacement, descriptor);
 
         half *featureInMem = (half *)featureInCpu.getMemPtr();
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Relu *relu = new Relu();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Relu> relu = make_shared<Relu>();
         layers.push_back(relu);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -54,7 +55,7 @@ TEST(Relu, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -125,13 +126,13 @@ TEST(Tanh, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Tanh *tanhLayer = new Tanh();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Tanh> tanhLayer = make_shared<Tanh>();
         layers.push_back(tanhLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -139,7 +140,7 @@ TEST(Tanh, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -229,13 +230,13 @@ TEST(Elu, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Elu *eluLayer = new Elu(alpha);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Elu> eluLayer = make_shared<Elu>(alpha);
         layers.push_back(eluLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -243,7 +244,7 @@ TEST(Elu, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -324,13 +325,13 @@ TEST(Swish, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Swish *swishLayer = new Swish();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Swish> swishLayer = make_shared<Swish>();
         layers.push_back(swishLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -338,7 +339,7 @@ TEST(Swish, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -406,13 +407,13 @@ TEST(Exponential, Works) {
             featureInMem[i] = ((rand() % 40) / 10.0f) - 2.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Exponential *exponentialLayer = new Exponential();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Exponential> exponentialLayer = make_shared<Exponential>();
         layers.push_back(exponentialLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -420,7 +421,7 @@ TEST(Exponential, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -501,13 +502,13 @@ TEST(SoftSign, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        SoftSign *softSignLayer = new SoftSign();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<SoftSign> softSignLayer = make_shared<SoftSign>();
         layers.push_back(softSignLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -515,7 +516,7 @@ TEST(SoftSign, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -598,13 +599,13 @@ TEST(HardSigmoid, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        HardSigmoid *hardSigmoidLayer = new HardSigmoid();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<HardSigmoid> hardSigmoidLayer = make_shared<HardSigmoid>();
         layers.push_back(hardSigmoidLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -612,7 +613,7 @@ TEST(HardSigmoid, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -693,13 +694,13 @@ TEST(SoftPlus, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        SoftPlus *softPlusLayer = new SoftPlus();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<SoftPlus> softPlusLayer = make_shared<SoftPlus>();
         layers.push_back(softPlusLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -707,7 +708,7 @@ TEST(SoftPlus, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -789,13 +790,13 @@ TEST(Sigmoid, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Sigmoid *sigmoidLayer = new Sigmoid();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Sigmoid> sigmoidLayer = make_shared<Sigmoid>();
         layers.push_back(sigmoidLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -803,7 +804,7 @@ TEST(Sigmoid, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -899,13 +900,13 @@ TEST(Selu, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Selu *seluLayer = new Selu();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Selu> seluLayer = make_shared<Selu>();
         layers.push_back(seluLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -913,7 +914,7 @@ TEST(Selu, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -1000,13 +1001,13 @@ TEST(Gelu, Works) {
             featureInMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Gelu *geluLayer = new Gelu();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Gelu> geluLayer = make_shared<Gelu>();
         layers.push_back(geluLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -1014,7 +1015,7 @@ TEST(Gelu, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();
@@ -1094,13 +1095,13 @@ TEST(Softmax, Works) {
             }
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(featureInGpu));
-        layers.push_back(new NoOpLayer());
-        Softmax *softmaxLayer = new Softmax();
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(featureInGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Softmax> softmaxLayer = make_shared<Softmax>();
         layers.push_back(softmaxLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
@@ -1108,7 +1109,7 @@ TEST(Softmax, Works) {
         // Network is runnable here
         layers[0]->forward(featureInCpu, false);
         Stream stream = layers.front()->getStream();
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         stream.synchronize();

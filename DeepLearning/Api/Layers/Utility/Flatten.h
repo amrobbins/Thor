@@ -18,15 +18,16 @@ class Flatten : public Layer {
     virtual std::string getLayerType() const { return "Flatten"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
         // Implemenattion has 1 extra dimension due to having the batchSize dimension
-        ThorImplementation::Flatten *flatten = new ThorImplementation::Flatten(getFeatureOutput().get().getDimensions().size() + 1);
+        std::shared_ptr<ThorImplementation::Flatten> flatten =
+            std::make_shared<ThorImplementation::Flatten>(getFeatureOutput().get().getDimensions().size() + 1);
         return flatten;
     }
 

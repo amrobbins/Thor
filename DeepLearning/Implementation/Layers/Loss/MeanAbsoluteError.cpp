@@ -11,7 +11,7 @@ using namespace std;
 
 MeanAbsoluteError::~MeanAbsoluteError() {}
 
-MeanAbsoluteError::MeanAbsoluteError() : Loss() {}
+MeanAbsoluteError::MeanAbsoluteError(TensorDescriptor::DataType lossDataType) : Loss(lossDataType) {}
 
 void MeanAbsoluteError::compile() {
     assert(featureInput.isPresent());

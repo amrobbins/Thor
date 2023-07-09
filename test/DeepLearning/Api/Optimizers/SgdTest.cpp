@@ -10,8 +10,7 @@
 #include <set>
 #include <vector>
 
-using std::set;
-using std::vector;
+using namespace std;
 
 using namespace Thor;
 
@@ -22,6 +21,8 @@ Network buildNetwork(uint32_t numFCLayers) {
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+    NetworkInput labels =
+        NetworkInput::Builder().network(network).name("labels").dimensions({500}).dataType(Tensor::DataType::FP16).build();
     latestOutputTensor = networkInput.getFeatureOutput();
 
     for (uint32_t i = 0; i < numFCLayers; ++i) {
@@ -37,14 +38,27 @@ Network buildNetwork(uint32_t numFCLayers) {
         latestOutputTensor = fullyConnected.getFeatureOutput();
     }
 
+    CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
+                                            .network(network)
+                                            .predictions(latestOutputTensor)
+                                            .labels(labels.getFeatureOutput())
+                                            .reportsBatchLoss()
+                                            .receivesOneHotLabels()
+                                            .build();
+
     NetworkOutput networkOutput =
-        NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
+        NetworkOutput::Builder().network(network).name("output").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP16).build();
 
     return network;
 }
 
 TEST(Sgd, SgdBuilds) {
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01).decay(0.9).momentum(0).useNesterov(true).build();
+    Optional<Network *> optionalTest;
+    ASSERT_FALSE(optionalTest.isPresent());
+
+    Network network = buildNetwork(2);
+    std::shared_ptr<Sgd> sgd =
+        Sgd::Builder().network(network).initialLearningRate(0.01).decay(0.9).momentum(0).useNesterovMomentum(true).build();
     ASSERT_NE(sgd, nullptr);
 }
 
@@ -53,92 +67,83 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
     float initialLearningRate = 0.72;
     float decay = 0.9;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd =
-        Sgd::Builder().initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterov(true).build();
-    sgd->setNetwork(&network);
+    std::shared_ptr<Sgd> sgd = Sgd::Builder()
+                                   .initialLearningRate(initialLearningRate)
+                                   .decay(decay)
+                                   .momentum(momentum)
+                                   .useNesterovMomentum(true)
+                                   .network(network)
+                                   .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    ThorImplementation::StampedNetwork stampedNetwork1;
-    network.stampNetwork(0, 5, stampedNetwork0);
+    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 10;
-    std::unordered_map<std::string, float> params = sgd->updateParameters(epoch, batch, batchesPerEpoch);
+    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
     ASSERT_EQ(params.size(), 1U);
     ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
-
-    // Check that the proper values are updated in the network
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[0]->getLearningRate() - initialLearningRate), 0.0001);
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[1]->getLearningRate() - initialLearningRate), 0.0001);
 }
 
+/* FIXME: put this back in once multile stamps is supported
 TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
     Network network = buildNetwork(2);
     float initialLearningRate = 0.25;
     float decay = 0.8;
     float momentum = 0.0;
     std::shared_ptr<Sgd> sgd =
-        Sgd::Builder().initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterov(true).build();
-    sgd->setNetwork(&network);
+        Sgd::Builder().network(network).initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterovMomentum(true).build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     ThorImplementation::StampedNetwork stampedNetwork1;
-    network.stampNetwork(0, 5, stampedNetwork0);
-    network.stampNetwork(0, 5, stampedNetwork1);
+    Network::StatusCode statusCode = network.place(32, {0}, 2);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
     uint32_t batch = 4;
     uint32_t batchesPerEpoch = 25;
-    std::unordered_map<std::string, float> params = sgd->updateParameters(epoch, batch, batchesPerEpoch);
+    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
     ASSERT_EQ(params.size(), 1U);
     ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
-
-    // Check that the proper values are updated in the network
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[0]->getLearningRate() - initialLearningRate), 0.0001);
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[1]->getLearningRate() - initialLearningRate), 0.0001);
-    ASSERT_LT(abs(stampedNetwork1.trainableLayers[0]->getLearningRate() - initialLearningRate), 0.0001);
-    ASSERT_LT(abs(stampedNetwork1.trainableLayers[1]->getLearningRate() - initialLearningRate), 0.0001);
 }
+ */
 
 TEST(Sgd, SgdUpdatesParameters) {
     Network network = buildNetwork(1);
     float initialLearningRate = 0.43;
     float decay = 0.8;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd =
-        Sgd::Builder().initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterov(true).build();
-    sgd->setNetwork(&network);
+    std::shared_ptr<Sgd> sgd = Sgd::Builder()
+                                   .network(network)
+                                   .initialLearningRate(initialLearningRate)
+                                   .decay(decay)
+                                   .momentum(momentum)
+                                   .useNesterovMomentum(true)
+                                   .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    ThorImplementation::StampedNetwork stampedNetwork1;
-    ThorImplementation::StampedNetwork stampedNetwork2;
-    network.stampNetwork(0, 5, stampedNetwork0);
-    network.stampNetwork(0, 5, stampedNetwork1);
-    network.stampNetwork(0, 5, stampedNetwork2);
+    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    sgd->updateParameters(0, 0, 10);
+    sgd->updateHyperParameters(0, 0, 10);
     uint32_t epoch = 5;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    std::unordered_map<std::string, float> params = sgd->updateParameters(epoch, batch, batchesPerEpoch);
+    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
     ASSERT_EQ(params.size(), 1U);
     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
-
-    // Check that the proper values are updated in the network
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[0]->getLearningRate() - expected), 0.0001);
-    ASSERT_LT(abs(stampedNetwork1.trainableLayers[0]->getLearningRate() - expected), 0.0001);
-    ASSERT_LT(abs(stampedNetwork2.trainableLayers[0]->getLearningRate() - expected), 0.0001);
 }
 
 TEST(Sgd, SgdInitializesStampedNetworkParameters) {
@@ -146,28 +151,29 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
     float initialLearningRate = 0.5;
     float decay = 0.32;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd =
-        Sgd::Builder().initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterov(true).build();
-    sgd->setNetwork(&network);
+    std::shared_ptr<Sgd> sgd = Sgd::Builder()
+                                   .initialLearningRate(initialLearningRate)
+                                   .decay(decay)
+                                   .momentum(momentum)
+                                   .useNesterovMomentum(true)
+                                   .network(network)
+                                   .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    network.stampNetwork(0, 5, stampedNetwork0);
+    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    sgd->updateParameters(0, 0, 10);
+    sgd->updateHyperParameters(0, 0, 10);
     uint32_t epoch = 1;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    std::unordered_map<std::string, float> params = sgd->initializeStampedNetworkParameters(stampedNetwork0, epoch, batch, batchesPerEpoch);
+    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
     ASSERT_EQ(params.size(), 1U);
     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
-
-    // Check that the proper values are updated in the network
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[0]->getLearningRate() - expected), 0.0001);
-    ASSERT_LT(abs(stampedNetwork0.trainableLayers[1]->getLearningRate() - expected), 0.0001);
 }
 
 TEST(Sgd, SgdReportsParameters) {
@@ -175,14 +181,19 @@ TEST(Sgd, SgdReportsParameters) {
     float initialLearningRate = 0.5;
     float decay = 0.32;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd =
-        Sgd::Builder().initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterov(true).build();
-    sgd->setNetwork(&network);
+    std::shared_ptr<Sgd> sgd = Sgd::Builder()
+                                   .initialLearningRate(initialLearningRate)
+                                   .decay(decay)
+                                   .momentum(momentum)
+                                   .useNesterovMomentum(true)
+                                   .network(network)
+                                   .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    network.stampNetwork(0, 5, stampedNetwork0);
+    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    std::unordered_map<std::string, float> params = sgd->getAllParameters(0, 0, 0);
+    std::unordered_map<std::string, float> params = sgd->getAllHyperParameters(0, 0, 0);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
@@ -194,17 +205,17 @@ TEST(Sgd, SgdReportsParameters) {
     ASSERT_LT(abs(params["decay"] - decay), 0.0001);
     ASSERT_EQ(params.count("momentum"), 1U);
     ASSERT_LT(abs(params["momentum"] - momentum), 0.0001);
-    ASSERT_EQ(params.count("useNesterov"), 1U);
-    ASSERT_TRUE(params["useNesterov"]);
+    ASSERT_EQ(params.count("useNesterovMomentum"), 1U);
+    ASSERT_TRUE(params["useNesterovMomentum"]);
 
-    sgd->updateParameters(0, 0, 10);
+    sgd->updateHyperParameters(0, 0, 10);
     uint32_t epoch = 2;
     uint32_t batch = 3;
     uint32_t batchesPerEpoch = 50;
-    sgd->updateParameters(epoch, batch, batchesPerEpoch);
+    sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
     params.clear();
-    params = sgd->getAllParameters(epoch, batch, batchesPerEpoch);
+    params = sgd->getAllHyperParameters(epoch, batch, batchesPerEpoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
@@ -216,8 +227,8 @@ TEST(Sgd, SgdReportsParameters) {
     ASSERT_LT(abs(params["decay"] - decay), 0.0001);
     ASSERT_EQ(params.count("momentum"), 1U);
     ASSERT_LT(abs(params["momentum"] - momentum), 0.0001);
-    ASSERT_EQ(params.count("useNesterov"), 1U);
-    ASSERT_TRUE(params["useNesterov"]);
+    ASSERT_EQ(params.count("useNesterovMomentum"), 1U);
+    ASSERT_TRUE(params["useNesterovMomentum"]);
 }
 
 int main(int argc, char **argv) {

@@ -37,16 +37,16 @@ TEST(LossShaper, NumericalBatchFp16) {
         }
         batchLossCpu /= dimensions[0];
 
-        vector<Layer *> layers;
-        NetworkInput *lossInput = new NetworkInput(gpuPlacement, dataType, dimensions);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> lossInput = make_shared<NetworkInput>(gpuPlacement, dataType, dimensions);
         layers.push_back(lossInput);
-        NoOpLayer *noOpLayer1 = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer1 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::BATCH);
+        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::BATCH);
         layers.push_back(lossShaper);
-        NoOpLayer *noOpLayer2 = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer2 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer2);
-        NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(lossOutput);
 
         Stream stream = lossInput->getStream();
@@ -107,16 +107,16 @@ TEST(LossShaper, NumericalElementWiseFp32) {
             }
         }
 
-        vector<Layer *> layers;
-        NetworkInput *lossInput = new NetworkInput(gpuPlacement, dataType, dimensions);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> lossInput = make_shared<NetworkInput>(gpuPlacement, dataType, dimensions);
         layers.push_back(lossInput);
-        NoOpLayer *noOpLayer1 = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer1 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::ELEMENTWISE);
+        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::ELEMENTWISE);
         layers.push_back(lossShaper);
-        NoOpLayer *noOpLayer2 = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer2 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer2);
-        NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(lossOutput);
 
         Stream stream = lossInput->getStream();
@@ -180,16 +180,16 @@ TEST(LossShaper, NumericalClassWiseFp32) {
             classwiseLossCpuMem[c] /= dimensions[0];
         }
 
-        vector<Layer *> layers;
-        NetworkInput *lossInput = new NetworkInput(gpuPlacement, dataType, dimensions);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> lossInput = make_shared<NetworkInput>(gpuPlacement, dataType, dimensions);
         layers.push_back(lossInput);
-        NoOpLayer *noOpLayer1 = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer1 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer1);
-        LossShaper *lossShaper = new LossShaper(LossShaper::OutputLossType::CLASSWISE);
+        shared_ptr<LossShaper> lossShaper = make_shared<LossShaper>(LossShaper::OutputLossType::CLASSWISE);
         layers.push_back(lossShaper);
-        NoOpLayer *noOpLayer2 = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer2 = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer2);
-        NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(lossOutput);
 
         Stream stream = lossInput->getStream();

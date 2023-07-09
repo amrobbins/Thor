@@ -200,63 +200,6 @@ __global__ void meanAbsoluteError(
     elementLoss_float2[element / 2] = elementLossBuffer;
 }
 
-__global__ void meanAbsoluteError(
-    float *labels, half *predictions, float *elementLoss, half *gradient, uint32_t numElements, bool computeGradient) {
-    int element = blockIdx.x * 1024 + (2 * threadIdx.x);
-
-    if (element >= numElements)
-        return;
-
-    const half2 zero(0.0f, 0.0f);
-    const half2 negativeOne(-1.0f, -1.0f);
-
-    float2 *labels_float2 = (float2 *)labels;
-    float2 labelsBuffer;
-
-    half2 *predictions_half2 = (half2 *)predictions;
-    half2 predictionsBuffer;
-
-    float2 *elementLoss_float2 = (float2 *)elementLoss;
-    float2 elementLossBuffer;
-
-    half2 *gradient_half2 = (half2 *)gradient;
-    half2 gradientBuffer;
-
-    half2 buffer;
-
-    labelsBuffer = labels_float2[element / 2];
-    predictionsBuffer = predictions_half2[element / 2];
-
-    buffer = __hsub2(predictionsBuffer, __float22half2_rn(labelsBuffer));
-    elementLossBuffer = __half22float2(__habs2(buffer));
-
-    // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
-    // of indexing out of bounds.
-    elementLoss_float2[element / 2] = elementLossBuffer;
-
-    if (computeGradient) {
-        gradientBuffer = zero;
-        gradientBuffer = __hadd2(__hgt2(buffer, zero), __hmul2(__hlt2(buffer, zero), negativeOne));
-        gradient_half2[element / 2] = gradientBuffer;
-    }
-
-    labelsBuffer = labels_float2[element / 2];
-    predictionsBuffer = predictions_half2[element / 2];
-
-    buffer = __hsub2(predictionsBuffer, __float22half2_rn(labelsBuffer));
-    elementLossBuffer = __half22float2(__habs2(buffer));
-
-    // Tensors are always padded to be multiples of 8 bytes (4 half variables) to allow this, without the possibility
-    // of indexing out of bounds.
-    elementLoss_float2[element / 2] = elementLossBuffer;
-
-    if (computeGradient) {
-        gradientBuffer = zero;
-        gradientBuffer = __hadd2(__hgt2(buffer, zero), __hmul2(__hlt2(buffer, zero), negativeOne));
-        gradient_half2[element / 2] = gradientBuffer;
-    }
-}
-
 template <typename LABEL_TYPE, typename PREDICTION_TYPE, typename LOSS_TYPE>
 __global__ void meanAbsoluteError(LABEL_TYPE *labels,
                                   PREDICTION_TYPE *predictions,

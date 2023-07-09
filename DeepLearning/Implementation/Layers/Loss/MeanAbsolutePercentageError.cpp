@@ -11,7 +11,8 @@ using namespace std;
 
 MeanAbsolutePercentageError::~MeanAbsolutePercentageError() {}
 
-MeanAbsolutePercentageError::MeanAbsolutePercentageError(float epsilon, float maxMagnitude) : Loss() {
+MeanAbsolutePercentageError::MeanAbsolutePercentageError(TensorDescriptor::DataType lossDataType, float epsilon, float maxMagnitude)
+    : Loss(lossDataType) {
     this->epsilon = epsilon;
     this->maxMagnitude = maxMagnitude;
 }

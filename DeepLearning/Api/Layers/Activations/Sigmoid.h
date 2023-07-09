@@ -19,14 +19,14 @@ class Sigmoid : public Activation {
     virtual std::string getLayerType() const { return "Sigmoid"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::Sigmoid *sigmoid = new ThorImplementation::Sigmoid(backwardComputedExternally);
+        std::shared_ptr<ThorImplementation::Sigmoid> sigmoid = std::make_shared<ThorImplementation::Sigmoid>(backwardComputedExternally);
         return sigmoid;
     }
 

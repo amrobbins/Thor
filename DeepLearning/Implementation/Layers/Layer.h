@@ -126,6 +126,12 @@ class Layer {
     virtual void backward(Optional<Tensor> errorInput) {
         assert(running);
 
+        // Experimental - back propagation stops at empty error input
+        // i.e. the errorInput data is the thing necessitates processing.
+        // if all errorInputs are empty for any layer that back propagation path will stop at that layer.
+        if (errorInput.isEmpty())
+            return;
+
         backProp(featureInput, errorInput, errorOutput, stream);
 
         if (previousLayer.isEmpty())
@@ -206,14 +212,38 @@ class Layer {
     }
 
     virtual void ensureNoDeviceCrossing() {
+        if (featureInput.isPresent() && featureOutput.isPresent())
+            assert(featureInput.get().getPlacement() == featureOutput.get().getPlacement());
+        if (featureInput.isPresent() && errorInput.isPresent())
+            assert(featureInput.get().getPlacement() == errorInput.get().getPlacement());
         if (featureInput.isPresent() && errorOutput.isPresent())
             assert(featureInput.get().getPlacement() == errorOutput.get().getPlacement());
+
         if (featureOutput.isPresent() && errorInput.isPresent())
             assert(featureOutput.get().getPlacement() == errorInput.get().getPlacement());
+        if (featureOutput.isPresent() && errorOutput.isPresent())
+            assert(featureOutput.get().getPlacement() == errorOutput.get().getPlacement());
+
+        if (errorInput.isPresent() && errorOutput.isPresent())
+            assert(errorInput.get().getPlacement() == errorOutput.get().getPlacement());
+    }
+
+    virtual TensorPlacement getPlacement() {
+        if (errorInput.isPresent()) {
+            return errorInput.get().getPlacement();
+        } else if (errorOutput.isPresent()) {
+            return errorOutput.get().getPlacement();
+        } else if (featureInput.isPresent()) {
+            return featureInput.get().getPlacement();
+        } else if (featureOutput.isPresent()) {
+            return featureOutput.get().getPlacement();
+        } else {
+            return TensorPlacement(TensorPlacement::MemDevices::CPU);
+        }
     }
 
     virtual bool isInferenceOnly() { return inferenceOnly; }
-    void setConstructForInferenceOnly(bool inferenceOnly) {
+    virtual void setConstructForInferenceOnly(bool inferenceOnly) {
         assert(!compiled);
         this->inferenceOnly = inferenceOnly;
     }
@@ -222,7 +252,7 @@ class Layer {
         assert(!compiled);
         this->connectToBackPropErrorIn = connectToBackPropErrorIn;
     }
-    bool shouldConnectToBackPropErrorIn() { return connectToBackPropErrorIn; }
+    virtual bool shouldConnectToBackPropErrorIn() { return connectToBackPropErrorIn; }
 
     virtual bool isBackPropStub() { return errorOutput.isEmpty(); }
 
@@ -233,29 +263,30 @@ class Layer {
     virtual Optional<Layer *> getNextLayer() { return nextLayer; }
     virtual Stream getStream() { return stream; }
 
-    void average(half result_d[], half *sources_d[], int numElements, int numSources, Stream stream) {
+    static void average(half result_d[], half *sources_d[], int numElements, int numSources, Stream stream) {
         launchAverage(result_d, sources_d, numSources, numElements, stream);
     }
 
-    void sum(half result_d[], half *sources_d[], uint32_t numSources, uint64_t numElements, Stream stream) {
+    static void sum(half result_d[], half *sources_d[], uint32_t numSources, uint64_t numElements, Stream stream) {
         launchSum<half>(result_d, sources_d, numSources, numElements, stream);
     }
 
-    void sumScale(float result_d[], float nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
+    static void sumScale(
+        float result_d[], float nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
         launchSumScale(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
-    void sumScaleHalfSourceDest(
+    static void sumScaleHalfSourceDest(
         half result_d[], half nonScaledSource_d[], float scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
         launchSumScaleHalfSourceDest(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
-    void sumScaleHalfSourceDestScaleSource(
+    static void sumScaleHalfSourceDestScaleSource(
         half result_d[], half nonScaledSource_d[], half scaledSource_d[], float scale, uint64_t numElements, Stream stream) {
         launchSumScaleHalfSourceDestScaleSource(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
-    void sumScaleHalfAll(
+    static void sumScaleHalfAll(
         half result_d[], half nonScaledSource_d[], half scaledSource_d[], half scale, uint64_t numElements, Stream stream) {
         launchSumScaleHalfAll(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
@@ -297,6 +328,11 @@ class Layer {
 
     static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<unsigned long> featureInputDimensions,
                                                                TensorDescriptor::DataType dataType);
+
+    virtual bool isKerasCompatible(std::string &explanation) {
+        explanation.clear();
+        return true;
+    }
 
    protected:
     Optional<Tensor> featureInput;

@@ -17,14 +17,14 @@ class Selu : public Activation {
     virtual std::string getLayerType() const { return "Selu"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::Selu *selu = new ThorImplementation::Selu();
+        std::shared_ptr<ThorImplementation::Selu> selu = std::make_shared<ThorImplementation::Selu>();
         return selu;
     }
 

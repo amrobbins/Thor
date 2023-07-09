@@ -14,8 +14,7 @@
 #include <set>
 #include <vector>
 
-using std::set;
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -60,20 +59,21 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
             }
         }
 
-        vector<Layer *> layers;
-        NetworkInput *activationsInput = new NetworkInput(activationsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> activationsInput = make_shared<NetworkInput>(activationsGpu);
         layers.push_back(activationsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        Sigmoid *sigmoid = new Sigmoid(true);
+        shared_ptr<Sigmoid> sigmoid = make_shared<Sigmoid>(true);
         layers.push_back(sigmoid);
-        CrossEntropy *crossEntropy = new CrossEntropy(CrossEntropyLossType::BINARY, false);
+        shared_ptr<CrossEntropy> crossEntropy =
+            make_shared<CrossEntropy>(CrossEntropyLossType::BINARY, TensorDescriptor::DataType::FP16, false);
         if (inferenceOnly)
             crossEntropy->setConstructForInferenceOnly(true);
         layers.push_back(crossEntropy);
-        NetworkOutput *lossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> lossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(lossOutput);
 
         Stream stream = activationsInput->getStream();

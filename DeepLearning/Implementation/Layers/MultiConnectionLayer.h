@@ -54,7 +54,6 @@ class MultiConnectionLayer : public Layer {
         Layer::parentInitialize();
 
         stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-        stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
     }
 
     virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
@@ -88,21 +87,19 @@ class MultiConnectionLayer : public Layer {
     virtual void backward(Optional<Tensor> errorInput) {
         assert(running);
 
+        // Experimental - back propagation stops at empty error input
+        if (errorInput.isEmpty())
+            return;
+
         unsigned int connectionNumber = 0;
-        if (errorInput.isPresent()) {
-            for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
-                if (errorInputs[connectionNumber].isPresent() && errorInput.get() == errorInputs[connectionNumber].get())
-                    break;
-            }
-            assert(connectionNumber != errorInputs.size());
-        } else {
-            assert(errorInputs.size() - numPresentTensors(errorInputs) == 1);
-            for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
-                if (errorInputs[connectionNumber].isEmpty())
-                    break;
-            }
-            assert(connectionNumber != errorInputs.size());
+        for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
+            if (errorInputs[connectionNumber].isPresent() && errorInput.get() == errorInputs[connectionNumber].get())
+                break;
         }
+        assert(connectionNumber != errorInputs.size());
+
+        assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
+        stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
 
         backProp(featureInputs[connectionNumber],
                  errorInputs[connectionNumber],
@@ -110,17 +107,8 @@ class MultiConnectionLayer : public Layer {
                  streams[connectionNumber],
                  connectionNumber);
 
-        if (errorInput.isPresent()) {
-            assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
-            stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
-        } else {
-            assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-            stillWaitingForNumEmptyErrorInputConnections -= 1;
-        }
-        if (stillWaitingForErrorInputTensors.empty() && stillWaitingForNumEmptyErrorInputConnections == 0) {
-            processedAllErrorInputs(streams[0].putEvent());
+        if (stillWaitingForErrorInputTensors.empty()) {
             stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-            stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
         }
 
         if (previousLayers[connectionNumber].isEmpty())
@@ -129,8 +117,6 @@ class MultiConnectionLayer : public Layer {
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
         previousLayers[connectionNumber].get()->backward(errorOutputs[connectionNumber]);
     }
-
-    virtual void processedAllErrorInputs(Event allProcessedEvent) {}
 
     // Note: A featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
     virtual Optional<Tensor> createFeatureOutputTensor() {
@@ -157,8 +143,10 @@ class MultiConnectionLayer : public Layer {
         if (errorInputs[tensorSlot].isPresent()) {
             // Some logic would not function correctly if the same error input tensor were allowed to be connected multiple times,
             // so avoid that.
-            for (uint32_t i = 0; i < errorInputs.size() - 1; ++i)
-                assert(errorInputs[i].get() != errorInputs.back().get());
+            for (uint32_t i = 0; i < errorInputs.size() - 1; ++i) {
+                if (errorInputs[i].isPresent())
+                    assert(errorInputs[i].get() != errorInputs.back().get());
+            }
         } else if (previousLayers[tensorSlot].isPresent() && errorOutputs[tensorSlot].isPresent()) {
             // This layer is now being informed that this back propagation path is unused, so deallocate the tensor and inform the adjacent
             // layer in that path to do the same.
@@ -229,10 +217,39 @@ class MultiConnectionLayer : public Layer {
         Optional<Tensor> lastErrorInput = getLastPresentTensor(errorInputs);
         Optional<Tensor> lastFeatureOutput = getLastPresentTensor(featureOutputs);
 
+        if (lastFeatureInput.isPresent() && lastFeatureOutput.isPresent())
+            assert(lastFeatureInput.get().getPlacement() == lastFeatureOutput.get().getPlacement());
+        if (lastFeatureInput.isPresent() && lastErrorInput.isPresent())
+            assert(lastFeatureInput.get().getPlacement() == lastErrorInput.get().getPlacement());
         if (lastFeatureInput.isPresent() && lastErrorOutput.isPresent())
             assert(lastFeatureInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+
         if (lastFeatureOutput.isPresent() && lastErrorInput.isPresent())
-            assert(featureOutputs.back().get().getPlacement() == errorInputs.back().get().getPlacement());
+            assert(lastFeatureOutput.get().getPlacement() == lastErrorInput.get().getPlacement());
+        if (lastFeatureOutput.isPresent() && lastErrorOutput.isPresent())
+            assert(lastFeatureOutput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+
+        if (lastErrorInput.isPresent() && lastErrorOutput.isPresent())
+            assert(lastErrorInput.get().getPlacement() == lastErrorOutput.get().getPlacement());
+    }
+
+    virtual TensorPlacement getPlacement() {
+        Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
+        Optional<Tensor> aFeatureOutput = getFirstPresentTensor(featureOutputs);
+        Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
+        Optional<Tensor> anErrorOutput = getFirstPresentTensor(errorOutputs);
+
+        if (anErrorInput.isPresent()) {
+            return anErrorInput.get().getPlacement();
+        } else if (anErrorOutput.isPresent()) {
+            return anErrorOutput.get().getPlacement();
+        } else if (aFeatureInput.isPresent()) {
+            return aFeatureInput.get().getPlacement();
+        } else if (aFeatureOutput.isPresent()) {
+            return aFeatureOutput.get().getPlacement();
+        } else {
+            return TensorPlacement(TensorPlacement::MemDevices::CPU);
+        }
     }
 
     virtual bool isBackPropStub() { return getFirstPresentTensor(errorOutputs).isEmpty(); }
@@ -296,11 +313,35 @@ class MultiConnectionLayer : public Layer {
         return totalFanOut;
     }
 
+    static Optional<Tensor> getFirstPresentTensor(std::vector<Optional<Tensor>> tensors) {
+        for (auto it = tensors.begin(); it != tensors.end(); ++it) {
+            if (it->isPresent())
+                return *it;
+        }
+        return Optional<Tensor>::empty();
+    }
+
+    static Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
+        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+            if (it->isPresent())
+                return *it;
+        }
+        return Optional<Tensor>::empty();
+    }
+
+    static unsigned int numPresentTensors(std::vector<Optional<Tensor>> tensors) {
+        unsigned int numPresent = 0;
+        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+            if (it->isPresent())
+                numPresent += 1;
+        }
+        return numPresent;
+    }
+
    protected:
     std::set<unsigned long> allErrorInputTensorIds;
     std::set<unsigned long> stillWaitingForErrorInputTensors;
     unsigned int numEmptyErrorInputConnections;
-    unsigned int stillWaitingForNumEmptyErrorInputConnections;
 
     std::vector<Optional<Tensor>> featureInputs;
     std::vector<Optional<Tensor>> featureOutputs;
@@ -314,31 +355,6 @@ class MultiConnectionLayer : public Layer {
 
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) = 0;
-
-    Optional<Tensor> getFirstPresentTensor(std::vector<Optional<Tensor>> tensors) {
-        for (auto it = tensors.begin(); it != tensors.end(); ++it) {
-            if (it->isPresent())
-                return *it;
-        }
-        return Optional<Tensor>::empty();
-    }
-
-    Optional<Tensor> getLastPresentTensor(std::vector<Optional<Tensor>> tensors) {
-        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-            if (it->isPresent())
-                return *it;
-        }
-        return Optional<Tensor>::empty();
-    }
-
-    unsigned int numPresentTensors(std::vector<Optional<Tensor>> tensors) {
-        unsigned int numPresent = 0;
-        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
-            if (it->isPresent())
-                numPresent += 1;
-        }
-        return numPresent;
-    }
 
    private:
     // Hide Layer's single instance members since they will not be used by classes derived from MultiConnectionLayer

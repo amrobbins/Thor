@@ -561,6 +561,11 @@ class Tensor : private ReferenceCounted {
 
     std::string dimensionsToString();
 
+    virtual bool isKerasCompatible(std::string &explanation) {
+        explanation.clear();
+        return true;
+    }
+
    private:
     void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);
 

@@ -78,31 +78,34 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                                                  ThorImplementation::TensorDescriptor::DataType::FP16);
     }
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
-        ThorImplementation::FullyConnected *fullyConnected = new ThorImplementation::FullyConnected(numOutputFeatures, hasBias);
+        std::shared_ptr<ThorImplementation::FullyConnected> fullyConnected =
+            std::make_shared<ThorImplementation::FullyConnected>(numOutputFeatures, hasBias, getId());
         return fullyConnected;
     }
 
-    virtual void initialize(ThorImplementation::Layer *layer, std::vector<std::shared_ptr<Initializer>> &initializers) const {
-        assert(dynamic_cast<ThorImplementation::FullyConnected *>(layer) != nullptr);
-        ThorImplementation::FullyConnected *fullyConnected = dynamic_cast<ThorImplementation::FullyConnected *>(layer);
+    virtual void initialize(std::shared_ptr<ThorImplementation::Layer> layer,
+                            std::vector<std::shared_ptr<Initializer>> &initializers) const {
+        assert(std::dynamic_pointer_cast<ThorImplementation::FullyConnected>(layer) != nullptr);
+        std::shared_ptr<ThorImplementation::FullyConnected> fullyConnected =
+            std::dynamic_pointer_cast<ThorImplementation::FullyConnected>(layer);
 
         std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(fullyConnected->getWeights());
-        weightsInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
+        weightsInitializerBuilderClone->layerThatOwnsTensor(fullyConnected.get());
         initializers.push_back(weightsInitializerBuilderClone->build());
 
         if (fullyConnected->getBiases().isPresent()) {
             std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
             biasInitializerBuilderClone->tensorToInitialize(fullyConnected->getBiases().get());
-            biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected);
+            biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected.get());
             initializers.push_back(biasInitializerBuilderClone->build());
         }
     }

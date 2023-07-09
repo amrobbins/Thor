@@ -15,7 +15,7 @@
 
 #include <vector>
 
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -39,22 +39,32 @@ TEST(BatchNormalization, 2dYieldsFiniteValues) {
             cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {(uint64_t)(rand() % 50) + 1, (uint64_t)(rand() % 50) + 1}));
         bool train = rand() % 5 != 0;
 
-        vector<Layer *> layers;
+        vector<shared_ptr<Layer>> layers;
 
-        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions()));
-        layers.push_back(new NoOpLayer());
-        BatchNormalization *batchNormalizationLayer = new BatchNormalization(train);
+        layers.push_back(
+            make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions()));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<BatchNormalization> batchNormalizationLayer = make_shared<BatchNormalization>(train);
         layers.push_back(batchNormalizationLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(cpuPlacement));
-
-        Stream stream = layers.front()->getStream();
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
+        ThorImplementation::Tensor anErrorInput =
+            ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorInputs());
+        ThorImplementation::Tensor anErrorOutput =
+            ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorOutputs());
+        shared_ptr<Optimizer> sgd =
+            make_shared<ThorImplementation::Sgd>(batchNormalizationLayer, 0.1, 0, 0, false, anErrorInput, anErrorOutput);
+        batchNormalizationLayer->setOptimizer(sgd);
+        sgd->updateHyperParameters(0, 0, 1);
+
+        Stream stream = layers.front()->getStream();
+
         UniformRandom initializer(0.1, -0.1);
-        initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getWeights());
-        initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getBiases());
+        initializer.initialize(batchNormalizationLayer.get(), batchNormalizationLayer->getWeights());
+        initializer.initialize(batchNormalizationLayer.get(), batchNormalizationLayer->getBiases());
 
         // Forward Pass
         uint32_t numElements = featureInputCpu.getDescriptor().getTotalNumElements();
@@ -99,12 +109,6 @@ TEST(BatchNormalization, 2dYieldsFiniteValues) {
                         printf("%f\n", error);
                     ASSERT_TRUE(isfinite(error));
                 }
-
-                batchNormalizationLayer->applyGradients(stream,
-                                                        batchNormalizationLayer->getWeights(),
-                                                        batchNormalizationLayer->getWeightsGradient(),
-                                                        batchNormalizationLayer->getBiases(),
-                                                        batchNormalizationLayer->getBiasesGradient());
             }
         }
 
@@ -128,22 +132,32 @@ TEST(BatchNormalization, 4dYieldsFiniteValues) {
                 {(uint64_t)(rand() % 10) + 1, (uint64_t)(rand() % 10) + 1, (uint64_t)(rand() % 10) + 1, (uint64_t)(rand() % 10) + 1}));
         bool train = rand() % 5 != 0;
 
-        vector<Layer *> layers;
+        vector<shared_ptr<Layer>> layers;
 
-        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions()));
-        layers.push_back(new NoOpLayer());
-        BatchNormalization *batchNormalizationLayer = new BatchNormalization(train);
+        layers.push_back(
+            make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureInputCpu.getDescriptor().getDimensions()));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<BatchNormalization> batchNormalizationLayer = make_shared<BatchNormalization>(train);
         layers.push_back(batchNormalizationLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(cpuPlacement));
-
-        Stream stream = layers.front()->getStream();
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
+        Stream stream = layers.front()->getStream();
+
+        ThorImplementation::Tensor anErrorInput =
+            ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorInputs());
+        ThorImplementation::Tensor anErrorOutput =
+            ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorOutputs());
+        shared_ptr<Optimizer> sgd =
+            make_shared<ThorImplementation::Sgd>(batchNormalizationLayer, 0.1, 0, 0, false, anErrorInput, anErrorOutput);
+        batchNormalizationLayer->setOptimizer(sgd);
+        sgd->updateHyperParameters(0, 0, 1);
+
         UniformRandom initializer(0.1, -0.1);
-        initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getWeights());
-        initializer.initialize(batchNormalizationLayer, batchNormalizationLayer->getBiases());
+        initializer.initialize(batchNormalizationLayer.get(), batchNormalizationLayer->getWeights());
+        initializer.initialize(batchNormalizationLayer.get(), batchNormalizationLayer->getBiases());
 
         // Forward Pass
         uint32_t numElements = featureInputCpu.getDescriptor().getTotalNumElements();
@@ -188,12 +202,6 @@ TEST(BatchNormalization, 4dYieldsFiniteValues) {
                         printf("%f\n", error);
                     ASSERT_TRUE(isfinite(error));
                 }
-
-                batchNormalizationLayer->applyGradients(stream,
-                                                        batchNormalizationLayer->getWeights(),
-                                                        batchNormalizationLayer->getWeightsGradient(),
-                                                        batchNormalizationLayer->getBiases(),
-                                                        batchNormalizationLayer->getBiasesGradient());
             }
         }
 

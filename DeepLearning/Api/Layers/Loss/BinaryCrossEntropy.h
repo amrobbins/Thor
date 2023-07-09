@@ -29,15 +29,16 @@ class BinaryCrossEntropy : public Loss {
     enum class LossType { BATCH = 9, ELEMENTWISE };
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         // Softmax and LossShaper are connected during multi-layer flattening
-        ThorImplementation::CrossEntropy *crossEntropy = new ThorImplementation::CrossEntropy(CrossEntropyLossType::BINARY);
+        std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
+            CrossEntropyLossType::BINARY, Tensor::convertToImplementationDataType(lossDataType));
         return crossEntropy;
     }
 

@@ -73,24 +73,17 @@ class Layer {
 
     // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
     // physical layers that are direct replacements for API layers.
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const = 0;
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const = 0;
 
     // initialize() is called for a layer after it has been stamped, the first connection that is made to the layer.
     // often layers will not need initialize() at all.
-    virtual void initialize(ThorImplementation::Layer *layer, std::vector<std::shared_ptr<Initializer>> &initializers) const {}
+    virtual void initialize(std::shared_ptr<ThorImplementation::Layer> layer,
+                            std::vector<std::shared_ptr<Initializer>> &initializers) const {}
 
     virtual void addToNetwork(Network *network);
-
-    // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
-    // physical layers that are direct replacements for API layers.
-    static void connectTwoLayers(ThorImplementation::Layer *drivingLayer,
-                                 ThorImplementation::Layer *loadingLayer,
-                                 const Thor::Layer *drivingApiLayer = nullptr,
-                                 const Thor::Layer *loadingApiLayer = nullptr,
-                                 const Thor::Tensor connectingApiTensor = Thor::Tensor());
 
     static void connectTwoLayers(std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                  std::shared_ptr<ThorImplementation::Layer> loadingLayer,
@@ -102,7 +95,7 @@ class Layer {
 
    private:
     uint64_t id;
-    static std::atomic<uint64_t> nextId;
+    static std::atomic<int64_t> nextId;
 
     friend class Network;
 };

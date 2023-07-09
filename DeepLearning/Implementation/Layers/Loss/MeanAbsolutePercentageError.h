@@ -16,7 +16,9 @@ class MeanAbsolutePercentageError : public Loss {
    public:
     virtual ~MeanAbsolutePercentageError();
 
-    MeanAbsolutePercentageError(float epsilon = 0.0001, float maxMagnitude = 1000.0f);
+    MeanAbsolutePercentageError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32,
+                                float epsilon = 0.0001,
+                                float maxMagnitude = 1000.0f);
 
     virtual void compile();
 

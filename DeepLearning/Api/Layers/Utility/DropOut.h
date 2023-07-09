@@ -20,14 +20,14 @@ class DropOut : public Layer {
     virtual std::string getLayerType() const { return "DropOut"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
-        ThorImplementation::DropOut *dropOut = new ThorImplementation::DropOut(dropProportion, true);
+        std::shared_ptr<ThorImplementation::DropOut> dropOut = std::make_shared<ThorImplementation::DropOut>(dropProportion, true);
         return dropOut;
     }
 
