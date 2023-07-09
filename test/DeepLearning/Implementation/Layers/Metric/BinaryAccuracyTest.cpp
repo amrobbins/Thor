@@ -15,9 +15,7 @@
 #include <unordered_set>
 #include <vector>
 
-using std::set;
-using std::unordered_set;
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -50,14 +48,14 @@ TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
             predictions[i] = ((rand() % 1000000) / 1000000.0f);
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        BinaryAccuracy *binaryAccuracy = new BinaryAccuracy();
+        shared_ptr<BinaryAccuracy> binaryAccuracy = make_shared<BinaryAccuracy>();
         if (inferenceOnly)
             binaryAccuracy->setConstructForInferenceOnly(true);
         layers.push_back(binaryAccuracy);
@@ -68,9 +66,9 @@ TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, binaryAccuracy, 0, (int)Metric::ConnectionType::FORWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, binaryAccuracy, 0, (int)Metric::ConnectionType::LABELS);
-        NetworkOutput *accuracyOutput = nullptr;
+        shared_ptr<NetworkOutput> accuracyOutput = nullptr;
         if (!inferenceOnly) {
-            accuracyOutput = new NetworkOutput(gpuPlacement);
+            accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
             layers.push_back(accuracyOutput);
             LayerTestHelper::connectTwoLayers(binaryAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
         }

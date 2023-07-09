@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
 
 namespace Thor {
 
@@ -13,11 +14,32 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> getWeightsGradient() const { return weightsGradient; }
     Optional<Tensor> getBiasesGradient() const { return biasesGradient; }
 
+    // Override the network default optimizer with a different one
+    void setLayerSpecificOptimizer(Optimizer *layerSpecificOptimizer) {
+        this->layerSpecificOptimizer = layerSpecificOptimizer;
+        /* FIXME: need to save network
+         *        get all stamps and replace the implementation optimizer with layerSpecificOptimizer->stamp()
+         *          note will need to explicitly clear the existing one first since optimizer is sticky
+         *        also during stamp() trainableWeightsBiasesLayers must check if there is a layerSpecificOptimizer and attach it if so.
+         */
+    }
+
+    // Revert layer to the network default optimizer
+    void clearLayerSpecificOptimizer() {
+        this->layerSpecificOptimizer.clear();
+        /* FIXME: need to save network
+         *        get all stamps and replace the implementation optimizer with network->getOptimizer()
+         *          note will need to explicitly clear the existing one first since optimizer is sticky
+         *        also during stamp() trainableWeightsBiasesLayers must check if there is a layerSpecificOptimizer and attach it if so.
+         */
+    }
+
    protected:
     Tensor weights;
     Optional<Tensor> biases;
     Optional<Tensor> weightsGradient;
     Optional<Tensor> biasesGradient;
+    Optional<Optimizer *> layerSpecificOptimizer;
 };
 
 }  // namespace Thor

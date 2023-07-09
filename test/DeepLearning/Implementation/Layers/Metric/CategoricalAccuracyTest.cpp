@@ -15,9 +15,7 @@
 #include <unordered_set>
 #include <vector>
 
-using std::set;
-using std::unordered_set;
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -65,14 +63,14 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
             }
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        CategoricalAccuracy *categoricalAccuracy = new CategoricalAccuracy();
+        shared_ptr<CategoricalAccuracy> categoricalAccuracy = make_shared<CategoricalAccuracy>();
         if (inferenceOnly)
             categoricalAccuracy->setConstructForInferenceOnly(true);
         layers.push_back(categoricalAccuracy);
@@ -83,9 +81,9 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_indicatorPerClassLabe
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalAccuracy, 0, (int)Metric::ConnectionType::FORWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalAccuracy, 0, (int)Metric::ConnectionType::LABELS);
-        NetworkOutput *accuracyOutput = nullptr;
+        shared_ptr<NetworkOutput> accuracyOutput = nullptr;
         if (!inferenceOnly) {
-            accuracyOutput = new NetworkOutput(gpuPlacement);
+            accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
             layers.push_back(accuracyOutput);
             LayerTestHelper::connectTwoLayers(categoricalAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
         }
@@ -177,14 +175,14 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
             }
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        CategoricalAccuracy *categoricalAccuracy = new CategoricalAccuracy();
+        shared_ptr<CategoricalAccuracy> categoricalAccuracy = make_shared<CategoricalAccuracy>();
         if (inferenceOnly)
             categoricalAccuracy->setConstructForInferenceOnly(true);
         layers.push_back(categoricalAccuracy);
@@ -195,9 +193,9 @@ TEST(CategoricalAccuracy, ComputesCorrectElementWiseResult_classIndexLabels) {
         LayerTestHelper::connectTwoLayers(predictionsInput, noOpLayer);
         LayerTestHelper::connectTwoLayers(noOpLayer, categoricalAccuracy, 0, (int)Metric::ConnectionType::FORWARD);
         LayerTestHelper::connectTwoLayers(labelsInput, categoricalAccuracy, 0, (int)Metric::ConnectionType::LABELS);
-        NetworkOutput *accuracyOutput = nullptr;
+        shared_ptr<NetworkOutput> accuracyOutput = nullptr;
         if (!inferenceOnly) {
-            accuracyOutput = new NetworkOutput(gpuPlacement);
+            accuracyOutput = make_shared<NetworkOutput>(gpuPlacement);
             layers.push_back(accuracyOutput);
             LayerTestHelper::connectTwoLayers(categoricalAccuracy, accuracyOutput, (int)Metric::ConnectionType::METRIC);
         }

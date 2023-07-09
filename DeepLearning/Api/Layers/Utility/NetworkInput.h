@@ -27,7 +27,8 @@ class NetworkInput : public Layer {
     virtual std::string getLayerType() const { return "NetworkInput"; }
 
    protected:
-    virtual ThorImplementation::NetworkInput *stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
+    virtual std::shared_ptr<ThorImplementation::NetworkInput> stamp(ThorImplementation::TensorPlacement placement,
+                                                                    uint32_t batchSize) const {
         assert(initialized);
 
         std::vector<uint64_t> batchDimensions;
@@ -35,17 +36,17 @@ class NetworkInput : public Layer {
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             batchDimensions.push_back(dimensions[i]);
 
-        ThorImplementation::NetworkInput *networkInput =
-            new ThorImplementation::NetworkInput(placement, Tensor::convertToImplementationDataType(dataType), batchDimensions);
+        std::shared_ptr<ThorImplementation::NetworkInput> networkInput = std::make_shared<ThorImplementation::NetworkInput>(
+            placement, Tensor::convertToImplementationDataType(dataType), batchDimensions);
         networkInput->setName(name);
 
         return networkInput;
     }
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(false);
     }
 

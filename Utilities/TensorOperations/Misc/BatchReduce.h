@@ -20,15 +20,16 @@ class BatchReduce {
                 uint32_t classDimSize,
                 bool reduceBatch,
                 bool reduceClass,
-                ThorImplementation::TensorDescriptor::DataType sourceDataType,
-                ThorImplementation::TensorDescriptor::DataType destDataType,
-                Stream stream);
+                TensorDescriptor::DataType sourceDataType,
+                TensorDescriptor::DataType destDataType,
+                Stream stream,
+                bool doBatchSizeDivide = true);
 
     virtual ~BatchReduce();
 
     uint64_t getWorkspaceSizeInBytes();
 
-    void reduce(Tensor source, Tensor dest);
+    void reduce(Tensor source, Tensor dest, bool accumulate = false);
 
     Stream getStream();
 
@@ -54,6 +55,7 @@ class BatchReduce {
     uint32_t classDimSize;
     bool reduceBatch;
     bool reduceClass;
+    bool doBatchSizeDivide;
     void *batchScale = nullptr;
     void *zero = nullptr;
     void *one = nullptr;

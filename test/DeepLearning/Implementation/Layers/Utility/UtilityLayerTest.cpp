@@ -53,9 +53,9 @@ TEST(InOut, NoOpWorks) {
         Tensor gpuSource(gpuPlacement, descriptor);
         Tensor cpuDest(cpuPlacement, descriptor);
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(gpuSource));
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(gpuSource));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
@@ -68,7 +68,7 @@ TEST(InOut, NoOpWorks) {
 
         // Network is runnable here
         layers[0]->forward(cpuSource, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         cpuDest.copyFromAsync(gpuOutput, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -118,22 +118,22 @@ TEST(Map, MapsCorrectlyToSameNumberOfElements) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
 
         Stream stream = layers.front()->getStream();
         mappingGpu.copyFromAsync(mappingCpu, stream);
         stream.synchronize();
 
-        layers.push_back(new Map<unsigned int>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<Map<unsigned int>>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -188,22 +188,22 @@ TEST(Map, MapsCorrectlyToFewerElements) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    vector<Layer *> layers;
-    layers.push_back(new NetworkInput(sourceGpu));
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
 
     Stream stream = layers.front()->getStream();
     mappingGpu.copyFromAsync(mappingCpu, stream);
     stream.synchronize();
 
-    layers.push_back(new Map<uint8_t>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
-    layers.push_back(new NetworkOutput(gpuPlacement));
+    layers.push_back(make_shared<Map<uint8_t>>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
-    stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
     destCpu.copyFromAsync(outputGpu, stream);
 
     cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -256,22 +256,22 @@ TEST(Map, MapsCorrectlyToMoreElements) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    vector<Layer *> layers;
-    layers.push_back(new NetworkInput(sourceGpu));
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
 
     Stream stream = layers.front()->getStream();
     mappingGpu.copyFromAsync(mappingCpu, stream);
     stream.synchronize();
 
-    layers.push_back(new Map<unsigned long>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
-    layers.push_back(new NetworkOutput(gpuPlacement));
+    layers.push_back(make_shared<Map<unsigned long>>(mappingGpu, sourceGpu.getDescriptor().getDimensions()));
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
     Tensor outputGpu = layers.back()->getFeatureOutput();
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
-    stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
     destCpu.copyFromAsync(outputGpu, stream);
 
     cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -325,10 +325,10 @@ TEST(Flatten, FlattensCorrectly) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
-        layers.push_back(new Flatten(numOutputDimensions));
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<Flatten>(numOutputDimensions));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
@@ -337,7 +337,7 @@ TEST(Flatten, FlattensCorrectly) {
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -383,10 +383,10 @@ TEST(Reshape, ReshapesCorrectly) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    vector<Layer *> layers;
-    layers.push_back(new NetworkInput(sourceGpu));
-    layers.push_back(new Reshape(newDimensions));
-    layers.push_back(new NetworkOutput(gpuPlacement));
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<Reshape>(newDimensions));
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
 
@@ -395,7 +395,7 @@ TEST(Reshape, ReshapesCorrectly) {
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
-    stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
     destCpu.copyFromAsync(outputGpu, stream);
 
     cudaStatus = cudaStreamSynchronize(stream.getStream());
@@ -439,10 +439,10 @@ TEST(TypeConversion, Converts) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
-        layers.push_back(new TypeConversion(TensorDescriptor::DataType::INT32));
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<TypeConversion>(TensorDescriptor::DataType::INT32));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
@@ -487,19 +487,19 @@ TEST(TensorFanout, CreatesFanout) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    vector<Layer *> layers;
-    layers.push_back(new NetworkInput(sourceGpu));
-    TensorFanout *tensorFanout = new TensorFanout();
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    shared_ptr<TensorFanout> tensorFanout = make_shared<TensorFanout>();
     layers.push_back(tensorFanout);
-    layers.push_back(new NetworkOutput(gpuPlacement));
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
     // Special case, two outputs
-    layers.push_back(new NetworkOutput(gpuPlacement));
-    layers[1]->connectToNextLayer(layers[3]);
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+    layers[1]->connectToNextLayer(layers[3].get());
     layers[3]->parentCompile();
     layers[3]->compile();
     layers[3]->parentInitialize();
@@ -510,8 +510,8 @@ TEST(TensorFanout, CreatesFanout) {
 
     // Network is runnable here
     layers[0]->forward(sourceCpu, false);
-    stream.waitEvent(((NetworkOutput *)layers[2])->getOutputReadyEvent());
-    stream.waitEvent(((NetworkOutput *)layers[3])->getOutputReadyEvent());
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers[2])->getOutputReadyEvent());
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers[3])->getOutputReadyEvent());
     destCpu0.copyFromAsync(outputGpu0, stream);
     destCpu1.copyFromAsync(outputGpu1, stream);
 
@@ -606,17 +606,17 @@ TEST(Concatenate, Concatenates) {
 
         long numElements = wholeCpu.getDescriptor().getTotalNumElements();
 
-        vector<Layer *> layers;
+        vector<shared_ptr<Layer>> layers;
 
         for (unsigned int i = 0; i < partsGpu.size(); ++i)
-            layers.push_back(new NetworkInput(partsGpu[i]));
-        layers.push_back(new Concatenate(axis));
+            layers.push_back(make_shared<NetworkInput>(partsGpu[i]));
+        layers.push_back(make_shared<Concatenate>(axis));
         for (unsigned int i = 0; i < layers.size() - 1; ++i)
-            layers[i]->connectToNextLayer(layers.back());
-        layers.push_back(new NoOpLayer());
-        layers[layers.size() - 2]->connectToNextLayer(layers.back());
-        layers.push_back(new NetworkOutput(gpuPlacement));
-        layers[layers.size() - 2]->connectToNextLayer(layers.back());
+            layers[i]->connectToNextLayer(layers.back().get());
+        layers.push_back(make_shared<NoOpLayer>());
+        layers[layers.size() - 2]->connectToNextLayer(layers.back().get());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+        layers[layers.size() - 2]->connectToNextLayer(layers.back().get());
 
         LayerTestHelper::initializeNetwork(layers);
 
@@ -632,7 +632,7 @@ TEST(Concatenate, Concatenates) {
             layers[i]->forward(partsCpu[i], false);
         }
 
-        layers[0]->getStream().waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        layers[0]->getStream().waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         wholeCpu.copyFromAsync(wholeGpu, layers[0]->getStream());
         layers[0]->getStream().synchronize();
 
@@ -722,8 +722,8 @@ TEST(Split, Splits) {
 
         long numElements = wholeCpu.getDescriptor().getTotalNumElements();
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(wholeGpu));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(wholeGpu));
         Stream stream = layers.front()->getStream();
 
         stridePerSourceDimension[numDimensions - 1] = 1;
@@ -748,18 +748,18 @@ TEST(Split, Splits) {
         vector<unsigned long> axisElements;
         for (int i = 0; i < numSplitTensors; ++i)
             axisElements.push_back(axisElementsPerDestArray[i]);
-        Layer *splitLayer = new Split(axis, axisElements);
-        layers.back()->connectToNextLayer(splitLayer);
+        shared_ptr<Layer> splitLayer = make_shared<Split>(axis, axisElements);
+        layers.back()->connectToNextLayer(splitLayer.get());
         layers.push_back(splitLayer);
-        vector<Layer *> outputLayers;
+        vector<shared_ptr<Layer>> outputLayers;
         for (int i = 0; i < numSplitTensors; ++i) {
-            Layer *noOpLayer = new NoOpLayer();
+            shared_ptr<Layer> noOpLayer = make_shared<NoOpLayer>();
             layers.push_back(noOpLayer);
-            splitLayer->connectToNextLayer(noOpLayer);
+            splitLayer->connectToNextLayer(noOpLayer.get());
 
-            Layer *networkOutputLayer = new NetworkOutput(gpuPlacement);
+            shared_ptr<Layer> networkOutputLayer = make_shared<NetworkOutput>(gpuPlacement);
             layers.push_back(networkOutputLayer);
-            noOpLayer->connectToNextLayer(networkOutputLayer);
+            noOpLayer->connectToNextLayer(networkOutputLayer.get());
             partsGpu.push_back(networkOutputLayer->getFeatureOutput());
             outputLayers.push_back(networkOutputLayer);
         }
@@ -770,7 +770,7 @@ TEST(Split, Splits) {
         layers[0]->forward(wholeCpu, false);
 
         for (unsigned int i = 0; i < partsGpu.size(); ++i) {
-            stream.waitEvent(((NetworkOutput *)outputLayers[i])->getOutputReadyEvent());
+            stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(outputLayers[i])->getOutputReadyEvent());
             partsCpu[i].copyFromAsync(partsGpu[i], stream);
         }
         stream.synchronize();
@@ -838,10 +838,10 @@ TEST(DeviceCrossing, Crosses) {
         sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
     }
 
-    vector<Layer *> layers;
-    layers.push_back(new NetworkInput(sourceGpu0));
-    layers.push_back(new DeviceCrossing(gpu0Placement, gpu1Placement));
-    NetworkOutput *networkOutput = new NetworkOutput(gpu1Placement);
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu0));
+    layers.push_back(make_shared<DeviceCrossing>(gpu0Placement, gpu1Placement));
+    shared_ptr<NetworkOutput> networkOutput = make_shared<NetworkOutput>(gpu1Placement);
     layers.push_back(networkOutput);
     Stream stream = layers.front()->getStream();
 
@@ -890,8 +890,8 @@ TEST(Pad, Pads) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
         Stream stream = layers.front()->getStream();
 
         map<unsigned int, pair<unsigned int, unsigned int>> paddingAmount;
@@ -915,15 +915,15 @@ TEST(Pad, Pads) {
         TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
         Tensor destCpu(cpuPlacement, destDescriptor);
 
-        layers.push_back(new Pad(paddingAmount));
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<Pad>(paddingAmount));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
         stream.synchronize();
 
@@ -1019,8 +1019,8 @@ TEST(Extract, Extracts) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
         }
 
-        vector<Layer *> layers;
-        layers.push_back(new NetworkInput(sourceGpu));
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
         Stream stream = layers.front()->getStream();
 
         vector<pair<unsigned int, unsigned int>> dimensionSpans;
@@ -1035,15 +1035,15 @@ TEST(Extract, Extracts) {
         TensorDescriptor destDescriptor(TensorDescriptor::DataType::FP16, outputDimensions);
         Tensor destCpu(cpuPlacement, destDescriptor);
 
-        layers.push_back(new Extract(dimensionSpans));
-        layers.push_back(new NetworkOutput(gpuPlacement));
+        layers.push_back(make_shared<Extract>(dimensionSpans));
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
         Tensor outputGpu = layers.back()->getFeatureOutput();
 
         // Network is runnable here
         layers[0]->forward(sourceCpu, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
         destCpu.copyFromAsync(outputGpu, stream);
         stream.synchronize();
 

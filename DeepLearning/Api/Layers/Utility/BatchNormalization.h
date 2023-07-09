@@ -25,14 +25,14 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual void buildSupportLayersAndAddToNetwork();
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
 
-        ThorImplementation::BatchNormalization *batchNormalization =
-            new ThorImplementation::BatchNormalization(true, exponentialRunningAverageFactor, epsilon);
+        std::shared_ptr<ThorImplementation::BatchNormalization> batchNormalization =
+            std::make_shared<ThorImplementation::BatchNormalization>(true, getId(), exponentialRunningAverageFactor, epsilon);
         return batchNormalization;
     }
 

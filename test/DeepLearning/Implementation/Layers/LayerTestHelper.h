@@ -6,13 +6,13 @@
 
 class LayerTestHelper {
    public:
-    static void connectNetwork(std::vector<ThorImplementation::Layer *> &layers) {
+    static void connectNetwork(std::vector<std::shared_ptr<ThorImplementation::Layer>> &layers) {
         for (unsigned int i = 0; i < layers.size() - 1; ++i) {
-            layers[i]->connectToNextLayer(layers[i + 1]);
+            layers[i]->connectToNextLayer(layers[i + 1].get());
         }
     }
 
-    static void initializeNetwork(std::vector<ThorImplementation::Layer *> &layers) {
+    static void initializeNetwork(std::vector<std::shared_ptr<ThorImplementation::Layer>> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->parentCompile();
             layers[i]->compile();
@@ -23,25 +23,24 @@ class LayerTestHelper {
         }
     }
 
-    static void connectAndInitializeNetwork(std::vector<ThorImplementation::Layer *> &layers) {
+    static void connectAndInitializeNetwork(std::vector<std::shared_ptr<ThorImplementation::Layer>> &layers) {
         connectNetwork(layers);
         initializeNetwork(layers);
     }
 
-    static void tearDownNetwork(std::vector<ThorImplementation::Layer *> &layers) {
+    static void tearDownNetwork(std::vector<std::shared_ptr<ThorImplementation::Layer>> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->cleanup();
             layers[i]->parentCleanup();
-            delete layers[i];
         }
         layers.clear();
     }
 
-    static void connectTwoLayers(ThorImplementation::Layer *firstLayer,
-                                 ThorImplementation::Layer *secondLayer,
+    static void connectTwoLayers(std::shared_ptr<ThorImplementation::Layer> firstLayer,
+                                 std::shared_ptr<ThorImplementation::Layer> secondLayer,
                                  int driverConnectionType = 0,
                                  int loaderConnectionType = 0) {
-        firstLayer->connectToNextLayer(secondLayer, driverConnectionType, loaderConnectionType);
+        firstLayer->connectToNextLayer(secondLayer.get(), driverConnectionType, loaderConnectionType);
     }
 
     static void initializeLayer(ThorImplementation::Layer *layer) {

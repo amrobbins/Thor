@@ -67,31 +67,41 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         ThorImplementation::GpuConvolution::instance().chooseOptimalKernelBackward(convolutionKernelRequirement, stream);
     }
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // FIXME: It doesn't look like this would work for multiple input/output connections. Check this on all multi-connection
-        ThorImplementation::Convolution2d *convolution2d = new ThorImplementation::Convolution2d(
-            filterWidth, filterHeight, horizontalStride, verticalStride, horizontalPadding, verticalPadding, numOutputChannels, hasBias);
+        std::shared_ptr<ThorImplementation::Convolution2d> convolution2d =
+            std::make_shared<ThorImplementation::Convolution2d>(filterWidth,
+                                                                filterHeight,
+                                                                horizontalStride,
+                                                                verticalStride,
+                                                                horizontalPadding,
+                                                                verticalPadding,
+                                                                numOutputChannels,
+                                                                hasBias,
+                                                                getId());
         return convolution2d;
     }
 
-    virtual void initialize(ThorImplementation::Layer *layer, std::vector<std::shared_ptr<Initializer>> &initializers) const {
-        assert(dynamic_cast<ThorImplementation::Convolution2d *>(layer) != nullptr);
-        ThorImplementation::Convolution2d *convolution2d = dynamic_cast<ThorImplementation::Convolution2d *>(layer);
+    virtual void initialize(std::shared_ptr<ThorImplementation::Layer> layer,
+                            std::vector<std::shared_ptr<Initializer>> &initializers) const {
+        assert(std::dynamic_pointer_cast<ThorImplementation::Convolution2d>(layer) != nullptr);
+        std::shared_ptr<ThorImplementation::Convolution2d> convolution2d =
+            std::dynamic_pointer_cast<ThorImplementation::Convolution2d>(layer);
         std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(convolution2d->getWeights());
-        weightsInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
+        weightsInitializerBuilderClone->layerThatOwnsTensor(convolution2d.get());
         initializers.push_back(weightsInitializerBuilderClone->build());
 
         if (convolution2d->getBiases().isPresent()) {
             std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
             biasInitializerBuilderClone->tensorToInitialize(convolution2d->getBiases().get());
-            biasInitializerBuilderClone->layerThatOwnsTensor(convolution2d);
+            biasInitializerBuilderClone->layerThatOwnsTensor(convolution2d.get());
             initializers.push_back(biasInitializerBuilderClone->build());
         }
     }

@@ -16,14 +16,14 @@ class BinaryAccuracy : public Metric {
     virtual std::string getLayerType() const { return "BinaryAccuracy"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
 
-        ThorImplementation::BinaryAccuracy *BinaryAccuracy = new ThorImplementation::BinaryAccuracy();
+        std::shared_ptr<ThorImplementation::BinaryAccuracy> BinaryAccuracy = std::make_shared<ThorImplementation::BinaryAccuracy>();
         return BinaryAccuracy;
     }
 

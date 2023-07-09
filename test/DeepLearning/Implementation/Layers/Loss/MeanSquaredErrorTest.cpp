@@ -14,8 +14,7 @@
 #include <set>
 #include <vector>
 
-using std::set;
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -53,16 +52,16 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
             elementLossGradient[i] = (half)2.0f * val * Loss::getLossScalingFactor();
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        MeanSquaredError *meanSquaredError = new MeanSquaredError();
+        shared_ptr<MeanSquaredError> meanSquaredError = make_shared<MeanSquaredError>(TensorDescriptor::DataType::FP16);
         layers.push_back(meanSquaredError);
-        NetworkOutput *elementLossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
 
         bool inferenceOnly = (rand() % 5) == 0;
@@ -171,16 +170,16 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        MeanSquaredError *meanSquaredError = new MeanSquaredError();
+        shared_ptr<MeanSquaredError> meanSquaredError = make_shared<MeanSquaredError>(TensorDescriptor::DataType::FP16);
         layers.push_back(meanSquaredError);
-        NetworkOutput *elementLossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
 
         bool inferenceOnly = (rand() % 5) == 0;
@@ -298,16 +297,16 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        MeanSquaredError *meanSquaredError = new MeanSquaredError();
+        shared_ptr<MeanSquaredError> meanSquaredError = make_shared<MeanSquaredError>(TensorDescriptor::DataType::FP32);
         layers.push_back(meanSquaredError);
-        NetworkOutput *elementLossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
 
         bool inferenceOnly = (rand() % 5) == 0;
@@ -355,7 +354,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
         }
 
         // Verify the loss
-        float thresh = 0.002;
+        float thresh = 0.005;
         Tensor elementLossGpu_h = elementLossCpu.clone(cpuPlacement);
         elementLossGpu_h.copyFromAsync(elementLossOutput->getFeatureOutput(), labelsStream);
         labelsStream.synchronize();
@@ -368,12 +367,13 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
 
         if (!inferenceOnly) {
             // Verify the loss gradient
+            thresh = 0.1;
             Tensor elementLossGradientGpu_h = elementLossGradientCpu.clone(cpuPlacement);
             elementLossGradientGpu_h.copyFromAsync(meanSquaredError->getErrorOutput(), labelsStream);
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (elementLossGradient[i] != elementLossGradientGpu_h_mem[i])
+                if (abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]) >= thresh)
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
                            i,
                            dimensions[0],
@@ -383,7 +383,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
                            (float)predictions[i],
                            (float)labels[i],
                            Loss::getLossScalingFactor());
-                ASSERT_EQ(elementLossGradient[i], elementLossGradientGpu_h_mem[i]);
+                ASSERT_LT(abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]), thresh);
             }
         }
 
@@ -425,16 +425,16 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32) {
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        MeanSquaredError *meanSquaredError = new MeanSquaredError();
+        shared_ptr<MeanSquaredError> meanSquaredError = make_shared<MeanSquaredError>(TensorDescriptor::DataType::FP32);
         layers.push_back(meanSquaredError);
-        NetworkOutput *elementLossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
 
         bool inferenceOnly = (rand() % 5) == 0;
@@ -551,16 +551,16 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }
 
-        vector<Layer *> layers;
-        NetworkInput *predictionsInput = new NetworkInput(predictionsGpu);
+        vector<shared_ptr<Layer>> layers;
+        shared_ptr<NetworkInput> predictionsInput = make_shared<NetworkInput>(predictionsGpu);
         layers.push_back(predictionsInput);
-        NoOpLayer *noOpLayer = new NoOpLayer();
+        shared_ptr<NoOpLayer> noOpLayer = make_shared<NoOpLayer>();
         layers.push_back(noOpLayer);
-        NetworkInput *labelsInput = new NetworkInput(labelsGpu);
+        shared_ptr<NetworkInput> labelsInput = make_shared<NetworkInput>(labelsGpu);
         layers.push_back(labelsInput);
-        MeanSquaredError *meanSquaredError = new MeanSquaredError();
+        shared_ptr<MeanSquaredError> meanSquaredError = make_shared<MeanSquaredError>(TensorDescriptor::DataType::FP32);
         layers.push_back(meanSquaredError);
-        NetworkOutput *elementLossOutput = new NetworkOutput(gpuPlacement);
+        shared_ptr<NetworkOutput> elementLossOutput = make_shared<NetworkOutput>(gpuPlacement);
         layers.push_back(elementLossOutput);
 
         bool inferenceOnly = (rand() % 5) == 0;

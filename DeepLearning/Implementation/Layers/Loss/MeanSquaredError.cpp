@@ -11,7 +11,7 @@ using namespace std;
 
 MeanSquaredError::~MeanSquaredError() {}
 
-MeanSquaredError::MeanSquaredError() : Loss() {}
+MeanSquaredError::MeanSquaredError(TensorDescriptor::DataType lossDataType) : Loss(lossDataType) {}
 
 void MeanSquaredError::compile() {
     assert(featureInput.isPresent());

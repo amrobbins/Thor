@@ -30,14 +30,14 @@ class NetworkOutput : public Layer {
     virtual void buildSupportLayersAndAddToNetwork();
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == featureInput.get());
 
-        ThorImplementation::NetworkOutput *networkOutput = new ThorImplementation::NetworkOutput(placement);
+        std::shared_ptr<ThorImplementation::NetworkOutput> networkOutput = std::make_shared<ThorImplementation::NetworkOutput>(placement);
         networkOutput->setName(name);
         return networkOutput;
     }

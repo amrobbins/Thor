@@ -36,16 +36,16 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         // Softmax and LossShaper are connected during multi-layer flattening
-        ThorImplementation::CrossEntropy *crossEntropy =
-            new ThorImplementation::CrossEntropy(CrossEntropyLossType::CATEGORICAL, labelType == LabelType::INDEX);
+        std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
+            CrossEntropyLossType::CATEGORICAL, Tensor::convertToImplementationDataType(lossDataType), labelType == LabelType::INDEX);
         return crossEntropy;
     }
 
@@ -223,7 +223,7 @@ class CategoricalCrossEntropy::Builder {
    protected:
     /**
      * CategoricalCrossEntropy is a softmax activation followed by a cross entropy loss.
-     * When the layer is stamped an external softmax will also be stamped and this will be recorded so that next attempt to stamp will
+     * When the layer is stamped, an external softmax will also be stamped and this will be recorded so that next attempt to stamp will
      * result in a single layer that can be stamped.
      */
     virtual CategoricalCrossEntropy::Builder &softmaxStamped() {

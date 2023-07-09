@@ -20,23 +20,23 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual ~BatchNormalization() {}
 
     BatchNormalization(bool training,
+                       int64_t stampedId = -1,
                        Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                        Optional<double> epsilon = Optional<double>::empty())
-        : TrainableWeightsBiasesLayer(true),
+        : TrainableWeightsBiasesLayer(true, stampedId),
           exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
           epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
-        learningRate = 0.001;
         setTrainingMode(training);
     }
 
     BatchNormalization(SharedWeightsPackage sharedWeightsPackage,
                        bool training,
+                       int64_t stampedId = -1,
                        Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
                        Optional<double> epsilon = Optional<double>::empty())
-        : TrainableWeightsBiasesLayer(sharedWeightsPackage),
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage, stampedId),
           exponentialRunningAverageFactor(exponentialRunningAverageFactor.isPresent() ? exponentialRunningAverageFactor.get() : 0.05),
           epsilon(epsilon.isPresent() ? epsilon.get() : 0.0001) {
-        learningRate = 0.001;
         setTrainingMode(training);
 
         assert(sharedWeightsPackage.otherSharedMem.size() == 2);
@@ -64,10 +64,6 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                              TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
             biases = Tensor(featureInputs[0].get().getPlacement(),
                             TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-            weightsGradient = Tensor(featureInputs[0].get().getPlacement(),
-                                     TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-            biasesGradient = Tensor(featureInputs[0].get().getPlacement(),
-                                    TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
             resultRunningMean = Tensor(featureInputs[0].get().getPlacement(),
                                        TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
             resultRunningVariance = Tensor(featureInputs[0].get().getPlacement(),
@@ -207,7 +203,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
         if (training) {
             cudnnStatus =
-                cudnnBatchNormalizationForwardTraining(streams[0].getCudnnHandle(),
+                cudnnBatchNormalizationForwardTraining(stream.getCudnnHandle(),
                                                        height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
                                                        &ALPHA_NO_SCALE,
                                                        &BETA_CLEAR,
@@ -228,7 +224,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         } else {
             cudnnStatus =
-                cudnnBatchNormalizationForwardInference(streams[0].getCudnnHandle(),
+                cudnnBatchNormalizationForwardInference(stream.getCudnnHandle(),
                                                         height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
                                                         &ALPHA_NO_SCALE,
                                                         &BETA_CLEAR,
@@ -244,16 +240,11 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                         epsilon);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         }
-
-        // Since running average is a single memory, multiple connections to this layer must serialize with each other.
-        if (connectionNumber != 0)
-            streams[connectionNumber].waitEvent(streams[0].putEvent());
     }
 
     virtual void backProp(Optional<Tensor> dataIn,
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
-                          Stream gradientStream,
                           Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
@@ -261,8 +252,13 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             return;
         assert(errorIn.isPresent());
 
+        assert(optimizer.isPresent());
+        Tensor weightsGradient = optimizer.get()->getWeightsGradient();
+        Optional<Tensor> biasesGradient = optimizer.get()->getBiasesGradient();
+        assert(biasesGradient.isPresent());
+
         cudnnStatus_t cudnnStatus;
-        cudnnStatus = cudnnBatchNormalizationBackward(streams[0].getCudnnHandle(),
+        cudnnStatus = cudnnBatchNormalizationBackward(dataStream.getCudnnHandle(),
                                                       height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
                                                       &ALPHA_NO_SCALE,
                                                       &BETA_CLEAR,
@@ -276,18 +272,71 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                       errorOut.get().getMemPtr(),
                                                       derivedBnDescriptor,
                                                       weights.getMemPtr(),
-                                                      weightsGradient.get().getMemPtr(),
+                                                      weightsGradient.getMemPtr(),
                                                       biasesGradient.get().getMemPtr(),
                                                       epsilon,
                                                       resultSaveMean[connectionNumber].getMemPtr(),
                                                       resultSaveInvVariance[connectionNumber].getMemPtr());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        // Since weights are a single memory, multiple connections to this layer must serialize with each other.
-        // This is the normal case for gradients, so that accumulation may be used, however it differs in that the separate
-        // gradientUpdateStream is not used. This is because cuDNN is not separating back propagation of errors and updating gradients.
-        if (connectionNumber != 0)
-            streams[connectionNumber].waitEvent(streams[0].putEvent());
+        if (!isInferenceOnly()) {
+            assert(optimizer.isPresent());
+
+            // Sync gradientUpdateStream with data stream, so now gradient is up to date at end of gradientUpdateStream
+            assert(optimizer.isPresent());
+            Stream gradientUpdateStream = optimizer.get()->getGradientUpdateStream();
+            gradientUpdateStream.waitEvent(dataStream.putEvent());
+
+            // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
+            optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+
+            // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
+            // so to enforce this gradientStream says that gradient is not ready to be applied until both errorOut and gradient are computed
+            // But.. Since both errorOut and gradient are computed in the data stream in this case, they are always both ready at the
+            // beginning of gradientUpdateStream, since that was just synchronized with data stream above.
+            // gradientUpdateStream.waitEvent(dataStream.putEvent());
+            // Now at the end of gradientStream errorOut and gradients are ready from the updates for this connection.
+
+            // Upon processing the last connection, schedule the update to the weights memory.
+            if (stillWaitingForErrorInputTensors.empty()) {
+                optimizer.get()->updateWeights(weights, biases, batchSize);
+            }
+
+            // weights will be updated at the current end of the gradientStream
+            // so Forward() must wait until gradientStream is finished.
+            // This is accomplished in TrainableWeightsBiasesLayer::forward().
+        }
+    }
+
+    // Compute the weights gradient for the specified connection number, accumulate as necessary.
+    // This computation runs on optimizer.gradientUpdateStream.
+    // Note: gradient is actually computed during backProp() since it is a single cudnn function to compute all gradients.
+    virtual void computeWeightsGradient(Optional<Tensor> weightsGradient,
+                                        Optional<Tensor> biasesGradient,
+                                        Optional<Tensor> featureIn,
+                                        Optional<Tensor> errorIn,
+                                        Stream gradientUpdateStream,
+                                        bool accumulateGradient) {
+        // Ensure all memory properly allocated
+        assert(weightsGradient.isPresent());
+        assert(weightsGradient.get().getDescriptor() == weights.getDescriptor());
+        assert(weightsGradient.get().getPlacement() == weights.getPlacement());
+        assert(weightsGradient.get().getMemPtr() != weights.getMemPtr());
+        if (hasBias) {
+            assert(biasesGradient.isPresent());
+            assert(biases.isPresent());
+            assert(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
+            assert(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
+            assert(biasesGradient.get().getPlacement() == biases.get().getPlacement());
+        } else {
+            assert(biasesGradient.isEmpty());
+        }
+
+        if (errorIn.isEmpty())
+            return;
+        assert(featureIn.isPresent());
+
+        // This was already placed into optimer's gradient buffers, so this is a no-op
     }
 
    private:

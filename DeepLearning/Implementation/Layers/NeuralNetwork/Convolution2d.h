@@ -16,8 +16,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                   const int leftAndRightPadWidth,
                   const int topAndBottomPadHeight,
                   const int numOutputChannels,
-                  const bool hasBias)
-        : TrainableWeightsBiasesLayer(hasBias),
+                  const bool hasBias,
+                  const int64_t stampedId = -1)
+        : TrainableWeightsBiasesLayer(hasBias, stampedId),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
           filterHorizontalStride(filterHorizontalStride),
@@ -30,8 +31,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                   const int filterHorizontalStride,
                   const int filterVerticalStride,
                   const int leftAndRightPadWidth,
-                  const int topAndBottomPadHeight)
-        : TrainableWeightsBiasesLayer(sharedWeightsPackage),
+                  const int topAndBottomPadHeight,
+                  const int64_t stampedId = -1)
+        : TrainableWeightsBiasesLayer(sharedWeightsPackage, stampedId),
           filterWidth(sharedWeightsPackage.weights.getDescriptor().getDimensions()[3]),
           filterHeight(sharedWeightsPackage.weights.getDescriptor().getDimensions()[2]),
           filterHorizontalStride(filterHorizontalStride),
@@ -52,13 +54,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             weightsDimensions.push_back(filterWidth);
             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
             weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
-            if (!isInferenceOnly())
-                weightsGradient = weights.clone();
             if (hasBias) {
                 biases = Tensor(featureInputs.front().get().getPlacement(),
                                 TensorDescriptor(TensorDescriptor::DataType::FP16, {weightsDimensions[0]}));
-                if (!isInferenceOnly())
-                    biasesGradient = biases.get().clone();
             }
         }
     }
@@ -152,20 +150,22 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                 workspaceBackwardData = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
             }
         }
-        uint64_t workspaceBackwardFilterSizeInBytes =
-            GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
-        if (workspaceBackwardFilterSizeInBytes > 0) {
-            std::vector<unsigned long> workspaceDimensions;
-            workspaceDimensions.push_back(workspaceBackwardFilterSizeInBytes);
-            TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
-            workspaceBackwardFilter = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
-        }
-        if (hasBias) {
-            uint64_t workspaceBackwardBiasSizeInBytes =
-                GpuConvolution::instance().getBackwardBiasWorkspaceSizeInBytes(convolutionKernelRequirement);
-            if (workspaceBackwardBiasSizeInBytes > 0) {
-                workspaceBackwardBias = Tensor(featureInputs.front().get().getPlacement(),
-                                               TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardBiasSizeInBytes}));
+        if (!isInferenceOnly()) {
+            uint64_t workspaceBackwardFilterSizeInBytes =
+                GpuConvolution::instance().getBackwardFilterWorkspaceSizeInBytes(convolutionKernelRequirement);
+            if (workspaceBackwardFilterSizeInBytes > 0) {
+                std::vector<unsigned long> workspaceDimensions;
+                workspaceDimensions.push_back(workspaceBackwardFilterSizeInBytes);
+                TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
+                workspaceBackwardFilter = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
+            }
+            if (hasBias) {
+                uint64_t workspaceBackwardBiasSizeInBytes =
+                    GpuConvolution::instance().getBackwardBiasWorkspaceSizeInBytes(convolutionKernelRequirement);
+                if (workspaceBackwardBiasSizeInBytes > 0) {
+                    workspaceBackwardBias = Tensor(featureInputs.front().get().getPlacement(),
+                                                   TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardBiasSizeInBytes}));
+                }
             }
         }
     }
@@ -184,7 +184,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     virtual void backProp(Optional<Tensor> dataIn,
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
-                          Stream gradientStream,
                           Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) {
@@ -199,12 +198,65 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                 convolutionKernelRequirement, errorIn, weights, errorOut, workspaceBackwardData, dataStream);
         }
 
-        GpuConvolution::instance().convolutionBackwardFilter(
-            convolutionKernelRequirement, dataIn, errorIn, weightsGradient, workspaceBackwardFilter, gradientStream, accumulateGradient);
+        if (!isInferenceOnly()) {
+            assert(optimizer.isPresent());
+
+            // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
+            optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+
+            // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
+            // so to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and gradient are
+            // computed
+            optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
+            // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
+
+            // Upon processing the last connection, schedule the upate to the weights memory.
+            if (stillWaitingForErrorInputTensors.empty()) {
+                optimizer.get()->updateWeights(weights, biases, batchSize);
+            }
+
+            // weights will be updated at the current end of the gradientUpdateStream
+            // so Forward() must wait until gradientUpdateStream is finished.
+            // This is accomplished in TrainableWeightsBiasesLayer::forward().
+        }
+    }
+
+    virtual void computeWeightsGradient(Optional<Tensor> weightsGradient,
+                                        Optional<Tensor> biasesGradient,
+                                        Optional<Tensor> featureIn,
+                                        Optional<Tensor> errorIn,
+                                        Stream gradientUpdateStream,
+                                        bool accumulateGradient) {
+        // Ensure all memory properly allocated
+        assert(weightsGradient.isPresent());
+        assert(weightsGradient.get().getDescriptor() == weights.getDescriptor());
+        assert(weightsGradient.get().getPlacement() == weights.getPlacement());
+        assert(weightsGradient.get().getMemPtr() != weights.getMemPtr());
+        if (hasBias) {
+            assert(biasesGradient.isPresent());
+            assert(biases.isPresent());
+            assert(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
+            assert(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
+            assert(biasesGradient.get().getPlacement() == biases.get().getPlacement());
+        } else {
+            assert(biasesGradient.isEmpty());
+        }
+
+        if (errorIn.isEmpty())
+            return;
+        assert(featureIn.isPresent());
+
+        GpuConvolution::instance().convolutionBackwardFilter(convolutionKernelRequirement,
+                                                             featureIn,
+                                                             errorIn,
+                                                             weightsGradient,
+                                                             workspaceBackwardFilter,
+                                                             gradientUpdateStream,
+                                                             accumulateGradient);
 
         if (hasBias) {
             GpuConvolution::instance().convolutionBackwardBias(
-                convolutionKernelRequirement, errorIn, biasesGradient, workspaceBackwardBias, gradientStream, accumulateGradient);
+                convolutionKernelRequirement, errorIn, biasesGradient, workspaceBackwardBias, gradientUpdateStream, accumulateGradient);
         }
     }
 

@@ -1,38 +1,39 @@
 #pragma once
 
 #include "DeepLearning/Api/Network/Network.h"
-#include "Optimizer.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <unordered_map>
+
+namespace Thor {
 
 class Sgd : public Optimizer {
    public:
     class Builder;
 
-    Sgd();
     virtual ~Sgd();
 
-    virtual void setNetwork(Thor::Network *network);
+    void setConstantLearningRate(float newCurrentLearningRate);
+    void setInitialLearningRate(float newInitialLearningRate);
+    void setDecay(float newDecay);
+    void setMomentum(float newMomentum);
+    void setUseNesterovMomentum(bool newUseNesterovMomentum);
 
-    // returns a map of updated parameters
-    std::unordered_map<std::string, float> updateParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-    std::unordered_map<std::string, float> initializeStampedNetworkParameters(ThorImplementation::StampedNetwork &stampedNetwork,
-                                                                              uint64_t epoch,
-                                                                              uint64_t batch,
-                                                                              uint64_t batchesPerEpoch);
-    std::unordered_map<std::string, float> getAllParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
+   protected:
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
+        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
+
+    virtual std::shared_ptr<Optimizer> clone() const;
 
    private:
     float initialLearningRate;
     float decay;
     float momentum;
-    bool useNesterov;
-    uint64_t currentEpoch;
-    bool parametersInitialized;
-
-    Thor::Network *network;
+    bool useNesterovMomentum;
 };
 
 class Sgd::Builder {
@@ -44,53 +45,65 @@ class Sgd::Builder {
             _decay = 0.1f;
         if (_momentum.isEmpty())
             _momentum = 0.0f;
-        if (_useNesterov.isEmpty())
-            _useNesterov = true;
+        if (_useNesterovMomentum.isEmpty())
+            _useNesterovMomentum = true;
 
         assert(_initialLearningRate > 0.0f);
         assert(_decay < 1.0f);
         assert(_decay >= 0.0f);
         assert(_momentum >= 0.0f);
 
-        std::shared_ptr<Sgd> sgd = std::make_shared<Sgd>();
-        sgd->initialLearningRate = _initialLearningRate;
-        sgd->decay = _decay;
-        sgd->momentum = _momentum;
-        sgd->useNesterov = _useNesterov;
-        sgd->currentEpoch = 0;
-        sgd->parametersInitialized = false;
-        sgd->network = nullptr;
+        Sgd sgd;
+        sgd.initialLearningRate = _initialLearningRate;
+        sgd.decay = _decay;
+        sgd.momentum = _momentum;
+        sgd.useNesterovMomentum = _useNesterovMomentum;
 
-        return sgd;
+        assert(_network.isPresent());
+        assert(_network.get() != nullptr);
+        sgd.addToNetwork(_network);
+
+        // Network clones the Optimizer when it is added to the network
+        assert(std::dynamic_pointer_cast<Sgd>(_network.get()->getOptimizer()) != nullptr);
+        return std::dynamic_pointer_cast<Sgd>(_network.get()->getOptimizer());
     }
 
-    Sgd::Builder initialLearningRate(float _initialLearningRate) {
+    virtual Sgd::Builder &network(Network &_network) {
+        assert(!this->_network.isPresent());
+        this->_network = &_network;
+        return *this;
+    }
+
+    virtual Sgd::Builder initialLearningRate(float _initialLearningRate) {
         assert(!this->_initialLearningRate.isPresent());
         this->_initialLearningRate = _initialLearningRate;
         return *this;
     }
 
-    Sgd::Builder decay(float _decay) {
+    virtual Sgd::Builder decay(float _decay) {
         assert(!this->_decay.isPresent());
         this->_decay = _decay;
         return *this;
     }
 
-    Sgd::Builder momentum(float _momentum) {
+    virtual Sgd::Builder momentum(float _momentum) {
         assert(!this->_momentum.isPresent());
         this->_momentum = _momentum;
         return *this;
     }
 
-    Sgd::Builder useNesterov(bool _useNesterov) {
-        assert(!this->_useNesterov.isPresent());
-        this->_useNesterov = _useNesterov;
+    virtual Sgd::Builder useNesterovMomentum(bool _useNesterovMomentum) {
+        assert(!this->_useNesterovMomentum.isPresent());
+        this->_useNesterovMomentum = _useNesterovMomentum;
         return *this;
     }
 
    private:
+    Optional<Network *> _network;
     Optional<float> _initialLearningRate;
     Optional<float> _decay;
     Optional<float> _momentum;
-    Optional<bool> _useNesterov;
+    Optional<bool> _useNesterovMomentum;
 };
+
+}  // namespace Thor

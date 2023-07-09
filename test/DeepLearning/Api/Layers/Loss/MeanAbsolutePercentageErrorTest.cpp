@@ -24,9 +24,6 @@ TEST(MeanAbsolutePercentageError, Builds) {
         Tensor::DataType labelsDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
         Tensor labels(labelsDataType, dimensions);
 
-        bool setLossDataType = rand() % 2 == 0;
-        Tensor::DataType lossDataType;
-
         MeanAbsolutePercentageError::Builder meanAbsolutePercentageErrorBuilder =
             MeanAbsolutePercentageError::Builder().network(network).predictions(predictions).labels(labels);
 
@@ -47,11 +44,6 @@ TEST(MeanAbsolutePercentageError, Builds) {
         vector<uint64_t> perOutputDimensions = {dimensions[0]};
         vector<uint64_t> rawLossDimensions = dimensions;
 
-        if (setLossDataType) {
-            lossDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-            meanAbsolutePercentageErrorBuilder.lossDataType(lossDataType);
-        }
-
         MeanAbsolutePercentageError meanAbsolutePercentageError = meanAbsolutePercentageErrorBuilder.build();
 
         ASSERT_TRUE(meanAbsolutePercentageError.isInitialized());
@@ -68,7 +60,7 @@ TEST(MeanAbsolutePercentageError, Builds) {
 
         Optional<Tensor> actualLoss = meanAbsolutePercentageError.getLoss();
         ASSERT_TRUE(actualLoss.isPresent());
-        ASSERT_EQ(actualLoss.get().getDataType(), setLossDataType ? lossDataType : predictionsDataType);
+        ASSERT_EQ(actualLoss.get().getDataType(), predictionsDataType);
         if (shape == 0) {
             ASSERT_EQ(actualLoss.get().getDimensions(), batchDimensions);
         } else if (shape == 1) {
@@ -97,7 +89,7 @@ TEST(MeanAbsolutePercentageError, Builds) {
 
         Optional<Tensor> cloneLoss = clone->getLoss();
         ASSERT_TRUE(cloneLoss.isPresent());
-        ASSERT_EQ(cloneLoss.get().getDataType(), setLossDataType ? lossDataType : predictionsDataType);
+        ASSERT_EQ(cloneLoss.get().getDataType(), predictionsDataType);
         if (shape == 0) {
             ASSERT_EQ(cloneLoss.get().getDimensions(), batchDimensions);
         } else if (shape == 1) {

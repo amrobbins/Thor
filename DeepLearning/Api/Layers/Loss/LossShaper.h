@@ -26,10 +26,10 @@ class LossShaper : public Layer {
     virtual Optional<Tensor> getFeatureOutput() const { return getLossOutput(); }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == lossInput || connectingApiTensor == lossOutput);
 
@@ -42,10 +42,11 @@ class LossShaper : public Layer {
             std::vector<uint64_t> implementationDimensions;
             // Tell reshape to match the batch size:
             implementationOutputLossDimensions[0] = 0;
-            ThorImplementation::Reshape *nopReshape = new ThorImplementation::Reshape(implementationOutputLossDimensions);
+            std::shared_ptr<ThorImplementation::Reshape> nopReshape =
+                std::make_shared<ThorImplementation::Reshape>(implementationOutputLossDimensions);
             return nopReshape;
         } else {
-            ThorImplementation::LossShaper *lossShaper = new ThorImplementation::LossShaper(outputLossType);
+            std::shared_ptr<ThorImplementation::LossShaper> lossShaper = std::make_shared<ThorImplementation::LossShaper>(outputLossType);
             return lossShaper;
         }
     }
@@ -69,7 +70,8 @@ class LossShaper : public Layer {
                                                                reduceLossDim,
                                                                Tensor::convertToImplementationDataType(lossInput.getDataType()),
                                                                Tensor::convertToImplementationDataType(lossInput.getDataType()),
-                                                               Stream::getStaticStream(deviceNum))
+                                                               // I just need any stream, so get one that is exists anyway.
+                                                               Stream::getNextUploadStream(deviceNum))
                                    .getWorkspaceSizeInBytes();
 
         return lossOutput.getTotalSizeInBytes() + workspaceSizeInBytes;

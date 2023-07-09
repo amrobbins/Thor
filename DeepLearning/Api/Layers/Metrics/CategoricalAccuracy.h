@@ -19,14 +19,15 @@ class CategoricalAccuracy : public Metric {
     enum class LabelType { INDEX = 5, ONE_HOT };
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput() || connectingApiTensor == labelsTensor);
 
-        ThorImplementation::CategoricalAccuracy *categoricalAccuracy = new ThorImplementation::CategoricalAccuracy();
+        std::shared_ptr<ThorImplementation::CategoricalAccuracy> categoricalAccuracy =
+            std::make_shared<ThorImplementation::CategoricalAccuracy>();
         return categoricalAccuracy;
     }
 

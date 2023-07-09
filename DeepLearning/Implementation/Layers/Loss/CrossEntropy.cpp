@@ -3,9 +3,10 @@
 using namespace ThorImplementation;
 using namespace std;
 
-CrossEntropy::CrossEntropy() : Loss() { crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED; }
+CrossEntropy::CrossEntropy() : Loss(TensorDescriptor::DataType::FP32) { crossEntropyLossType = CrossEntropyLossType::UNINITIALIZED; }
 
-CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, bool indexLabels) : Loss() {
+CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, TensorDescriptor::DataType lossDataType, bool indexLabels)
+    : Loss(lossDataType) {
     // Just to be clear, index labels is a feature for categorical only:
     assert(!(crossEntropyLossType == CrossEntropyLossType::BINARY && indexLabels == true));
 

@@ -31,7 +31,16 @@ namespace ThorImplementation {
  */
 class Loss : public Layer {
    public:
-    Loss() {}
+    Loss(TensorDescriptor::DataType lossDataType) {
+        assert(lossDataType == TensorDescriptor::DataType::FP16 || lossDataType == TensorDescriptor::DataType::FP32);
+        this->lossDataType = lossDataType;
+    }
+
+    // Note: featureInput is guaranteed to be connected before createFeatureOutputTensor() is called.
+    virtual Optional<Tensor> createFeatureOutputTensor() {
+        assert(featureInput.isPresent());
+        return featureInput.get().clone(lossDataType);
+    }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
         assert(!compiled);
@@ -197,14 +206,9 @@ class Loss : public Layer {
     }
 
     virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
-    virtual Optional<Tensor> getLossOutput() {
-        if (batchLossOutput.isPresent())
-            return batchLossOutput;
-        else if (elementwiseLossOutput.isPresent())
-            return elementwiseLossOutput;
-        else
-            assert(false);
-    }
+    virtual Optional<Tensor> getPredictionsInput() { return getFeatureInput(); }
+    // When a loss shaper is present, that will provide batch loss etc. Loss::getLossOutput() provides raw loss
+    virtual Optional<Tensor> getLossOutput() { return featureOutput; }
 
     enum class ConnectionType { FORWARD_BACKWARD = 4289, LABELS };
 
@@ -213,11 +217,8 @@ class Loss : public Layer {
     static uint32_t getLossScalingFactor() { return lossScalingFactor; }
 
    protected:
-    Optional<Layer *> lossOutputLayer;
-
     Optional<Tensor> labelsInput;
-    Optional<Tensor> elementwiseLossOutput;
-    Optional<Tensor> batchLossOutput;
+    TensorDescriptor::DataType lossDataType;
 
     // FIXME: only const for now for convenience
     static constexpr uint32_t lossScalingFactor = 32;

@@ -3,55 +3,60 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/Common/Optional.h"
 
 namespace ThorImplementation {
 
 /**
  * A TrainableWeightsBiasesLayer has a trainable weights tensor and possibly a trainable biases tensor.
  *
- * TrainableWeightsBiasesLayer support multiple connections, in that case the gradient will accumulate
- * as the sum of the gradients from the backProp step of each connection.
+ * Updates to weights and biases during training is the responsibility of the connected Optimizer.
  *
  */
 class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    public:
-    virtual ~TrainableWeightsBiasesLayer() {}
+    virtual ~TrainableWeightsBiasesLayer() { clearOptimizer(); }
 
-    TrainableWeightsBiasesLayer(bool hasBias)
-        : hasBias(hasBias), usingSharedWeights(false), weightUpdateCallback(nullptr), clearGradientAccumulator(true) {}
+    // stampedId defaults to -1 so that it is not necessary to set it to some value during testing
+    // where there are not multiple stamped networks
+    // All real id's will have positive values
+    TrainableWeightsBiasesLayer(bool hasBias, int64_t stampedId = -1) : hasBias(hasBias), usingSharedWeights(false), stampedId(stampedId) {}
 
     struct SharedWeightsPackage {
         Tensor weights;
-        Optional<Tensor> weightsGradient;
         Optional<Tensor> biases;
-        Optional<Tensor> biasesGradient;
-
-        Stream gradientUpdateStream;
 
         std::vector<Tensor> otherSharedMem;
     };
 
-    TrainableWeightsBiasesLayer(SharedWeightsPackage sharedWeightsPackage)
-        : hasBias(sharedWeightsPackage.biases.isPresent()),
-          usingSharedWeights(false),
-          weightUpdateCallback(nullptr),
-          clearGradientAccumulator(true) {
+    TrainableWeightsBiasesLayer(SharedWeightsPackage sharedWeightsPackage, int64_t stampedId = -1)
+        : hasBias(sharedWeightsPackage.biases.isPresent()), usingSharedWeights(false), stampedId(stampedId) {
         weights = sharedWeightsPackage.weights;
-        weightsGradient = sharedWeightsPackage.weightsGradient;
         biases = sharedWeightsPackage.biases;
-        biasesGradient = sharedWeightsPackage.biasesGradient;
-
-        gradientUpdateStream = sharedWeightsPackage.gradientUpdateStream;
     }
+
+    uint64_t getStampedId() { return stampedId; }
 
     virtual void createWeightsIfNecessary() = 0;
 
-    Event updateWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
-        clearGradientAccumulator = true;
-        Stream stream = gradientUpdateStream;
-        if (!stream.isInitialized())
-            stream = streams[0];
+    virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
+        // Forward direction must wait for weights update to finish before inference is called
+        assert(streams.size() > 0);
+
+        if (optimizer.isPresent()) {
+            Stream gradientUpdateStream = optimizer.get()->getGradientUpdateStream();
+            for (uint32_t i = 0; i < streams.size(); ++i)
+                streams[i].waitEvent(gradientUpdateStream.putEvent());
+        }
+
+        MultiConnectionLayer::forward(featureInput, validationPass);
+    }
+
+    // Note: the setWeightsAndBiases is not used during optimization, it is there to support loading a trained model.
+    Event setWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
+        Stream stream = streams[0];
         stream.waitEvent(dataReadyEvent);
         weights.copyFromAsync(newWeights, stream);
         Event weightsUpdatedEvent = stream.putEvent();
@@ -71,23 +76,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         return streams[0].putEvent();
     }
 
-    Event updateWeightsAndBiasesWithScaledGradient() {
-        assert(gradientUpdateStream.isInitialized());
-        applyGradients(gradientUpdateStream, weights, weightsGradient, biases, biasesGradient);
-        Event gradientAppliedEvent = gradientUpdateStream.putEvent();
-        return gradientAppliedEvent;
-    }
-
-    virtual Stream getGradientUpdateStream() { return gradientUpdateStream; }
-
     virtual SharedWeightsPackage getSharedWeightsPackage() {
         SharedWeightsPackage sharedWeightsPackage;
         sharedWeightsPackage.weights = weights;
-        sharedWeightsPackage.weightsGradient = weightsGradient;
         sharedWeightsPackage.biases = biases;
-        sharedWeightsPackage.biasesGradient = biasesGradient;
-
-        sharedWeightsPackage.gradientUpdateStream = gradientUpdateStream;
 
         return sharedWeightsPackage;
     }
@@ -95,46 +87,38 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual void backward(Optional<Tensor> errorInput) {
         assert(running);
 
-        unsigned int connectionNumber = 0;
-        if (errorInput.isPresent()) {
-            for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
-                if (errorInputs[connectionNumber].isPresent() && errorInput.get() == errorInputs[connectionNumber].get())
-                    break;
-            }
-            assert(connectionNumber != errorInputs.size());
-        } else {
-            assert(errorInputs.size() - numPresentTensors(errorInputs) == 1);
-            for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
-                if (errorInputs[connectionNumber].isEmpty())
-                    break;
-            }
-            assert(connectionNumber != errorInputs.size());
-        }
+        // Experimental - back propagation stops at empty error input
+        if (errorInput.isEmpty())
+            return;
 
-        gradientUpdateStream.waitEvent(streams[connectionNumber].putEvent());
+        // When receiving the first errorInput of the set, clear the errorOutput and gradients.
+        // For the other errorInputs, accumulate the values.
+        bool accumulateValues = stillWaitingForErrorInputTensors != allErrorInputTensorIds;
+
+        // Using the errorInput tensor, determine which connection backward is being called for.
+        unsigned int connectionNumber = 0;
+        for (; connectionNumber < errorInputs.size(); ++connectionNumber) {
+            if (errorInputs[connectionNumber].isPresent() && errorInput.get() == errorInputs[connectionNumber].get())
+                break;
+        }
+        assert(connectionNumber != errorInputs.size());
+
+        assert(optimizer.isPresent());
+        optimizer.get()->getGradientUpdateStream().waitEvent(streams[connectionNumber].putEvent());
+
+        assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
+        stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
 
         backProp(featureInputs[connectionNumber],
                  errorInputs[connectionNumber],
                  errorOutputs[connectionNumber],
                  // Since they all update a single gradients tensor, gradient updates must run sequentially to one another.
-                 gradientUpdateStream,
                  streams[connectionNumber],
                  connectionNumber,
-                 !clearGradientAccumulator);
-        clearGradientAccumulator = false;
+                 accumulateValues);
 
-        if (errorInputs.size() > 1) {
-            if (errorInput.isPresent()) {
-                assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
-                stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
-            } else {
-                assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-                stillWaitingForNumEmptyErrorInputConnections -= 1;
-            }
-            if (stillWaitingForErrorInputTensors.empty() && stillWaitingForNumEmptyErrorInputConnections == 0) {
-                stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-                stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
-            }
+        if (stillWaitingForErrorInputTensors.empty()) {
+            stillWaitingForErrorInputTensors = allErrorInputTensorIds;
         }
 
         if (previousLayers[connectionNumber].isEmpty())
@@ -157,150 +141,59 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         if (!isInferenceOnly()) {
             assert(!featureInputs.empty());
-            if (!usingSharedWeights) {
-                // gradient upate streams have low priority so that this type of parallel work tends to build up
-                gradientUpdateStream = Stream(featureInputs[0].get().getPlacement().getMemDevice(), Stream::Priority::REGULAR);
-            }
         }
     }
 
-    // Default implementation simply updates weights by learningRate*gradient, does not apply momentum or anything else.
-    virtual void applyGradients(
-        Stream stream, Tensor weights, Tensor weightsGradient, Optional<Tensor> biases, Optional<Tensor> biasesGradient) {
-        assert(learningRate.isPresent());
-
-        Optional<Tensor> anInputTensor = getFirstPresentTensor(featureInputs);
-        assert(anInputTensor.isPresent());
-        uint32_t batchSize = anInputTensor.get().getDescriptor().getDimensions()[0];
-
-        if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
-            weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-            sumScaleHalfSourceDestScaleSource(
-                (half *)weights.getMemPtr(),
-                (half *)weights.getMemPtr(),
-                (half *)weightsGradient.getMemPtr(),
-                (float)((-1.0f * learningRate) / (Loss::getLossScalingFactor() *
-                                                  batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
-                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-                // processing a batch, and each item in the batch provides a share of that update.
-                weights.getDescriptor().getTotalNumElements(),
-                stream);
-        } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
-                   weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            sumScaleHalfSourceDest(
-                (half *)weights.getMemPtr(),
-                (half *)weights.getMemPtr(),
-                (float *)weightsGradient.getMemPtr(),
-                (-1.0f * learningRate) /
-                    (Loss::getLossScalingFactor() * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                weights.getDescriptor().getTotalNumElements(),
-                stream);
-            // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-            // processing a batch, and each item in the batch provides a share of that update.
-        } else if (weights.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
-                   weightsGradient.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-            sumScale((float *)weights.getMemPtr(),
-                     (float *)weights.getMemPtr(),
-                     (float *)weightsGradient.getMemPtr(),
-                     (-1.0f * learningRate) / (Loss::getLossScalingFactor() *
-                                               batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                     weights.getDescriptor().getTotalNumElements(),
-                     stream);
-            // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-            // processing a batch, and each item in the batch provides a share of that update.
-        } else {
-            assert(false);
-        }
-        if (hasBias) {
-            assert(biases.isPresent());
-            assert(biasesGradient.isPresent());
-            if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
-                biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16) {
-                sumScaleHalfSourceDestScaleSource(
-                    (half *)biases.get().getMemPtr(),
-                    (half *)biases.get().getMemPtr(),
-                    (half *)biasesGradient.get().getMemPtr(),
-                    (float)((-1.0f * learningRate) / (Loss::getLossScalingFactor() *
-                                                      batchSize)),  // subtract the gradient, scaled by the learning rate, from the weights
-                    biases.get().getDescriptor().getTotalNumElements(),
-                    stream);
-                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-                // processing a batch, and each item in the batch provides a share of that update.
-            } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP16 &&
-                       biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-                sumScaleHalfSourceDest(
-                    (half *)biases.get().getMemPtr(),
-                    (half *)biases.get().getMemPtr(),
-                    (float *)biasesGradient.get().getMemPtr(),
-                    (-1.0f * learningRate) /
-                        (Loss::getLossScalingFactor() * batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                    biases.get().getDescriptor().getTotalNumElements(),
-                    stream);
-                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-                // processing a batch, and each item in the batch provides a share of that update.
-            } else if (biases.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 &&
-                       biasesGradient.get().getDescriptor().getDataType() == TensorDescriptor::DataType::FP32) {
-                sumScale((float *)biases.get().getMemPtr(),
-                         (float *)biases.get().getMemPtr(),
-                         (float *)biasesGradient.get().getMemPtr(),
-                         (-1.0f * learningRate) / (Loss::getLossScalingFactor() *
-                                                   batchSize),  // subtract the gradient, scaled by the learning rate, from the weights
-                         biases.get().getDescriptor().getTotalNumElements(),
-                         stream);
-                // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-                // processing a batch, and each item in the batch provides a share of that update.
-            } else {
-                assert(false);
-            }
-        }
-
-        clearGradientAccumulator = true;
-    }
-
-    // Callback can be used to directly apply the gradients to the weights,
-    // or to copy the gradients to another device for accumulation for example.
-    virtual void setCallBackWhenGradientsReady(void (*weightUpdateCallback)(
-        Event readyEvent, Optional<Tensor> weights, Optional<Tensor> gradients, Optional<Tensor> biases, Optional<Tensor> biasesGradient)) {
-        assert(!compiled);
-        this->weightUpdateCallback = weightUpdateCallback;
-    }
-
-    virtual void setLearningRate(float learningRate) { this->learningRate = learningRate; }
-    virtual float getLearningRate() { return learningRate; }
+    // errorInput must be ready on data stream when calling computeWeightsGradient
+    // gradientUpdateStream will first synchronize with data stream.
+    // weightsGradient and biasesGradient will be ready at end of gradientUpdateStream
+    virtual void computeWeightsGradient(Optional<Tensor> weightsGradient,
+                                        Optional<Tensor> biasesGradient,
+                                        Optional<Tensor> featureIn,
+                                        Optional<Tensor> errorIn,
+                                        Stream gradientUpdateStream,
+                                        bool accumulateGradient) = 0;
 
     virtual Tensor getWeights() { return weights; }
     virtual Optional<Tensor> getBiases() { return biases; }
-    virtual Optional<Tensor> getWeightsGradient() { return weightsGradient; }
-    virtual Optional<Tensor> getBiasesGradient() { return biasesGradient; }
+
+    // If an optimizer is set, it will not be replaced even if setOptimizer() is called again, which allows the user to override
+    // the network level default optimizer for particular layers.
+    virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> optimizer) {
+        if (this->optimizer.isEmpty())
+            this->optimizer = optimizer;
+    }
+
+    virtual Optional<std::shared_ptr<Optimizer>> getOptimizer() { return optimizer; }
+
+    void clearOptimizer() {
+        optimizer.clear();
+        assert(optimizer.isEmpty());
+    }
 
    protected:
     const bool hasBias;
     const bool usingSharedWeights;
-    Optional<float> learningRate;
 
     Tensor weights;
-    Optional<Tensor> weightsGradient;
     Optional<Tensor> biases;
-    Optional<Tensor> biasesGradient;
-
-    Stream gradientUpdateStream;
-
-    void (*weightUpdateCallback)(
-        Event readyEvent, Optional<Tensor> weights, Optional<Tensor> gradients, Optional<Tensor> biases, Optional<Tensor> biasesGradient);
 
     virtual void backProp(Optional<Tensor> dataIn,
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
-                          Stream gradientStream,
                           Stream dataStream,
                           unsigned int connectionNumber,
                           bool accumulateGradient) = 0;
 
-    bool clearGradientAccumulator;
+   protected:
+    Optional<std::shared_ptr<Optimizer>> optimizer;
 
    private:
     virtual void backProp(
         Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
+
+    // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.
+    int64_t stampedId;
 };
 
 }  // namespace ThorImplementation

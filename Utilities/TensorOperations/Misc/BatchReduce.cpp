@@ -24,7 +24,8 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                          bool reduceClass,
                          TensorDescriptor::DataType sourceDataType,
                          TensorDescriptor::DataType destDataType,
-                         Stream stream) {
+                         Stream stream,
+                         bool doBatchSizeDivide) {
     // stream is kept because the cudnn handle is associated with it.
     this->stream = stream;
 
@@ -35,6 +36,7 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
     this->classDimSize = classDimSize;
     this->reduceBatch = reduceBatch;
     this->reduceClass = reduceClass;
+    this->doBatchSizeDivide = doBatchSizeDivide;
 
     assert(batchSize > 0);
     assert(classDimSize > 0);
@@ -143,7 +145,7 @@ BatchReduce::~BatchReduce() {
 
 Stream BatchReduce::getStream() { return stream; }
 
-void BatchReduce::reduce(Tensor source, Tensor dest) {
+void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
     if (isWire()) {
         if (source != dest)
             dest.copyFromAsync(source, stream);
@@ -164,10 +166,10 @@ void BatchReduce::reduce(Tensor source, Tensor dest) {
                                     0,
                                     workspaceSizeInBytes > 0 ? workspace.getMemPtr() : nullptr,
                                     workspaceSizeInBytes,
-                                    reduceBatch ? batchScale : one,
+                                    reduceBatch && doBatchSizeDivide ? batchScale : one,
                                     sourceTensorDescriptor,
                                     source.getMemPtr(),
-                                    zero,
+                                    accumulate ? one : zero,
                                     destTensorDescriptor,
                                     dest.getMemPtr());
 

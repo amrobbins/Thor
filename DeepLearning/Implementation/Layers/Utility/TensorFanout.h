@@ -142,6 +142,10 @@ class TensorFanout : public MultiConnectionLayer {
         if (errorOutputs[0].isEmpty())
             return;
 
+        // Experimental - back propagation stops at empty error input
+        if (errorInput.isEmpty())
+            return;
+
         if (numPresentTensors(errorInputs) == 1) {
             // NOP (errorInput[0] is connected to errorOutput[0])
             // Just sync streams and initiate back prop
@@ -158,15 +162,11 @@ class TensorFanout : public MultiConnectionLayer {
             if (errorInput.isPresent()) {
                 assert(stillWaitingForErrorInputTensors.count(errorInput.get().getTensorId()) == 1);
                 stillWaitingForErrorInputTensors.erase(errorInput.get().getTensorId());
-            } else {
-                assert(stillWaitingForNumEmptyErrorInputConnections != 0);
-                stillWaitingForNumEmptyErrorInputConnections -= 1;
             }
-            if (!stillWaitingForErrorInputTensors.empty() || stillWaitingForNumEmptyErrorInputConnections != 0)
+            if (!stillWaitingForErrorInputTensors.empty())
                 return;
 
             stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-            stillWaitingForNumEmptyErrorInputConnections = numEmptyErrorInputConnections;
         }
 
         for (unsigned int i = 1; i < errorInputs.size(); ++i)

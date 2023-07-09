@@ -13,6 +13,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
 
@@ -142,9 +143,18 @@ class Stream : private ReferenceCounted {
 
     uint64_t getId() { return getReferenceCountedId(); }
 
-    // For cases where you just need any stream (for example computing workspace sizes for cudnn) use the static stream to
-    // avoid allocating too many streams and crashing Cuda.
-    static Stream getStaticStream(uint32_t deviceNum);
+    // To allow for parallelization while limiting the amount of streams created, gradient update operations all share
+    // a fixed size pool of gradientUpdateStreams
+    // The thought here is that this is ok because they all branch off data streams and then re-synchronize to a data stream,
+    // so this cannot cause deadlock. If data streams were assigned this same way, deadlock would be possible - so that is not done.
+    static Stream getNextGradientUpdateStream(uint32_t deviceNum);
+    static void setMaxNumGradientUpdateStreams(uint32_t numGradientUpdateStreams);
+
+    static Stream getNextUploadStream(uint32_t deviceNum);
+    static void setMaxNumUploadStreams(uint32_t numGradientUpdateStreams);
+
+    static Stream getNextDownloadStream(uint32_t deviceNum);
+    static void setMaxNumDownloadStreams(uint32_t numGradientUpdateStreams);
 
    private:
     void construct(int gpuNum, Priority priority) {
@@ -180,13 +190,14 @@ class Stream : private ReferenceCounted {
         gpuNum = other.gpuNum;
         cudaStream = other.cudaStream;
         cudnnHandle = other.cudnnHandle;
+        isStatic = other.isStatic;
         mtx = other.mtx;
     }
 
     void destroy() {
         // If this is a static stream, it is too late to free cuda resources, or interact with cuda, when it is destroyed.
         // Doesn't much matter as the program is exiting anyway.
-        if (isStatic) {
+        if (!isStatic) {
             ScopedGpu scopedGpu(gpuNum);
 
             // can't destroy the cudnn handle at the point when the static string is destroyed

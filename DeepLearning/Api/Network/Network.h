@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -32,20 +33,20 @@ namespace ThorImplementation {
 
 class StampedNetwork {
    public:
-    std::vector<ThorImplementation::NetworkInput *> inputs;
-    std::vector<ThorImplementation::NetworkOutput *> outputs;
-    std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
-    std::vector<ThorImplementation::Layer *> otherLayers;
+    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs;
+    std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputs;
+    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers;
+    std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayers;
 
     std::vector<std::shared_ptr<Thor::Initializer>> initializers;
 
-    std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
-    std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
-    std::map<ThorImplementation::Layer *, uint64_t> physicalLayerToApiLayer;
-    std::map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
+    std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayer;
+    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayer;
+    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t> physicalLayerToApiLayer;
+    std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayer;
 
-    std::map<std::string, ThorImplementation::NetworkInput *> inputNamed;
-    std::map<std::string, ThorImplementation::NetworkOutput *> outputNamed;
+    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamed;
+    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamed;
 
     uint32_t gpuNum;
 
@@ -54,6 +55,8 @@ class StampedNetwork {
 
     uint64_t floatingPointOperationsPerExampleForward;
     uint64_t floatingPointOperationsPerExampleBackward;
+
+    uint32_t getGpuNum() const { return gpuNum; }
 
     void initialize() {
         for (uint32_t i = 0; i < initializers.size(); ++i)
@@ -100,16 +103,6 @@ class StampedNetwork {
             inputs[0]->getStream().waitEvent(outputReadyEvent);
         }
 
-        if (!isInferenceOnly) {
-            // The stream from input 0 waits for all gradient updates to finish
-            for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-                trainableLayers[i]->updateWeightsAndBiasesWithScaledGradient();
-                assert(trainableLayers[i]->getGradientUpdateStream().isInitialized());
-                Event gradientUpdateFinishedEvent = trainableLayers[i]->getGradientUpdateStream().putEvent();
-                inputs[0]->getStream().waitEvent(gradientUpdateFinishedEvent);
-            }
-        }
-
         // Processing is finished when the stream from input 0 is ready
         Event processingFinishedEvent = inputs[0]->getStream().putEvent(true, true);
 
@@ -125,28 +118,24 @@ class StampedNetwork {
         for (uint32_t i = 0; i < inputs.size(); ++i) {
             inputs[i]->parentCleanup();
             inputs[i]->cleanup();
-            delete inputs[i];
         }
         inputs.clear();
 
         for (uint32_t i = 0; i < outputs.size(); ++i) {
             outputs[i]->parentCleanup();
             outputs[i]->cleanup();
-            delete outputs[i];
         }
         outputs.clear();
 
         for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
             trainableLayers[i]->parentCleanup();
             trainableLayers[i]->cleanup();
-            delete trainableLayers[i];
         }
         trainableLayers.clear();
 
         for (uint32_t i = 0; i < otherLayers.size(); ++i) {
             otherLayers[i]->parentCleanup();
             otherLayers[i]->cleanup();
-            delete otherLayers[i];
         }
         otherLayers.clear();
 
@@ -174,32 +163,47 @@ class Network {
         DEADLOCK_CYCLE
     };
 
+    const static int32_t CPU = -1;
+
     Network() : frozen(false) {}
     virtual ~Network() {}
 
     virtual std::string statusCodeToString(int statusCode);
 
-    virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
+    virtual StatusCode place(uint32_t batchSize,
+                             std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
+                             uint32_t forcedNumStampsPerGpu = 0);
+    // FIXME: access modifiers of the next 2. place should be calling stamp and preoptimize. getStampedNetworks should remain public.
     virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
+    virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual std::vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
 
     virtual void setNetworkName(std::string networkName) { this->networkName = networkName; }
     virtual std::string getNetworkName() { return networkName; }
+
+    // FIXME: implement:
+    virtual void save(std::string filename, bool keep_optimizer);
+    virtual void load(std::string filename);
+    virtual void save_as_keras(std::string filename, bool keep_optimizer);
+    virtual void load_from_keras(std::string filename);
+
+    std::shared_ptr<Optimizer> getOptimizer();
 
    private:
     static const bool DEBUG_STAMP = false;
 
    protected:
     std::set<std::shared_ptr<Layer>> network;
-    std::vector<std::pair<Optional<Tensor>, Layer *>> orderedNetwork;
+    std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
 
     std::set<Tensor> allTensors;
-    std::map<Tensor, std::vector<Layer *>> apiTensorToApiLoadingLayers;
-    std::map<Tensor, Layer *> apiTensorToApiDrivingLayer;
-    std::map<Layer *, std::vector<Tensor>> apiLayerToApiOutputTensors;
-    std::map<Layer *, std::vector<Tensor>> apiLayerToApiInputTensors;
+    std::map<Tensor, std::vector<std::shared_ptr<Layer>>> apiTensorToApiLoadingLayers;
+    std::map<Tensor, std::shared_ptr<Layer>> apiTensorToApiDrivingLayer;
+    std::map<std::shared_ptr<Layer>, std::vector<Tensor>> apiLayerToApiOutputTensors;
+    std::map<std::shared_ptr<Layer>, std::vector<Tensor>> apiLayerToApiInputTensors;
 
     std::vector<std::shared_ptr<Initializer>> initializers;
+    std::shared_ptr<Optimizer> optimizer;
 
     std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
@@ -216,41 +220,43 @@ class Network {
     virtual StatusCode checkForDeadlockCycles();
     virtual void topologicalSort();
 
-    virtual void stampNetworkInput(const Thor::NetworkInput *networkInput,
+    virtual void stampNetworkInput(const std::shared_ptr<Thor::NetworkInput> networkInput,
                                    uint32_t gpuNum,
                                    uint32_t batchSize,
                                    ThorImplementation::StampedNetwork &stampedNetwork);
     virtual void stampNetworkOutput(Tensor inputTensor,
-                                    const Thor::NetworkOutput *networkOutput,
+                                    const std::shared_ptr<Thor::NetworkOutput> networkOutput,
                                     uint32_t gpuNum,
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork);
     virtual void stampLayer(Tensor inputTensor,
-                            const Thor::Layer *layer,
+                            const std::shared_ptr<Thor::Layer> layer,
                             uint32_t gpuNum,
                             uint32_t batchSize,
                             ThorImplementation::StampedNetwork &stampedNetwork);
 
     void createBatchDimensions(std::vector<uint64_t> &batchDimensions, std::vector<uint64_t> tensorDimensions, uint32_t batchSize);
 
-    void addLayerToNetwork(const Layer *layer) { network.insert(layer->clone()); }
+    void addLayerToNetwork(const Layer *layer);
 
     // Take a snapshot of layer and add the snapshot to the network
     void addToNetwork(Layer *layer);
-    void addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
+    void addToNetwork(Initializer *initializer);
+    void addToNetwork(Optimizer *optimizer);
 
     std::string networkName;
 
     // void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork);
     // void reorderLayers(StampedNetwork &stampedNetwork, std::vector<Layer*> &layersToReoder, std::vector<Layer*> &destinationStorage);
 
-    bool terminatesWithoutHitting(Tensor tensor, Layer *layer);
+    bool terminatesWithoutHitting(Tensor tensor, std::shared_ptr<Layer> layer);
 
     bool frozen;
 
     class GpuOutOfMemoryError {};
 
     friend void Layer::addToNetwork(Network *network);
+    friend void Optimizer::addToNetwork(Network *network);
     friend class Executor;
 };
 

@@ -26,14 +26,15 @@ class MeanAbsoluteError : public Loss {
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
-        ThorImplementation::MeanAbsoluteError *meanAbsoluteError = new ThorImplementation::MeanAbsoluteError();
+        std::shared_ptr<ThorImplementation::MeanAbsoluteError> meanAbsoluteError =
+            std::make_shared<ThorImplementation::MeanAbsoluteError>(Tensor::convertToImplementationDataType(lossDataType));
 
         return meanAbsoluteError;
     }

@@ -27,10 +27,10 @@ class Pooling : public Layer {
     enum class Type { AVERAGE = 3, MAX };
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == getFeatureInput());
 
@@ -38,7 +38,7 @@ class Pooling : public Layer {
         implementationPoolingType =
             type == Type::AVERAGE ? ThorImplementation::Pooling::Type::AVERAGE : ThorImplementation::Pooling::Type::MAX;
 
-        ThorImplementation::Pooling *pooling = new ThorImplementation::Pooling(
+        std::shared_ptr<ThorImplementation::Pooling> pooling = std::make_shared<ThorImplementation::Pooling>(
             implementationPoolingType, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
         return pooling;
     }

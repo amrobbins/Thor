@@ -62,15 +62,16 @@ class Concatenate : public TrainableWeightsBiasesLayer {
     virtual std::string getLayerType() const { return "Concatenate"; }
 
    protected:
-    virtual ThorImplementation::Layer *stamp(ThorImplementation::TensorPlacement placement,
-                                             ThorImplementation::Layer *drivingLayer,
-                                             Thor::Layer *drivingApiLayer,
-                                             Thor::Tensor connectingApiTensor) const {
+    virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
+                                                             std::shared_ptr<ThorImplementation::Layer> drivingLayer,
+                                                             std::shared_ptr<Thor::Layer> drivingApiLayer,
+                                                             Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Add 1 to concatenation axis since API does not consider batch size (the first dimension)
-        ThorImplementation::Concatenate *concatenate = new ThorImplementation::Concatenate(concatenationAxis + 1);
+        std::shared_ptr<ThorImplementation::Concatenate> concatenate =
+            std::make_shared<ThorImplementation::Concatenate>(concatenationAxis + 1);
         return concatenate;
     }
 

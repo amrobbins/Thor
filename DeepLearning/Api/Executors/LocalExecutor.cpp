@@ -24,7 +24,6 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     localExecutor->network = _network;
     localExecutor->loader = _loader;
     localExecutor->optimizer = _optimizer;
-    localExecutor->optimizer->setNetwork(&(localExecutor->network));
     // localExecutor->hyperparameterController = _hyperparameterController;
     localExecutor->visualizers = _visualizers;
 
@@ -165,7 +164,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
     for (uint64_t batch = 0; batch < batches; ++batch) {
         uint64_t epochBatchNum = initialEpochBatchNum + batch;
 
-        optimizer->updateParameters(*currentEpoch, epochBatchNum, *numBatchesInEpoch);
+        optimizer->updateHyperParameters(*currentEpoch, epochBatchNum, *numBatchesInEpoch);
 
         // batchNumber ->   batchlet0                              batchlet1
         //               [[input0 -> buffer, output0 -> buffer], [input0 -> buffer, output0 -> buffer]]
@@ -282,7 +281,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 else
                     averageTrainingBatchTime = 0.05 * elapsed.count() + 0.95 * averageTrainingBatchTime;
 
-                unordered_map<string, float> optimizerParameters = optimizer->getAllParameters(*currentEpoch, batchNum, batchesPerEpoch);
+                unordered_map<string, float> optimizerParameters =
+                    optimizer->getAllHyperParameters(*currentEpoch, batchNum, batchesPerEpoch);
                 executionState.learningRate = optimizerParameters["currentLearningRate"];
                 executionState.momentum = optimizerParameters["momentum"];
 
@@ -342,7 +342,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 else
                     averageValidationBatchTime = 0.05 * elapsed.count() + 0.95 * averageValidationBatchTime;
 
-                unordered_map<string, float> optimizerParameters = optimizer->getAllParameters(*currentEpoch, batchNum, batchesPerEpoch);
+                unordered_map<string, float> optimizerParameters =
+                    optimizer->getAllHyperParameters(*currentEpoch, batchNum, batchesPerEpoch);
                 executionState.learningRate = optimizerParameters["currentLearningRate"];
                 executionState.momentum = optimizerParameters["momentum"];
 

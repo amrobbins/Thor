@@ -16,7 +16,7 @@ class MeanAbsoluteError : public Loss {
    public:
     virtual ~MeanAbsoluteError();
 
-    MeanAbsoluteError();
+    MeanAbsoluteError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32);
 
     virtual void compile();
 

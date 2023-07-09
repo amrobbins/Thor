@@ -91,6 +91,11 @@ void Tensor::allocateMemory() {
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
         cudaStatus = cudaMalloc(&mem, memBytes);
+        if (cudaStatus != cudaSuccess) {
+            printf("cudaStatus %d\n", cudaStatus);
+            printf("%s\n", cudaGetErrorString(cudaStatus));
+            fflush(stdout);
+        }
         assert(cudaStatus == cudaSuccess);
     } else {
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||

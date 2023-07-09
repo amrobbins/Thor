@@ -14,7 +14,7 @@
 
 #include <vector>
 
-using std::vector;
+using namespace std;
 
 using namespace ThorImplementation;
 
@@ -317,17 +317,18 @@ TEST(Pooling, MaxPoolingWorks) {
             featureInMem[i] = ((rand() % 100000) / 500.0f) - 100.0f;
         }
 
-        vector<Layer *> layers;
+        vector<shared_ptr<Layer>> layers;
 
-        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
-        layers.push_back(new NoOpLayer());
-        Pooling *poolingLayer = new Pooling(
+        layers.push_back(
+            make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Pooling> poolingLayer = make_shared<Pooling>(
             Pooling::Type::MAX, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
         poolingLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(poolingLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(cpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
@@ -346,7 +347,7 @@ TEST(Pooling, MaxPoolingWorks) {
 
         // Network is runnable here
         layers[0]->forward(featureIn, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
 
         featureOut = maxPoolingForward(featureIn,
                                        windowHeight,
@@ -464,17 +465,18 @@ TEST(Pooling, AveragePoolingWorks) {
             featureInMem[i] = ((rand() % 1000) / 5.0f) - 100.0f;
         }
 
-        vector<Layer *> layers;
+        vector<shared_ptr<Layer>> layers;
 
-        layers.push_back(new NetworkInput(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
-        layers.push_back(new NoOpLayer());
-        Pooling *poolingLayer = new Pooling(
+        layers.push_back(
+            make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
+        layers.push_back(make_shared<NoOpLayer>());
+        shared_ptr<Pooling> poolingLayer = make_shared<Pooling>(
             Pooling::Type::AVERAGE, windowHeight, windowWidth, verticalStride, horizontalStride, verticalPadding, horizontalPadding);
         poolingLayer->setConstructForInferenceOnly(inferenceOnly);
 
         layers.push_back(poolingLayer);
-        layers.push_back(new NoOpLayer());
-        layers.push_back(new NetworkOutput(cpuPlacement));
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
 
         Stream stream = layers.front()->getStream();
 
@@ -491,7 +493,7 @@ TEST(Pooling, AveragePoolingWorks) {
 
         // Network is runnable here
         layers[0]->forward(featureIn, false);
-        stream.waitEvent(((NetworkOutput *)layers.back())->getOutputReadyEvent());
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
 
         featureOut = averagePoolingForward(featureIn,
                                            windowHeight,
