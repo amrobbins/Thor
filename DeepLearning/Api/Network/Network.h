@@ -33,25 +33,47 @@ namespace ThorImplementation {
 
 class StampedNetwork {
    private:
-    struct LayerComparator {
+    struct LayerComparatorShared {
         bool operator()(const std::shared_ptr<Layer> &lhs, const std::shared_ptr<Layer> &rhs) const { return lhs->getId() < rhs->getId(); }
     };
+    struct LayerComparator {
+        bool operator()(const Layer *lhs, const Layer *rhs) const { return lhs->getId() < rhs->getId(); }
+    };
+    template <typename T>
+    int count(std::vector<T> v, T item) {
+        uint32_t c = 0;
+        for (uint32_t i = 0; i < v.size(); ++i) {
+            if (v[i] == item)
+                c += 1;
+        }
+        return c;
+    }
 
    public:
-    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs;
-    std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputs;
-    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers;
-    std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayers;
+    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputsShared;
+    std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
+    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayersShared;
+    std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
+    std::vector<std::shared_ptr<Thor::Initializer>> initializersShared;
+    std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;
+    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayerShared;
+    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparatorShared> physicalLayerToApiLayerShared;
+    std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayerShared;
+    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
+    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
 
-    std::vector<std::shared_ptr<Thor::Initializer>> initializers;
-
-    std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayer;
-    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayer;
-    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;
-    std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayer;
-
-    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamed;
-    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamed;
+    // For performance, store and use the raw pointers
+    std::vector<ThorImplementation::NetworkInput *> inputs;
+    std::vector<ThorImplementation::NetworkOutput *> outputs;
+    std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
+    std::vector<ThorImplementation::Layer *> otherLayers;
+    std::vector<Thor::Initializer *> initializers;
+    std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
+    std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
+    std::map<ThorImplementation::Layer *, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;
+    std::map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
+    std::map<std::string, ThorImplementation::NetworkInput *> inputNamed;
+    std::map<std::string, ThorImplementation::NetworkOutput *> outputNamed;
 
     uint32_t gpuNum;
 
@@ -64,6 +86,47 @@ class StampedNetwork {
     uint32_t getGpuNum() const { return gpuNum; }
 
     void initialize() {
+        for (auto it = initializersShared.begin(); it != initializersShared.end(); ++it) {
+            initializers.push_back(it->get());
+        }
+
+        // First, ensure the shared pointers and raw pointers match
+        for (auto it = inputsShared.begin(); it != inputsShared.end(); ++it)
+            assert(count(inputs, it->get()) == 1);
+        for (auto it = outputsShared.begin(); it != outputsShared.end(); ++it)
+            assert(count(outputs, it->get()) == 1);
+        for (auto it = trainableLayersShared.begin(); it != trainableLayersShared.end(); ++it)
+            assert(count(trainableLayers, it->get()) == 1);
+        for (auto it = otherLayersShared.begin(); it != otherLayersShared.end(); ++it)
+            assert(count(otherLayers, it->get()) == 1);
+        for (auto it = initializersShared.begin(); it != initializersShared.end(); ++it)
+            assert(count(initializers, it->get()) == 1);
+        for (auto it = apiTensorToPhysicalDrivingLayerShared.begin(); it != apiTensorToPhysicalDrivingLayerShared.end(); ++it) {
+            assert(apiTensorToPhysicalDrivingLayer.count(it->first) == 1);
+            assert(apiTensorToPhysicalDrivingLayer[it->first] == it->second.get());
+        }
+        for (auto it = apiLayerToPhysicalLayerShared.begin(); it != apiLayerToPhysicalLayerShared.end(); ++it) {
+            assert(apiLayerToPhysicalLayer.count(it->first) == 1);
+            assert(apiLayerToPhysicalLayer[it->first] == it->second.get());
+        }
+        for (auto it = physicalLayerToApiLayerShared.begin(); it != physicalLayerToApiLayerShared.end(); ++it) {
+            assert(physicalLayerToApiLayer.count(it->first.get()) == 1);
+            assert(physicalLayerToApiLayer[it->first.get()] == it->second);
+        }
+        for (auto it = apiTensorToApiDrivingLayerShared.begin(); it != apiTensorToApiDrivingLayerShared.end(); ++it) {
+            assert(apiTensorToApiDrivingLayer.count(it->first) == 1);
+            assert(apiTensorToApiDrivingLayer[it->first] == it->second.get());
+        }
+        for (auto it = inputNamedShared.begin(); it != inputNamedShared.end(); ++it) {
+            assert(inputNamed.count(it->first) == 1);
+            assert(inputNamed[it->first] == it->second.get());
+        }
+        for (auto it = outputNamedShared.begin(); it != outputNamedShared.end(); ++it) {
+            assert(outputNamed.count(it->first) == 1);
+            assert(outputNamed[it->first] == it->second.get());
+        }
+
+        // Now that checks have been run, initialize the stamp
         for (uint32_t i = 0; i < initializers.size(); ++i)
             initializers[i]->initialize();
 
@@ -144,9 +207,29 @@ class StampedNetwork {
         }
         otherLayers.clear();
 
+        inputs.clear();
+        outputs.clear();
+        trainableLayers.clear();
+        otherLayers.clear();
+        initializers.clear();
         apiTensorToPhysicalDrivingLayer.clear();
         apiLayerToPhysicalLayer.clear();
+        physicalLayerToApiLayer.clear();
         apiTensorToApiDrivingLayer.clear();
+        inputNamed.clear();
+        outputNamed.clear();
+
+        inputsShared.clear();
+        outputsShared.clear();
+        trainableLayersShared.clear();
+        otherLayersShared.clear();
+        initializersShared.clear();
+        apiTensorToPhysicalDrivingLayerShared.clear();
+        apiLayerToPhysicalLayerShared.clear();
+        physicalLayerToApiLayerShared.clear();
+        apiTensorToApiDrivingLayerShared.clear();
+        inputNamedShared.clear();
+        outputNamedShared.clear();
     }
 };
 

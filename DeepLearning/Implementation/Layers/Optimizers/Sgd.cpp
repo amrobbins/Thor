@@ -22,7 +22,8 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     assert(momentum >= 0.0f);
     assert(gpuNum < (uint32_t)MachineEvaluator::instance().getNumGpus());
 
-    this->trainableLayer = trainableLayer;
+    this->trainableLayerShared = trainableLayer;
+    this->trainableLayer = trainableLayer.get();
     assert(gradientUpdateStream.isInitialized());
 
     this->initialLearningRate = initialLearningRate;
@@ -82,11 +83,6 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             assert(biasesGradient.isPresent());
             accumulateScale(biasesGradient, biases, &alpha, &beta, gradientUpdateStream);
         }
-        Tensor wcpu = weights.clone(TensorPlacement::MemDevices::CPU);
-        Tensor wgcpu = weightsGradient.clone(TensorPlacement::MemDevices::CPU);
-        wcpu.copyFromAsync(weights, gradientUpdateStream);
-        wgcpu.copyFromAsync(weightsGradient, gradientUpdateStream);
-        gradientUpdateStream.synchronize();
     }
 }
 

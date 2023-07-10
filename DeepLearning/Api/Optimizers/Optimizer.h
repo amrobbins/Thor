@@ -48,7 +48,8 @@ class Optimizer {
 
     // gpuNum -> stampedId -> *optimizer
     // So there is one optimizer per layer, shared by all stamps of the network
-    std::unordered_map<uint32_t, std::unordered_map<int64_t, std::shared_ptr<ThorImplementation::Optimizer>>> optimizers;
+    std::unordered_map<uint32_t, std::unordered_map<int64_t, std::shared_ptr<ThorImplementation::Optimizer>>> optimizersShared;
+    std::unordered_map<uint32_t, std::unordered_map<int64_t, ThorImplementation::Optimizer *>> optimizers;
 
     friend class Network;
 

@@ -159,12 +159,19 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     // If an optimizer is set, it will not be replaced even if setOptimizer() is called again, which allows the user to override
     // the network level default optimizer for particular layers.
-    virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> optimizer) {
-        if (this->optimizer.isEmpty())
-            this->optimizer = optimizer;
+    // To replace an optimizer after it has been attached, you need to call setOptimizer again with an empty Optional
+    virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> newOptimizer) {
+        if (newOptimizer.isEmpty()) {
+            this->optimizer.clear();
+            this->optimizerShared.clear();
+        } else if (this->optimizer.isEmpty()) {
+            assert(optimizerShared.isEmpty());
+            this->optimizerShared = newOptimizer;
+            this->optimizer = newOptimizer.get().get();
+        }
     }
 
-    virtual Optional<std::shared_ptr<Optimizer>> getOptimizer() { return optimizer; }
+    virtual Optional<std::shared_ptr<Optimizer>> getOptimizer() { return optimizerShared; }
 
     void clearOptimizer() {
         optimizer.clear();
@@ -186,7 +193,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                           bool accumulateGradient) = 0;
 
    protected:
-    Optional<std::shared_ptr<Optimizer>> optimizer;
+    Optional<std::shared_ptr<Optimizer>> optimizerShared;
+    Optional<Optimizer *> optimizer;
 
    private:
     virtual void backProp(

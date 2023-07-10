@@ -552,15 +552,20 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
         printf("stamped network input\n");
         fflush(stdout);
     }
-    networkInput->initialize(implementationNetworkInput, stampedNetwork.initializers);
-    stampedNetwork.inputs.push_back(implementationNetworkInput);
-    stampedNetwork.inputNamed[implementationNetworkInput->getName()] = implementationNetworkInput;
+    networkInput->initialize(implementationNetworkInput, stampedNetwork.initializersShared);
+    stampedNetwork.inputsShared.push_back(implementationNetworkInput);
+    stampedNetwork.inputs.push_back(implementationNetworkInput.get());
+    stampedNetwork.inputNamedShared[implementationNetworkInput->getName()] = implementationNetworkInput;
+    stampedNetwork.inputNamed[implementationNetworkInput->getName()] = implementationNetworkInput.get();
     outputLayer = implementationNetworkInput;
-    stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput;
-    stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput] = networkInput->getId();
+    stampedNetwork.apiLayerToPhysicalLayerShared[networkInput->getId()] = implementationNetworkInput;
+    stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput.get();
+    stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkInput] = networkInput->getId();
+    stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput.get()] = networkInput->getId();
 
     // Map the api tensor to its physical driving layer
-    stampedNetwork.apiTensorToPhysicalDrivingLayer[outputTensor] = outputLayer;
+    stampedNetwork.apiTensorToPhysicalDrivingLayerShared[outputTensor] = outputLayer;
+    stampedNetwork.apiTensorToPhysicalDrivingLayer[outputTensor] = outputLayer.get();
 }
 
 void Network::addToNetwork(Layer *layer) {
@@ -592,7 +597,7 @@ void Network::stampLayer(Tensor inputTensor,
                          uint32_t batchSize,
                          ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
+    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
         apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
@@ -608,9 +613,11 @@ void Network::stampLayer(Tensor inputTensor,
             Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
             physicalDrivingLayer = implementationTensorFanout;
 
-            stampedNetwork.otherLayers.push_back(implementationTensorFanout);
+            stampedNetwork.otherLayersShared.push_back(implementationTensorFanout);
+            stampedNetwork.otherLayers.push_back(implementationTensorFanout.get());
             apiDrivingLayer = nullptr;
-            stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
+            stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor] = physicalDrivingLayer;
+            stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer.get();
 
             if (DEBUG_STAMP) {
                 printf("stamped tensor fanout - id %ld - driving %s - num output connections afterward %ld\n",
@@ -636,7 +643,7 @@ void Network::stampLayer(Tensor inputTensor,
     bool layerPreviouslyStamped = (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1);
     // In case of a tensor fanout, there is no apiLayer...
     if (layerPreviouslyStamped) {
-        implementationLayer = stampedNetwork.apiLayerToPhysicalLayer[layer->getId()];
+        implementationLayer = stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()];
 
         if (DEBUG_STAMP) {
             printf("connecting to %s\n", layer->getLayerType().c_str());
@@ -644,8 +651,10 @@ void Network::stampLayer(Tensor inputTensor,
         }
     } else {
         implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor);
-        stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer;
-        stampedNetwork.physicalLayerToApiLayer[implementationLayer] = layer->getId();
+        stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()] = implementationLayer;
+        stampedNetwork.apiLayerToPhysicalLayer[layer->getId()] = implementationLayer.get();
+        stampedNetwork.physicalLayerToApiLayerShared[implementationLayer] = layer->getId();
+        stampedNetwork.physicalLayerToApiLayer[implementationLayer.get()] = layer->getId();
 
         if (DEBUG_STAMP) {
             printf("stamped %s (physical layer id = %ld) driven by physical layer id = %ld\n",
@@ -657,19 +666,23 @@ void Network::stampLayer(Tensor inputTensor,
     }
     Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
     if (!layerPreviouslyStamped)
-        layer->initialize(implementationLayer, stampedNetwork.initializers);
+        layer->initialize(implementationLayer, stampedNetwork.initializersShared);
 
     vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
-    for (uint32_t i = 0; i < apiOutputTensors.size(); ++i)
-        stampedNetwork.apiTensorToPhysicalDrivingLayer[apiOutputTensors[i]] = implementationLayer;
+    for (uint32_t i = 0; i < apiOutputTensors.size(); ++i) {
+        stampedNetwork.apiTensorToPhysicalDrivingLayerShared[apiOutputTensors[i]] = implementationLayer;
+        stampedNetwork.apiTensorToPhysicalDrivingLayer[apiOutputTensors[i]] = implementationLayer.get();
+    }
 
     if (!layerPreviouslyStamped) {
         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
             dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
         if (implementationTrainableLayer != nullptr) {
-            stampedNetwork.trainableLayers.push_back(implementationTrainableLayer);
+            stampedNetwork.trainableLayersShared.push_back(implementationTrainableLayer);
+            stampedNetwork.trainableLayers.push_back(implementationTrainableLayer.get());
         } else {
-            stampedNetwork.otherLayers.push_back(implementationLayer);
+            stampedNetwork.otherLayersShared.push_back(implementationLayer);
+            stampedNetwork.otherLayers.push_back(implementationLayer.get());
         }
     }
 }
@@ -680,7 +693,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
                                  uint32_t batchSize,
                                  ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor];
+    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
         apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
@@ -695,9 +708,11 @@ void Network::stampNetworkOutput(Tensor inputTensor,
         Layer::connectTwoLayers(physicalDrivingLayer, implementationTensorFanout, apiDrivingLayer, nullptr, inputTensor);
         physicalDrivingLayer = implementationTensorFanout;
 
-        stampedNetwork.otherLayers.push_back(implementationTensorFanout);
+        stampedNetwork.otherLayersShared.push_back(implementationTensorFanout);
+        stampedNetwork.otherLayers.push_back(implementationTensorFanout.get());
         apiDrivingLayer = nullptr;
-        stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer;
+        stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor] = physicalDrivingLayer;
+        stampedNetwork.apiTensorToPhysicalDrivingLayer[inputTensor] = physicalDrivingLayer.get();
         if (DEBUG_STAMP) {
             printf("stamped tensor fanout - network output\n");
             fflush(stdout);
@@ -711,15 +726,19 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);
-    networkOutput->initialize(implementationNetworkOutput, stampedNetwork.initializers);
+    networkOutput->initialize(implementationNetworkOutput, stampedNetwork.initializersShared);
     assert(implementationNetworkOutput != nullptr);
-    stampedNetwork.outputs.push_back(implementationNetworkOutput);
-    stampedNetwork.outputNamed[implementationNetworkOutput->getName()] = implementationNetworkOutput;
+    stampedNetwork.outputsShared.push_back(implementationNetworkOutput);
+    stampedNetwork.outputs.push_back(implementationNetworkOutput.get());
+    stampedNetwork.outputNamedShared[implementationNetworkOutput->getName()] = implementationNetworkOutput;
+    stampedNetwork.outputNamed[implementationNetworkOutput->getName()] = implementationNetworkOutput.get();
     if (DEBUG_STAMP) {
         printf("stamped network output\n");
         fflush(stdout);
     }
 
-    stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput;
-    stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput] = networkOutput->getId();
+    stampedNetwork.apiLayerToPhysicalLayerShared[networkOutput->getId()] = implementationNetworkOutput;
+    stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput.get();
+    stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkOutput] = networkOutput->getId();
+    stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput.get()] = networkOutput->getId();
 }
