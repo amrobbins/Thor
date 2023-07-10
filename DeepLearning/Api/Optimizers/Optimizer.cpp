@@ -26,17 +26,18 @@ void Optimizer::attachToNetwork() {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         uint32_t stampGpu = stampedNetwork.getGpuNum();
         for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayers[j];
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayersShared[j];
             int64_t layerStampedId = trainableLayer->getStampedId();
-            if (optimizers[stampGpu].count(layerStampedId) == 0) {
+            if (optimizersShared[stampGpu].count(layerStampedId) == 0) {
                 shared_ptr<ThorImplementation::Optimizer> optimizer = stamp(trainableLayer);
                 assert(optimizer->getGradientUpdateStream().isInitialized());
-                optimizers[stampGpu][layerStampedId] = optimizer;
+                optimizersShared[stampGpu][layerStampedId] = optimizer;
+                optimizers[stampGpu][layerStampedId] = optimizer.get();
             }
 
             assert(optimizers[stampGpu].count(layerStampedId) == 1);
             assert(optimizers[stampGpu][layerStampedId]->getGradientUpdateStream().isInitialized());
-            trainableLayer->setOptimizer(optimizers[stampGpu][layerStampedId]);
+            trainableLayer->setOptimizer(optimizersShared[stampGpu][layerStampedId]);
         }
     }
 }
@@ -49,12 +50,16 @@ void Optimizer::disconnectFromNetwork() {
     for (uint32_t i = 0; i < stamps.size(); ++i) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayers[j];
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayersShared[j];
             trainableLayer->clearOptimizer();
         }
     }
 
     for (auto gpuIt = optimizers.begin(); gpuIt != optimizers.end(); ++gpuIt) {
+        unordered_map<int64_t, ThorImplementation::Optimizer *> gpuOptimizers = gpuIt->second;
+        gpuOptimizers.clear();
+    }
+    for (auto gpuIt = optimizersShared.begin(); gpuIt != optimizersShared.end(); ++gpuIt) {
         unordered_map<int64_t, shared_ptr<ThorImplementation::Optimizer>> gpuOptimizers = gpuIt->second;
         gpuOptimizers.clear();
     }
@@ -75,7 +80,7 @@ unordered_map<string, float> Optimizer::getAllHyperParameters(uint64_t epoch, ui
     assert(!stamps.empty());
     assert(!stamps[0].trainableLayers.empty());
 
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stamps[0].trainableLayers[0];
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stamps[0].trainableLayersShared[0];
     Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
     assert(maybeOptimizer.isPresent());
     shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -91,9 +96,9 @@ unordered_map<string, float> Optimizer::updateHyperParameters(uint64_t epoch, ui
 
     unordered_map<string, float> updatedHyperParameters;
     for (auto gpuIt = optimizers.begin(); gpuIt != optimizers.end(); ++gpuIt) {
-        unordered_map<int64_t, shared_ptr<ThorImplementation::Optimizer>> gpuOptimizers = gpuIt->second;
+        unordered_map<int64_t, ThorImplementation::Optimizer *> gpuOptimizers = gpuIt->second;
         for (auto it = gpuOptimizers.begin(); it != gpuOptimizers.end(); ++it) {
-            shared_ptr<ThorImplementation::Optimizer> optimizer = it->second;
+            ThorImplementation::Optimizer *optimizer = it->second;
             updatedHyperParameters = optimizer->updateHyperParameters(epoch, batch, batchesPerEpoch);
         }
     }

@@ -51,7 +51,8 @@ class Sgd : public Optimizer {
 
     uint32_t gpuNum;
 
-    std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer;
+    std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayerShared;
+    TrainableWeightsBiasesLayer *trainableLayer;
 
     uint32_t numInputFeatures;
     uint32_t numOutputputFeatures;

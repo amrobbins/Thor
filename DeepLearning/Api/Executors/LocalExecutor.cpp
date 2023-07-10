@@ -8,8 +8,8 @@ using std::thread;
 using namespace Thor;
 using namespace std;
 
-#define LOCAL_EXECUTOR_PROFILE true
-#define LOCAL_EXECUTOR_PROFILE_NUM_BATCHES 5
+#define LOCAL_EXECUTOR_PROFILE false
+#define LOCAL_EXECUTOR_PROFILE_NUM_BATCHES 10
 
 shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     assert(_loader);

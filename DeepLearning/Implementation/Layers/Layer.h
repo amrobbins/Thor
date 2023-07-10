@@ -291,7 +291,7 @@ class Layer {
         launchSumScaleHalfAll(result_d, nonScaledSource_d, scaledSource_d, scale, numElements, stream);
     }
 
-    uint64_t getId() { return id; }
+    uint64_t getId() const { return id; }
 
     // compute the fan in for one element of a batch
     virtual uint64_t getFanIn() {

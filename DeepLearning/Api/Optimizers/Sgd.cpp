@@ -34,7 +34,7 @@ void Sgd::setDecay(float newDecay) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
             // Ensure that an sgd optimizer is infact attached to each trainable layer, and then set each of their learning rate.
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayers[j];
+            ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer = stampedNetwork.trainableLayers[j];
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -58,7 +58,7 @@ void Sgd::setInitialLearningRate(float newInitialLearningRate) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
             // Ensure that an sgd optimizer is infact attached to each trainable layer, and then set each of their learning rate.
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayers[j];
+            ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer = stampedNetwork.trainableLayers[j];
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -79,7 +79,7 @@ void Sgd::setMomentum(float newMomentum) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
             // Ensure that an sgd optimizer is infact attached to each trainable layer, and then set each of their learning rate.
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayers[j];
+            ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer = stampedNetwork.trainableLayers[j];
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -100,7 +100,7 @@ void Sgd::setUseNesterovMomentum(bool newUseNesterovMomentum) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
             // Ensure that an sgd optimizer is infact attached to each trainable layer, and then set each of their learning rate.
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayers[j];
+            ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer = stampedNetwork.trainableLayers[j];
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
