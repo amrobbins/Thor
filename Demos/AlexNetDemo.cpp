@@ -26,7 +26,7 @@ int main() {
     Thor::Network alexNet = buildAlexNet();
     // Thor::Network alexNet = buildDeepFullyConnected();
 
-    assert(cudaProfilerStop() == cudaSuccess);
+    // assert(cudaProfilerStop() == cudaSuccess);
 
     cudaDeviceReset();
 
@@ -40,7 +40,7 @@ int main() {
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 256);
     batchLoader->setDatasetName("ImageNet 2012");
 
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.05).decay(0.2).momentum(0.0).build();
+    std::shared_ptr<Sgd> sgd = Sgd::Builder().network(alexNet).initialLearningRate(0.05).decay(0.2).momentum(0.0).build();
 
     shared_ptr<Thor::LocalExecutor> executor =
         LocalExecutor::Builder().network(alexNet).loader(batchLoader).optimizer(sgd).visualizer(&ConsoleVisualizer::instance()).build();

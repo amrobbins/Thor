@@ -35,7 +35,7 @@ int main() {
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 48);
     batchLoader->setDatasetName("ImageNet 2012");
 
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01).decay(0.4).momentum(0.0).build();
+    std::shared_ptr<Sgd> sgd = Sgd::Builder().network(fewLayerFullyConnected).initialLearningRate(0.01).decay(0.4).momentum(0.0).build();
 
     shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
                                                    .network(fewLayerFullyConnected)

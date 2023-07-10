@@ -8,8 +8,10 @@ using std::thread;
 using namespace Thor;
 using namespace std;
 
+#define LOCAL_EXECUTOR_PROFILE true
+#define LOCAL_EXECUTOR_PROFILE_NUM_BATCHES 5
+
 shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
-    assert(_network.isPresent());
     assert(_loader);
     assert(_optimizer);
     // FIXME: add hyperparameter controller
@@ -35,7 +37,7 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     }
 
     for (uint64_t i = 0; i < localExecutor->visualizers.size(); ++i) {
-        localExecutor->visualizerExecutionState.emplace_back(new AsyncQueue<ExecutionState>(1024));
+        localExecutor->visualizerExecutionState.push_back(std::make_shared<AsyncQueue<ExecutionState>>(1024));
         localExecutor->visualizerExecutionState.back()->open();
         localExecutor->visualizers[i]->connectStateUpdateQueue(localExecutor->visualizerExecutionState.back());
         localExecutor->visualizers[i]->startUI();
@@ -46,19 +48,14 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     // Stamp the network
     // FIXME: stamp N networks per GPU, currently just stamping 1 network on gpu 0.
     // FIXME: save known optimal kernels on disk
-    localExecutor->network.preOptimize(0, batchSize);
-    localExecutor->stampedNetworks.emplace_back();
-    Thor::Network::StatusCode statusCode = localExecutor->network.stampNetwork(0, batchSize, localExecutor->stampedNetworks.back());
-    assert(statusCode == Thor::Network::StatusCode::SUCCESS);
-    localExecutor->stampedNetworks.back().initialize();
-
-    /*
-    // FIXME: temp
-    for (uint64_t i = 0; i < localExecutor->stampedNetworks.size(); ++i) {
-        for (uint64_t t = 0; t < localExecutor->stampedNetworks[i].trainableLayers.size(); ++t)
-            localExecutor->stampedNetworks[i].trainableLayers[t]->setLearningRate(0.001);
+    Network::StatusCode statusCode;
+    statusCode = localExecutor->network->place(batchSize);
+    assert(statusCode == Network::StatusCode::SUCCESS);
+    assert(!localExecutor->network->getStampedNetworks().empty());
+    localExecutor->stampedNetworks = localExecutor->network->getStampedNetworks();
+    for (uint32_t i = 0; i < localExecutor->stampedNetworks.size(); ++i) {
+        localExecutor->stampedNetworks.back().initialize();
     }
-    */
 
     localExecutor->batchDataReady = make_shared<map<uint64_t, bool>>();
     localExecutor->batchData = make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();
@@ -78,6 +75,7 @@ LocalExecutor::~LocalExecutor() {
     for (uint64_t i = 0; i < visualizerExecutionState.size(); ++i) {
         visualizerExecutionState[i]->close();
     }
+    visualizerExecutionState.clear();
 }
 
 void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
@@ -161,7 +159,19 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
     // Scheduling in the following loop schedules far enough ahead untill all input batch buffers are exhausted.
     // Once that happens scheduling does not get any further ahead.
+#if LOCAL_EXECUTOR_PROFILE
+    cudaStatus = cudaProfilerStart();
+    assert(cudaStatus == cudaSuccess);
+#endif
     for (uint64_t batch = 0; batch < batches; ++batch) {
+#if LOCAL_EXECUTOR_PROFILE
+        if (batch == LOCAL_EXECUTOR_PROFILE_NUM_BATCHES) {
+            cudaStatus = cudaProfilerStop();
+            assert(cudaStatus == cudaSuccess);
+            exit(0);
+        }
+#endif
+
         uint64_t epochBatchNum = initialEpochBatchNum + batch;
 
         optimizer->updateHyperParameters(*currentEpoch, epochBatchNum, *numBatchesInEpoch);
@@ -255,7 +265,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         ExecutionState executionState;
         executionState.outputDirectory = outputDirectory;
         executionState.epochsToTrain = numEpochs;
-        executionState.networkName = network.getNetworkName();
+        executionState.networkName = network->getNetworkName();
         executionState.datasetName = loader->getDatasetName();
         executionState.executionMode = ExampleType::TRAIN;
         executionState.epochNum = *currentEpoch;
@@ -317,7 +327,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
         executionState.outputDirectory = outputDirectory;
         executionState.epochsToTrain = numEpochs;
-        executionState.networkName = network.getNetworkName();
+        executionState.networkName = network->getNetworkName();
         executionState.datasetName = loader->getDatasetName();
         executionState.executionMode = ExampleType::VALIDATE;
         executionState.epochNum = *currentEpoch;

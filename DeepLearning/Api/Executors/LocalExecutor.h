@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include <cuda_profiler_api.h>
 #include <boost/filesystem.hpp>
 
 #include <condition_variable>
@@ -60,7 +61,7 @@ class LocalExecutor : public Executor {
    private:
     bool initialized;
 
-    Network network;
+    Network* network;
     std::shared_ptr<Loader> loader;
     std::shared_ptr<Optimizer> optimizer;
     // FIXME: shared_ptr, however how do I deal with singletons then?
@@ -96,9 +97,8 @@ class LocalExecutor::Builder {
    public:
     virtual std::shared_ptr<LocalExecutor> build();
 
-    LocalExecutor::Builder network(Network _network) {
-        assert(!this->_network.isPresent());
-        this->_network = _network;
+    LocalExecutor::Builder network(Network& _network) {
+        this->_network = &_network;
         return *this;
     }
 
@@ -133,7 +133,7 @@ class LocalExecutor::Builder {
     }
 
    private:
-    Optional<Network> _network;
+    Network* _network;
     std::shared_ptr<Loader> _loader;
     std::shared_ptr<Optimizer> _optimizer;
     Optional<std::vector<Visualizer*>> _visualizers;
