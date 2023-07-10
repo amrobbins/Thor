@@ -32,6 +32,11 @@
 namespace ThorImplementation {
 
 class StampedNetwork {
+   private:
+    struct LayerComparator {
+        bool operator()(const std::shared_ptr<Layer> &lhs, const std::shared_ptr<Layer> &rhs) const { return lhs->getId() < rhs->getId(); }
+    };
+
    public:
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputs;
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputs;
@@ -42,7 +47,7 @@ class StampedNetwork {
 
     std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayer;
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayer;
-    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t> physicalLayerToApiLayer;
+    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;
     std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayer;
 
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamed;
@@ -173,9 +178,6 @@ class Network {
     virtual StatusCode place(uint32_t batchSize,
                              std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
                              uint32_t forcedNumStampsPerGpu = 0);
-    // FIXME: access modifiers of the next 2. place should be calling stamp and preoptimize. getStampedNetworks should remain public.
-    virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual std::vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
 
     virtual void setNetworkName(std::string networkName) { this->networkName = networkName; }
@@ -192,15 +194,19 @@ class Network {
    private:
     static const bool DEBUG_STAMP = false;
 
+    struct LayerComparator {
+        bool operator()(const std::shared_ptr<Layer> &lhs, const std::shared_ptr<Layer> &rhs) const { return *lhs < *rhs; }
+    };
+
    protected:
-    std::set<std::shared_ptr<Layer>> network;
+    std::set<std::shared_ptr<Layer>, Network::LayerComparator> network;
     std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
 
     std::set<Tensor> allTensors;
     std::map<Tensor, std::vector<std::shared_ptr<Layer>>> apiTensorToApiLoadingLayers;
     std::map<Tensor, std::shared_ptr<Layer>> apiTensorToApiDrivingLayer;
-    std::map<std::shared_ptr<Layer>, std::vector<Tensor>> apiLayerToApiOutputTensors;
-    std::map<std::shared_ptr<Layer>, std::vector<Tensor>> apiLayerToApiInputTensors;
+    std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiOutputTensors;
+    std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiInputTensors;
 
     std::vector<std::shared_ptr<Initializer>> initializers;
     std::shared_ptr<Optimizer> optimizer;
@@ -212,6 +218,9 @@ class Network {
 
     uint64_t firstInstanceBytes;
     uint64_t nonFirstInstanceBytes;
+
+    virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize);
+    virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
 
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForDuplicateInOutPortNames();

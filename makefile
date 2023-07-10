@@ -36,7 +36,7 @@ TEST_COMPILE_DEPENDENCIES = $(INCLUDE_DIRS_TEST) $(LIB_DIRS_TEST) $(LIBS_TEST) $
 DEBUG = -ggdb -O0
 NVCC_DEBUG = -g
 
-RELEASE = false
+RELEASE = true
 
 ifeq ($(RELEASE),true)
 	Gpp = g++ -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed

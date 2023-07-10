@@ -79,7 +79,7 @@ class ConsoleVisualizer : public Visualizer {
     static int heightW1;
     static int heightW2;
 
-    static std::thread *uiThread;
+    static std::shared_ptr<std::thread> uiThread;
     static std::recursive_mutex mtx;
     static bool uiRunning;
 

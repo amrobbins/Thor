@@ -45,7 +45,8 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 }
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
-Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, ThorImplementation::StampedNetwork &stampedNetwork) {
+Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize) {
+    ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
 
     StatusCode preoptimizeStatus = preOptimize(gpuNum, batchSize);
@@ -146,9 +147,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize, T
 Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
     // FIXME: multiple stamps, multiple gpus
     // FIXME: smart placement and stamping
-    assert(forcedNumStampsPerGpu = 1);
+    assert(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
     vector<int32_t> gpu0 = {0};
-    assert(forcedDevices == gpu0);
+    assert(forcedDevices == gpu0 || forcedDevices.empty());
 
     StatusCode statusCode;
 
@@ -166,10 +167,10 @@ Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forc
         }
     }
 
-    for (uint32_t i = 0; i < forcedDevices.size(); ++i) {
+    for (uint32_t i = 0; i < devices.size(); ++i) {
+        preOptimize(devices[i], batchSize);
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
-            ThorImplementation::StampedNetwork ignoredStampedNetwork;
-            statusCode = stampNetwork(devices[i], batchSize, ignoredStampedNetwork);
+            statusCode = stampNetwork(devices[i], batchSize);
             if (statusCode != StatusCode::SUCCESS)
                 return statusCode;
         }
@@ -222,30 +223,6 @@ void Network::load_from_keras(string filename) {
     // FIXME:
     assert(false);
 }
-
-/*
-void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork) {
-    StampedNetwork initialStampedNework = stampedNetwork;
-    stampedNetwork.inputs.clear();
-    stampedNetwork.outputs.clear();
-    stampedNetwork.trainableLayers.clear();
-    stampedNetwork.otherLayers.clear();
-
-    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.inputs);
-    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.outputs);
-    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.trainableLayers);
-    reorderLayers(initialStampedNetwork, initialStampedNetwork.inputs, stampedNetwork.otherLayers);
-}
-
-void reorderLayers(StampedNetwork &stampedNetwork, vector<Layer*> &layersToReoder, vector<Layer*> &destinationStorage) {
-    put api layers in one vector, non api layers in another vector
-    sort impl layers based on their corresponding api id, will need to use a lambda comparison function
-
-    for(uint32_t i = 0; i < layersToReorder.size(); ++i) {
-
-    }
-}
-*/
 
 // Determine the graph structure
 // Tensors are the edges that connect the Layers which are nodes.

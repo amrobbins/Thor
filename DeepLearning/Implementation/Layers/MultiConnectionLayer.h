@@ -44,8 +44,11 @@ class MultiConnectionLayer : public Layer {
                         previousLayers[i].get()->replaceErrorInput(errorOutputs[i], newErrorInput);
                     errorOutputs[i] = newErrorInput;
                 }
+                allErrorInputTensorIds.erase(errorInputs[i].get().getTensorId());
             }
             errorInputs[i] = newErrorInput;
+            if (errorInputs[i].isPresent())
+                allErrorInputTensorIds.insert(errorInputs[i].get().getTensorId());
         }
         assert(replacementHappend);
     }

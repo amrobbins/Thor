@@ -30,7 +30,7 @@ int ConsoleVisualizer::windowWidth;
 int ConsoleVisualizer::heightW0;
 int ConsoleVisualizer::heightW1;
 int ConsoleVisualizer::heightW2;
-std::thread *ConsoleVisualizer::uiThread = nullptr;
+shared_ptr<thread> ConsoleVisualizer::uiThread = nullptr;
 bool ConsoleVisualizer::uiRunning = false;
 std::recursive_mutex ConsoleVisualizer::mtx;
 
@@ -903,7 +903,7 @@ void ConsoleVisualizer::startUI() {
 
     printf("\033[?1003l\n");  // Disable mouse movement events, as l = low
     uiRunning = true;
-    uiThread = new thread(&ConsoleVisualizer::inputHandler, this);
+    uiThread = make_shared<thread>(&ConsoleVisualizer::inputHandler, this);
 
     display();
 }
@@ -921,7 +921,6 @@ void ConsoleVisualizer::stopUI() {
     }
 
     uiThread->join();
-    delete uiThread;
     uiThread = nullptr;
 
     dumpSummaryToTerminal();
