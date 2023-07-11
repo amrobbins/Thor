@@ -23,6 +23,14 @@ string Network::statusCodeToString(int statusCode) {
     assert(false);
 }
 
+Network::~Network() {
+    for (uint32_t i = 0; i < stampedNetworks.size(); ++i) {
+        // Calls parentCleanup then cleanUp then clears all the shared pointers:
+        stampedNetworks[i].clear();
+    }
+    stampedNetworks.clear();
+}
+
 Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
     if (!frozen) {
         StatusCode status = evaluateGraph();
@@ -171,8 +179,12 @@ Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forc
         preOptimize(devices[i], batchSize);
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
             statusCode = stampNetwork(devices[i], batchSize);
-            if (statusCode != StatusCode::SUCCESS)
+            if (statusCode != StatusCode::SUCCESS) {
                 return statusCode;
+            }
+            bool initializeWeights = i == 0 && j == 0;
+            bool copyWeights = i != 0 && j == 0;
+            stampedNetworks.back().initialize(initializeWeights, copyWeights, copyWeights ? &(stampedNetworks[0]) : nullptr);
         }
     }
 

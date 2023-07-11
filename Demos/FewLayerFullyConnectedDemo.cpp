@@ -23,19 +23,19 @@ using namespace std;
 int main() {
     Thor::Network fewLayerFullyConnected = buildFewLayerFullyConnected();
 
+    cudaDeviceReset();
+
     set<string> shardPaths;
 
-    assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_1_of_2.shard"));
-    assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_2_of_2.shard"));
-    shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_1_of_2.shard");
-    shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_2_of_2.shard");
-    ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {3, 224, 224});
-    ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {1});
+    assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_1_of_1.shard"));
+    shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_1_of_1.shard");
+    ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {3, 224, 224});
+    ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {1000});
 
-    std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 48);
+    std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 256);
     batchLoader->setDatasetName("ImageNet 2012");
 
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().network(fewLayerFullyConnected).initialLearningRate(0.01).decay(0.4).momentum(0.0).build();
+    std::shared_ptr<Sgd> sgd = Sgd::Builder().network(fewLayerFullyConnected).initialLearningRate(0.05).decay(0.2).momentum(0.0).build();
 
     shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
                                                    .network(fewLayerFullyConnected)

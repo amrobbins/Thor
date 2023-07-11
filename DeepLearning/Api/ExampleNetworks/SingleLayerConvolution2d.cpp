@@ -34,7 +34,7 @@ Network buildSingleLayerConvolution2d() {
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
-                             .activationBuilder(Swish::Builder())
+                             .activationBuilder(Relu::Builder())
                              .batchNormalization()
                              .build()
                              .getFeatureOutput();
@@ -79,6 +79,7 @@ Network buildSingleLayerConvolution2d() {
                                             .predictions(latestOutputTensor)
                                             .labels(labelsTensor)
                                             .reportsBatchLoss()
+                                            .receivesOneHotLabels()
                                             .build();
 
     labelsTensor = lossLayer.getLabels();
@@ -100,6 +101,7 @@ Network buildSingleLayerConvolution2d() {
                                             .network(singleLayerConvolution2d)
                                             .predictions(lossLayer.getPredictions())
                                             .labels(labelsTensor)
+                                            .receivesOneHotLabels()
                                             .build();
 
     NetworkOutput accuracy = NetworkOutput::Builder()

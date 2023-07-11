@@ -24,7 +24,7 @@ Network buildFewLayerFullyConnected() {
     latestOutputTensor = FullyConnected::Builder()
                              .network(fewLayerFullyConnected)
                              .featureInput(imagesInput.getFeatureOutput())
-                             .numOutputFeatures(4096)
+                             .numOutputFeatures(128)
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
@@ -36,7 +36,7 @@ Network buildFewLayerFullyConnected() {
     latestOutputTensor = FullyConnected::Builder()
                              .network(fewLayerFullyConnected)
                              .featureInput(latestOutputTensor)
-                             .numOutputFeatures(4096)
+                             .numOutputFeatures(128)
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
@@ -70,6 +70,7 @@ Network buildFewLayerFullyConnected() {
                                             .predictions(latestOutputTensor)
                                             .labels(labelsTensor)
                                             .reportsBatchLoss()
+                                            .receivesOneHotLabels()
                                             .build();
 
     labelsTensor = lossLayer.getLabels();
@@ -87,8 +88,12 @@ Network buildFewLayerFullyConnected() {
                              .dataType(Tensor::DataType::FP32)
                              .build();
 
-    CategoricalAccuracy accuracyLayer =
-        CategoricalAccuracy::Builder().network(fewLayerFullyConnected).predictions(lossLayer.getPredictions()).labels(labelsTensor).build();
+    CategoricalAccuracy accuracyLayer = CategoricalAccuracy::Builder()
+                                            .network(fewLayerFullyConnected)
+                                            .predictions(lossLayer.getPredictions())
+                                            .labels(labelsTensor)
+                                            .receivesOneHotLabels()
+                                            .build();
 
     NetworkOutput accuracy = NetworkOutput::Builder()
                                  .network(fewLayerFullyConnected)
