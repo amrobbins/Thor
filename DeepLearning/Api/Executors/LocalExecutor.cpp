@@ -53,9 +53,6 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     assert(statusCode == Network::StatusCode::SUCCESS);
     assert(!localExecutor->network->getStampedNetworks().empty());
     localExecutor->stampedNetworks = localExecutor->network->getStampedNetworks();
-    for (uint32_t i = 0; i < localExecutor->stampedNetworks.size(); ++i) {
-        localExecutor->stampedNetworks.back().initialize();
-    }
 
     localExecutor->batchDataReady = make_shared<map<uint64_t, bool>>();
     localExecutor->batchData = make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();

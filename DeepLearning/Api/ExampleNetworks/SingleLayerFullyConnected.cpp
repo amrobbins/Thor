@@ -58,6 +58,7 @@ Network buildSingleLayerFullyConnected() {
                                             .predictions(latestOutputTensor)
                                             .labels(labelsTensor)
                                             .reportsBatchLoss()
+                                            .receivesOneHotLabels()
                                             .build();
 
     labelsTensor = lossLayer.getLabels();
@@ -79,6 +80,7 @@ Network buildSingleLayerFullyConnected() {
                                             .network(singleLayerFullyConnected)
                                             .predictions(lossLayer.getPredictions())
                                             .labels(labelsTensor)
+                                            .receivesOneHotLabels()
                                             .build();
 
     NetworkOutput accuracy = NetworkOutput::Builder()

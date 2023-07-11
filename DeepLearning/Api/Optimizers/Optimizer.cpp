@@ -25,8 +25,8 @@ void Optimizer::attachToNetwork() {
     for (uint32_t i = 0; i < stamps.size(); ++i) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
         uint32_t stampGpu = stampedNetwork.getGpuNum();
-        for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayersShared[j];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
             int64_t layerStampedId = trainableLayer->getStampedId();
             if (optimizersShared[stampGpu].count(layerStampedId) == 0) {
                 shared_ptr<ThorImplementation::Optimizer> optimizer = stamp(trainableLayer);
@@ -49,8 +49,8 @@ void Optimizer::disconnectFromNetwork() {
     vector<ThorImplementation::StampedNetwork> stamps = network->getStampedNetworks();
     for (uint32_t i = 0; i < stamps.size(); ++i) {
         ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.trainableLayers.size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.trainableLayersShared[j];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
             trainableLayer->clearOptimizer();
         }
     }
@@ -78,9 +78,9 @@ unordered_map<string, float> Optimizer::getAllHyperParameters(uint64_t epoch, ui
     // All optimizer instances must have the same parameters.
     vector<ThorImplementation::StampedNetwork> stamps = network->getStampedNetworks();
     assert(!stamps.empty());
-    assert(!stamps[0].trainableLayers.empty());
+    assert(!stamps[0].getTrainableLayers().empty());
 
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stamps[0].trainableLayersShared[0];
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stamps[0].getTrainableLayers()[0];
     Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
     assert(maybeOptimizer.isPresent());
     shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();

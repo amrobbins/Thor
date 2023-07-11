@@ -29,6 +29,13 @@
 #include <utility>
 #include <vector>
 
+#include "omp.h"
+
+namespace Thor {
+class Network;
+class LocalExecutor;
+}  // namespace Thor
+
 namespace ThorImplementation {
 
 class StampedNetwork {
@@ -50,42 +57,21 @@ class StampedNetwork {
     }
 
    public:
-    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputsShared;
-    std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
-    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayersShared;
-    std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
-    std::vector<std::shared_ptr<Thor::Initializer>> initializersShared;
-    std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;
-    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayerShared;
-    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparatorShared> physicalLayerToApiLayerShared;
-    std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayerShared;
-    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
-    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
-
-    // For performance, store and use the raw pointers
-    std::vector<ThorImplementation::NetworkInput *> inputs;
-    std::vector<ThorImplementation::NetworkOutput *> outputs;
-    std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
-    std::vector<ThorImplementation::Layer *> otherLayers;
-    std::vector<Thor::Initializer *> initializers;
-    std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
-    std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
-    std::map<ThorImplementation::Layer *, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;
-    std::map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
-    std::map<std::string, ThorImplementation::NetworkInput *> inputNamed;
-    std::map<std::string, ThorImplementation::NetworkOutput *> outputNamed;
-
-    uint32_t gpuNum;
-
-    uint64_t bytesRequired;
-    uint64_t batchSize;
-
-    uint64_t floatingPointOperationsPerExampleForward;
-    uint64_t floatingPointOperationsPerExampleBackward;
-
     uint32_t getGpuNum() const { return gpuNum; }
+    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
+    std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
+    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> getTrainableLayers() { return trainableLayersShared; }
+    std::vector<std::shared_ptr<ThorImplementation::Layer>> getOtherLayers() { return otherLayersShared; }
+    uint64_t getBytesRequired() {
+        // FIXME
+        assert(false);
+    }
 
-    void initialize() {
+    // For testing:
+    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
+
+   protected:
+    void initialize(bool initializeWeights, bool copyWeightsFromOtherStamp, StampedNetwork *otherStamp = nullptr) {
         for (auto it = initializersShared.begin(); it != initializersShared.end(); ++it) {
             initializers.push_back(it->get());
         }
@@ -127,8 +113,42 @@ class StampedNetwork {
         }
 
         // Now that checks have been run, initialize the stamp
-        for (uint32_t i = 0; i < initializers.size(); ++i)
-            initializers[i]->initialize();
+        assert(!(initializeWeights && copyWeightsFromOtherStamp));
+        if (initializeWeights) {
+            // Weights are shared by all stamps so weights are only initialized once
+            for (uint32_t i = 0; i < initializers.size(); ++i)
+                initializers[i]->initialize();
+        } else if (copyWeightsFromOtherStamp) {
+            // Every GPU needs its a copy of the weights, if they have already been initialized in a weights memory, then copy that memory
+            // to the target GPU.
+            assert(otherStamp != nullptr);
+            // FIXME use trainable layer stamped ids to copy weights and when present biases from other stamp to this stamp
+            std::unordered_map<uint64_t, ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayerMap;
+            for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+                trainableLayerMap[trainableLayers[i]->getStampedId()] = trainableLayers[i];
+            }
+            std::vector<Stream> streams;
+            Stream stream;
+            for (uint32_t i = 0; i < otherStamp->trainableLayers.size(); ++i) {
+                uint32_t stampedId = otherStamp->trainableLayers[i]->getStampedId();
+                if (i == 0) {
+                    streams.push_back(trainableLayerMap[stampedId]->getStreams()[0]);
+                }
+                Tensor uninitializedWeights = trainableLayerMap[stampedId]->getWeights();
+                Optional<Tensor> uninitializedBiases = trainableLayerMap[stampedId]->getBiases();
+                ThorImplementation::TrainableWeightsBiasesLayer *initializedLayer = otherStamp->trainableLayers[i];
+                Tensor initializedWeights = initializedLayer->getWeights();
+                Optional<Tensor> initializedBiases = initializedLayer->getBiases();
+                uninitializedWeights.copyFromAsync(initializedWeights, streams.back());
+                if (initializedBiases.isPresent()) {
+                    assert(uninitializedBiases.isPresent());
+                    uninitializedBiases.get().copyFromAsync(initializedBiases.get(), stream);
+                }
+            }
+            for (uint32_t i = 0; i < streams.size(); ++i) {
+                streams[i].synchronize();
+            }
+        }
 
         for (uint32_t i = 0; i < inputs.size(); ++i) {
             inputs[i]->parentInitialize();
@@ -207,10 +227,6 @@ class StampedNetwork {
         }
         otherLayers.clear();
 
-        inputs.clear();
-        outputs.clear();
-        trainableLayers.clear();
-        otherLayers.clear();
         initializers.clear();
         apiTensorToPhysicalDrivingLayer.clear();
         apiLayerToPhysicalLayer.clear();
@@ -231,6 +247,42 @@ class StampedNetwork {
         inputNamedShared.clear();
         outputNamedShared.clear();
     }
+
+    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> inputsShared;
+    std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
+    std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayersShared;
+    std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
+    std::vector<std::shared_ptr<Thor::Initializer>> initializersShared;
+    std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;
+    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayerShared;
+    std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparatorShared> physicalLayerToApiLayerShared;
+    std::map<Thor::Tensor, std::shared_ptr<Thor::Layer>> apiTensorToApiDrivingLayerShared;
+    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
+    std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
+
+    // For performance, store and use the raw pointers
+    std::vector<ThorImplementation::NetworkInput *> inputs;
+    std::vector<ThorImplementation::NetworkOutput *> outputs;
+    std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
+    std::vector<ThorImplementation::Layer *> otherLayers;
+    std::vector<Thor::Initializer *> initializers;
+    std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
+    std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
+    std::map<ThorImplementation::Layer *, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;
+    std::map<Thor::Tensor, Thor::Layer *> apiTensorToApiDrivingLayer;
+    std::map<std::string, ThorImplementation::NetworkInput *> inputNamed;
+    std::map<std::string, ThorImplementation::NetworkOutput *> outputNamed;
+
+    uint32_t gpuNum;
+
+    uint64_t bytesRequired;
+    uint64_t batchSize;
+
+    uint64_t floatingPointOperationsPerExampleForward;
+    uint64_t floatingPointOperationsPerExampleBackward;
+
+    friend class Thor::Network;
+    friend class Thor::LocalExecutor;
 };
 
 }  // namespace ThorImplementation
@@ -254,7 +306,7 @@ class Network {
     const static int32_t CPU = -1;
 
     Network() : frozen(false) {}
-    virtual ~Network() {}
+    virtual ~Network();
 
     virtual std::string statusCodeToString(int statusCode);
 
