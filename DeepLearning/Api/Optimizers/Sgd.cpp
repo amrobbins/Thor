@@ -130,3 +130,11 @@ void Sgd::updateParameters() {
         }
     }
 }
+
+float Sgd::getInitialLearningRate() { return initialLearningRate; }
+
+float Sgd::getDecay() { return decay; }
+
+float Sgd::getMomentum() { return momentum; }
+
+bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
