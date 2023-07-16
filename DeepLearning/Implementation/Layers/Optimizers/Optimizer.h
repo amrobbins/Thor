@@ -14,6 +14,8 @@ class Optimizer {
         id = nextId.fetch_add(1);
     }
 
+    virtual void initialize() {}
+
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) { assert(false); }
@@ -45,7 +47,7 @@ class Optimizer {
     /**
      * C = alpha * A + beta * C
      */
-    void accumulateScale(Tensor A, Tensor C, const void *alpha, const void *beta, Stream stream) {
+    void accumulateScale(Tensor C, Tensor A, const void *alpha, const void *beta, Stream stream) {
         // Verify compatibility
         TensorDescriptor descriptorA = A.getDescriptor();
         TensorDescriptor descriptorC = C.getDescriptor();
