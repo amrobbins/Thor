@@ -17,11 +17,16 @@ class Sgd : public Optimizer {
 
     virtual ~Sgd();
 
-    void setConstantLearningRate(float newCurrentLearningRate);
-    void setInitialLearningRate(float newInitialLearningRate);
-    void setDecay(float newDecay);
-    void setMomentum(float newMomentum);
-    void setUseNesterovMomentum(bool newUseNesterovMomentum);
+    virtual void setConstantLearningRate(float newCurrentLearningRate);
+    virtual void setInitialLearningRate(float newInitialLearningRate);
+    virtual void setDecay(float newDecay);
+    virtual void setMomentum(float newMomentum);
+    virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
+
+    virtual float getInitialLearningRate();
+    virtual float getDecay();
+    virtual float getMomentum();
+    virtual bool getUseNesterovMomentum();
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(

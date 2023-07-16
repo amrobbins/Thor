@@ -50,7 +50,7 @@ void Adam::initialize() {
     // So the default value of epsilon (which prevents divide by zero) is set to no less than this when epsilon is FP16.
     // https://en.wikipedia.org/wiki/Half-precision_floating-point_format
     if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 && epsilon < 5.96046448e-8)
-        epsilon = __float2half_ru(5.96046448e-8f);
+        epsilon = __float2half_ru(5.9604644e-8f);
 
     weightsUpdate = weightsGradient.clone();
     if (biasesGradient.isPresent())
