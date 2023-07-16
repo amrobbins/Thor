@@ -127,3 +127,11 @@ float Sgd::getDecay() { return decay; }
 float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
+
+float Sgd::getInitialLearningRate() { return initialLearningRate; }
+
+float Sgd::getDecay(float newDecay) { return decay; }
+
+float Sgd::getMomentum(float newMomentum) { return momentum; }
+
+bool Sgd::getUseNesterovMomentum(bool newUseNesterovMomentum) { return useNesterovMomentum; }
