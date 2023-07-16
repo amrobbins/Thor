@@ -31,6 +31,7 @@ void Optimizer::attachToNetwork() {
             if (optimizersShared[stampGpu].count(layerStampedId) == 0) {
                 shared_ptr<ThorImplementation::Optimizer> optimizer = stamp(trainableLayer);
                 assert(optimizer->getGradientUpdateStream().isInitialized());
+                optimizer->initialize();
                 optimizersShared[stampGpu][layerStampedId] = optimizer;
                 optimizers[stampGpu][layerStampedId] = optimizer.get();
             }

@@ -65,7 +65,7 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             assert(false);
         } else {
             // Need to save of previous weights update, scale this by momentum, add to scaled gradient and add that to weights:
-            // weights = weightsGradient * scaleFromBelow + previousWeightsUpdate * momentum
+            // weights += previousWeightsUpdate * momentum - weightsGradient * scaleFromBelow
             // There is unfortunately no cublasHgeam: grep geam /usr/local/cuda-11.4/targets/x86_64-linux/include/cublas_api.h
             // but this function does implement this: C = α*A + β*B for fp32
             // so create a custom one for fp16 and use cublas for fp32. Wrap this in a function called addMatrixMatrix
@@ -78,10 +78,10 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
         float alpha = (-1.0f * currentLearningRate) / (Loss::getLossScalingFactor() * batchSize);
         float beta = 1.0f;
 
-        accumulateScale(weightsGradient, weights, &alpha, &beta, gradientUpdateStream);
+        accumulateScale(weights, weightsGradient, &alpha, &beta, gradientUpdateStream);
         if (biases.isPresent()) {
             assert(biasesGradient.isPresent());
-            accumulateScale(biasesGradient, biases, &alpha, &beta, gradientUpdateStream);
+            accumulateScale(biases, biasesGradient, &alpha, &beta, gradientUpdateStream);
         }
     }
 }
@@ -127,13 +127,3 @@ float Sgd::getDecay() { return decay; }
 float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
-
-Tensor Sgd::getWeightsUpdate() {
-    // FIXME: momentum
-    return weightsGradient;
-}
-
-Optional<Tensor> Sgd::getBiasesUpdate() {
-    // FIXME: momentum
-    return biasesGradient;
-}

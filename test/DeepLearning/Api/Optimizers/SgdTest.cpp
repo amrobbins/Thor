@@ -57,7 +57,7 @@ TEST(Sgd, SgdBuilds) {
     ASSERT_FALSE(optionalTest.isPresent());
 
     Network network = buildNetwork(2);
-    std::shared_ptr<Sgd> sgd =
+    shared_ptr<Sgd> sgd =
         Sgd::Builder().network(network).initialLearningRate(0.01).decay(0.9).momentum(0).useNesterovMomentum(true).build();
     ASSERT_NE(sgd, nullptr);
 }
@@ -67,13 +67,13 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
     float initialLearningRate = 0.72;
     float decay = 0.9;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd = Sgd::Builder()
-                                   .initialLearningRate(initialLearningRate)
-                                   .decay(decay)
-                                   .momentum(momentum)
-                                   .useNesterovMomentum(true)
-                                   .network(network)
-                                   .build();
+    shared_ptr<Sgd> sgd = Sgd::Builder()
+                              .initialLearningRate(initialLearningRate)
+                              .decay(decay)
+                              .momentum(momentum)
+                              .useNesterovMomentum(true)
+                              .network(network)
+                              .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     Network::StatusCode statusCode = network.place(32, {0}, 1);
@@ -82,7 +82,7 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
     uint32_t epoch = 0;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 10;
-    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
@@ -96,7 +96,7 @@ TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
     float initialLearningRate = 0.25;
     float decay = 0.8;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd =
+    shared_ptr<Sgd> sgd =
         Sgd::Builder().network(network).initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterovMomentum(true).build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
@@ -107,7 +107,7 @@ TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
     uint32_t epoch = 0;
     uint32_t batch = 4;
     uint32_t batchesPerEpoch = 25;
-    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
@@ -121,13 +121,13 @@ TEST(Sgd, SgdUpdatesParameters) {
     float initialLearningRate = 0.43;
     float decay = 0.8;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd = Sgd::Builder()
-                                   .network(network)
-                                   .initialLearningRate(initialLearningRate)
-                                   .decay(decay)
-                                   .momentum(momentum)
-                                   .useNesterovMomentum(true)
-                                   .build();
+    shared_ptr<Sgd> sgd = Sgd::Builder()
+                              .network(network)
+                              .initialLearningRate(initialLearningRate)
+                              .decay(decay)
+                              .momentum(momentum)
+                              .useNesterovMomentum(true)
+                              .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     Network::StatusCode statusCode = network.place(32, {0}, 1);
@@ -137,7 +137,7 @@ TEST(Sgd, SgdUpdatesParameters) {
     uint32_t epoch = 5;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
@@ -151,13 +151,13 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
     float initialLearningRate = 0.5;
     float decay = 0.32;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd = Sgd::Builder()
-                                   .initialLearningRate(initialLearningRate)
-                                   .decay(decay)
-                                   .momentum(momentum)
-                                   .useNesterovMomentum(true)
-                                   .network(network)
-                                   .build();
+    shared_ptr<Sgd> sgd = Sgd::Builder()
+                              .initialLearningRate(initialLearningRate)
+                              .decay(decay)
+                              .momentum(momentum)
+                              .useNesterovMomentum(true)
+                              .network(network)
+                              .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     Network::StatusCode statusCode = network.place(32, {0}, 1);
@@ -167,7 +167,7 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
     uint32_t epoch = 1;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    std::unordered_map<std::string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
@@ -181,19 +181,19 @@ TEST(Sgd, SgdReportsParameters) {
     float initialLearningRate = 0.5;
     float decay = 0.32;
     float momentum = 0.0;
-    std::shared_ptr<Sgd> sgd = Sgd::Builder()
-                                   .initialLearningRate(initialLearningRate)
-                                   .decay(decay)
-                                   .momentum(momentum)
-                                   .useNesterovMomentum(true)
-                                   .network(network)
-                                   .build();
+    shared_ptr<Sgd> sgd = Sgd::Builder()
+                              .initialLearningRate(initialLearningRate)
+                              .decay(decay)
+                              .momentum(momentum)
+                              .useNesterovMomentum(true)
+                              .network(network)
+                              .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     Network::StatusCode statusCode = network.place(32, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    std::unordered_map<std::string, float> params = sgd->getAllHyperParameters(0, 0, 0);
+    unordered_map<string, float> params = sgd->getAllHyperParameters(0, 0, 0);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);

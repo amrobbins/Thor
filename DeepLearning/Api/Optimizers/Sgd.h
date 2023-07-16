@@ -29,6 +29,8 @@ class Sgd : public Optimizer {
 
     virtual std::shared_ptr<Optimizer> clone() const;
 
+    void updateParameters();
+
    private:
     float initialLearningRate;
     float decay;

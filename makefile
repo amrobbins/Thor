@@ -94,6 +94,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest && \
                 build/test/DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageErrorTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest && \
+                build/test/DeepLearning/Api/Optimizers/AdamTest && \
 				build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
 				build/test/Utilities/WorkQueue/WorkQueueTest \
 
@@ -142,6 +143,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/Utilities/Common/OptionalTest \
             build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest \
             build/test/DeepLearning/Api/Optimizers/SgdTest \
+            build/test/DeepLearning/Api/Optimizers/AdamTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageErrorTest \
@@ -195,6 +197,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/Utilities/TensorOperations/Misc/Pad.o \
                    build/Utilities/TensorOperations/Misc/Extract.o \
                    build/Utilities/TensorOperations/Misc/Concatenate.o \
+                   build/Utilities/TensorOperations/Optimizers/Adam.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o \
                    build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o \
@@ -230,6 +233,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Network/Network.o \
                    build/DeepLearning/Api/Optimizers/Optimizer.o \
                    build/DeepLearning/Api/Optimizers/Sgd.o \
+                   build/DeepLearning/Api/Optimizers/Adam.o \
                    build/Utilities/Common/Stream.o \
                    build/Utilities/Loaders/Shard.o \
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
@@ -471,6 +475,10 @@ build/Utilities/TensorOperations/Misc/Pad.o: Utilities/TensorOperations/Misc/Pad
 	mkdir -p build/Utilities/TensorOperations/Misc
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Pad.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Pad.cu
 
+build/Utilities/TensorOperations/Optimizers/Adam.o: Utilities/TensorOperations/Optimizers/Adam.h Utilities/TensorOperations/Optimizers/Adam.cu
+	mkdir -p build/Utilities/TensorOperations/Optimizers
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Optimizers/Adam.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Optimizers/Adam.cu
+
 build/Utilities/TensorOperations/Misc/Extract.o: Utilities/TensorOperations/Misc/Extract.h Utilities/TensorOperations/Misc/Extract.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Extract.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Extract.cu
@@ -602,6 +610,10 @@ build/DeepLearning/Api/Optimizers/Optimizer.o: DeepLearning/Api/Optimizers/Optim
 build/DeepLearning/Api/Optimizers/Sgd.o: DeepLearning/Api/Optimizers/Sgd.h DeepLearning/Api/Optimizers/Sgd.cpp
 	mkdir -p build/DeepLearning/Api/Optimizers/
 	$(Gpp) -c -std=c++11 DeepLearning/Api/Optimizers/Sgd.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Optimizers/Sgd.o
+
+build/DeepLearning/Api/Optimizers/Adam.o: DeepLearning/Api/Optimizers/Adam.h DeepLearning/Api/Optimizers/Adam.cpp
+	mkdir -p build/DeepLearning/Api/Optimizers/
+	$(Gpp) -c -std=c++11 DeepLearning/Api/Optimizers/Adam.cpp $(CUDA) $(INCLUDE_DIRS) -o build/DeepLearning/Api/Optimizers/Adam.o
 
 build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
 	mkdir -p build/Utilities/Common
@@ -977,6 +989,9 @@ build/test/DeepLearning/Api/Optimizers/SgdTest: build/test/googletest/libgtest.a
 	mkdir -p build/test/DeepLearning/Api/Optimizers
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Optimizers/SgdTest test/DeepLearning/Api/Optimizers/SgdTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
+build/test/DeepLearning/Api/Optimizers/AdamTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Optimizers/AdamTest.cpp $(THOR)
+	mkdir -p build/test/DeepLearning/Api/Optimizers
+	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Optimizers/AdamTest test/DeepLearning/Api/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 

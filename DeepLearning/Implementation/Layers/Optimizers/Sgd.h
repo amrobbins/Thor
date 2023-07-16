@@ -21,9 +21,6 @@ class Sgd : public Optimizer {
         Optional<Tensor> errorInput,
         Optional<Tensor> errorOutput);
 
-    virtual Tensor getWeightsUpdate();
-    virtual Optional<Tensor> getBiasesUpdate();
-
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
     virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batch_size);
 
