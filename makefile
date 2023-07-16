@@ -309,6 +309,10 @@ softclean:
 	rm -f Thor.h
 
 
+formatAll:
+	./formatAll
+
+
 # Library
 
 libThor.a: Thor.h
