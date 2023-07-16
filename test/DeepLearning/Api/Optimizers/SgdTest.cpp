@@ -181,11 +181,12 @@ TEST(Sgd, SgdReportsParameters) {
     float initialLearningRate = 0.5;
     float decay = 0.32;
     float momentum = 0.0;
+    bool useNesteroveMomentum = true;
     shared_ptr<Sgd> sgd = Sgd::Builder()
                               .initialLearningRate(initialLearningRate)
                               .decay(decay)
                               .momentum(momentum)
-                              .useNesterovMomentum(true)
+                              .useNesterovMomentum(useNesteroveMomentum)
                               .network(network)
                               .build();
 
@@ -207,6 +208,22 @@ TEST(Sgd, SgdReportsParameters) {
     ASSERT_LT(abs(params["momentum"] - momentum), 0.0001);
     ASSERT_EQ(params.count("useNesterovMomentum"), 1U);
     ASSERT_TRUE(params["useNesterovMomentum"]);
+
+    // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
+    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork0.getTrainableLayers();
+    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+        shared_ptr<ThorImplementation::FullyConnected> fc = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[i]);
+        ASSERT_NE(fc, nullptr);
+        Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
+        assert(maybeOptimizer.isPresent());
+        shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+        shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+        ASSERT_NE(sgd, nullptr);
+        ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
+        ASSERT_EQ(sgd->getDecay(), decay);
+        ASSERT_EQ(sgd->getMomentum(), momentum);
+        ASSERT_EQ(sgd->getUseNesterovMomentum(), useNesteroveMomentum);
+    }
 
     sgd->updateHyperParameters(0, 0, 10);
     uint32_t epoch = 2;
