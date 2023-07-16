@@ -19,13 +19,12 @@ class Sgd : public Optimizer {
 
     virtual void setConstantLearningRate(float newCurrentLearningRate);
     virtual void setInitialLearningRate(float newInitialLearningRate);
-    virtual void setDecay(float newDecay);
-    virtual void setMomentum(float newMomentum);
-    virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
-
     virtual float getInitialLearningRate();
+    virtual void setDecay(float newDecay);
     virtual float getDecay();
+    virtual void setMomentum(float newMomentum);
     virtual float getMomentum();
+    virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
     virtual bool getUseNesterovMomentum();
 
    protected:
