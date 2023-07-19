@@ -251,6 +251,8 @@ void launchElementWiseBinaryCrossEntropyLoss(void *labels_d,
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
 
+    ScopedGpu scopedGpu(stream.getGpuNum());
+
     if (lossScalingFactor == 1 || !computeGradient) {
         elementWiseBinaryCrossEntropyLoss<LABEL_TYPE, PROBABILITY_TYPE, LOSS_TYPE>
             <<<gridSize, blockSize, 0, stream.getStream()>>>(batchSize, labels_d, probabilities_d, loss_d, gradient_d, computeGradient);

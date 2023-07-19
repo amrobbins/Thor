@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cuda.h>
