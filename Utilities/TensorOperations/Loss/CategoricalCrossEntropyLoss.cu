@@ -384,6 +384,8 @@ void launchElementWiseCategoricalCrossEntropyLoss_oneHotLabels(void *labels_d,
     dim3 blockSize(256);
     dim3 gridSize((numElements + 1023) / 1024);
 
+    ScopedGpu scopedGpu(stream.getGpuNum());
+
     if (lossScalingFactor == 1 || !computeGradient) {
         elementWiseCategoricalCrossEntropyLoss_oneHotLabels<LABEL_TYPE, PROBABILITY_TYPE, LOSS_TYPE>
             <<<gridSize, blockSize, 0, stream.getStream()>>>(
@@ -422,6 +424,8 @@ void launchElementWiseCategoricalCrossEntropyLoss_classIndexLabels(void *classOf
         assert(false);
         return;
     }
+
+    ScopedGpu scopedGpu(stream.getGpuNum());
 
     if (lossScalingFactor == 1 || !computeGradient) {
         elementWiseCategoricalCrossEntropyLoss_classIndexLabels<INDEX_TYPE, PROBABILITY_TYPE, LOSS_TYPE>

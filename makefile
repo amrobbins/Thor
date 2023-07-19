@@ -95,8 +95,9 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageErrorTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest && \
                 build/test/DeepLearning/Api/Optimizers/AdamTest && \
-				build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
-				build/test/Utilities/WorkQueue/WorkQueueTest \
+                build/test/Utilities/Optimizers/AdamTest && \
+                build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
+                build/test/Utilities/WorkQueue/WorkQueueTest \
 
 				# FIXME: put back
                 # build/test/DeepLearning/Implementation/SimpleNetworkTest && \
@@ -144,6 +145,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Api/Visualizers/ConsoleVisualizerTest \
             build/test/DeepLearning/Api/Optimizers/SgdTest \
             build/test/DeepLearning/Api/Optimizers/AdamTest \
+            build/test/Utilities/Optimizers/AdamTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageErrorTest \
@@ -996,6 +998,10 @@ build/test/DeepLearning/Api/Optimizers/SgdTest: build/test/googletest/libgtest.a
 build/test/DeepLearning/Api/Optimizers/AdamTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Optimizers/AdamTest.cpp $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Optimizers
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Optimizers/AdamTest test/DeepLearning/Api/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+
+build/test/Utilities/Optimizers/AdamTest: build/test/googletest/libgtest.a test/Utilities/Optimizers/AdamTest.cpp $(THOR)
+	mkdir -p build/test/Utilities/Optimizers
+	$(Gpp) $(DEBUG) -o build/test/Utilities/Optimizers/AdamTest test/Utilities/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 
