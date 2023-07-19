@@ -3,6 +3,7 @@
 using namespace std;
 
 __global__ void adamStep(
+    half *weightUpdate, half *gradient, half *m, half *v, half alphaT, half beta1, half beta2, half epsilon, uint32_t length) {
     // Each block process 512 elements as half2's
     uint32_t indexHalf2 = blockIdx.x * 256 + threadIdx.x;
     if ((indexHalf2 << 1) >= length)
@@ -19,8 +20,7 @@ __global__ void adamStep(
     const half2 ONE_HALF_2 = __half2half2((half)1.0f);
 
     half2 gradBuffHalf2 = gradientHalf2[indexHalf2];
-    mHalf2[indexHalf2] =
-        __hadd2(__hmul2(beta1Half2, mHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta1Half2), gradBuffHalf2));
+    mHalf2[indexHalf2] = __hadd2(__hmul2(beta1Half2, mHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta1Half2), gradBuffHalf2));
     vHalf2[indexHalf2] =
         __hadd2(__hmul2(beta2Half2, vHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta2Half2), __hmul2(gradBuffHalf2, gradBuffHalf2)));
     weightUpdateHalf2[indexHalf2] = __hmul2(alphaTHalf2, __h2div(mHalf2[indexHalf2], __hadd2(h2sqrt(vHalf2[indexHalf2]), epsilonHalf2)));
