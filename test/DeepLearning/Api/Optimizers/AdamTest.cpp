@@ -52,7 +52,7 @@ Network buildNetwork(uint32_t numFCLayers) {
     return network;
 }
 
-TEST(Adam, AdamBuilds) {
+TEST(Adam, Builds) {
     Optional<Network *> optionalTest;
     ASSERT_FALSE(optionalTest.isPresent());
 
@@ -61,7 +61,7 @@ TEST(Adam, AdamBuilds) {
     ASSERT_NE(adam, nullptr);
 }
 
-TEST(Adam, AdamInitializesParametersWithOneStamp) {
+TEST(Adam, InitializesParametersWithOneStamp) {
     Network network = buildNetwork(2);
     float alpha = 0.72;
     float beta1 = 0.9;
@@ -69,7 +69,6 @@ TEST(Adam, AdamInitializesParametersWithOneStamp) {
     float epsilon = 1e-5f;
     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
 
-    ThorImplementation::StampedNetwork stampedNetwork0;
     Network::StatusCode statusCode = network.place(32, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
@@ -85,7 +84,7 @@ TEST(Adam, AdamInitializesParametersWithOneStamp) {
 }
 
 /* FIXME: put this back in once multile stamps is supported
-TEST(Adam, AdamInitializesParametersWithTwoStamps) {
+TEST(Adam, InitializesParametersWithTwoStamps) {
     Network network = buildNetwork(2);
     float alpha = 0.25;
     float beta1 = 0.8;
@@ -93,8 +92,6 @@ TEST(Adam, AdamInitializesParametersWithTwoStamps) {
     shared_ptr<Adam> adam =
         Adam::Builder().network(network).alpha(alpha).beta1(beta1).beta2(beta2).epsilon(true).build();
 
-    ThorImplementation::StampedNetwork stampedNetwork0;
-    ThorImplementation::StampedNetwork stampedNetwork1;
     Network::StatusCode statusCode = network.place(32, {0}, 2);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
@@ -110,7 +107,7 @@ TEST(Adam, AdamInitializesParametersWithTwoStamps) {
 }
  */
 
-TEST(Adam, AdamReportsParameters) {
+TEST(Adam, ReportsParameters) {
     Network network = buildNetwork(2);
     float alpha = 0.5;
     float beta1 = 0.32;
@@ -136,6 +133,64 @@ TEST(Adam, AdamReportsParameters) {
     ASSERT_EQ(params.count("epsilon"), 1U);
     // Since fp16 is used, the minimum epsilon is around 5e-8f, check that this is enforced.
     ASSERT_GT(params["epsilon"], 1e-8f);
+
+    // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
+    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork0.getTrainableLayers();
+    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+        shared_ptr<ThorImplementation::FullyConnected> fc = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[i]);
+        ASSERT_NE(fc, nullptr);
+        Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
+        assert(maybeOptimizer.isPresent());
+        shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+        shared_ptr<ThorImplementation::Adam> adam = dynamic_pointer_cast<ThorImplementation::Adam>(optimizer);
+        ASSERT_NE(adam, nullptr);
+        ASSERT_EQ(adam->getT(), 0);
+        ASSERT_EQ(adam->getAlpha(), alpha);
+        ASSERT_EQ(adam->getBeta1(), beta1);
+        ASSERT_EQ(adam->getBeta2(), beta2);
+        ASSERT_EQ(adam->getEpsilon(), epsilon);
+    }
+}
+
+TEST(Adam, SettersAndGetters) {
+    Network network = buildNetwork(2);
+    float alpha = 0.5;
+    float beta1 = 0.32;
+    float beta2 = 0.6;
+    float epsilon = 1e-6f;
+    shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
+
+    ThorImplementation::StampedNetwork stampedNetwork0;
+    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+
+    unordered_map<string, float> params = adam->getAllHyperParameters(10, 3, 100);
+
+    ASSERT_EQ(params.size(), 5U);
+    ASSERT_EQ(params.count("t"), 1U);
+    ASSERT_EQ(params["t"], 0);
+    ASSERT_EQ(params.count("t"), 1U);
+    ASSERT_EQ(params["alpha"], alpha);
+    ASSERT_EQ(params.count("beta1"), 1U);
+    ASSERT_EQ(params["beta1"], beta1);
+    ASSERT_EQ(params.count("beta2"), 1U);
+    ASSERT_EQ(params["beta2"], beta2);
+    ASSERT_EQ(params.count("epsilon"), 1U);
+    ASSERT_EQ(params["epsilon"], epsilon);
+
+    // Test the setters
+    alpha = 0.75f;
+    beta1 = 0.65f;
+    beta2 = 0.77f;
+    epsilon = 1e-4f;
+    adam->setAlpha(alpha);
+    EXPECT_EQ(adam->getAlpha(), alpha);
+    adam->setBeta1(beta1);
+    EXPECT_EQ(adam->getBeta1(), beta1);
+    adam->setBeta2(beta2);
+    EXPECT_EQ(adam->getBeta2(), beta2);
+    adam->setEpsilon(epsilon);
+    EXPECT_EQ(adam->getEpsilon(), epsilon);
 
     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
     vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork0.getTrainableLayers();

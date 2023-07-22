@@ -24,7 +24,7 @@ __global__ void adamStep(
     vHalf2[indexHalf2] =
         __hadd2(__hmul2(beta2Half2, vHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta2Half2), __hmul2(gradBuffHalf2, gradBuffHalf2)));
     weightUpdateHalf2[indexHalf2] = __hmul2(alphaTHalf2, __h2div(mHalf2[indexHalf2], __hadd2(h2sqrt(vHalf2[indexHalf2]), epsilonHalf2)));
-}
+};
 
 __global__ void adamStep(
     float *weightUpdate, float *gradient, float *m, float *v, float alphaT, float beta1, float beta2, float epsilon, uint32_t length) {

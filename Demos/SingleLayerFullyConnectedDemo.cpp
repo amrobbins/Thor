@@ -40,12 +40,14 @@ int main() {
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 48);
     batchLoader->setDatasetName("MNIST");
 
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().network(singleLayerFullyConnected).initialLearningRate(0.1).decay(0.2).momentum(0.0).build();
+    // std::shared_ptr<Sgd> sgd =
+    // Sgd::Builder().network(singleLayerFullyConnected).initialLearningRate(0.1).decay(0.2).momentum(0.0).build();
+    std::shared_ptr<Adam> adam = Adam::Builder().network(singleLayerFullyConnected).build();
 
     shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
                                                    .network(singleLayerFullyConnected)
                                                    .loader(batchLoader)
-                                                   .optimizer(sgd)
+                                                   .optimizer(adam)
                                                    .visualizer(&ConsoleVisualizer::instance())
                                                    .build();
 

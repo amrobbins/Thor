@@ -49,7 +49,7 @@ class Adam::Builder {
         if (_beta2.isEmpty())
             _beta2 = 0.999f;
         if (_epsilon.isEmpty())
-            _epsilon = 1e-8f;
+            _epsilon = 1e-7f;
         Adam adam;
         adam.alpha = _alpha;
         adam.beta1 = _beta1;
