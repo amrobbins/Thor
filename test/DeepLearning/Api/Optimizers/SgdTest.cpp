@@ -52,6 +52,110 @@ Network buildNetwork(uint32_t numFCLayers) {
     return network;
 }
 
+TEST(SgdTest, SetAndGetInitialLearningRate) {
+    Network network = buildNetwork(3);
+    shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.2f).network(network).build();
+
+    sgd->setInitialLearningRate(0.1f);
+    ASSERT_FLOAT_EQ(0.1f, sgd->getInitialLearningRate());
+
+    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
+    for (uint32_t i = 0; i < stamps.size(); ++i) {
+        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+            Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
+            assert(maybeOptimizer.isPresent());
+            shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+            shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+            assert(sgd != NULL);
+            ASSERT_EQ(sgd->getInitialLearningRate(), 0.1f);
+        }
+    }
+}
+
+TEST(SgdTest, SetAndGetDecay) {
+    Network network = buildNetwork(4);
+    shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
+
+    sgd->setDecay(0.2f);
+    ASSERT_FLOAT_EQ(0.2f, sgd->getDecay());
+
+    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
+    for (uint32_t i = 0; i < stamps.size(); ++i) {
+        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+            Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
+            assert(maybeOptimizer.isPresent());
+            shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+            shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+            assert(sgd != NULL);
+            ASSERT_EQ(sgd->getDecay(), 0.2f);
+        }
+    }
+}
+
+TEST(SgdTest, SetAndGetMomentum) {
+    Network network = buildNetwork(5);
+    shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
+
+    sgd->setMomentum(0.3f);
+    ASSERT_FLOAT_EQ(0.3f, sgd->getMomentum());
+
+    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
+    for (uint32_t i = 0; i < stamps.size(); ++i) {
+        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+            Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
+            assert(maybeOptimizer.isPresent());
+            shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+            shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+            assert(sgd != NULL);
+            ASSERT_EQ(sgd->getMomentum(), 0.3f);
+        }
+    }
+}
+
+TEST(SgdTest, SetAndGetUseNesterovMomentum) {
+    Network network = buildNetwork(6);
+    shared_ptr<Sgd> sgd = Sgd::Builder().useNesterovMomentum(false).network(network).build();
+
+    sgd->setUseNesterovMomentum(true);
+    ASSERT_TRUE(sgd->getUseNesterovMomentum());
+
+    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
+    for (uint32_t i = 0; i < stamps.size(); ++i) {
+        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+            Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
+            assert(maybeOptimizer.isPresent());
+            shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+            shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+            assert(sgd != NULL);
+            ASSERT_EQ(sgd->getUseNesterovMomentum(), true);
+        }
+    }
+
+    sgd->setUseNesterovMomentum(false);
+    ASSERT_FALSE(sgd->getUseNesterovMomentum());
+
+    for (uint32_t i = 0; i < stamps.size(); ++i) {
+        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
+        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+            Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
+            assert(maybeOptimizer.isPresent());
+            shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
+            shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+            assert(sgd != NULL);
+            ASSERT_EQ(sgd->getUseNesterovMomentum(), false);
+        }
+    }
+}
+
 TEST(Sgd, SgdBuilds) {
     Optional<Network *> optionalTest;
     ASSERT_FALSE(optionalTest.isPresent());
@@ -247,6 +351,11 @@ TEST(Sgd, SgdReportsParameters) {
     ASSERT_EQ(params.count("useNesterovMomentum"), 1U);
     ASSERT_TRUE(params["useNesterovMomentum"]);
 }
+
+TEST(ApiSgd, Update) {}
+
+// FIXME: Test stamp directly. Connect it to tensors and set its optimizer, set its weights and gradients and test backward to
+// ensure the stamped layer's SGD is numerically correct.
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

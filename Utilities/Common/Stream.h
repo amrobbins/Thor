@@ -118,8 +118,8 @@ class Stream : private ReferenceCounted {
                        numCudnnHandles);
                 fflush(stdout);
             }
-            numCudnnHandles += 1;
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            numCudnnHandles += 1;
             cudnnStatus = cudnnSetStream(handle, cudaStream);
             assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
             *cudnnHandle = handle;

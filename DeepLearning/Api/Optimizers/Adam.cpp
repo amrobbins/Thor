@@ -54,7 +54,8 @@ void Adam::updateParameters() {
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
             shared_ptr<ThorImplementation::Adam> adam = dynamic_pointer_cast<ThorImplementation::Adam>(optimizer);
-            assert(adam != NULL);
+            if (adam == nullptr || adam->getId() != getId())
+                continue;
             adam->setAlpha(alpha);
             adam->setBeta1(beta1);
             adam->setBeta2(beta2);
