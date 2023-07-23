@@ -32,13 +32,16 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual void createWeightsIfNecessary() {
         if (!usingSharedWeights && !weights.isInitialized()) {
             std::vector<unsigned long> weightsDimensions;
-            weightsDimensions.push_back(featureInputs[0].get().getDescriptor().getDimensions()[1]);
+            Optional<Tensor> maybeAFeatureInput = getFirstPresentTensor(featureInputs);
+            assert(maybeAFeatureInput.isPresent());
+            Tensor aFeatureInput = maybeAFeatureInput.get();
+            assert(aFeatureInput.getDimensions().size() == 2);
+            weightsDimensions.push_back(aFeatureInput.getDescriptor().getDimensions()[1]);
             weightsDimensions.push_back(numOutputFeatures);
             TensorDescriptor weightsDescriptor = TensorDescriptor(TensorDescriptor::DataType::FP16, weightsDimensions);
-            weights = Tensor(featureInputs.front().get().getPlacement(), weightsDescriptor);
+            weights = Tensor(aFeatureInput.getPlacement(), weightsDescriptor);
             if (hasBias) {
-                biases = Tensor(featureInputs.front().get().getPlacement(),
-                                TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputFeatures}));
+                biases = Tensor(aFeatureInput.getPlacement(), TensorDescriptor(TensorDescriptor::DataType::FP16, {numOutputFeatures}));
             }
         }
     }

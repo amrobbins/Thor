@@ -18,12 +18,14 @@ __global__ void adamStep(
     half2 beta2Half2 = __half2half2(beta2);
     half2 epsilonHalf2 = __half2half2(epsilon);
     const half2 ONE_HALF_2 = __half2half2((half)1.0f);
+    const half2 NEGATIVE_ONE_HALF_2 = __half2half2((half)-1.0f);
 
     half2 gradBuffHalf2 = gradientHalf2[indexHalf2];
     mHalf2[indexHalf2] = __hadd2(__hmul2(beta1Half2, mHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta1Half2), gradBuffHalf2));
     vHalf2[indexHalf2] =
         __hadd2(__hmul2(beta2Half2, vHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta2Half2), __hmul2(gradBuffHalf2, gradBuffHalf2)));
-    weightUpdateHalf2[indexHalf2] = __hmul2(alphaTHalf2, __h2div(mHalf2[indexHalf2], __hadd2(h2sqrt(vHalf2[indexHalf2]), epsilonHalf2)));
+    weightUpdateHalf2[indexHalf2] =
+        __h2div(__hmul2(NEGATIVE_ONE_HALF_2, __hmul2(alphaTHalf2, mHalf2[indexHalf2])), __hadd2(h2sqrt(vHalf2[indexHalf2]), epsilonHalf2));
 };
 
 __global__ void adamStep(
