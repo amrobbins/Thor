@@ -1,5 +1,5 @@
 CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include
-CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /usr/local/lib/libboost_filesystem.a
+CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /lib/x86_64-linux-gnu/libboost_filesystem.a
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
 COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_53,code=compute_53 -gencode=arch=compute_53,code=sm_53 \
                                       -gencode=arch=compute_62,code=compute_62 -gencode=arch=compute_62,code=sm_62 \
@@ -97,7 +97,7 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Optimizers/AdamTest && \
 				build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest && \
 				build/test/DeepLearning/Implementation/Layers/Optimizers/AdamTest && \
-                build/test/Utilities/Optimizers/AdamTest && \
+                build/test/Utilities/TensorOperations/Optimizers/AdamTest && \
                 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
                 build/test/Utilities/WorkQueue/WorkQueueTest \
 
@@ -149,7 +149,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
             build/test/DeepLearning/Api/Optimizers/AdamTest \
             build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest \
             build/test/DeepLearning/Implementation/Layers/Optimizers/AdamTest \
-            build/test/Utilities/Optimizers/AdamTest \
+            build/test/Utilities/TensorOperations/Optimizers/AdamTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanSquaredErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanAbsoluteErrorTest \
             build/test/DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageErrorTest \
@@ -1011,9 +1011,9 @@ build/test/DeepLearning/Implementation/Layers/Optimizers/AdamTest: build/test/go
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Optimizers
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Optimizers/AdamTest test/DeepLearning/Implementation/Layers/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/Utilities/Optimizers/AdamTest: build/test/googletest/libgtest.a test/Utilities/Optimizers/AdamTest.cpp $(THOR)
-	mkdir -p build/test/Utilities/Optimizers
-	$(Gpp) $(DEBUG) -o build/test/Utilities/Optimizers/AdamTest test/Utilities/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
+build/test/Utilities/TensorOperations/Optimizers/AdamTest: build/test/googletest/libgtest.a test/Utilities/TensorOperations/Optimizers $(THOR)
+	mkdir -p build/test/Utilities/TensorOperations/Optimizers
+	$(Gpp) $(DEBUG) -o build/test/Utilities/TensorOperations/Optimizers/AdamTest test/Utilities/TensorOperations/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
 
 

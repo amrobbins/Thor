@@ -20,7 +20,7 @@ Dependencies, with installation directions for Ubuntu:
   1. cuda 11  - can install with 'sudo apt-get install cuda'
   2. cudnn 8.2 - get it here: https://developer.nvidia.com/cudnn
   3. clang-format  - can install with 'sudo apt-get install clang-format'
-  4. boost 1.72 (later is probably fine.) get it here: https://www.boost.org/users/download/#live
+  4. boost 1.74 (earlier and later is probably fine.) can install with 'sudo apt-get install libboost-all-dev'
   5. GraphicsMagick - http://www.graphicsmagick.org/README.html
   6. ncurses
 
