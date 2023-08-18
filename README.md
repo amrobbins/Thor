@@ -20,7 +20,7 @@ Dependencies, with installation directions for Ubuntu:
   1. sudo apt-get update
   1. sudo apt-get install build-essential cmake
   1. cuda 12  - can install with 'sudo apt-get install cuda'
-  2. cudnn 8.9 - get it here: https://developer.nvidia.com/cudnn
+  2. cudnn 8.9 for cuda 12 - get it here: https://developer.nvidia.com/cudnn
      1. you will need to create an account and accept the terms
      2. download the local installer for the version ubuntu you are using - I'm on 22.04
      3. follow this guide to set up public keys and install cudnn via the deb file: https://docs.nvidia.com/deeplearning/cudnn/install-guide/index.html
