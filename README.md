@@ -17,6 +17,7 @@ The goals of this project are:
 This framework is for Linux, and has been tested on Ubuntu 18.04 and 20.04.
 
 Dependencies, with installation directions for Ubuntu:
+  1. sudo apt-get update
   1. sudo apt-get install build-essential cmake
   1. cuda 12  - can install with 'sudo apt-get install cuda'
   2. cudnn 8.9 - get it here: https://developer.nvidia.com/cudnn
