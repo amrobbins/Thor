@@ -31,7 +31,7 @@ Dependencies, with installation directions for Ubuntu:
   8. GraphicsMagick - http://www.graphicsmagick.org/README.html
      1. Example: download the latest version 
      2. tar -xf GraphicsMagick-1.3.41.tar.xz
-     3. cd raphicsMagick-1.3.41
+     3. cd GraphicsMagick-1.3.41
      4. ./configure CC=gcc CXX=c++ CFLAGS=-O3 CPPFLAGS=-O3 CXXFLAGS=-O3 LDFLAGS='-L/usr/local/lib'
      5. make check
      6. sudo make install
