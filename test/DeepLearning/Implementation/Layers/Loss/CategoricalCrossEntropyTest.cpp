@@ -60,7 +60,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_oneHotLabels) {
             totalActivations = 0.0;
             for (int i = 0; i < numElements; ++i) {
                 activations[i] = ((rand() % 1000) / 999.0f);
-                totalActivations += activations[i];
+                totalActivations += (double)activations[i];
                 labels[i] = ((rand() % 1000) / 999.0f);
                 // printf("%d: activation %f label %f\n", i, (float)activations[i], labels[i]);
             }
@@ -246,7 +246,7 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
                 labels[b] = rand() % numClasses;
                 for (uint32_t c = 0; c < numClasses; ++c) {
                     activations[b * numClasses + c] = ((rand() % 1000) / 999.0f);
-                    totalActivations += activations[b * numClasses + c];
+                    totalActivations += (double)activations[b * numClasses + c];
                 }
             }
         }
@@ -342,8 +342,8 @@ TEST(CategoricalCrossEntropy, ComputesCorrectElementWiseResult_classIndexLabels)
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t c = 0; c < numClasses; ++c) {
                 uint32_t e = b * numClasses + c;
-                float thresh = std::max(lossMem[e] * 0.03f, 0.01f);
-                if (abs(lossMem[e] - lossMemFromGpu[e]) >= thresh) {
+                float thresh = std::max((float)lossMem[e] * 0.03f, 0.01f);
+                if (abs((float)lossMem[e] - (float)lossMemFromGpu[e]) >= thresh) {
                     printf("cpuF %f gpuF %f  label %d  batchSize %d numClasses %d   batch: %d class %d\n",
                            (float)lossMem[e],
                            (float)lossMemFromGpu[e],

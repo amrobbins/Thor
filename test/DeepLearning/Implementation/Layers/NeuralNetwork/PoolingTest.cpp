@@ -62,7 +62,7 @@ Tensor maxPoolingForward(Tensor featureIn,
                             if (!inHorizontalPadding && !inVerticalPadding) {
                                 half value = *(half *)featureIn.getElement(
                                     {batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
-                                if (value > maxValue)
+                                if ((float)value > maxValue)
                                     maxValue = value;
                             }
                         }
@@ -190,7 +190,7 @@ Tensor averagePoolingForward(Tensor featureIn,
                                 half value = *(half *)featureIn.getElement(
                                     {batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
                                 numValues += 1;
-                                averageValue += value;
+                                averageValue += (float)value;
                             }
                         }
                     }
@@ -271,7 +271,7 @@ Tensor averagePoolingBackward(Tensor errorIn,
                             half errorValue = *(half *)errorIn.getElement({batch, feature, outputRow, outputCol});
                             *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) =
                                 *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) +
-                                errorValue / numElements[verticalWindow][horizontalWindow];
+                                (half)((float)errorValue / numElements[verticalWindow][horizontalWindow]);
                         }
                     }
                 }

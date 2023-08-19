@@ -113,7 +113,7 @@ class ConvolutionTestHelper {
                         }
 
                         if (bias.isPresent())
-                            accum += *((half *)bias.get().getElement({(uint64_t)outputChannel}));
+                            accum += (float)*((half *)bias.get().getElement({(uint64_t)outputChannel}));
 
                         std::vector<unsigned long> outputImageIndex{(uint64_t)batch,
                                                                     (uint64_t)outputChannel,

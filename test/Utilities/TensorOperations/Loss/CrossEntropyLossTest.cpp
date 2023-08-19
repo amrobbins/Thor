@@ -219,12 +219,12 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_
                             probabilities[i + b * numClasses] = -std::numeric_limits<half>::infinity();
                     } else {
                         probabilities[i + b * numClasses] = (float)(rand() % 10000);
-                        totalProb += probabilities[i + b * numClasses];
+                        totalProb += (float)probabilities[i + b * numClasses];
                     }
                 }
             }
             for (uint32_t i = 0; i < numClasses; ++i) {
-                probabilities[i + b * numClasses] = probabilities[i + b * numClasses] / totalProb;
+                probabilities[i + b * numClasses] = (float)probabilities[i + b * numClasses] / totalProb;
             }
         }
 
@@ -250,13 +250,13 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t i = 0; i < numClasses; ++i) {
                 half probability = probabilities[i + b * numClasses];
-                if (!isfinite(probability) || isnan(probability))
+                if (!isfinite((float)probability) || isnan((float)probability))
                     probability = 0.0f;
                 float rawProbability = probability;
                 if (probability < MIN_PROBABILITY_HALF)
                     probability = MIN_PROBABILITY_HALF;
-                loss_cpu[b * numClasses + i] = -labels[i + b * numClasses] * logf(probability);
-                gradient_cpu[b * numClasses + i] = (rawProbability - labels[i + b * numClasses]) * lossScalingFactor;
+                loss_cpu[b * numClasses + i] = (float)-labels[i + b * numClasses] * logf((float)probability);
+                gradient_cpu[b * numClasses + i] = (rawProbability - (float)labels[i + b * numClasses]) * lossScalingFactor;
             }
         }
 
@@ -265,7 +265,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_
         float thresh = 0.005;
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t i = 0; i < numClasses; ++i) {
-                float diff = abs(loss[b * numClasses + i] - loss_cpu[b * numClasses + i]);
+                float diff = abs((float)loss[b * numClasses + i] - (float)loss_cpu[b * numClasses + i]);
                 if (diff >= thresh || !isfinite(diff)) {
                     printf(
                         "loss batchItem %d class %d, %f %f\n", b, i, (float)loss_cpu[b * numClasses + i], (float)loss[b * numClasses + i]);
@@ -277,7 +277,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_categoricalOneHotLabels_
         thresh = 0.00001;
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t i = 0; i < numClasses; ++i) {
-                float diff = abs(gradient[b * numClasses + i] - gradient_cpu[b * numClasses + i]);
+                float diff = abs((float)gradient[b * numClasses + i] - (float)gradient_cpu[b * numClasses + i]);
                 if (diff >= thresh || !isfinite(diff)) {
                     printf("gradient batchItem %d class %d,  %f %f\n",
                            b,
@@ -510,12 +510,12 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPre
                             probabilities[c + b * numClasses] = -std::numeric_limits<half>::infinity();
                     } else {
                         probabilities[c + b * numClasses] = (float)(rand() % 10000);
-                        totalProb += probabilities[c + b * numClasses];
+                        totalProb += (float)probabilities[c + b * numClasses];
                     }
                 }
             }
             for (uint32_t c = 0; c < numClasses; ++c) {
-                probabilities[c + b * numClasses] = probabilities[c + b * numClasses] / totalProb;
+                probabilities[c + b * numClasses] = (float)probabilities[c + b * numClasses] / totalProb;
             }
         }
 
@@ -541,15 +541,15 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPre
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t c = 0; c < numClasses; ++c) {
                 half probability = probabilities[c + b * numClasses];
-                half clampedProbability = (!isfinite(probability) || isnan(probability)) ? 0.0f : (float)probability;
-                if (probability < MIN_PROBABILITY_HALF || (!isfinite(probability) || isnan(probability)))
+                half clampedProbability = (!isfinite((float)probability) || isnan((float)probability)) ? 0.0f : (float)probability;
+                if (probability < MIN_PROBABILITY_HALF || (!isfinite((float)probability) || isnan((float)probability)))
                     probability = MIN_PROBABILITY_HALF;
                 if (labels[b] == c) {
-                    loss_cpu[b * numClasses + c] = -logf(probability);
-                    gradient_cpu[b * numClasses + c] = (clampedProbability - 1) * lossScalingFactor;
+                    loss_cpu[b * numClasses + c] = -logf((float)probability);
+                    gradient_cpu[b * numClasses + c] = ((float)clampedProbability - 1) * lossScalingFactor;
                 } else {
                     loss_cpu[b * numClasses + c] = 0.0f;
-                    gradient_cpu[b * numClasses + c] = clampedProbability * lossScalingFactor;
+                    gradient_cpu[b * numClasses + c] = (float)clampedProbability * lossScalingFactor;
                 }
             }
         }
@@ -559,7 +559,7 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPre
         float thresh = 0.01;
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t c = 0; c < numClasses; ++c) {
-                float diff = abs(loss[b * numClasses + c] - loss_cpu[b * numClasses + c]);
+                float diff = abs((float)loss[b * numClasses + c] - (float)loss_cpu[b * numClasses + c]);
                 if (diff >= thresh || !isfinite(diff)) {
                     uint32_t e = b * numClasses + c;
                     printf("loss batchItem %d class %d label %d, %f %f\n", b, c, (uint32_t)labels[b], (float)loss_cpu[e], (float)loss[e]);
@@ -570,8 +570,8 @@ TEST(CategoricalCrossEntropyLoss, ComputesCorrectAnswer_classIndexLabels_halfPre
 
         for (uint32_t b = 0; b < batchSize; ++b) {
             for (uint32_t c = 0; c < numClasses; ++c) {
-                float diff = abs(gradient[b * numClasses + c] - gradient_cpu[b * numClasses + c]);
-                thresh = max(0.0001, abs(gradient_cpu[b * numClasses + c] * 0.003));
+                float diff = abs((float)gradient[b * numClasses + c] - (float)gradient_cpu[b * numClasses + c]);
+                thresh = max(0.0001, abs((float)gradient_cpu[b * numClasses + c] * 0.003));
                 if (diff >= thresh || !isfinite(diff)) {
                     uint32_t e = b * numClasses + c;
                     printf("gradient batchItem %d class %d label %d probability %f scalingFactor %d, %f %f\n",
@@ -795,25 +795,26 @@ TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer_halfPrecision) {
 
         for (uint32_t b = 0; b < batchSize; ++b) {
             half probability = probabilities[b];
-            if (!isfinite(probability) || isnan(probability))
+            if (!isfinite((float)probability) || isnan((float)probability))
                 probability = 0.0f;
             half trueClampedProbability = probability;
             if (probability < MIN_PROBABILITY_HALF)
                 trueClampedProbability = MIN_PROBABILITY_HALF;
             half falseClampedProbability = probability;
-            if (1.0 - probability < MIN_PROBABILITY_HALF)
+            if (1.0 - (float)probability < (float)MIN_PROBABILITY_HALF)
                 falseClampedProbability = 0.9995;
-            loss_cpu[b] = -(labels[b] * logf(trueClampedProbability) + (1.0f - labels[b]) * (logf(1.0f - falseClampedProbability)));
-            if (!isfinite(loss_cpu[b]))
+            loss_cpu[b] = -((float)labels[b] * logf((float)trueClampedProbability) +
+                            (1.0f - (float)labels[b]) * (logf(1.0f - (float)falseClampedProbability)));
+            if (!isfinite((float)loss_cpu[b]))
                 printf("INF label %d, prob %f\n", labels[b], (float)probability);
-            gradient_cpu[b] = (probability - labels[b]) * lossScalingFactor;
+            gradient_cpu[b] = ((float)probability - labels[b]) * lossScalingFactor;
         }
 
         stream.synchronize();
 
         float thresh = 0.01;
         for (uint32_t b = 0; b < batchSize; ++b) {
-            float diff = abs(loss[b] - loss_cpu[b]);
+            float diff = abs((float)loss[b] - (float)loss_cpu[b]);
             if (diff >= thresh || !isfinite(diff)) {
                 printf("loss batchItem %d scalingFactor %d, %f %f\n", b, lossScalingFactor, (float)loss_cpu[b], (float)loss[b]);
             }
@@ -821,8 +822,8 @@ TEST(BinaryCrossEntropyLoss, ComputesCorrectAnswer_halfPrecision) {
         }
 
         for (uint32_t b = 0; b < batchSize; ++b) {
-            float diff = abs(gradient[b] - gradient_cpu[b]);
-            thresh = max(0.0001, abs(gradient_cpu[b] * 0.003));
+            float diff = abs((float)gradient[b] - (float)gradient_cpu[b]);
+            thresh = max(0.0001, abs((float)gradient_cpu[b] * 0.003));
             if (diff >= thresh || !isfinite(diff)) {
                 printf("gradient batchItem %d scalingFactor %d, %f %f\n", b, lossScalingFactor, (float)gradient_cpu[b], (float)gradient[b]);
             }

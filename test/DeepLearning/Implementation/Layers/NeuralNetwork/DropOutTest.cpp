@@ -276,7 +276,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         half *sourceMem = (half *)sourceCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
             sourceMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-            if (sourceMem[i] < 0.1 && sourceMem[i] > -0.1)
+            if (sourceMem[i] < (half)0.1 && sourceMem[i] > (half)-0.1)
                 sourceMem[i] = 1.2f;
         }
 
@@ -315,7 +315,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         }
 
         for (int i = 0; i < numElements; ++i) {
-            if (destMem[i] != 0.0f) {
+            if (destMem[i] != (half)0.0f) {
                 EXPECT_LT(abs((float)destMem[i] - (float)sourceMem[i] * scalingFactor), 0.2);
             }
         }
@@ -338,7 +338,7 @@ TEST(DropOut, TrainingSomeDropOut) {
         stream.synchronize();
 
         for (int i = 0; i < numElements; ++i) {
-            if (destMem[i] == 0.0f) {
+            if (destMem[i] == (half)0.0f) {
                 EXPECT_EQ((float)errorOutputMem[i], 0.0f);
             } else {
                 ASSERT_LT(abs((float)errorOutputMem[i] - (float)errorInputMem[i] * scalingFactor), 0.2);

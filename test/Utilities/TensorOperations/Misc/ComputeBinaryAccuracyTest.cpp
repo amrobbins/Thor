@@ -87,7 +87,7 @@ TEST(ComputeBinaryAccuracy, computesCorrectly22) {
             half label = (float)(rand() % 2);
             ((half *)predictions_h.getMemPtr())[batch] = prediction;
             ((half *)labels_h.getMemPtr())[batch] = label;
-            if (label == (prediction >= 0.5f))
+            if ((float)label == (prediction >= 0.5f))
                 numCorrect += 1;
         }
         float expected = numCorrect / (float)batchSize;
@@ -237,7 +237,7 @@ TEST(ComputeBinaryAccuracy, computesCorrectly42) {
             half label = (float)(rand() % 2);
             ((float *)predictions_h.getMemPtr())[batch] = prediction;
             ((half *)labels_h.getMemPtr())[batch] = label;
-            if (label == (prediction >= 0.5f))
+            if ((float)label == (prediction >= 0.5f))
                 numCorrect += 1;
         }
         float expected = numCorrect / (float)batchSize;

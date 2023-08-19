@@ -195,7 +195,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         half *gpuFeatureOut = (half *)featureOutputGpu_h.getMemPtr();
         const float thresh = std::max(batchSize * (filterWidth * 0.02 + filterHeight * 0.02), 1.01);
         for (int i = 0; i < numOutputElements; ++i) {
-            int threshAdjust = abs(cpuFeatureOut[i]) > 300.0f ? 3 : 0;
+            int threshAdjust = abs((float)cpuFeatureOut[i]) > 300.0f ? 3 : 0;
             ASSERT_LT(abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])), thresh + threshAdjust);
             if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= thresh)
                 printf("%f %f\n", (float)(cpuFeatureOut[i]), (float)(gpuFeatureOut[i]));
