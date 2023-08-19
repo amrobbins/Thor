@@ -171,7 +171,7 @@ void matrixMultiplyCpuHalf(half *A,
         for (int cb = 0; cb < colsB; cb++) {
             float accum = 0.0;
             for (int carb = 0; carb < colsA; carb++)
-                accum += A[ra * lda + carb] * B[carb * ldb + cb];
+                accum += (float)(A[ra * lda + carb] * B[carb * ldb + cb]);
 
             if (accumulate)
                 C[ra * ldc + cb] = (float)(C[ra * ldc + cb]) + accum;

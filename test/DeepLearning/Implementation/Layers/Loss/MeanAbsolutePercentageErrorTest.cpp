@@ -74,22 +74,22 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             if (rand() % 2)
-                predictions[i] = predictions[i] * -1.0f;
+                predictions[i] = predictions[i] * (half)-1.0f;
             labels[i] = ((rand() % 1500) / 999.0f);
-            if (predictions[i] == 0.0f && (rand() % 5))
-                labels[i] = 0.0f;
+            if (predictions[i] == (half)0.0f && (rand() % 5) != 0)
+                labels[i] = (half)0.0f;
             if (rand() % 2)
-                labels[i] = labels[i] * -1.0f;
+                labels[i] = labels[i] * (half)-1.0f;
 
             if (labels[i] == predictions[i])
-                elementLoss[i] = 0.0f;
+                elementLoss[i] = (half)0.0f;
             else
                 elementLoss[i] = 100.0f * fabsf((clampLabel(labels[i], epsilon) - predictions[i]) / clampLabel(labels[i], epsilon));
-            if (elementLoss[i] < maxMagnitude) {
-                if (!(elementLoss[i] > -maxMagnitude))
-                    elementLoss[i] = -maxMagnitude;
+            if (elementLoss[i] < (half)maxMagnitude) {
+                if (!(elementLoss[i] > (half)-maxMagnitude))
+                    elementLoss[i] = (half)-maxMagnitude;
             } else {
-                elementLoss[i] = maxMagnitude;
+                elementLoss[i] = (half)maxMagnitude;
             }
 
             // d/dx(100 abs((y - x)/y)) = 100 * (x - y) * (sqrt( (y-x)^2 / y^2 ) / (y - x)^2)
@@ -98,14 +98,15 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
             if (labels[i] == predictions[i])
                 elementLossGradient[i] = 0.0f;
             else
-                elementLossGradient[i] = 100.0f * (x - y) * (sqrt(((y - x) * (y - x)) / (y * y)) / ((y - x) * (y - x)));
-            if (elementLossGradient[i] < maxMagnitude) {
-                if (!(elementLossGradient[i] > -maxMagnitude))
-                    elementLossGradient[i] = -maxMagnitude;
+                elementLossGradient[i] =
+                    (half)100.0f * (x - y) * ((half)sqrt((float)(((y - x) * (y - x)) / (y * y))) / ((y - x) * (y - x)));
+            if (elementLossGradient[i] < (half)maxMagnitude) {
+                if (!(elementLossGradient[i] > (half)-maxMagnitude))
+                    elementLossGradient[i] = (half)-maxMagnitude;
             } else {
-                elementLossGradient[i] = maxMagnitude;
+                elementLossGradient[i] = (half)maxMagnitude;
             }
-            elementLossGradient[i] = elementLossGradient[i] * Loss::getLossScalingFactor();
+            elementLossGradient[i] = elementLossGradient[i] * (half)Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -172,9 +173,9 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
         half *elementLossGpu_h_mem = (half *)elementLossGpu_h.getMemPtr();
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
             float thresh = 0.001f;
-            if (thresh < fabsf(elementLoss[i] * 0.002f))
-                thresh = fabsf(elementLoss[i] * 0.002f);
-            if (abs(elementLoss[i] - elementLossGpu_h_mem[i]) >= thresh) {
+            if (thresh < fabsf((float)elementLoss[i] * 0.002f))
+                thresh = fabsf((float)elementLoss[i] * 0.002f);
+            if (abs((float)elementLoss[i] - (float)elementLossGpu_h_mem[i]) >= thresh) {
                 printf("%d (%ld, %ld)  %f vs %f    %f %f\n",
                        i,
                        dimensions[0],
@@ -189,8 +190,8 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
                        (float)clampLabel(labels[i], epsilon),
                        (float)elementLoss[i]);
             }
-            thresh = fmaxf(thresh, elementLoss[i] * 0.001f);
-            ASSERT_LT(abs(elementLoss[i] - elementLossGpu_h_mem[i]), thresh);
+            thresh = fmaxf(thresh, (float)elementLoss[i] * 0.001f);
+            ASSERT_LT(abs((float)elementLoss[i] - (float)elementLossGpu_h_mem[i]), thresh);
         }
 
         if (!inferenceOnly) {
@@ -200,8 +201,8 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                float thresh = fmaxf(abs(elementLossGradient[i] * 0.06f), 0.0001f);
-                if (fabsf(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]) >= thresh)
+                float thresh = fmaxf(abs((float)elementLossGradient[i] * 0.06f), 0.0001f);
+                if (fabsf((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]) >= thresh)
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %d\n",
                            i,
                            dimensions[0],
@@ -211,7 +212,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
                            (float)predictions[i],
                            (float)clampLabel(labels[i], epsilon),
                            Loss::getLossScalingFactor());
-                ASSERT_LT(abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]), thresh);
+                ASSERT_LT(abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]), thresh);
             }
         }
 
@@ -253,7 +254,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32) {
             if (rand() % 2)
                 predictions[i] = predictions[i] * -1.0f;
             labels[i] = ((rand() % 1500) / 999.0f);
-            if (predictions[i] == 0.0f && (rand() % 5))
+            if (predictions[i] == 0.0f && (rand() % 5) != 0)
                 labels[i] = 0.0f;
             if (rand() % 2)
                 labels[i] = labels[i] * -1.0f;
@@ -430,15 +431,16 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32_FP16Labels) {
             if (rand() % 2)
                 predictions[i] = predictions[i] * -1.0f;
             labels[i] = ((rand() % 1500) / 999.0f);
-            if (predictions[i] == 0.0f && (rand() % 5))
+            if (predictions[i] == 0.0f && (rand() % 5) != 0)
                 labels[i] = 0.0f;
             if (rand() % 2)
-                labels[i] = labels[i] * -1.0f;
+                labels[i] = labels[i] * (half)-1.0f;
 
-            if (labels[i] == predictions[i])
+            if ((float)labels[i] == predictions[i])
                 elementLoss[i] = 0.0f;
             else
-                elementLoss[i] = 100.0f * fabsf((clampLabel(labels[i], epsilon) - predictions[i]) / clampLabel(labels[i], epsilon));
+                elementLoss[i] =
+                    100.0f * fabsf(((float)clampLabel(labels[i], epsilon) - predictions[i]) / (float)clampLabel(labels[i], epsilon));
             if (elementLoss[i] < maxMagnitude) {
                 if (!(elementLoss[i] > -maxMagnitude))
                     elementLoss[i] = -maxMagnitude;
@@ -449,7 +451,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32_FP16Labels) {
             // d/dx(100 abs((y - x)/y)) = 100 * (x - y) * (sqrt( (y-x)^2 / y^2 ) / (y - x)^2)
             float x = predictions[i];
             float y = clampLabel(labels[i], epsilon);
-            if (labels[i] == predictions[i])
+            if ((float)labels[i] == predictions[i])
                 elementLossGradient[i] = 0.0f;
             else
                 elementLossGradient[i] = 100.0f * (x - y) * (sqrt(((y - x) * (y - x)) / (y * y)) / ((y - x) * (y - x)));
@@ -526,8 +528,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32_FP16Labels) {
         float *elementLossGpu_h_mem = (float *)elementLossGpu_h.getMemPtr();
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
             float thresh = 0.001f;
-            if (thresh < fabsf(elementLoss[i] * 0.002f))
-                thresh = fabsf(elementLoss[i] * 0.002f);
+            thresh = fmaxf(thresh, elementLoss[i] * 0.001f);
             if (abs(elementLoss[i] - elementLossGpu_h_mem[i]) >= thresh) {
                 printf("%d (%ld, %ld)  %f vs %f    %f %f\n",
                        i,
@@ -543,7 +544,6 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32_FP16Labels) {
                        (float)clampLabel(labels[i], epsilon),
                        (float)elementLoss[i]);
             }
-            thresh = fmaxf(thresh, elementLoss[i] * 0.001f);
             ASSERT_LT(abs(elementLoss[i] - elementLossGpu_h_mem[i]), thresh);
         }
 

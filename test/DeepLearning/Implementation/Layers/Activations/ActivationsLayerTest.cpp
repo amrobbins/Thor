@@ -63,7 +63,7 @@ TEST(Relu, Works) {
         half *destMem = (half *)destCpu.getMemPtr();
         for (int i = 0; i < numElements; ++i) {
             half rectified = featureInMem[i];
-            if (rectified < 0.0f)
+            if (rectified < (half)0.0f)
                 rectified = 0.0f;
             if ((float)destMem[i] != (float)rectified) {
                 printf("%d of %d\n", i, numElements);
@@ -169,7 +169,7 @@ TEST(Tanh, Works) {
         half *errorOutMem = (half *)errorOutCpu.getMemPtr();
         float thresh = 0.0001;
         for (int i = 0; i < numElements; ++i) {
-            float expectedValueFloat = errorInMem[i] * (1.0f - tanh(featureInMem[i]) * tanh(featureInMem[i]));
+            float expectedValueFloat = (float)errorInMem[i] * (1.0f - tanh((float)featureInMem[i]) * tanh((float)featureInMem[i]));
             half expectedValue = (half)expectedValueFloat;
             half actualValue = errorOutMem[i];
             ASSERT_LT(abs((float)expectedValue - (float)actualValue), thresh);

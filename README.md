@@ -18,7 +18,7 @@ This framework is for Linux, and has been tested on Ubuntu 18.04 and 20.04.
 
 Dependencies, with installation directions for Ubuntu:
   1. sudo apt-get update
-  1. sudo apt-get install build-essential cmake
+  1. sudo apt-get install build-essential cmake clang-format
   1. cuda 12  - can install with 'sudo apt-get install cuda'
   2. cudnn 8.9 for cuda 12 - get it here: https://developer.nvidia.com/cudnn
      1. you will need to create an account and accept the terms
@@ -43,6 +43,7 @@ git clone https://github.com/amrobbins/Thor.git
 cd Thor
 git clone https://github.com/google/googletest.git
 cd googletest
+git checkout release-1.12.1
 mkdir build
 cd build
 cmake ..

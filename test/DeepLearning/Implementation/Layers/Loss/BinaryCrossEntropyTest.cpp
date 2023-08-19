@@ -20,7 +20,7 @@ using namespace ThorImplementation;
 
 half sigmoidH(half x) {
     half one = 1.0f;
-    return one / (half)(one + expf(-x));
+    return one / (half)(one + (half)expf(-x));
 }
 
 TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
@@ -54,7 +54,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
             totalActivations = 0.0;
             for (uint32_t i = 0; i < batchSize; ++i) {
                 activations[i] = ((rand() % 1000) / 999.0f);
-                totalActivations += activations[i];
+                totalActivations += (double)activations[i];
                 labels[i] = rand() % 2;
             }
         }
@@ -136,7 +136,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
         half *probabilityMem = (half *)probabilities.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
             probabilityMem[b] = sigmoidH(activationsMem[b]);
-            lossMem[b] = -(labelMem[b] * logf(probabilityMem[b]) + (1 - labelMem[b]) * (logf(1.0f - probabilityMem[b])));
+            lossMem[b] = -(labelMem[b] * logf(probabilityMem[b]) + (1 - labelMem[b]) * (logf(1.0f - (float)probabilityMem[b])));
         }
 
         // Verify the loss output
@@ -168,7 +168,7 @@ TEST(BinaryCrossEntropy, ComputesCorrectElementWiseResult) {
 
         half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
         for (uint32_t b = 0; b < batchSize; ++b) {
-            errorOutputMem[b] = Loss::getLossScalingFactor() * (probabilityMem[b] - labelMem[b]);
+            errorOutputMem[b] = (half)Loss::getLossScalingFactor() * (probabilityMem[b] - (half)labelMem[b]);
         }
 
         // Verify the loss gradient

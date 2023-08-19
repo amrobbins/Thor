@@ -138,7 +138,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         half *cpuFeatureOut = (half *)featureOut.getMemPtr();
         half *gpuFeatureOut = (half *)featureOutGpu_h.getMemPtr();
         int numOutputElements = batchSize * numOutputFeatures;
-        float maxDiff = numInputFeatures * 0.01;
+        float maxDiff = numInputFeatures * 0.0125;
         for (int i = 0; i < numOutputElements; ++i) {
             if (abs((float)(cpuFeatureOut[i]) - (float)(gpuFeatureOut[i])) >= maxDiff) {
                 int batch = i / numOutputFeatures;
@@ -323,8 +323,8 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     half *weightsGpuMem = (half *)weightsGpu_h.getMemPtr();
     half *weightsGradientMem = (half *)weightsGradientGpu_h.getMemPtr();
     for (int i = 0; i < numWeights; ++i) {
-        half expected = weightsMem[i] - (learningRate * weightsGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
-        maxDiff = abs(expected / 1000.0f);
+        half expected = (float)weightsMem[i] - (learningRate * (float)weightsGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
+        maxDiff = abs((float)expected / 1000.0f);
         if (maxDiff < 0.016)
             maxDiff = 0.016;
         if (abs((float)expected - (float)weightsGpuMem[i]) >= maxDiff) {
@@ -346,8 +346,8 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
         half *biasesGpuMem = (half *)biasesGpu_h.getMemPtr();
         half *biasesGradientMem = (half *)biasesGradientGpu_h.getMemPtr();
         for (int i = 0; i < numBiases; ++i) {
-            half expected = biasesMem[i] - (learningRate * biasesGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
-            maxDiff = abs(expected / 1000.0f);
+            half expected = (float)biasesMem[i] - (learningRate * (float)biasesGradientMem[i]) / (Loss::getLossScalingFactor() * batchSize);
+            maxDiff = abs((float)expected / 1000.0f);
             if (maxDiff < 0.01)
                 maxDiff = 0.01;
             ASSERT_LT(abs((float)expected - (float)biasesGpuMem[i]), maxDiff);

@@ -32,7 +32,7 @@ TEST(LossShaper, NumericalBatchFp16) {
             for (uint32_t c = 0; c < dimensions[1]; ++c) {
                 half val = (rand() % 1000) / 250.0f;
                 rawLossCpuMem[b * dimensions[1] + c] = val;
-                batchLossCpu += val;
+                batchLossCpu += (float)val;
             }
         }
         batchLossCpu /= dimensions[0];

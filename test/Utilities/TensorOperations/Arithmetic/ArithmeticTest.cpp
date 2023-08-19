@@ -392,7 +392,7 @@ TEST(SumScaleHalfAll, ComputesCorrectAnswer) {
         assert(cudaStatus == cudaSuccess);
 
         for (int i = 0; i < numElements; ++i)
-            dest_cpu[i] = ((float)source0[i] + scale * (float)source1[i]);
+            dest_cpu[i] = ((float)source0[i] + (float)scale * (float)source1[i]);
 
         cudaStatus = cudaStreamSynchronize(stream.getStream());
         assert(cudaStatus == cudaSuccess);

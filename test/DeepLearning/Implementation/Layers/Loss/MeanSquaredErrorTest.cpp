@@ -49,7 +49,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss) {
             labels[i] = ((rand() % 1500) / 999.0f);
             half val = labels[i] - predictions[i];
             elementLoss[i] = val * val;
-            elementLossGradient[i] = (half)2.0f * val * Loss::getLossScalingFactor();
+            elementLossGradient[i] = (half)2.0f * val * (half)Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -167,7 +167,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
             labels[i] = ((rand() % 1500) / 999.0f);
             half val = (half)labels[i] - predictions[i];
             elementLoss[i] = val * val;
-            elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
+            elementLossGradient[i] = (half)2.0f * val * (half)Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -233,9 +233,9 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
         labelsStream.synchronize();
         half *elementLossGpu_h_mem = (half *)elementLossGpu_h.getMemPtr();
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-            if (abs(elementLoss[i] - elementLossGpu_h_mem[i]) >= thresh)
+            if (abs((float)elementLoss[i] - (float)elementLossGpu_h_mem[i]) >= thresh)
                 printf("%d (%ld, %ld)  %f vs %f\n", i, dimensions[0], dimensions[1], (float)elementLoss[i], (float)elementLossGpu_h_mem[i]);
-            ASSERT_LT(abs(elementLoss[i] - elementLossGpu_h_mem[i]), thresh);
+            ASSERT_LT(abs((float)elementLoss[i] - (float)elementLossGpu_h_mem[i]), thresh);
         }
 
         if (!inferenceOnly) {
@@ -245,7 +245,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]) >= thresh)
+                if (abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]) >= thresh)
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
                            i,
                            dimensions[0],
@@ -255,7 +255,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
                            (float)predictions[i],
                            (float)labels[i],
                            Loss::getLossScalingFactor());
-                ASSERT_LT(abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]), thresh);
+                ASSERT_LT(abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]), thresh);
             }
         }
 
@@ -294,7 +294,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
             labels[i] = ((rand() % 1500) / 999.0f);
             half val = (half)labels[i] - predictions[i];
             elementLoss[i] = val * val;
-            elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
+            elementLossGradient[i] = (half)2.0f * val * (half)Loss::getLossScalingFactor();
         }
 
         vector<shared_ptr<Layer>> layers;
@@ -373,7 +373,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
             labelsStream.synchronize();
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
-                if (abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]) >= thresh)
+                if (abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]) >= thresh)
                     printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
                            i,
                            dimensions[0],
@@ -383,7 +383,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
                            (float)predictions[i],
                            (float)labels[i],
                            Loss::getLossScalingFactor());
-                ASSERT_LT(abs(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]), thresh);
+                ASSERT_LT(abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]), thresh);
             }
         }
 
@@ -546,7 +546,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
         for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); i++) {
             predictions[i] = ((rand() % 1500) / 999.0f);
             labels[i] = ((rand() % 1500) / 999.0f);
-            float val = labels[i] - predictions[i];
+            float val = (float)labels[i] - (float)predictions[i];
             elementLoss[i] = val * val;
             elementLossGradient[i] = 2.0f * val * Loss::getLossScalingFactor();
         }
