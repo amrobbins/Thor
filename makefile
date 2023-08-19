@@ -1,21 +1,23 @@
 CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include
 CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /lib/x86_64-linux-gnu/libboost_filesystem.a
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
-COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_53,code=compute_53 -gencode=arch=compute_53,code=sm_53 \
-                                      -gencode=arch=compute_62,code=compute_62 -gencode=arch=compute_62,code=sm_62 \
-                                      -gencode=arch=compute_72,code=compute_72 -gencode=arch=compute_72,code=sm_72
+# https://en.wikipedia.org/wiki/CUDA#GPUs_supported
+COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_62,code=compute_62 -gencode=arch=compute_62,code=sm_62 \
+                                      -gencode=arch=compute_72,code=compute_72 -gencode=arch=compute_72,code=sm_72 \
+                                      -gencode=arch=compute_87,code=compute_87 -gencode=arch=compute_87,code=sm_87
 #COMPUTE_CAPABILITIES = -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_52,code=sm_52 \
 #                       -gencode=arch=compute_60,code=compute_60 -gencode=arch=compute_60,code=sm_60 \
 #                       -gencode=arch=compute_61,code=compute_61 -gencode=arch=compute_61,code=sm_61 \
 #                       -gencode=arch=compute_70,code=compute_70 -gencode=arch=compute_70,code=sm_70 \
 #                       -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
-COMPUTE_CAPABILITIES = -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_52,code=sm_52 \
-                       -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
+COMPUTE_CAPABILITIES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75 \
+                       -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
 
 
 #COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_70,code=compute_70 -gencode=arch=compute_70,code=sm_70 \
 #                       -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
-COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
+COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75 \
+										 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
 
 
 BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl -lcurses
