@@ -260,9 +260,9 @@ bool alexnetImagePreprocessorUint8(uint8_t *rgbPixelArray) {
 bool alexnetImagePreprocessorHalf(half *rgbPixelArray) {
     for (uint32_t row = 0; row < 224; ++row) {
         for (uint32_t col = 0; col < 224; ++col) {
-            rgbPixelArray[row * 224 + col] = (rgbPixelArray[row * 224 + col] - 124.0f) / 255.0f;
-            rgbPixelArray[224 * 224 + row * 224 + col] = (rgbPixelArray[224 * 224 + row * 224 + col] - 117.0f) / 255.0f;
-            rgbPixelArray[2 * 224 * 224 + row * 224 + col] = (rgbPixelArray[2 * 224 * 224 + row * 224 + col] - 104.0f) / 255.0f;
+            rgbPixelArray[row * 224 + col] = ((float)rgbPixelArray[row * 224 + col] - 124.0f) / 255.0f;
+            rgbPixelArray[224 * 224 + row * 224 + col] = ((float)rgbPixelArray[224 * 224 + row * 224 + col] - 117.0f) / 255.0f;
+            rgbPixelArray[2 * 224 * 224 + row * 224 + col] = ((float)rgbPixelArray[2 * 224 * 224 + row * 224 + col] - 104.0f) / 255.0f;
         }
     }
     return true;
@@ -276,7 +276,7 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
     unordered_set<string> destDirectories;
 
     sourceDirectories.insert(testDatasetDir);
-    destDirectories.insert("/media/andrew/PCIE_SSD/");
+    destDirectories.insert("/PCIE_SSD/");
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
@@ -324,7 +324,7 @@ TEST(ShardedRawDatasetCreator, createMnist) {
     unordered_set<string> destDirectories;
 
     sourceDirectories.insert(testDatasetDir);
-    destDirectories.insert("/media/andrew/PCIE_SSD/");
+    destDirectories.insert("/PCIE_SSD/");
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
@@ -333,7 +333,6 @@ TEST(ShardedRawDatasetCreator, createMnist) {
                           shards);
 }
 */
-
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
