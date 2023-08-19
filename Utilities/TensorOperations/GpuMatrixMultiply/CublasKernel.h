@@ -124,6 +124,7 @@ struct CublasKernelOptions {
 class CublasKernel : private ReferenceCounted {
    public:
     static const float ALPHA_NO_SCALE;
+    static const float ALPHA_NEGATE;
     static const float BETA_ACCUMULATE;
     static const float BETA_CLEAR;
 
@@ -221,7 +222,7 @@ class CublasKernel : private ReferenceCounted {
         return lhs.cublasKernelOptions->runStats < rhs.cublasKernelOptions->runStats;
     }
 
-    void executeKernel(Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, Stream stream) {
+    void executeKernel(Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, bool negate, Stream stream) {
         executeKernel(A,
                       B,
                       C,
@@ -232,6 +233,7 @@ class CublasKernel : private ReferenceCounted {
                       D.getDescriptor().getDimensions()[1],
                       workspace,
                       accumulate,
+                      negate,
                       stream);
     }
 
@@ -245,6 +247,7 @@ class CublasKernel : private ReferenceCounted {
                        size_t ldD,
                        Optional<Tensor> workspace,
                        bool accumulate,
+                       bool negate,
                        Stream stream) {
         assert(!uninitialized());
 
@@ -292,11 +295,11 @@ class CublasKernel : private ReferenceCounted {
         assert(C.getMemPtr() != B.getMemPtr());
         assert(C.getMemPtr() == D.getMemPtr());
 
-        assert(runWithoutChecks(A, B, C, D, workspace, accumulate, stream) == CUBLAS_STATUS_SUCCESS);
+        assert(runWithoutChecks(A, B, C, D, workspace, accumulate, negate, stream) == CUBLAS_STATUS_SUCCESS);
     }
 
     inline cublasStatus_t runWithoutChecks(
-        Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, Stream stream) {
+        Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, bool negate, Stream stream) {
         assert(!uninitialized());
         ScopedGpu scopedGpu(stream.getGpuNum());
 
@@ -312,7 +315,7 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus_t cublasStatus;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       *operationDesc,
-                                      &ALPHA_NO_SCALE,
+                                      negate ? &ALPHA_NEGATE : &ALPHA_NO_SCALE,
                                       A.getMemPtr(),
                                       *ADesc,
                                       B.getMemPtr(),

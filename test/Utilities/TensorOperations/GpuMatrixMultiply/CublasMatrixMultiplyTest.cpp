@@ -101,25 +101,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
 
         // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it fixed. Until then no
         // accumulate.
-        // bool accumulate = rand() % 2 ? true : false;
-        bool accumulate = false;
+        bool accumulate = rand() % 2 ? true : false;
+        bool negate = rand() % 2 ? true : false;
 
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
-
-        std::thread cpuWorker(matrixMultiplyCpu,
-                              (float *)A.getMemPtr(),
-                              (float *)B.getMemPtr(),
-                              (float *)C.getMemPtr(),
-                              rowsA,
-                              colsA,
-                              rowsB,
-                              colsB,
-                              ldA,
-                              ldB,
-                              ldC,
-                              transposeA,
-                              transposeB,
-                              accumulate);
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalKernel(
@@ -147,6 +132,23 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         A_d.copyFromAsync(A, stream);
         B_d.copyFromAsync(B, stream);
         C_d.copyFromAsync(C, stream);
+        stream.synchronize();
+
+        std::thread cpuWorker(matrixMultiplyCpu,
+                              (float *)A.getMemPtr(),
+                              (float *)B.getMemPtr(),
+                              (float *)C.getMemPtr(),
+                              rowsA,
+                              colsA,
+                              rowsB,
+                              colsB,
+                              ldA,
+                              ldB,
+                              ldC,
+                              transposeA,
+                              transposeB,
+                              accumulate,
+                              negate);
 
         if (useLdVersion) {
             CublasMatrixMultiply::instance().multiply(A_d,
@@ -163,6 +165,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
                                                       transposeA,
                                                       transposeB,
                                                       accumulate,
+                                                      negate,
                                                       TensorDescriptor::DataType::FP32,
                                                       stream);
         } else {
@@ -177,13 +180,15 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
                                                       transposeA,
                                                       transposeB,
                                                       accumulate,
+                                                      negate,
                                                       TensorDescriptor::DataType::FP32,
                                                       stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
-        cpuWorker.join();
         stream.synchronize();
+
+        cpuWorker.join();
 
         float maxDiff = transposeA == false ? colsA * 0.0001 : rowsA * 0.0001;
 
@@ -297,25 +302,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
 
         // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it fixed. Until then no
         // accumulate.
-        // bool accumulate = rand() % 2 ? true : false;
-        bool accumulate = false;
+        bool accumulate = rand() % 2 ? true : false;
+        bool negate = rand() % 2 ? true : false;
 
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
-
-        std::thread cpuWorker(matrixMultiplyCpuHalf,
-                              (half *)A.getMemPtr(),
-                              (half *)B.getMemPtr(),
-                              (half *)C.getMemPtr(),
-                              rowsA,
-                              colsA,
-                              rowsB,
-                              colsB,
-                              ldA,
-                              ldB,
-                              ldC,
-                              transposeA,
-                              transposeB,
-                              accumulate);
 
         if (useLdVersion)
             CublasMatrixMultiply::instance().chooseOptimalKernel(
@@ -343,6 +333,23 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         A_d.copyFromAsync(A, stream);
         B_d.copyFromAsync(B, stream);
         C_d.copyFromAsync(C, stream);
+        stream.synchronize();
+
+        std::thread cpuWorker(matrixMultiplyCpuHalf,
+                              (half *)A.getMemPtr(),
+                              (half *)B.getMemPtr(),
+                              (half *)C.getMemPtr(),
+                              rowsA,
+                              colsA,
+                              rowsB,
+                              colsB,
+                              ldA,
+                              ldB,
+                              ldC,
+                              transposeA,
+                              transposeB,
+                              accumulate,
+                              negate);
 
         if (useLdVersion) {
             CublasMatrixMultiply::instance().multiply(A_d,
@@ -359,6 +366,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
                                                       transposeA,
                                                       transposeB,
                                                       accumulate,
+                                                      negate,
                                                       TensorDescriptor::DataType::FP16,
                                                       stream);
         } else {
@@ -373,13 +381,15 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
                                                       transposeA,
                                                       transposeB,
                                                       accumulate,
+                                                      negate,
                                                       TensorDescriptor::DataType::FP16,
                                                       stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
-        cpuWorker.join();
         stream.synchronize();
+
+        cpuWorker.join();
 
         float maxDiff = transposeA == false ? colsA * 0.005 : rowsA * 0.005;
 
@@ -493,10 +503,15 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
 
         // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it fixed. Until then no
         // accumulate.
-        // bool accumulate = rand() % 2 ? true : false;
-        bool accumulate = false;
+        bool accumulate = rand() % 2 ? true : false;
+        bool negate = rand() % 2 ? true : false;
 
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
+
+        A_d.copyFromAsync(A, stream);
+        B_d.copyFromAsync(B, stream);
+        C_d.copyFromAsync(C, stream);
+        stream.synchronize();
 
         std::thread cpuWorker(matrixMultiplyCpu,
                               (float *)A.getMemPtr(),
@@ -511,11 +526,8 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
                               ldC,
                               transposeA,
                               transposeB,
-                              accumulate);
-
-        A_d.copyFromAsync(A, stream);
-        B_d.copyFromAsync(B, stream);
-        C_d.copyFromAsync(C, stream);
+                              accumulate,
+                              negate);
 
         if (useLdVersion) {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
@@ -531,16 +543,29 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
                                                                                 transposeA,
                                                                                 transposeB,
                                                                                 accumulate,
+                                                                                negate,
                                                                                 TensorDescriptor::DataType::FP32,
                                                                                 stream);
         } else {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, rowsB, colsB, transposeA, transposeB, accumulate, TensorDescriptor::DataType::FP32, stream);
+            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
+                                                                                B_d,
+                                                                                C_d,
+                                                                                rowsA,
+                                                                                colsA,
+                                                                                rowsB,
+                                                                                colsB,
+                                                                                transposeA,
+                                                                                transposeB,
+                                                                                accumulate,
+                                                                                negate,
+                                                                                TensorDescriptor::DataType::FP32,
+                                                                                stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
-        cpuWorker.join();
         stream.synchronize();
+
+        cpuWorker.join();
 
         float maxDiff = transposeA == false ? colsA * 0.0001 : rowsA * 0.0001;
 
@@ -654,10 +679,22 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
 
         // CublasLt currently takes D = Alpha*(AB) + Beta*(AB+C), I believe this is a bug, will try to get it fixed. Until then no
         // accumulate.
-        // bool accumulate = rand() % 2 ? true : false;
-        bool accumulate = false;
+        bool accumulate = rand() % 2 ? true : false;
+        bool negate = rand() % 2 ? true : false;
 
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
+
+        if (useLdVersion)
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+        else
+            CublasMatrixMultiply::instance().chooseOptimalKernel(
+                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
+
+        A_d.copyFromAsync(A, stream);
+        B_d.copyFromAsync(B, stream);
+        C_d.copyFromAsync(C, stream);
+        stream.synchronize();
 
         std::thread cpuWorker(matrixMultiplyCpuHalf,
                               (half *)A.getMemPtr(),
@@ -672,18 +709,8 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
                               ldC,
                               transposeA,
                               transposeB,
-                              accumulate);
-
-        if (useLdVersion)
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
-                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
-        else
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
-                0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
-
-        A_d.copyFromAsync(A, stream);
-        B_d.copyFromAsync(B, stream);
-        C_d.copyFromAsync(C, stream);
+                              accumulate,
+                              negate);
 
         if (useLdVersion) {
             CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
@@ -699,16 +726,29 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
                                                                                 transposeA,
                                                                                 transposeB,
                                                                                 accumulate,
+                                                                                negate,
                                                                                 TensorDescriptor::DataType::FP16,
                                                                                 stream);
         } else {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(
-                A_d, B_d, C_d, rowsA, colsA, rowsB, colsB, transposeA, transposeB, accumulate, TensorDescriptor::DataType::FP16, stream);
+            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
+                                                                                B_d,
+                                                                                C_d,
+                                                                                rowsA,
+                                                                                colsA,
+                                                                                rowsB,
+                                                                                colsB,
+                                                                                transposeA,
+                                                                                transposeB,
+                                                                                accumulate,
+                                                                                negate,
+                                                                                TensorDescriptor::DataType::FP16,
+                                                                                stream);
         }
 
         C_gpu_h.copyFromAsync(C_d, stream);
-        cpuWorker.join();
         stream.synchronize();
+
+        cpuWorker.join();
 
         float maxDiff = transposeA == false ? colsA * 0.005 : rowsA * 0.005;
 

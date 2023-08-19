@@ -74,8 +74,7 @@ class CublasMatrixMultiply {
                   bool transposeA,
                   bool transposeB,
                   const bool accumulate,
-                  // const bool negate,
-                  //  FIXME: why do I have the two versions for workspace, cant I just have an optional tensor as the parameter?
+                  const bool negate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream) {
         int ldC = transposeB == false ? B_cols : B_rows;
@@ -93,6 +92,7 @@ class CublasMatrixMultiply {
                  transposeA,
                  transposeB,
                  accumulate,
+                 negate,
                  ABCDataType,
                  stream);
     }
@@ -114,7 +114,7 @@ class CublasMatrixMultiply {
                   bool transposeA,
                   bool transposeB,
                   const bool accumulate,
-                  // const bool negate,
+                  const bool negate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
 
@@ -138,11 +138,12 @@ class CublasMatrixMultiply {
                                             bool transposeA,
                                             bool transposeB,
                                             const bool accumulate,
+                                            const bool negate,
                                             const TensorDescriptor::DataType ABCDataType,
                                             Stream stream) {
         int ldC = transposeB == false ? B_cols : B_rows;
         multiplyUsingHeuristicKernelChoice(
-            A, B, C, A_rows, A_cols, B_rows, B_cols, A_cols, B_cols, ldC, transposeA, transposeB, accumulate, ABCDataType, stream);
+            A, B, C, A_rows, A_cols, B_rows, B_cols, A_cols, B_cols, ldC, transposeA, transposeB, accumulate, negate, ABCDataType, stream);
     }
 
     // This variant allows non-packed matrices
@@ -161,6 +162,7 @@ class CublasMatrixMultiply {
                                             bool transposeA,
                                             bool transposeB,
                                             const bool accumulate,
+                                            const bool negate,
                                             const TensorDescriptor::DataType ABCDataType,
                                             Stream stream);
 

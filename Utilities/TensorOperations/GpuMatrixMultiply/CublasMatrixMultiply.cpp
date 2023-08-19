@@ -69,6 +69,7 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     bool transposeA,
                                     bool transposeB,
                                     const bool accumulate,
+                                    const bool negate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
     int32_t C_rows = transposeA == false ? A_rows : A_cols;
@@ -135,7 +136,7 @@ void CublasMatrixMultiply::multiply(Tensor A,
                    workspace.get().getDescriptor().getArraySizeInBytes());
     }
 
-    cublasKernel.executeKernel(A, B, C, C, ld_A, ld_B, ld_C, ld_C, workspace, accumulate, stream);
+    cublasKernel.executeKernel(A, B, C, C, ld_A, ld_B, ld_C, ld_C, workspace, accumulate, negate, stream);
 }
 
 cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataType dataType) {
@@ -160,6 +161,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               bool transposeA,
                                                               bool transposeB,
                                                               const bool accumulate,
+                                                              const bool negate,
                                                               const TensorDescriptor::DataType ABCDataType,
                                                               Stream stream) {
     int32_t C_rows = transposeA == false ? A_rows : A_cols;
@@ -241,7 +243,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
 
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
-                                      &CublasKernel::ALPHA_NO_SCALE,
+                                      negate ? &CublasKernel::ALPHA_NEGATE : &CublasKernel::ALPHA_NO_SCALE,
                                       A.getMemPtr(),
                                       ADesc,
                                       B.getMemPtr(),
@@ -263,7 +265,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
 
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
-                                      &CublasKernel::ALPHA_NO_SCALE,
+                                      negate ? &CublasKernel::ALPHA_NEGATE : &CublasKernel::ALPHA_NO_SCALE,
                                       A.getMemPtr(),
                                       ADesc,
                                       B.getMemPtr(),
@@ -314,7 +316,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
             continue;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
-                                      &CublasKernel::ALPHA_NO_SCALE,
+                                      negate ? &CublasKernel::ALPHA_NEGATE : &CublasKernel::ALPHA_NO_SCALE,
                                       A.getMemPtr(),
                                       ADesc,
                                       B.getMemPtr(),
@@ -353,7 +355,7 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
         for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
             cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                           operationDesc,
-                                          &CublasKernel::ALPHA_NO_SCALE,
+                                          negate ? &CublasKernel::ALPHA_NEGATE : &CublasKernel::ALPHA_NO_SCALE,
                                           A.getMemPtr(),
                                           ADesc,
                                           B.getMemPtr(),
@@ -678,7 +680,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         for (unsigned int i = 0; i < kernels.size() && (abs(TARGET_WAVES - kernels[i].getWavesCount(gpuNum)) <= maxWavesDiff ||
                                                         prunedKernels.size() < initialContestantCount);
              ++i) {
-            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, stream);
+            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, false, stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 // Wait for execution to finish to catch any runtime errors that are reported asynchronously
                 stream.synchronize();
@@ -694,7 +696,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
 
         // Prune just the non-working kernels
         for (unsigned int i = 0; i < kernels.size(); ++i) {
-            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, stream);
+            cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, false, stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
                 // Wait for execution to finish to catch any runtime errors that are reported asynchronously
                 stream.synchronize();
@@ -719,7 +721,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     Event startEvent = stream.putEvent(true);
     for (int i = 0; i < 5; ++i) {
         kernels[rand() % kernels.size()].runWithoutChecks(
-            A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, stream);
+            A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, false, stream);
         tensorInstance += 1;
         if (tensorInstance >= numInstances)
             tensorInstance = 0;
@@ -738,8 +740,14 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
         Event startEvent = stream.putEvent(true);
 
         for (int i = 0; i < kernelsToExecute; ++i) {
-            kernels[rand() % kernels.size()].runWithoutChecks(
-                A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, stream);
+            kernels[rand() % kernels.size()].runWithoutChecks(A[tensorInstance],
+                                                              B[tensorInstance],
+                                                              C[tensorInstance],
+                                                              C[tensorInstance],
+                                                              workspace[workspaceInstance],
+                                                              false,
+                                                              false,
+                                                              stream);
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
                 tensorInstance = 0;
@@ -756,7 +764,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     // But first put some initial work in the stream so that all timed work will be queued before running
     for (int i = 0; i < 5; ++i) {
         kernels[rand() % kernels.size()].runWithoutChecks(
-            A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, stream);
+            A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, false, stream);
         tensorInstance += 1;
         if (tensorInstance >= numInstances)
             tensorInstance = 0;
@@ -775,8 +783,14 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
     for (int run = 0; run < initialRun; ++run) {
         for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
             startEvents[kernelIndex].push_back(stream.putEvent(true));
-            cublasStatus = kernels[kernelIndex].runWithoutChecks(
-                A[tensorInstance], B[tensorInstance], C[tensorInstance], C[tensorInstance], workspace[workspaceInstance], false, stream);
+            cublasStatus = kernels[kernelIndex].runWithoutChecks(A[tensorInstance],
+                                                                 B[tensorInstance],
+                                                                 C[tensorInstance],
+                                                                 C[tensorInstance],
+                                                                 workspace[workspaceInstance],
+                                                                 false,
+                                                                 false,
+                                                                 stream);
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
             tensorInstance += 1;
             if (tensorInstance >= numInstances)
@@ -830,6 +844,7 @@ bool CublasMatrixMultiply::chooseOptimalKernel(int gpuNum,
                                                                      C[tensorInstance],
                                                                      C[tensorInstance],
                                                                      workspace[workspaceInstance],
+                                                                     false,
                                                                      false,
                                                                      stream);
             tensorInstance += 1;

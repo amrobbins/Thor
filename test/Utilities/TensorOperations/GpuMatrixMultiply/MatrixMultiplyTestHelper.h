@@ -84,7 +84,8 @@ void matrixMultiplyCpu(float *A,
                        int ldc,
                        bool transposeA,
                        bool transposeB,
-                       bool accumulate) {
+                       bool accumulate,
+                       bool negate) {
     omp_set_num_threads(10);
 
     float *A_t = nullptr;
@@ -116,10 +117,17 @@ void matrixMultiplyCpu(float *A,
             for (int carb = 0; carb < colsA; carb++)
                 accum += A[ra * lda + carb] * B[carb * ldb + cb];
 
-            if (accumulate)
-                C[ra * ldc + cb] += accum;
-            else
-                C[ra * ldc + cb] = accum;
+            if (accumulate) {
+                if (negate)
+                    C[ra * ldc + cb] -= accum;
+                else
+                    C[ra * ldc + cb] += accum;
+            } else {
+                if (negate)
+                    C[ra * ldc + cb] = -accum;
+                else
+                    C[ra * ldc + cb] = accum;
+            }
         }
     }
 
@@ -141,7 +149,8 @@ void matrixMultiplyCpuHalf(half *A,
                            int ldc,
                            bool transposeA,
                            bool transposeB,
-                           bool accumulate) {
+                           bool accumulate,
+                           bool negate) {
     omp_set_num_threads(10);
 
     half *A_t = nullptr;
@@ -173,10 +182,17 @@ void matrixMultiplyCpuHalf(half *A,
             for (int carb = 0; carb < colsA; carb++)
                 accum += (float)(A[ra * lda + carb] * B[carb * ldb + cb]);
 
-            if (accumulate)
-                C[ra * ldc + cb] = (float)(C[ra * ldc + cb]) + accum;
-            else
-                C[ra * ldc + cb] = accum;
+            if (accumulate) {
+                if (negate)
+                    C[ra * ldc + cb] = (float)(C[ra * ldc + cb]) + -accum;
+                else
+                    C[ra * ldc + cb] = (float)(C[ra * ldc + cb]) + accum;
+            } else {
+                if (negate)
+                    C[ra * ldc + cb] = -accum;
+                else
+                    C[ra * ldc + cb] = accum;
+            }
         }
     }
 
