@@ -52,6 +52,8 @@ class CublasMatrixMultiply {
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // accumulate=true computes C += A * B. accumulate=false computes C = A * B.
+    // with negate=true:
+    //   accumulate=true computes C -= A * B. accumulate=false computes C = -A * B.
     //
     // Prerequisites to using this version of multiply:
     //  1. You have previously called chooseOptimalKernel for a matrix multiply with the same dimensions (i.e. A rows, A cols, B cols).
@@ -64,7 +66,7 @@ class CublasMatrixMultiply {
     void multiply(Tensor A,
                   Tensor B,
                   Tensor C,
-                  Tensor workspace,
+                  Optional<Tensor> workspace,
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_rows,
@@ -72,6 +74,8 @@ class CublasMatrixMultiply {
                   bool transposeA,
                   bool transposeB,
                   const bool accumulate,
+                  // const bool negate,
+                  //  FIXME: why do I have the two versions for workspace, cant I just have an optional tensor as the parameter?
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream) {
         int ldC = transposeB == false ? B_cols : B_rows;
@@ -97,7 +101,7 @@ class CublasMatrixMultiply {
     void multiply(Tensor A,
                   Tensor B,
                   Tensor C,
-                  Tensor workspace,
+                  Optional<Tensor> workspace,
                   const int32_t A_rows,
                   const int32_t A_cols,
                   const int32_t B_rows,
@@ -110,45 +114,7 @@ class CublasMatrixMultiply {
                   bool transposeA,
                   bool transposeB,
                   const bool accumulate,
-                  const TensorDescriptor::DataType ABCDataType,
-                  Stream stream);
-
-    // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
-    //
-    // Prerequisites to using this version of multiply:
-    //  1. You have previously called chooseOptimalKernel for a matrix multiply with the same dimensions (i.e. A rows, A cols, B cols).
-    void multiply(Tensor A,
-                  Tensor B,
-                  Tensor C,
-                  const int32_t A_rows,
-                  const int32_t A_cols,
-                  const int32_t B_rows,
-                  const int32_t B_cols,
-                  bool transposeA,
-                  bool transposeB,
-                  const bool accumulate,
-                  const TensorDescriptor::DataType ABCDataType,
-                  Stream stream) {
-        int ldC = transposeB == false ? B_cols : B_rows;
-        multiply(A, B, C, A_rows, A_cols, B_rows, B_cols, A_cols, B_cols, ldC, transposeA, transposeB, accumulate, ABCDataType, stream);
-    }
-
-    // This variant allows non-packed matrices
-    void multiply(Tensor A,
-                  Tensor B,
-                  Tensor C,
-                  const int32_t A_rows,
-                  const int32_t A_cols,
-                  const int32_t B_rows,
-                  const int32_t B_cols,
-                  // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent rows in
-                  // memory. Some slots at the end of a row may be unused.
-                  const int32_t ld_A,
-                  const int32_t ld_B,
-                  const int32_t ld_C,
-                  bool transposeA,
-                  bool transposeB,
-                  const bool accumulate,
+                  // const bool negate,
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
 
@@ -374,25 +340,6 @@ class CublasMatrixMultiply {
     uint32_t getReductionSupportMask(cublasLtMatmulAlgo_t algo);
     int getSwizzleMaxValue(cublasLtMatmulAlgo_t algo);
     int getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t algo);
-
-    void multiply(Tensor A,
-                  Tensor B,
-                  Tensor C,
-                  Optional<Tensor> workspace,
-                  const int32_t A_rows,
-                  const int32_t A_cols,
-                  const int32_t B_rows,
-                  const int32_t B_cols,
-                  // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two
-                  // adjacent rows in memory. Some slots at the end of a row may be unused.
-                  const int32_t ld_A,
-                  const int32_t ld_B,
-                  const int32_t ld_C,
-                  bool transposeA,
-                  bool transposeB,
-                  const bool accumulate,
-                  const TensorDescriptor::DataType ABCDataType,
-                  Stream stream);
 };
 
 }  // namespace ThorImplementation

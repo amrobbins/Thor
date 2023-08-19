@@ -52,79 +52,6 @@
 using namespace ThorImplementation;
 using namespace std;
 
-// This variant allows non-packed matrices and uses a workspace
-void CublasMatrixMultiply::multiply(Tensor A,
-                                    Tensor B,
-                                    Tensor C,
-                                    Tensor workspace,
-                                    const int32_t A_rows,
-                                    const int32_t A_cols,
-                                    const int32_t B_rows,
-                                    const int32_t B_cols,
-                                    // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two
-                                    // adjacent rows in memory. Some slots at the end of a row may be unused.
-                                    const int32_t ld_A,
-                                    const int32_t ld_B,
-                                    const int32_t ld_C,
-                                    bool transposeA,
-                                    bool transposeB,
-                                    const bool accumulate,
-                                    const TensorDescriptor::DataType ABCDataType,
-                                    Stream stream) {
-    multiply(A,
-             B,
-             C,
-             Optional<Tensor>(workspace),
-             A_rows,
-             A_cols,
-             B_rows,
-             B_cols,
-             ld_A,
-             ld_B,
-             ld_C,
-             transposeA,
-             transposeB,
-             accumulate,
-             ABCDataType,
-             stream);
-}
-
-// This variant allows non-packed matrices, does not use a workspace
-void CublasMatrixMultiply::multiply(Tensor A,
-                                    Tensor B,
-                                    Tensor C,
-                                    const int32_t A_rows,
-                                    const int32_t A_cols,
-                                    const int32_t B_rows,
-                                    const int32_t B_cols,
-                                    // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two
-                                    // adjacent rows in memory. Some slots at the end of a row may be unused.
-                                    const int32_t ld_A,
-                                    const int32_t ld_B,
-                                    const int32_t ld_C,
-                                    bool transposeA,
-                                    bool transposeB,
-                                    const bool accumulate,
-                                    const TensorDescriptor::DataType ABCDataType,
-                                    Stream stream) {
-    multiply(A,
-             B,
-             C,
-             Optional<Tensor>::empty(),
-             A_rows,
-             A_cols,
-             B_rows,
-             B_cols,
-             ld_A,
-             ld_B,
-             ld_C,
-             transposeA,
-             transposeB,
-             accumulate,
-             ABCDataType,
-             stream);
-}
-
 // This variant allows non-packed matrices
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
@@ -144,10 +71,6 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const bool accumulate,
                                     const TensorDescriptor::DataType ABCDataType,
                                     Stream stream) {
-    // It appears that Cublas currently does not handle alpha and beta right, I am seeing in some instances that alpha*AB + beta*(AB+C) is
-    // returned, which I could work with, except it appears that the behavior is not consistent.
-    assert(accumulate == false);
-
     int32_t C_rows = transposeA == false ? A_rows : A_cols;
     int32_t C_cols = transposeB == false ? B_cols : B_rows;
 
@@ -239,10 +162,6 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const bool accumulate,
                                                               const TensorDescriptor::DataType ABCDataType,
                                                               Stream stream) {
-    // It appears that Cublas currently does not handle alpha and beta right, I am seeing in some instances that alpha*AB + beta*(AB+C) is
-    // returned, which I could work with, except it appears that the behavior is not consistent.
-    assert(accumulate == false);
-
     int32_t C_rows = transposeA == false ? A_rows : A_cols;
     int32_t C_cols = transposeB == false ? B_cols : B_rows;
 
