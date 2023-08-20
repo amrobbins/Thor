@@ -202,8 +202,6 @@ void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards, const uint32_t 
     batchAssembler.returnBuffer(batchTensor, labelTensor);
 }
 
-/*
-FIXME: update this test
 TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     string baseFilename = "testDataset";
     string testDatasetDir("test/DeepLearning/DataSet");
@@ -221,13 +219,13 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
-    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224)), shards);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 10, 224, 224, 1, false, false)), shards);
 
     // load the dataset, ensure it contains the expected contents
     ASSERT_EQ(shards.size(), 1u);
-    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TRAIN), 3u);
-    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::VALIDATE), 1u);
-    ASSERT_EQ(shards[0]->getNumExamples(ExampleType::TEST), 7u);
+    EXPECT_EQ(shards[0]->getNumExamples(ExampleType::TRAIN), 3u);
+    EXPECT_EQ(shards[0]->getNumExamples(ExampleType::VALIDATE), 1u);
+    EXPECT_EQ(shards[0]->getNumExamples(ExampleType::TEST), 7u);
 
     uint32_t NUM_CLASSES = 4;
     verifyBatchAssembler(shards, NUM_CLASSES);
@@ -244,7 +242,7 @@ TEST(ShardedRawDatasetCreator, evaluatesDataset) {
 
     remove_all(tempDirectoryPath);
 }
-*/
+
 /*
 bool alexnetImagePreprocessorUint8(uint8_t *rgbPixelArray) {
     for (uint32_t row = 0; row < 224; ++row) {

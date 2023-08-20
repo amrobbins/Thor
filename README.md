@@ -18,11 +18,11 @@ This framework is for Linux, and has been tested on Ubuntu 18.04 and 20.04.
 
 Dependencies, with installation directions for Ubuntu:
   1. sudo apt-get update
-  1. sudo apt-get install build-essential cmake clang-format
+  1. sudo apt-get install build-essential cmake clang-format  
   1. cuda 12  - can install with 'sudo apt-get install cuda'
   2. cudnn 8.9 for cuda 12 - get it here: https://developer.nvidia.com/cudnn
      1. you will need to create an account and accept the terms
-     2. download the local installer for the version ubuntu you are using - I'm on 22.04
+     2. download the local installer for the version of ubuntu you are using - I'm on 22.04
      3. follow this guide to set up public keys and install cudnn via the deb file: https://docs.nvidia.com/deeplearning/cudnn/install-guide/index.html
   3. clang-format  - sudo apt-get install clang-format
   4. boost 1.74 (earlier and later is probably fine.) sudo apt-get install libboost-all-dev
@@ -32,9 +32,10 @@ Dependencies, with installation directions for Ubuntu:
      1. Example: download the latest version 
      2. tar -xf GraphicsMagick-1.3.41.tar.xz
      3. cd GraphicsMagick-1.3.41
-     4. ./configure CC=gcc CXX=c++ CFLAGS=-O3 CPPFLAGS=-O3 CXXFLAGS=-O3 LDFLAGS='-L/usr/local/lib'
-     5. make check
-     6. sudo make install
+     4. sudo apt-get install libpng-dev zlib1g-dev libgs-dev libjpeg-dev libtiff-dev libxml2-dev
+     5. ./configure CC=gcc CXX=c++ CFLAGS=-O3 CPPFLAGS=-O3 CXXFLAGS=-O3 LDFLAGS='-L/usr/local/lib'
+     6. make check
+     7. sudo make install
 
 Install:
 
@@ -47,7 +48,7 @@ git checkout release-1.12.1
 mkdir build
 cd build
 cmake ..
-make -j10
+make -j
 cd ../..
-make -j10 all
+make -j all
 ```

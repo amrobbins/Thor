@@ -83,6 +83,15 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
                                    maxClassNameChars);
     }
 
+    // It goes like this:
+    // A work queue is created that will send the file's bytes through the data processor upon the file's buffer being pushed onto the work
+    // queue loadExamples is the function that pushes the buffers onto the work queue, which is why it needs to be passed the work queue, it
+    // reads the files from disk and loads them into a buffer and then pushes them onto the work queue
+    // writeDataToShard pops the processed buffer from the work queue and each shard is appended to round-robin regardless of which
+    // thread does the appending.
+    // loadExamples returns after all examples are loaded. Then we wait for all the buffers to be popped from the work queue.
+    // Then we close the queue, which causes the writer threads to terminate.
+
     // start numDestDisks threads, each pops a processed training example and writes it to the end of the memMappedFile that it is told too
     std::vector<thread> writerThreads;
     for (uint32_t i = 0; i < numOutputShards; ++i) {
