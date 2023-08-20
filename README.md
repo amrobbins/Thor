@@ -28,14 +28,19 @@ Dependencies, with installation directions for Ubuntu:
   4. boost 1.74 (earlier and later is probably fine.) sudo apt-get install libboost-all-dev
   6. ncurses - sudo apt-get install lib64ncurses-dev.
   7. X11 - sudo apt-get install libx11-dev 
-  8. GraphicsMagick - http://www.graphicsmagick.org/README.html
-     1. Example: download the latest version 
-     2. tar -xf GraphicsMagick-1.3.41.tar.xz
-     3. cd GraphicsMagick-1.3.41
-     4. sudo apt-get install libpng-dev zlib1g-dev libgs-dev libjpeg-dev libtiff-dev libxml2-dev
-     5. ./configure CC=gcc CXX=c++ CFLAGS=-O3 CPPFLAGS=-O3 CXXFLAGS=-O3 LDFLAGS='-L/usr/local/lib'
-     6. make check
-     7. sudo make install
+  8. GraphicsMagick
+     1. Ensure you have all of the image libraries installed:
+        1. sudo apt-get install libpng-dev zlib1g-dev libgs-dev libjpeg-dev libtiff-dev libxml2-dev
+     1. I built from source as documented below, but that may not be necessary, try this first:
+        1. sudo apt install libgraphicsmagick1-dev
+        1. If this works then you don't need to follow the build instructions below.
+     1. If above doesn't work then follow this build from source example:
+     1. download the latest version - http://www.graphicsmagick.org/README.html 
+     1. tar -xf GraphicsMagick-1.3.41.tar.xz
+     1. cd GraphicsMagick-1.3.41
+     1. ./configure CC=gcc CXX=c++ CFLAGS=-O3 CPPFLAGS=-O3 CXXFLAGS=-O3 LDFLAGS='-L/usr/local/lib'
+     1. make check
+     1. sudo make install
 
 Install:
 
