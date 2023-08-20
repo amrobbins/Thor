@@ -4,10 +4,7 @@ using std::mutex;
 using std::string;
 using std::thread;
 
-Shard::Shard() {
-    mtx = std::make_shared<std::mutex>();
-    open = false;
-}
+Shard::Shard() { open = false; }
 
 void Shard::createShard(string filename,
                         uint64_t numTrainExamples,
@@ -118,7 +115,7 @@ bool Shard::isOpen() { return open; }
 
 void Shard::writeExample(uint8_t *buffer, const string &label, const string &filename, ExampleType exampleType) {
     assert(buffer != nullptr);
-    std::unique_lock<std::mutex> lck(*mtx);
+    std::unique_lock<std::mutex> lck(mtx);
 
     if (exampleType == ExampleType::TRAIN) {
         assert(trainData->capacity() > trainData->size() + exampleSizeInBytes);

@@ -94,7 +94,7 @@ class Shard {
     file_string_vector_t *allClasses;
     ShardMetadata *shardMetadata;
 
-    std::shared_ptr<std::mutex> mtx;
+    std::mutex mtx;
 
     std::shared_ptr<file_string_allocator_t> fileStringAllocator;
 
