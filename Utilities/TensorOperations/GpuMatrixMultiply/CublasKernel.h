@@ -123,11 +123,6 @@ struct CublasKernelOptions {
 
 class CublasKernel : private ReferenceCounted {
    public:
-    static const float ALPHA_NO_SCALE;
-    static const float ALPHA_NEGATE;
-    static const float BETA_ACCUMULATE;
-    static const float BETA_CLEAR;
-
     CublasKernel() : ReferenceCounted() {}
 
     CublasKernel(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
@@ -222,7 +217,7 @@ class CublasKernel : private ReferenceCounted {
         return lhs.cublasKernelOptions->runStats < rhs.cublasKernelOptions->runStats;
     }
 
-    void executeKernel(Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, bool negate, Stream stream) {
+    void executeKernel(Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, float alpha, float beta, Stream stream) {
         executeKernel(A,
                       B,
                       C,
@@ -232,8 +227,8 @@ class CublasKernel : private ReferenceCounted {
                       C.getDescriptor().getDimensions()[1],
                       D.getDescriptor().getDimensions()[1],
                       workspace,
-                      accumulate,
-                      negate,
+                      alpha,
+                      beta,
                       stream);
     }
 
@@ -246,8 +241,8 @@ class CublasKernel : private ReferenceCounted {
                        size_t ldC,
                        size_t ldD,
                        Optional<Tensor> workspace,
-                       bool accumulate,
-                       bool negate,
+                       float alpha,
+                       float beta,
                        Stream stream) {
         assert(!uninitialized());
 
@@ -293,13 +288,12 @@ class CublasKernel : private ReferenceCounted {
 
         assert(C.getMemPtr() != A.getMemPtr());
         assert(C.getMemPtr() != B.getMemPtr());
-        assert(C.getMemPtr() == D.getMemPtr());
 
-        assert(runWithoutChecks(A, B, C, D, workspace, accumulate, negate, stream) == CUBLAS_STATUS_SUCCESS);
+        assert(runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream) == CUBLAS_STATUS_SUCCESS);
     }
 
     inline cublasStatus_t runWithoutChecks(
-        Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, bool accumulate, bool negate, Stream stream) {
+        Tensor A, Tensor B, Tensor C, Tensor D, Optional<Tensor> workspace, float alpha, float beta, Stream stream) {
         assert(!uninitialized());
         ScopedGpu scopedGpu(stream.getGpuNum());
 
@@ -315,12 +309,12 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus_t cublasStatus;
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       *operationDesc,
-                                      negate ? &ALPHA_NEGATE : &ALPHA_NO_SCALE,
+                                      &alpha,
                                       A.getMemPtr(),
                                       *ADesc,
                                       B.getMemPtr(),
                                       *BDesc,
-                                      accumulate ? &BETA_ACCUMULATE : &BETA_CLEAR,
+                                      &beta,
                                       C.getMemPtr(),
                                       *CDesc,
                                       D.getMemPtr(),
@@ -446,6 +440,11 @@ class CublasKernel : private ReferenceCounted {
             cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
             assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         }
+        if (cublasKernelRequirement->kernelRequirement.transposeC) {
+            cublasOperation_t transpose = CUBLAS_OP_T;
+            cublasStatus = cublasLtMatmulDescSetAttribute(*operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose));
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        }
 
         cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
         int64_t ld;
@@ -493,11 +492,11 @@ class CublasKernel : private ReferenceCounted {
 
         DDesc = new cublasLtMatrixLayout_t;
         cublasStatus = cublasLtMatrixLayoutCreate(
-            DDesc, cublasKernelRequirement->operationType.DDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldC);
+            DDesc, cublasKernelRequirement->operationType.DDataType, rowsC, colsC, cublasKernelRequirement->kernelRequirement.ldD);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        ld = cublasKernelRequirement->kernelRequirement.ldC;
+        ld = cublasKernelRequirement->kernelRequirement.ldD;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 

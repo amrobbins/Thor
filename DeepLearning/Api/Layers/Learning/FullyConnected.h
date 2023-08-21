@@ -52,30 +52,33 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         for (uint32_t i = 0; i < inputDimensions.size(); ++i)
             numInputFeatures *= inputDimensions[i];
 
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
-                                                                                 batchSize,
-                                                                                 numInputFeatures,
-                                                                                 numInputFeatures,
-                                                                                 numOutputFeatures,
-                                                                                 false,
-                                                                                 false,
-                                                                                 ThorImplementation::TensorDescriptor::DataType::FP16);
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
-                                                                                 batchSize,
-                                                                                 numOutputFeatures,
-                                                                                 numInputFeatures,
-                                                                                 numOutputFeatures,
-                                                                                 false,
-                                                                                 true,
-                                                                                 ThorImplementation::TensorDescriptor::DataType::FP16);
-        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalKernel(gpuNum,
-                                                                                 batchSize,
-                                                                                 numInputFeatures,
-                                                                                 batchSize,
-                                                                                 numOutputFeatures,
-                                                                                 true,
-                                                                                 false,
-                                                                                 ThorImplementation::TensorDescriptor::DataType::FP16);
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
+            gpuNum,
+            batchSize,
+            numInputFeatures,
+            numInputFeatures,
+            numOutputFeatures,
+            false,
+            false,
+            ThorImplementation::TensorDescriptor::DataType::FP16);
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
+            gpuNum,
+            batchSize,
+            numOutputFeatures,
+            numInputFeatures,
+            numOutputFeatures,
+            false,
+            true,
+            ThorImplementation::TensorDescriptor::DataType::FP16);
+        ThorImplementation::CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
+            gpuNum,
+            batchSize,
+            numInputFeatures,
+            batchSize,
+            numOutputFeatures,
+            true,
+            false,
+            ThorImplementation::TensorDescriptor::DataType::FP16);
     }
 
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

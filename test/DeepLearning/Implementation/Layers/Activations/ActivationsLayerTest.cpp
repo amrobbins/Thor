@@ -1179,6 +1179,7 @@ TEST(Softmax, Works) {
                               dimensions[1],
                               false,
                               false,
+                              false,
                               false);
             matrixSubtractCpu(
                 (float *)smI.getMemPtr(), (float *)smTsm.getMemPtr(), (float *)smJacobian.getMemPtr(), dimensions[1], dimensions[1]);
@@ -1192,6 +1193,7 @@ TEST(Softmax, Works) {
                               dimensions[1],
                               dimensions[1],
                               dimensions[1],
+                              false,
                               false,
                               false,
                               false);

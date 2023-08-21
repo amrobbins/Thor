@@ -85,7 +85,8 @@ bool ShardedRawDatasetCreator::createDataset(unique_ptr<DataProcessor>&& dataPro
 
     // It goes like this:
     // A work queue is created that will send the file's bytes through the data processor upon the file's buffer being pushed onto the work
-    // queue loadExamples is the function that pushes the buffers onto the work queue, which is why it needs to be passed the work queue, it
+    // queue.
+    // loadExamples is the function that pushes the buffers onto the work queue, which is why it needs to be passed the work queue, it
     // reads the files from disk and loads them into a buffer and then pushes them onto the work queue
     // writeDataToShard pops the processed buffer from the work queue and each shard is appended to round-robin regardless of which
     // thread does the appending.
