@@ -121,6 +121,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
                               numOutputFeatures,
                               false,
                               false,
+                              false,
                               false);
 
         if (hasBiases) {
@@ -229,6 +230,7 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
                           numInputFeatures,
                           false,
                           true,
+                          false,
                           false);
 
     matrixMultiplyCpuHalf((half *)featureInput.getMemPtr(),
@@ -242,6 +244,7 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
                           numOutputFeatures,
                           numOutputFeatures,
                           true,
+                          false,
                           false,
                           false);
 

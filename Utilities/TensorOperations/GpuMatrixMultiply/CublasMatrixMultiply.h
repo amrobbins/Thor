@@ -56,7 +56,8 @@ class CublasMatrixMultiply {
     //   accumulate=true computes C -= A * B. accumulate=false computes C = -A * B.
     //
     // Prerequisites to using this version of multiply:
-    //  1. You have previously called chooseOptimalKernel for a matrix multiply with the same dimensions (i.e. A rows, A cols, B cols).
+    //  1. You have previously called chooseOptimalMatrixMultiplyKernel for a matrix multiply with the same dimensions (i.e. A rows, A cols,
+    //  B cols).
     //  2. You provide the workspace, which is memory allocated on the target gpu of size getWorkspaceSizeInBytes(same parameters).
     //     When the workspace is 0 bytes, set it to nullptr.
     //
@@ -118,6 +119,31 @@ class CublasMatrixMultiply {
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
 
+    // This exposes the full GEMM functionality and using optimal kernel
+    // D = alpha*(A*B) + beta*(C)
+    void gemm(Tensor A,
+              Tensor B,
+              Tensor C,
+              Tensor D,
+              Optional<Tensor> workspace,
+              const int32_t A_rows,
+              const int32_t A_cols,
+              const int32_t B_rows,
+              const int32_t B_cols,
+              // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent rows in
+              // memory. Some slots at the end of a row may be unused.
+              const int32_t ld_A,
+              const int32_t ld_B,
+              const int32_t ld_C,
+              const int32_t ld_D,
+              bool transposeA,
+              bool transposeB,
+              bool transposeC,
+              float alpha,
+              float beta,
+              const TensorDescriptor::DataType ABCDDataType,
+              Stream stream);
+
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // This variant performs a multiplication and does not use a workspace. If the optimal kernel is not already known,
@@ -168,31 +194,51 @@ class CublasMatrixMultiply {
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
-    inline void chooseOptimalKernel(std::string gpuType,
-                                    int rowsA,
-                                    int colsA,
-                                    int rowsB,
-                                    int colsB,
-                                    bool transposeA,
-                                    bool transposeB,
-                                    TensorDescriptor::DataType ABCDataType,
-                                    bool printResults = false) {
+    inline void chooseOptimalMatrixMultiplyKernel(std::string gpuType,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  TensorDescriptor::DataType ABCDataType,
+                                                  bool printResults = false) {
         int ldC = transposeB == false ? colsB : rowsB;
-        chooseOptimalKernel(gpuType, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, printResults);
+        chooseOptimalMatrixMultiplyKernel(
+            gpuType, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, printResults);
     }
 
-    inline void chooseOptimalKernel(std::string gpuType,
-                                    int rowsA,
-                                    int colsA,
-                                    int rowsB,
-                                    int colsB,
-                                    int ldA,
-                                    int ldB,
-                                    int ldC,
-                                    bool transposeA,
-                                    bool transposeB,
-                                    TensorDescriptor::DataType ABCDataType,
-                                    bool printResults = false) {
+    inline void chooseOptimalMatrixMultiplyKernel(std::string gpuType,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  int ldA,
+                                                  int ldB,
+                                                  int ldC,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  TensorDescriptor::DataType ABCDataType,
+                                                  bool printResults = false) {
+        int ldD = ldC;
+        chooseOptimalGemmKernel(
+            gpuType, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, ldD, transposeA, transposeB, false, ABCDataType, printResults);
+    }
+
+    inline void chooseOptimalGemmKernel(std::string gpuType,
+                                        int rowsA,
+                                        int colsA,
+                                        int rowsB,
+                                        int colsB,
+                                        int ldA,
+                                        int ldB,
+                                        int ldC,
+                                        int ldD,
+                                        bool transposeA,
+                                        bool transposeB,
+                                        bool transposeC,
+                                        TensorDescriptor::DataType ABCDataType,
+                                        bool printResults = false) {
         // Find a gpu of the proper type or fail
         int gpuNum = -1;
         for (int i = 0; i < (int)MachineEvaluator::instance().getNumGpus(); ++i) {
@@ -203,7 +249,8 @@ class CublasMatrixMultiply {
         }
         assert(gpuNum >= 0);
 
-        chooseOptimalKernel(gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, ABCDataType, printResults);
+        chooseOptimalGemmKernel(
+            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, transposeC, ABCDataType, printResults);
     }
 
     // Find the optimal kernel for the matrix multiply operation for type of the gpuNum GPU, by measuring it specifically on that gpu.
@@ -214,31 +261,51 @@ class CublasMatrixMultiply {
     // multiple readers are fine lock free so locks are only used during multi-threaded optimization.
     //
     // Note: never run more than one optimization at a time on any gpu.
-    inline void chooseOptimalKernel(int gpuNum,
-                                    int rowsA,
-                                    int colsA,
-                                    int rowsB,
-                                    int colsB,
-                                    bool transposeA,
-                                    bool transposeB,
-                                    TensorDescriptor::DataType ABCDataType,
-                                    bool printResults = false) {
+    inline void chooseOptimalMatrixMultiplyKernel(int gpuNum,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  TensorDescriptor::DataType ABCDataType,
+                                                  bool printResults = false) {
         int ldC = transposeB == false ? colsB : rowsB;
-        chooseOptimalKernel(gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, printResults);
+        chooseOptimalMatrixMultiplyKernel(
+            gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, printResults);
     }
 
-    void chooseOptimalKernel(int gpuNum,
-                             int rowsA,
-                             int colsA,
-                             int rowsB,
-                             int colsB,
-                             int ldA,
-                             int ldB,
-                             int ldC,
-                             bool transposeA,
-                             bool transposeB,
-                             TensorDescriptor::DataType ABCDataType,
-                             bool printResults = false);
+    inline void chooseOptimalMatrixMultiplyKernel(int gpuNum,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  int ldA,
+                                                  int ldB,
+                                                  int ldC,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  TensorDescriptor::DataType ABCDataType,
+                                                  bool printResults = false) {
+        int ldD = ldC;
+        chooseOptimalGemmKernel(
+            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, printResults);
+    }
+
+    void chooseOptimalGemmKernel(int gpuNum,
+                                 int rowsA,
+                                 int colsA,
+                                 int rowsB,
+                                 int colsB,
+                                 int ldA,
+                                 int ldB,
+                                 int ldC,
+                                 int ldD,
+                                 bool transposeA,
+                                 bool transposeB,
+                                 bool transposeC,
+                                 TensorDescriptor::DataType ABCDataType,
+                                 bool printResults = false);
 
     inline unsigned int getWorkspaceSizeInBytes(int gpuNum,
                                                 int rowsA,
@@ -250,8 +317,9 @@ class CublasMatrixMultiply {
                                                 TensorDescriptor::DataType ABCDataType,
                                                 bool &kernelWillRunOnGpu) {
         int ldC = transposeB == false ? colsB : rowsB;
+        int ldD = ldC;
         return getWorkspaceSizeInBytes(
-            gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, kernelWillRunOnGpu);
+            gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
     }
 
     unsigned int getWorkspaceSizeInBytes(int gpuNum,
@@ -262,12 +330,14 @@ class CublasMatrixMultiply {
                                          int ldA,
                                          int ldB,
                                          int ldC,
+                                         int ldD,
                                          bool transposeA,
                                          bool transposeB,
+                                         bool transposeC,
                                          TensorDescriptor::DataType ABCDataType,
                                          bool &kernelWillRunOnGpu);
 
-    // getOptimalKernelTime(...) will give you the average time the kernel took when chooseOptimalKernel was called for the
+    // getOptimalKernelTime(...) will give you the average time the kernel took when chooseOptimalMatrixMultiplyKernel was called for the
     // matrix multiply operation with those dimensions on that GPU. It is an error to call this for an operation where the
     // optimal kernel was not measured.
     //
@@ -280,8 +350,10 @@ class CublasMatrixMultiply {
                                 int ldA,
                                 int ldB,
                                 int ldC,
+                                int ldD,
                                 bool transposeA,
                                 bool transposeB,
+                                bool transposeC,
                                 TensorDescriptor::DataType ABCDataType,
                                 bool workspaceAllowed);
 
@@ -293,12 +365,19 @@ class CublasMatrixMultiply {
                                 int ldA,
                                 int ldB,
                                 int ldC,
+                                int ldD,
                                 bool transposeA,
                                 bool transposeB,
+                                bool transposeC,
                                 TensorDescriptor::DataType ABCDataType,
                                 bool workspaceAllowed);
 
    private:
+    static const float ALPHA_NO_SCALE;
+    static const float ALPHA_NEGATE;
+    static const float BETA_ACCUMULATE;
+    static const float BETA_CLEAR;
+
     std::unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
     std::unordered_map<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
 
@@ -318,19 +397,21 @@ class CublasMatrixMultiply {
 
     cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
 
-    bool chooseOptimalKernel(int gpuNum,
-                             int rowsA,
-                             int colsA,
-                             int rowsB,
-                             int colsB,
-                             int ldA,
-                             int ldB,
-                             int ldC,
-                             bool transposeA,
-                             bool transposeB,
-                             TensorDescriptor::DataType ABCDataType,
-                             bool allowWorkspaces,
-                             bool printResults);
+    bool chooseOptimalGemmKernel(int gpuNum,
+                                 int rowsA,
+                                 int colsA,
+                                 int rowsB,
+                                 int colsB,
+                                 int ldA,
+                                 int ldB,
+                                 int ldC,
+                                 int ldD,
+                                 bool transposeA,
+                                 bool transposeB,
+                                 bool transposeC,
+                                 TensorDescriptor::DataType ABCDataType,
+                                 bool allowWorkspaces,
+                                 bool printResults);
 
     void getSupportedCublasAlgorithms(const OperationType &operationType,
                                       std::vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,

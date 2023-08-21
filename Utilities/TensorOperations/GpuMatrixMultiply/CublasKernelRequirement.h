@@ -16,9 +16,11 @@ struct KernelRequirement {
                       const int colsB,
                       const bool transposeA,
                       const bool transposeB,
+                      const bool transposeC,
                       const int ldA,
                       const int ldB,
                       const int ldC,
+                      const int ldD,
                       const bool allowWorkspace)
         : gpuType(gpuType),
           rowsA(rowsA),
@@ -27,9 +29,11 @@ struct KernelRequirement {
           colsB(colsB),
           transposeA(transposeA),
           transposeB(transposeB),
+          transposeC(transposeC),
           ldA(ldA),
           ldB(ldB),
           ldC(ldC),
+          ldD(ldD),
           allowWorkspace(allowWorkspace) {
         assert(rowsA > 0);
         assert(colsA > 0);
@@ -57,6 +61,7 @@ struct KernelRequirement {
 
         assert(ldC >= finalColsB);
         assert(finalColsA == finalRowsB);
+        assert(ldD >= finalColsB);
     }
 
     const std::string gpuType;
@@ -66,21 +71,24 @@ struct KernelRequirement {
     const int colsB;
     const bool transposeA;
     const bool transposeB;
+    const bool transposeC;
     const int ldA;
     const int ldB;
     const int ldC;
+    const int ldD;
     const bool allowWorkspace;
 
     bool operator==(const KernelRequirement &other) const {
         return gpuType == other.gpuType && rowsA == other.rowsA && colsA == other.colsA && rowsB == other.rowsB && colsB == other.colsB &&
-               transposeA == other.transposeA && transposeB == other.transposeB && ldA == other.ldA && ldB == other.ldB &&
-               ldC == other.ldC && allowWorkspace == other.allowWorkspace;
+               transposeA == other.transposeA && transposeB == other.transposeB && transposeC == other.transposeC && ldA == other.ldA &&
+               ldB == other.ldB && ldC == other.ldC && ldD == other.ldD && allowWorkspace == other.allowWorkspace;
     }
 
     bool operator<(const KernelRequirement &other) const {
-        long total = rowsA + colsA + rowsB + colsB + ldA + ldB + ldC + (int)allowWorkspace + (int)transposeA + (int)transposeB;
-        long otherTotal = other.rowsA + other.colsA + other.rowsB + other.colsB + other.ldA + other.ldB + other.ldC +
-                          (int)other.allowWorkspace + (int)other.transposeA + (int)other.transposeB;
+        long total = rowsA + colsA + rowsB + colsB + ldA + ldB + ldC + ldD + (int)transposeA + (int)transposeB + (int)transposeC +
+                     (int)allowWorkspace;
+        long otherTotal = other.rowsA + other.colsA + other.rowsB + other.colsB + other.ldA + other.ldB + other.ldC + ldD +
+                          (int)other.transposeA + (int)other.transposeB + (int)other.transposeC + (int)other.allowWorkspace;
         return total < otherTotal;
     }
 };
@@ -98,6 +106,7 @@ struct hash<KernelRequirement> {
         hashValue = (hashValue ^ (hash<int>()(k.ldA))) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.ldB))) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.ldC))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.ldD))) << 1;
         hashValue = hashValue ^ hash<std::string>()(k.gpuType);
 
         return hashValue;

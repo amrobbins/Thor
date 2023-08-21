@@ -19,7 +19,7 @@ inline void checkCudaErrors(cudaError_t cudaStatus) {
     assert(cudaStatus == cudaSuccess);
 }
 
-TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
+TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
     srand(time(nullptr));
 
     ScopedGpu scopedGpu(0);
@@ -107,10 +107,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
 
         if (useLdVersion)
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP32, false);
         else
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP32, false);
 
         bool useWorkspace = rand() % 2;
@@ -119,8 +119,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
-                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP32, kernelWillRunOnGpu);
+            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(0,
+                                                                                                     rowsA,
+                                                                                                     colsA,
+                                                                                                     rowsB,
+                                                                                                     colsB,
+                                                                                                     ldA,
+                                                                                                     ldB,
+                                                                                                     ldC,
+                                                                                                     ldC,
+                                                                                                     transposeA,
+                                                                                                     transposeB,
+                                                                                                     false,
+                                                                                                     TensorDescriptor::DataType::FP32,
+                                                                                                     kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -220,7 +232,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP32) {
     }
 }
 
-TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
+TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
     srand(time(nullptr));
 
     ScopedGpu scopedGpu(0);
@@ -308,10 +320,10 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
 
         if (useLdVersion)
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
         else
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
 
         bool useWorkspace = rand() % 2;
@@ -320,8 +332,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(
-                0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
+            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(0,
+                                                                                                     rowsA,
+                                                                                                     colsA,
+                                                                                                     rowsB,
+                                                                                                     colsB,
+                                                                                                     ldA,
+                                                                                                     ldB,
+                                                                                                     ldC,
+                                                                                                     ldC,
+                                                                                                     transposeA,
+                                                                                                     transposeB,
+                                                                                                     false,
+                                                                                                     TensorDescriptor::DataType::FP16,
+                                                                                                     kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -421,7 +445,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalKernelWorksFP16) {
     }
 }
 
-TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
+TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
     srand(time(nullptr));
 
     ScopedGpu scopedGpu(0);
@@ -597,7 +621,7 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP32) {
     }
 }
 
-TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
+TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
     srand(time(nullptr));
 
     ScopedGpu scopedGpu(0);
@@ -685,10 +709,10 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
         verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB);
 
         if (useLdVersion)
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 0, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
         else
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, false);
 
         A_d.copyFromAsync(A, stream);
@@ -778,6 +802,22 @@ TEST(CublasMatrixMultiply, HeuristicKernelWorksFP16) {
             }
         }
     }
+}
+
+TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
+    // FIXME
+}
+
+TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
+    // FIXME
+}
+
+TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
+    // FIXME
+}
+
+TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
+    // FIXME
 }
 
 int main(int argc, char **argv) {
