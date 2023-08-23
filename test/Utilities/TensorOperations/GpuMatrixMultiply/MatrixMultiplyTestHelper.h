@@ -86,7 +86,11 @@ void matrixMultiplyCpu(float *A,
                        bool transposeB,
                        bool accumulate,
                        bool negate) {
-    omp_set_num_threads(10);
+    int num_threads = omp_get_num_procs() - 1;
+    if (num_threads < 1)
+        num_threads = 1;
+    omp_set_num_threads(num_threads);
+
 
     float *A_t = nullptr;
     if (transposeA) {
@@ -151,7 +155,10 @@ void matrixMultiplyCpuHalf(half *A,
                            bool transposeB,
                            bool accumulate,
                            bool negate) {
-    omp_set_num_threads(10);
+    int num_threads = omp_get_num_procs() - 1;
+    if (num_threads < 1)
+        num_threads = 1;
+    omp_set_num_threads(num_threads);
 
     half *A_t = nullptr;
     if (transposeA) {
@@ -255,4 +262,84 @@ void printMatrices(float *matrixCpu, float *matrixGpu, int rows, int cols, int l
         }
         printf(" :GPU\n");
     }
+}
+
+
+void gemmCpuFp32(float *A,
+                       float *B,
+                       float *C,
+                       float *D,
+                       int rowsA,
+                       int colsA,
+                       int rowsB,
+                       int colsB,
+                       int lda,
+                       int ldb,
+                       int ldc,
+                       int ldd,
+                       bool transposeA,
+                       bool transposeB,
+                       bool transposeC,
+                       float alpha,
+                       float beta) {
+    int num_threads = omp_get_num_procs() - 1;
+    if (num_threads < 1)
+        num_threads = 1;
+    omp_set_num_threads(num_threads);
+
+    float *A_t = nullptr;
+    if (transposeA) {
+        A_t = A;
+        A = new float[rowsA * colsA];
+
+        transpose(A, A_t, rowsA, colsA, lda);
+        swap(rowsA, colsA);
+        lda = colsA;
+    }
+
+    float *B_t = nullptr;
+    if (transposeB) {
+        B_t = B;
+        B = new float[rowsB * colsB];
+
+        transpose(B, B_t, rowsB, colsB, ldb);
+        swap(rowsB, colsB);
+        ldb = colsB;
+    }
+
+    int colsC = colsB;
+    int rowsC = rowsA;
+    float *C_t = nullptr;
+    if (transposeC) {
+        assert(C != D);
+        C_t = C;
+        C = new float[rowsC * colsC];
+
+        transpose(C, C_t, rowsC, colsC, ldc);
+        swap(rowsC, colsC);
+        ldc = colsC;
+    }
+
+    if (C == D)
+        assert(ldc == ldd);
+
+    verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, lda, ldb, ldc);
+
+#pragma omp parallel for schedule(static, 3)
+    for (int ra = 0; ra < rowsA; ra++) {
+        for (int cb = 0; cb < colsB; cb++) {
+            float accum = 0.0;
+            for (int carb = 0; carb < colsA; carb++)
+                accum += A[ra * lda + carb] * B[carb * ldb + cb];
+
+            D[ra * ldd + cb] = alpha * accum + beta * C[ra * ldc + cb];
+        }
+    }
+
+    if (transposeA)
+        delete A;
+    if (transposeB)
+        delete B;
+    if (transposeC)
+        delete C;
 }
