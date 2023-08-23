@@ -20,6 +20,10 @@ Dependencies, with installation directions for Ubuntu:
   1. sudo apt-get update
   1. sudo apt-get install build-essential cmake clang-format  
   1. cuda 12  - can install with 'sudo apt-get install cuda'
+  1. After installing cuda and resetting, make sure that nvcc is in your path by running 'which nvcc'
+     1. If it is not in your path then add the following line to the end of your ~/.bashrc file:
+     2. export PATH=$PATH:/usr/local/cuda-12.2/bin
+     3. assuming cuda12.2 is installed there. Then close your terminal and open a new one and confirm that nvcc is on your path using 'which nvcc'
   2. cudnn 8.9 for cuda 12 - get it here: https://developer.nvidia.com/cudnn
      1. you will need to create an account and accept the terms
      2. download the local installer for the version of ubuntu you are using - I'm on 22.04
