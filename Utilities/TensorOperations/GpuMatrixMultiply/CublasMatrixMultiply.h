@@ -311,7 +311,7 @@ class CublasMatrixMultiply {
                                  TensorDescriptor::DataType ABCDataType,
                                  bool printResults = false);
 
-    inline unsigned int getWorkspaceSizeInBytes(int gpuNum,
+    inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
                                                 int rowsA,
                                                 int colsA,
                                                 int rowsB,
@@ -321,12 +321,28 @@ class CublasMatrixMultiply {
                                                 TensorDescriptor::DataType ABCDataType,
                                                 bool &kernelWillRunOnGpu) {
         int ldC = transposeB == false ? colsB : rowsB;
-        int ldD = ldC;
-        return getWorkspaceSizeInBytes(
-            gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
+        return getMatrixMultiplyWorkspaceSizeInBytes(
+            gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, kernelWillRunOnGpu);
     }
 
-    unsigned int getWorkspaceSizeInBytes(int gpuNum,
+    inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
+                                                              int rowsA,
+                                                              int colsA,
+                                                              int rowsB,
+                                                              int colsB,
+                                                              int ldA,
+                                                              int ldB,
+                                                              int ldC,
+                                                              bool transposeA,
+                                                              bool transposeB,
+                                                              TensorDescriptor::DataType ABCDataType,
+                                                              bool &kernelWillRunOnGpu) {
+        int ldD = ldC; // They are the same memory
+        return getGemmWorkspaceSizeInBytes(
+            gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
+    }
+
+    unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                          int rowsA,
                                          int colsA,
                                          int rowsB,

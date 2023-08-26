@@ -58,13 +58,13 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         batchSize = featureInputs[0].get().getDescriptor().getDimensions()[0];
         numInputFeatures = featureInputs[0].get().getDescriptor().getDimensions()[1];
 
-        CublasMatrixMultiply::instance().chooseOptimalKernel(
+        CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
 
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         bool kernelWillRunOnGpu;
-        uint64_t workspaceForwardSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(gpuNum,
+        uint64_t workspaceForwardSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
                                                                                                         batchSize,
                                                                                                         numInputFeatures,
                                                                                                         numInputFeatures,
@@ -82,11 +82,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
 
         if (!isBackPropStub()) {
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, TensorDescriptor::DataType::FP16);
 
             uint64_t workspaceBackwardDataSizeInBytes =
-                CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(gpuNum,
+                CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
                                                                          batchSize,
                                                                          numOutputFeatures,
                                                                          numInputFeatures,
@@ -103,11 +103,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
 
         if (!isInferenceOnly()) {
-            CublasMatrixMultiply::instance().chooseOptimalKernel(
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
                 gpuNum, batchSize, numInputFeatures, batchSize, numOutputFeatures, true, false, TensorDescriptor::DataType::FP16);
 
             uint64_t workspaceBackwardWeightsSizeInBytes =
-                CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(gpuNum,
+                CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
                                                                          batchSize,
                                                                          numInputFeatures,
                                                                          batchSize,
@@ -165,6 +165,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                   false,
                                                   false,
                                                   false,
+                                                  false,
                                                   TensorDescriptor::DataType::FP16,
                                                   stream);
 
@@ -206,6 +207,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                       numOutputFeatures,
                                                       false,
                                                       true,
+                                                      false,
                                                       false,
                                                       TensorDescriptor::DataType::FP16,
                                                       dataStream);
@@ -270,6 +272,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                   batchSize,
                                                   numOutputFeatures,
                                                   true,
+                                                  false,
                                                   false,
                                                   accumulateGradient,
                                                   TensorDescriptor::DataType::FP16,
