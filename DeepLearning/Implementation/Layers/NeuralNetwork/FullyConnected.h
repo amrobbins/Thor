@@ -64,15 +64,16 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         bool kernelWillRunOnGpu;
-        uint64_t workspaceForwardSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
-                                                                                                        batchSize,
-                                                                                                        numInputFeatures,
-                                                                                                        numInputFeatures,
-                                                                                                        numOutputFeatures,
-                                                                                                        false,
-                                                                                                        false,
-                                                                                                        TensorDescriptor::DataType::FP16,
-                                                                                                        kernelWillRunOnGpu);
+        uint64_t workspaceForwardSizeInBytes =
+            CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
+                                                                                   batchSize,
+                                                                                   numInputFeatures,
+                                                                                   numInputFeatures,
+                                                                                   numOutputFeatures,
+                                                                                   false,
+                                                                                   false,
+                                                                                   TensorDescriptor::DataType::FP16,
+                                                                                   kernelWillRunOnGpu);
         assert(kernelWillRunOnGpu);
         if (workspaceForwardSizeInBytes > 0) {
             std::vector<unsigned long> workspaceDimensions;
@@ -87,14 +88,14 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
             uint64_t workspaceBackwardDataSizeInBytes =
                 CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
-                                                                         batchSize,
-                                                                         numOutputFeatures,
-                                                                         numInputFeatures,
-                                                                         numOutputFeatures,
-                                                                         false,
-                                                                         true,
-                                                                         TensorDescriptor::DataType::FP16,
-                                                                         kernelWillRunOnGpu);
+                                                                                       batchSize,
+                                                                                       numOutputFeatures,
+                                                                                       numInputFeatures,
+                                                                                       numOutputFeatures,
+                                                                                       false,
+                                                                                       true,
+                                                                                       TensorDescriptor::DataType::FP16,
+                                                                                       kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceBackwardDataSizeInBytes > 0)
@@ -108,14 +109,14 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
             uint64_t workspaceBackwardWeightsSizeInBytes =
                 CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
-                                                                         batchSize,
-                                                                         numInputFeatures,
-                                                                         batchSize,
-                                                                         numOutputFeatures,
-                                                                         true,
-                                                                         false,
-                                                                         TensorDescriptor::DataType::FP16,
-                                                                         kernelWillRunOnGpu);
+                                                                                       batchSize,
+                                                                                       numInputFeatures,
+                                                                                       batchSize,
+                                                                                       numOutputFeatures,
+                                                                                       true,
+                                                                                       false,
+                                                                                       TensorDescriptor::DataType::FP16,
+                                                                                       kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceBackwardWeightsSizeInBytes > 0)

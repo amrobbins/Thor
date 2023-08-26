@@ -539,66 +539,18 @@ __global__ void addElementwiseHalf(half *augend, half *dest, half *addend, uint6
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 32 elements : 8192 elements processed per block
+// each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void addElementwise4B(DATA_TYPE *augend, DATA_TYPE *dest, DATA_TYPE *addend, uint64_t numElements) {
     DATA_TYPE augendBuffer[4];
     DATA_TYPE addendBuffer[4];
 
-    uint64_t offset = blockIdx.x * 8192 + 1024 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    uint64_t offset = blockIdx.x * 4096 + 512 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
     uint64_t offset4Elements = offset >> 2;
 
-    ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
-    ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
-    augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
-    augendBuffer[1] = augendBuffer[1] + addendBuffer[1];
-    augendBuffer[2] = augendBuffer[2] + addendBuffer[2];
-    augendBuffer[3] = augendBuffer[3] + addendBuffer[3];
-    ((double2 *)dest)[offset4Elements] = ((double2 *)augendBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
-    ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
-    augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
-    augendBuffer[1] = augendBuffer[1] + addendBuffer[1];
-    augendBuffer[2] = augendBuffer[2] + addendBuffer[2];
-    augendBuffer[3] = augendBuffer[3] + addendBuffer[3];
-    ((double2 *)dest)[offset4Elements] = ((double2 *)augendBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
-    ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
-    augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
-    augendBuffer[1] = augendBuffer[1] + addendBuffer[1];
-    augendBuffer[2] = augendBuffer[2] + addendBuffer[2];
-    augendBuffer[3] = augendBuffer[3] + addendBuffer[3];
-    ((double2 *)dest)[offset4Elements] = ((double2 *)augendBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
-    ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
-    ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
-    augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
-    augendBuffer[1] = augendBuffer[1] + addendBuffer[1];
-    augendBuffer[2] = augendBuffer[2] + addendBuffer[2];
-    augendBuffer[3] = augendBuffer[3] + addendBuffer[3];
-    ((double2 *)dest)[offset4Elements] = ((double2 *)augendBuffer)[0];
-
-    offset += 128;
-    if (offset >= numElements)
-        return;
-    offset4Elements = offset >> 2;
     ((double2 *)augendBuffer)[0] = ((double2 *)augend)[offset4Elements];
     ((double2 *)addendBuffer)[0] = ((double2 *)addend)[offset4Elements];
     augendBuffer[0] = augendBuffer[0] + addendBuffer[0];
@@ -1637,7 +1589,7 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
         dim3 gridSize((numElements + 8191) / 8192);
         addElementwiseHalf<<<gridSize, blockSize, 0, stream>>>((half *)augendMem, (half *)destMem, (half *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 8191) / 8192);
+        dim3 gridSize((numElements + 4095) / 4096);
         addElementwise4B<float><<<gridSize, blockSize, 0, stream>>>((float *)augendMem, (float *)destMem, (float *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 8191) / 8192);
@@ -1648,7 +1600,7 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
         addElementwise2BInt<uint16_t>
             <<<gridSize, blockSize, 0, stream>>>((uint16_t *)augendMem, (uint16_t *)destMem, (uint16_t *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 8191) / 8192);
+        dim3 gridSize((numElements + 4095) / 4096);
         addElementwise4B<uint32_t>
             <<<gridSize, blockSize, 0, stream>>>((uint32_t *)augendMem, (uint32_t *)destMem, (uint32_t *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
@@ -1660,7 +1612,7 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
         addElementwise2BInt<int16_t>
             <<<gridSize, blockSize, 0, stream>>>((int16_t *)augendMem, (int16_t *)destMem, (int16_t *)addendMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 8191) / 8192);
+        dim3 gridSize((numElements + 4095) / 4096);
         addElementwise4B<int32_t>
             <<<gridSize, blockSize, 0, stream>>>((int32_t *)augendMem, (int32_t *)destMem, (int32_t *)addendMem, numElements);
     } else {
