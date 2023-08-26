@@ -64,6 +64,9 @@ class CublasMatrixMultiply {
     //  Note: don't allocate a workspace before each call to multiply, you would be better off using the version of multiply that doesn't
     //  use a workspace in terms of performance. Use workspaces only when you can allocate it once and use it a number of times, i.e. when
     //  you have to do a matrix multiplication of the same size over and over.
+    //
+    // Note that the number of columns in an input matrix does not have to be the same size as its leading dimension i.e. A.getDimensions[0]
+    // in this case the ldA/ldB etc facitilies of GEMM are used. The matrix size is instead specified by the number of columns.
     void multiply(Tensor A,
                   Tensor B,
                   Tensor C,
@@ -121,6 +124,7 @@ class CublasMatrixMultiply {
 
     // This exposes the full GEMM functionality and using optimal kernel
     // D = alpha*(A*B) + beta*(C)
+    // C and D may be the same tensor. It should be this way for beta = 0 because then no tensor will be loaded for the addition stage.
     void gemm(Tensor A,
               Tensor B,
               Tensor C,
@@ -222,7 +226,7 @@ class CublasMatrixMultiply {
                                                   bool printResults = false) {
         int ldD = ldC;
         chooseOptimalGemmKernel(
-            gpuType, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, ldD, transposeA, transposeB, false, ABCDataType, printResults);
+            gpuType, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, printResults);
     }
 
     inline void chooseOptimalGemmKernel(std::string gpuType,

@@ -42,9 +42,10 @@ struct KernelRequirement {
         assert(ldA >= colsA);
         assert(ldB >= colsB);
 
+        int finalRowsA = transposeA == false ? rowsA : colsA;
         int finalColsA = transposeA == false ? colsA : rowsA;
-        int finalColsB = transposeB == false ? colsB : rowsB;
         int finalRowsB = transposeB == false ? rowsB : colsB;
+        int finalColsB = transposeB == false ? colsB : rowsB;
 
         /*
         printf("rowsA %d colsA %d rowsB %d colsB %d transposeA %d transposeB %d ldA %d ldB %d ldC %d\n",
@@ -59,8 +60,11 @@ struct KernelRequirement {
                ldC);
         */
 
-        assert(ldC >= finalColsB);
         assert(finalColsA == finalRowsB);
+        if (transposeC)
+            assert(ldC >= finalRowsA);
+        else
+            assert(ldC >= finalColsB);
         assert(ldD >= finalColsB);
     }
 

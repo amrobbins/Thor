@@ -57,6 +57,8 @@ const float CublasMatrixMultiply::ALPHA_NEGATE = -1.0f;
 const float CublasMatrixMultiply::BETA_ACCUMULATE = 1.0f;
 const float CublasMatrixMultiply::BETA_CLEAR = 0.0f;
 
+// FIXME: get rid of ldA, B etc. instead specify just a nd b rows and cols and dimension 1 of each tensor is ld
+
 // This variant allows non-packed matrices
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
@@ -123,10 +125,13 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 float beta,
                                 const TensorDescriptor::DataType ABCDDataType,
                                 Stream stream) {
-    int32_t C_rows = transposeA == false ? A_rows : A_cols;
-    int32_t C_cols = transposeB == false ? B_cols : B_rows;
+    const int32_t C_rows = (transposeA == false ? A_rows : A_cols);
+    const int32_t C_cols = (transposeB == false ? B_cols : B_rows);
     int32_t D_rows = C_rows;
     int32_t D_cols = C_cols;
+
+    // FIXME: TEMP
+    assert(transposeC == false);
 
     assert(!(C == D && transposeC));
 
@@ -549,16 +554,29 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
     assert(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
     assert(ABCDataType == TensorDescriptor::DataType::FP32 || ABCDataType == TensorDescriptor::DataType::FP16);
 
+    // Ensure the operation is legal
+    // The number of C and D columns is specified by the sizes of A and B, so verify A and B
+    const int32_t finalRowsA = (transposeA ? colsA : rowsA);
+    const int32_t finalColsA = (transposeA ? rowsA : colsA);
+    const int32_t finalRowsB = (transposeB ? colsB : rowsB);
+    const int32_t finalColsB = (transposeB ? rowsB : colsB);
+    assert(finalColsA == finalRowsB);
+
+    const int32_t initialRowsC = (transposeC ? finalColsB : finalRowsA);
+    const int32_t initialColsC = (transposeC ? finalRowsA : finalColsB);
+    assert(ldC >= initialColsC);
+
+    // const int32_t finalRowsC = finalRowsA;
+    const int32_t finalColsC = finalColsB;
+    assert(ldD >= finalColsC);
+
     Stream stream(gpuNum);
 
     Event optimizationStartEvent;
     if (printResults)
         optimizationStartEvent = stream.putEvent(true);
 
-    int colsC = transposeB == false ? colsB : rowsB;
-    int rowsC = transposeA == false ? rowsA : colsA;
-
-    double opSize = (long)rowsA * (long)colsA * (long)colsC;
+    double opSize = (long)rowsA * (long)colsA * (long)finalColsC;
     double targetCount;
     if (opSize < pow(1024.0, 3)) {
         targetCount = 10000;
@@ -726,7 +744,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
     cublasGetError();
 
     // Allocate a lot of memory, to ensure subsequent calls are not benefitting from cache hits
-    long memPerInstance = (rowsA * ldA + rowsB * ldB + rowsC * ldC) * ELEMENT_SIZE;
+    long memPerInstance = (rowsA * ldA + rowsB * ldB + initialRowsC * ldC) * ELEMENT_SIZE;
     long totalMatrixMemory = minl(totalGpuMem * 0.4, maxl(ONE_HUNDRED_MEGS, 10 * memPerInstance));
     long numInstances = minl(totalMatrixMemory / memPerInstance, 5000);
     assert(numInstances > 0);
@@ -755,7 +773,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
         B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
                        TensorDescriptor(ABCDataType, {(uint64_t)rowsB, (uint64_t)ldB}));
         C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(ABCDataType, {(uint64_t)rowsC, (uint64_t)ldC}));
+                       TensorDescriptor(ABCDataType, {(uint64_t)initialRowsC, (uint64_t)ldC}));
     }
     for (int i = 0; i < numWorkspaceInstances; ++i) {
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
