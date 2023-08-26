@@ -8,15 +8,76 @@ void swap(int &a, int &b) {
 
 void verifyOperationIsLegal(
     int rowsA, int colsA, int rowsB, int colsB, int ldA, int ldB, int ldC, int transposeA = false, int transposeB = false) {
+    assert(ldA >= colsA);
+    assert(ldB >= colsB);
+
     if (transposeA) {
         swap(rowsA, colsA);
     }
     if (transposeB) {
         swap(rowsB, colsB);
     }
-
-    assert(colsA == rowsB);
     assert(ldC >= colsB);
+    assert(colsA == rowsB);
+}
+
+void verifyOperationIsLegal(int rowsA,
+                            int colsA,
+                            int rowsB,
+                            int colsB,
+                            int rowsC,
+                            int colsC,
+                            int ldA,
+                            int ldB,
+                            int ldC,
+                            int ldD,
+                            bool transposeA,
+                            bool transposeB,
+                            bool transposeC,
+                            bool CDInPlace,
+                            void *C,
+                            void *D,
+                            void *C_d,
+                            void *D_d) {
+    printf("rowsA %d colsA %d rowsB %d colsB %d rowsC %d colsC %d ldA %d ldB %d ldC %d ldD %d transposeA %i transposeB %i transposeC %i\n",
+           rowsA,
+           colsA,
+           rowsB,
+           colsB,
+           rowsC,
+           colsC,
+           ldA,
+           ldB,
+           ldC,
+           ldD,
+           transposeA,
+           transposeB,
+           transposeC);
+    fflush(stdout);
+
+    assert(ldA >= colsA);
+    assert(ldB >= colsB);
+    assert(ldC >= colsC);
+
+    if (transposeA) {
+        swap(rowsA, colsA);
+    }
+    if (transposeB) {
+        swap(rowsB, colsB);
+    }
+    assert(colsA == rowsB);
+    if (transposeC) {
+        swap(rowsC, colsC);
+    }
+    assert(rowsC == rowsA);
+    assert(colsC == colsB);
+    assert(ldD >= colsC);
+
+    if (CDInPlace) {
+        assert(!transposeC);
+        assert(C == D);
+        assert(C_d == D_d);
+    }
 }
 
 void transpose(float *A, float *A_t, int rows, int cols, int ld) {
@@ -90,7 +151,6 @@ void matrixMultiplyCpu(float *A,
     if (num_threads < 1)
         num_threads = 1;
     omp_set_num_threads(num_threads);
-
 
     float *A_t = nullptr;
     if (transposeA) {
@@ -266,22 +326,22 @@ void printMatrices(float *matrixCpu, float *matrixGpu, int rows, int cols, int l
 
 
 void gemmCpuFp32(float *A,
-                       float *B,
-                       float *C,
-                       float *D,
-                       int rowsA,
-                       int colsA,
-                       int rowsB,
-                       int colsB,
-                       int lda,
-                       int ldb,
-                       int ldc,
-                       int ldd,
-                       bool transposeA,
-                       bool transposeB,
-                       bool transposeC,
-                       float alpha,
-                       float beta) {
+                 float *B,
+                 float *C,
+                 float *D,
+                 int rowsA,
+                 int colsA,
+                 int rowsB,
+                 int colsB,
+                 int lda,
+                 int ldb,
+                 int ldc,
+                 int ldd,
+                 bool transposeA,
+                 bool transposeB,
+                 bool transposeC,
+                 float alpha,
+                 float beta) {
     int num_threads = omp_get_num_procs() - 1;
     if (num_threads < 1)
         num_threads = 1;
