@@ -1158,7 +1158,7 @@ int CublasMatrixMultiply::getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t alg
     return kernelOptionMaxValue;
 }
 
-unsigned int CublasMatrixMultiply::getWorkspaceSizeInBytes(int gpuNum,
+unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
                                                            int rowsA,
                                                            int colsA,
                                                            int rowsB,

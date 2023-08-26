@@ -119,20 +119,31 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(0,
-                                                                                                     rowsA,
-                                                                                                     colsA,
-                                                                                                     rowsB,
-                                                                                                     colsB,
-                                                                                                     ldA,
-                                                                                                     ldB,
-                                                                                                     ldC,
-                                                                                                     ldC,
-                                                                                                     transposeA,
-                                                                                                     transposeB,
-                                                                                                     false,
-                                                                                                     TensorDescriptor::DataType::FP32,
-                                                                                                     kernelWillRunOnGpu);
+            uint64_t workspaceSizeInBytes;
+            if (useLdVersion) {
+                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
+                                                                                                         rowsA,
+                                                                                                         colsA,
+                                                                                                         rowsB,
+                                                                                                         colsB,
+                                                                                                         ldA,
+                                                                                                         ldB,
+                                                                                                         ldC,
+                                                                                                         transposeA,
+                                                                                                         transposeB,
+                                                                                                         TensorDescriptor::DataType::FP32,
+                                                                                                         kernelWillRunOnGpu);
+            } else {
+                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
+                                                                                                rowsA,
+                                                                                                colsA,
+                                                                                                rowsB,
+                                                                                                colsB,
+                                                                                                transposeA,
+                                                                                                transposeB,
+                                                                                                TensorDescriptor::DataType::FP32,
+                                                                                                kernelWillRunOnGpu);
+            }
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -332,20 +343,31 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(0,
-                                                                                                     rowsA,
-                                                                                                     colsA,
-                                                                                                     rowsB,
-                                                                                                     colsB,
-                                                                                                     ldA,
-                                                                                                     ldB,
-                                                                                                     ldC,
-                                                                                                     ldC,
-                                                                                                     transposeA,
-                                                                                                     transposeB,
-                                                                                                     false,
-                                                                                                     TensorDescriptor::DataType::FP16,
-                                                                                                     kernelWillRunOnGpu);
+            uint64_t workspaceSizeInBytes;
+            if (useLdVersion) {
+                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
+                                                                                                         rowsA,
+                                                                                                         colsA,
+                                                                                                         rowsB,
+                                                                                                         colsB,
+                                                                                                         ldA,
+                                                                                                         ldB,
+                                                                                                         ldC,
+                                                                                                         transposeA,
+                                                                                                         transposeB,
+                                                                                                         TensorDescriptor::DataType::FP16,
+                                                                                                         kernelWillRunOnGpu);
+            } else {
+                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
+                                                                                                rowsA,
+                                                                                                colsA,
+                                                                                                rowsB,
+                                                                                                colsB,
+                                                                                                transposeA,
+                                                                                                transposeB,
+                                                                                                TensorDescriptor::DataType::FP16,
+                                                                                                kernelWillRunOnGpu);
+            }
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -956,7 +978,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
 
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
-            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getWorkspaceSizeInBytes(0,
+            uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getGemmWorkspaceSizeInBytes(0,
                                                                                                      rowsA,
                                                                                                      colsA,
                                                                                                      rowsB,
