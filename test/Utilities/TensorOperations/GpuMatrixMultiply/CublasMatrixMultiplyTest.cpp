@@ -121,28 +121,22 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
             bool kernelWillRunOnGpu;
             uint64_t workspaceSizeInBytes;
             if (useLdVersion) {
-                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
-                                                                                                         rowsA,
-                                                                                                         colsA,
-                                                                                                         rowsB,
-                                                                                                         colsB,
-                                                                                                         ldA,
-                                                                                                         ldB,
-                                                                                                         ldC,
-                                                                                                         transposeA,
-                                                                                                         transposeB,
-                                                                                                         TensorDescriptor::DataType::FP32,
-                                                                                                         kernelWillRunOnGpu);
+                workspaceSizeInBytes =
+                    CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
+                                                                                           rowsA,
+                                                                                           colsA,
+                                                                                           rowsB,
+                                                                                           colsB,
+                                                                                           ldA,
+                                                                                           ldB,
+                                                                                           ldC,
+                                                                                           transposeA,
+                                                                                           transposeB,
+                                                                                           TensorDescriptor::DataType::FP32,
+                                                                                           kernelWillRunOnGpu);
             } else {
-                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
-                                                                                                rowsA,
-                                                                                                colsA,
-                                                                                                rowsB,
-                                                                                                colsB,
-                                                                                                transposeA,
-                                                                                                transposeB,
-                                                                                                TensorDescriptor::DataType::FP32,
-                                                                                                kernelWillRunOnGpu);
+                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(
+                    0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP32, kernelWillRunOnGpu);
             }
             assert(kernelWillRunOnGpu);
 
@@ -173,40 +167,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
                               accumulate,
                               negate);
 
-        if (useLdVersion) {
-            CublasMatrixMultiply::instance().multiply(A_d,
-                                                      B_d,
-                                                      C_d,
-                                                      workspace_d,
-                                                      rowsA,
-                                                      colsA,
-                                                      rowsB,
-                                                      colsB,
-                                                      ldA,
-                                                      ldB,
-                                                      ldC,
-                                                      transposeA,
-                                                      transposeB,
-                                                      accumulate,
-                                                      negate,
-                                                      TensorDescriptor::DataType::FP32,
-                                                      stream);
-        } else {
-            CublasMatrixMultiply::instance().multiply(A_d,
-                                                      B_d,
-                                                      C_d,
-                                                      workspace_d,
-                                                      rowsA,
-                                                      colsA,
-                                                      rowsB,
-                                                      colsB,
-                                                      transposeA,
-                                                      transposeB,
-                                                      accumulate,
-                                                      negate,
-                                                      TensorDescriptor::DataType::FP32,
-                                                      stream);
-        }
+        CublasMatrixMultiply::instance().multiply(A_d,
+                                                  B_d,
+                                                  C_d,
+                                                  workspace_d,
+                                                  rowsA,
+                                                  colsA,
+                                                  rowsB,
+                                                  colsB,
+                                                  transposeA,
+                                                  transposeB,
+                                                  accumulate,
+                                                  negate,
+                                                  TensorDescriptor::DataType::FP32,
+                                                  stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
         stream.synchronize();
@@ -345,28 +319,22 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
             bool kernelWillRunOnGpu;
             uint64_t workspaceSizeInBytes;
             if (useLdVersion) {
-                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
-                                                                                                         rowsA,
-                                                                                                         colsA,
-                                                                                                         rowsB,
-                                                                                                         colsB,
-                                                                                                         ldA,
-                                                                                                         ldB,
-                                                                                                         ldC,
-                                                                                                         transposeA,
-                                                                                                         transposeB,
-                                                                                                         TensorDescriptor::DataType::FP16,
-                                                                                                         kernelWillRunOnGpu);
+                workspaceSizeInBytes =
+                    CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
+                                                                                           rowsA,
+                                                                                           colsA,
+                                                                                           rowsB,
+                                                                                           colsB,
+                                                                                           ldA,
+                                                                                           ldB,
+                                                                                           ldC,
+                                                                                           transposeA,
+                                                                                           transposeB,
+                                                                                           TensorDescriptor::DataType::FP16,
+                                                                                           kernelWillRunOnGpu);
             } else {
-                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(0,
-                                                                                                rowsA,
-                                                                                                colsA,
-                                                                                                rowsB,
-                                                                                                colsB,
-                                                                                                transposeA,
-                                                                                                transposeB,
-                                                                                                TensorDescriptor::DataType::FP16,
-                                                                                                kernelWillRunOnGpu);
+                workspaceSizeInBytes = CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(
+                    0, rowsA, colsA, rowsB, colsB, transposeA, transposeB, TensorDescriptor::DataType::FP16, kernelWillRunOnGpu);
             }
             assert(kernelWillRunOnGpu);
 
@@ -397,40 +365,20 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
                               accumulate,
                               negate);
 
-        if (useLdVersion) {
-            CublasMatrixMultiply::instance().multiply(A_d,
-                                                      B_d,
-                                                      C_d,
-                                                      workspace_d,
-                                                      rowsA,
-                                                      colsA,
-                                                      rowsB,
-                                                      colsB,
-                                                      ldA,
-                                                      ldB,
-                                                      ldC,
-                                                      transposeA,
-                                                      transposeB,
-                                                      accumulate,
-                                                      negate,
-                                                      TensorDescriptor::DataType::FP16,
-                                                      stream);
-        } else {
-            CublasMatrixMultiply::instance().multiply(A_d,
-                                                      B_d,
-                                                      C_d,
-                                                      workspace_d,
-                                                      rowsA,
-                                                      colsA,
-                                                      rowsB,
-                                                      colsB,
-                                                      transposeA,
-                                                      transposeB,
-                                                      accumulate,
-                                                      negate,
-                                                      TensorDescriptor::DataType::FP16,
-                                                      stream);
-        }
+        CublasMatrixMultiply::instance().multiply(A_d,
+                                                  B_d,
+                                                  C_d,
+                                                  workspace_d,
+                                                  rowsA,
+                                                  colsA,
+                                                  rowsB,
+                                                  colsB,
+                                                  transposeA,
+                                                  transposeB,
+                                                  accumulate,
+                                                  negate,
+                                                  TensorDescriptor::DataType::FP16,
+                                                  stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
         stream.synchronize();
@@ -495,9 +443,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
         uint64_t ldA = colsA;
         uint64_t ldB = colsB;
         uint64_t ldC = transposeB == false ? colsB : rowsB;
-        bool useLdVersion = false;
         if (rand() % 2) {
-            useLdVersion = true;
             ldA += rand() % 10;
             ldB += rand() % 10;
             ldC += rand() % 10;
@@ -575,38 +521,19 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
                               accumulate,
                               negate);
 
-        if (useLdVersion) {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
-                                                                                B_d,
-                                                                                C_d,
-                                                                                rowsA,
-                                                                                colsA,
-                                                                                rowsB,
-                                                                                colsB,
-                                                                                ldA,
-                                                                                ldB,
-                                                                                ldC,
-                                                                                transposeA,
-                                                                                transposeB,
-                                                                                accumulate,
-                                                                                negate,
-                                                                                TensorDescriptor::DataType::FP32,
-                                                                                stream);
-        } else {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
-                                                                                B_d,
-                                                                                C_d,
-                                                                                rowsA,
-                                                                                colsA,
-                                                                                rowsB,
-                                                                                colsB,
-                                                                                transposeA,
-                                                                                transposeB,
-                                                                                accumulate,
-                                                                                negate,
-                                                                                TensorDescriptor::DataType::FP32,
-                                                                                stream);
-        }
+        CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
+                                                                            B_d,
+                                                                            C_d,
+                                                                            rowsA,
+                                                                            colsA,
+                                                                            rowsB,
+                                                                            colsB,
+                                                                            transposeA,
+                                                                            transposeB,
+                                                                            accumulate,
+                                                                            negate,
+                                                                            TensorDescriptor::DataType::FP32,
+                                                                            stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
         stream.synchronize();
@@ -758,38 +685,19 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
                               accumulate,
                               negate);
 
-        if (useLdVersion) {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
-                                                                                B_d,
-                                                                                C_d,
-                                                                                rowsA,
-                                                                                colsA,
-                                                                                rowsB,
-                                                                                colsB,
-                                                                                ldA,
-                                                                                ldB,
-                                                                                ldC,
-                                                                                transposeA,
-                                                                                transposeB,
-                                                                                accumulate,
-                                                                                negate,
-                                                                                TensorDescriptor::DataType::FP16,
-                                                                                stream);
-        } else {
-            CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
-                                                                                B_d,
-                                                                                C_d,
-                                                                                rowsA,
-                                                                                colsA,
-                                                                                rowsB,
-                                                                                colsB,
-                                                                                transposeA,
-                                                                                transposeB,
-                                                                                accumulate,
-                                                                                negate,
-                                                                                TensorDescriptor::DataType::FP16,
-                                                                                stream);
-        }
+        CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(A_d,
+                                                                            B_d,
+                                                                            C_d,
+                                                                            rowsA,
+                                                                            colsA,
+                                                                            rowsB,
+                                                                            colsB,
+                                                                            transposeA,
+                                                                            transposeB,
+                                                                            accumulate,
+                                                                            negate,
+                                                                            TensorDescriptor::DataType::FP16,
+                                                                            stream);
 
         C_gpu_h.copyFromAsync(C_d, stream);
         stream.synchronize();
@@ -979,19 +887,19 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
         if (useWorkspace) {
             bool kernelWillRunOnGpu;
             uint64_t workspaceSizeInBytes = CublasMatrixMultiply::instance().getGemmWorkspaceSizeInBytes(0,
-                                                                                                     rowsA,
-                                                                                                     colsA,
-                                                                                                     rowsB,
-                                                                                                     colsB,
-                                                                                                     ldA,
-                                                                                                     ldB,
-                                                                                                     ldC,
-                                                                                                     ldD,
-                                                                                                     transposeA,
-                                                                                                     transposeB,
-                                                                                                     transposeC,
-                                                                                                     TensorDescriptor::DataType::FP32,
-                                                                                                     kernelWillRunOnGpu);
+                                                                                                         rowsA,
+                                                                                                         colsA,
+                                                                                                         rowsB,
+                                                                                                         colsB,
+                                                                                                         ldA,
+                                                                                                         ldB,
+                                                                                                         ldC,
+                                                                                                         ldD,
+                                                                                                         transposeA,
+                                                                                                         transposeB,
+                                                                                                         transposeC,
+                                                                                                         TensorDescriptor::DataType::FP32,
+                                                                                                         kernelWillRunOnGpu);
             assert(kernelWillRunOnGpu);
 
             if (workspaceSizeInBytes > 0) {
@@ -1026,8 +934,6 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
                               alpha,
                               beta);
 
-        // printf("rowsA %d colsA %d rowsA %d colsA %d ")
-
         CublasMatrixMultiply::instance().gemm(A_d,
                                               B_d,
                                               C_d,
@@ -1037,10 +943,6 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
                                               colsA,
                                               rowsB,
                                               colsB,
-                                              ldA,
-                                              ldB,
-                                              ldC,
-                                              ldD,
                                               transposeA,
                                               transposeB,
                                               transposeC,

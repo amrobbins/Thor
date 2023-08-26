@@ -324,7 +324,6 @@ void printMatrices(float *matrixCpu, float *matrixGpu, int rows, int cols, int l
     }
 }
 
-
 void gemmCpuFp32(float *A,
                  float *B,
                  float *C,

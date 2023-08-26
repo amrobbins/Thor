@@ -57,8 +57,6 @@ const float CublasMatrixMultiply::ALPHA_NEGATE = -1.0f;
 const float CublasMatrixMultiply::BETA_ACCUMULATE = 1.0f;
 const float CublasMatrixMultiply::BETA_CLEAR = 0.0f;
 
-// FIXME: get rid of ldA, B etc. instead specify just a nd b rows and cols and dimension 1 of each tensor is ld
-
 // This variant allows non-packed matrices
 void CublasMatrixMultiply::multiply(Tensor A,
                                     Tensor B,
@@ -68,11 +66,6 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     const int32_t A_cols,
                                     const int32_t B_rows,
                                     const int32_t B_cols,
-                                    // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two
-                                    // adjacent rows in memory. Some slots at the end of a row may be unused.
-                                    const int32_t ld_A,
-                                    const int32_t ld_B,
-                                    const int32_t ld_C,
                                     bool transposeA,
                                     bool transposeB,
                                     const bool accumulate,
@@ -81,26 +74,7 @@ void CublasMatrixMultiply::multiply(Tensor A,
                                     Stream stream) {
     float alpha = negate ? ALPHA_NEGATE : ALPHA_NO_SCALE;
     float beta = accumulate ? BETA_ACCUMULATE : BETA_CLEAR;
-    gemm(A,
-         B,
-         C,
-         C,
-         workspace,
-         A_rows,
-         A_cols,
-         B_rows,
-         B_cols,
-         ld_A,
-         ld_B,
-         ld_C,
-         ld_C,
-         transposeA,
-         transposeB,
-         false,
-         alpha,
-         beta,
-         ABCDataType,
-         stream);
+    gemm(A, B, C, C, workspace, A_rows, A_cols, B_rows, B_cols, transposeA, transposeB, false, alpha, beta, ABCDataType, stream);
 }
 
 void CublasMatrixMultiply::gemm(Tensor A,
@@ -112,12 +86,6 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 const int32_t A_cols,
                                 const int32_t B_rows,
                                 const int32_t B_cols,
-                                // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent
-                                // rows in memory. Some slots at the end of a row may be unused.
-                                const int32_t ld_A,
-                                const int32_t ld_B,
-                                const int32_t ld_C,
-                                const int32_t ld_D,
                                 bool transposeA,
                                 bool transposeB,
                                 bool transposeC,
@@ -125,6 +93,15 @@ void CublasMatrixMultiply::gemm(Tensor A,
                                 float beta,
                                 const TensorDescriptor::DataType ABCDDataType,
                                 Stream stream) {
+    assert(A.getDimensions().size() == 2);
+    assert(B.getDimensions().size() == 2);
+    assert(C.getDimensions().size() == 2);
+    assert(D.getDimensions().size() == 2);
+    const int32_t ld_A = A.getDimensions()[1];
+    const int32_t ld_B = B.getDimensions()[1];
+    const int32_t ld_C = C.getDimensions()[1];
+    const int32_t ld_D = D.getDimensions()[1];
+
     const int32_t C_rows = (transposeA == false ? A_rows : A_cols);
     const int32_t C_cols = (transposeB == false ? B_cols : B_rows);
     int32_t D_rows = C_rows;
@@ -222,15 +199,19 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               const int32_t A_cols,
                                                               const int32_t B_rows,
                                                               const int32_t B_cols,
-                                                              const int32_t ld_A,
-                                                              const int32_t ld_B,
-                                                              const int32_t ld_C,
                                                               bool transposeA,
                                                               bool transposeB,
                                                               const bool accumulate,
                                                               const bool negate,
                                                               const TensorDescriptor::DataType ABCDataType,
                                                               Stream stream) {
+    assert(A.getDimensions().size() == 2);
+    assert(B.getDimensions().size() == 2);
+    assert(C.getDimensions().size() == 2);
+    const int32_t ld_A = A.getDimensions()[1];
+    const int32_t ld_B = B.getDimensions()[1];
+    const int32_t ld_C = C.getDimensions()[1];
+
     int32_t C_rows = transposeA == false ? A_rows : A_cols;
     int32_t C_cols = transposeB == false ? B_cols : B_rows;
 
@@ -1159,19 +1140,19 @@ int CublasMatrixMultiply::getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t alg
 }
 
 unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
-                                                           int rowsA,
-                                                           int colsA,
-                                                           int rowsB,
-                                                           int colsB,
-                                                           int ldA,
-                                                           int ldB,
-                                                           int ldC,
-                                                           int ldD,
-                                                           bool transposeA,
-                                                           bool transposeB,
-                                                           bool transposeC,
-                                                           TensorDescriptor::DataType ABCDataType,
-                                                           bool &kernelWillRunOnGpu) {
+                                                               int rowsA,
+                                                               int colsA,
+                                                               int rowsB,
+                                                               int colsB,
+                                                               int ldA,
+                                                               int ldB,
+                                                               int ldC,
+                                                               int ldD,
+                                                               bool transposeA,
+                                                               bool transposeB,
+                                                               bool transposeC,
+                                                               TensorDescriptor::DataType ABCDataType,
+                                                               bool &kernelWillRunOnGpu) {
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         rowsA,
                                         colsA,

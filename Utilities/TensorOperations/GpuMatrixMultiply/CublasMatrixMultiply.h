@@ -80,46 +80,6 @@ class CublasMatrixMultiply {
                   const bool accumulate,
                   const bool negate,
                   const TensorDescriptor::DataType ABCDataType,
-                  Stream stream) {
-        int ldC = transposeB == false ? B_cols : B_rows;
-        multiply(A,
-                 B,
-                 C,
-                 workspace,
-                 A_rows,
-                 A_cols,
-                 B_rows,
-                 B_cols,
-                 A_cols,
-                 B_cols,
-                 ldC,
-                 transposeA,
-                 transposeB,
-                 accumulate,
-                 negate,
-                 ABCDataType,
-                 stream);
-    }
-
-    // This variant allows non-packed matrices
-    void multiply(Tensor A,
-                  Tensor B,
-                  Tensor C,
-                  Optional<Tensor> workspace,
-                  const int32_t A_rows,
-                  const int32_t A_cols,
-                  const int32_t B_rows,
-                  const int32_t B_cols,
-                  // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent rows in
-                  // memory. Some slots at the end of a row may be unused.
-                  const int32_t ld_A,
-                  const int32_t ld_B,
-                  const int32_t ld_C,
-                  bool transposeA,
-                  bool transposeB,
-                  const bool accumulate,
-                  const bool negate,
-                  const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
 
     // This exposes the full GEMM functionality and using optimal kernel
@@ -136,10 +96,6 @@ class CublasMatrixMultiply {
               const int32_t B_cols,
               // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent rows in
               // memory. Some slots at the end of a row may be unused.
-              const int32_t ld_A,
-              const int32_t ld_B,
-              const int32_t ld_C,
-              const int32_t ld_D,
               bool transposeA,
               bool transposeB,
               bool transposeC,
@@ -165,30 +121,6 @@ class CublasMatrixMultiply {
                                             const int32_t A_cols,
                                             const int32_t B_rows,
                                             const int32_t B_cols,
-                                            bool transposeA,
-                                            bool transposeB,
-                                            const bool accumulate,
-                                            const bool negate,
-                                            const TensorDescriptor::DataType ABCDataType,
-                                            Stream stream) {
-        int ldC = transposeB == false ? B_cols : B_rows;
-        multiplyUsingHeuristicKernelChoice(
-            A, B, C, A_rows, A_cols, B_rows, B_cols, A_cols, B_cols, ldC, transposeA, transposeB, accumulate, negate, ABCDataType, stream);
-    }
-
-    // This variant allows non-packed matrices
-    void multiplyUsingHeuristicKernelChoice(Tensor A,
-                                            Tensor B,
-                                            Tensor C,
-                                            const int32_t A_rows,
-                                            const int32_t A_cols,
-                                            const int32_t B_rows,
-                                            const int32_t B_cols,
-                                            // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of
-                                            // two adjacent rows in memory. Some slots at the end of a row may be unused.
-                                            const int32_t ld_A,
-                                            const int32_t ld_B,
-                                            const int32_t ld_C,
                                             bool transposeA,
                                             bool transposeB,
                                             const bool accumulate,
@@ -312,14 +244,14 @@ class CublasMatrixMultiply {
                                  bool printResults = false);
 
     inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
-                                                int rowsA,
-                                                int colsA,
-                                                int rowsB,
-                                                int colsB,
-                                                bool transposeA,
-                                                bool transposeB,
-                                                TensorDescriptor::DataType ABCDataType,
-                                                bool &kernelWillRunOnGpu) {
+                                                              int rowsA,
+                                                              int colsA,
+                                                              int rowsB,
+                                                              int colsB,
+                                                              bool transposeA,
+                                                              bool transposeB,
+                                                              TensorDescriptor::DataType ABCDataType,
+                                                              bool &kernelWillRunOnGpu) {
         int ldC = transposeB == false ? colsB : rowsB;
         return getMatrixMultiplyWorkspaceSizeInBytes(
             gpuNum, rowsA, colsA, rowsB, colsB, colsA, colsB, ldC, transposeA, transposeB, ABCDataType, kernelWillRunOnGpu);
@@ -337,25 +269,25 @@ class CublasMatrixMultiply {
                                                               bool transposeB,
                                                               TensorDescriptor::DataType ABCDataType,
                                                               bool &kernelWillRunOnGpu) {
-        int ldD = ldC; // They are the same memory
+        int ldD = ldC;  // They are the same memory
         return getGemmWorkspaceSizeInBytes(
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
     }
 
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
-                                         int rowsA,
-                                         int colsA,
-                                         int rowsB,
-                                         int colsB,
-                                         int ldA,
-                                         int ldB,
-                                         int ldC,
-                                         int ldD,
-                                         bool transposeA,
-                                         bool transposeB,
-                                         bool transposeC,
-                                         TensorDescriptor::DataType ABCDataType,
-                                         bool &kernelWillRunOnGpu);
+                                             int rowsA,
+                                             int colsA,
+                                             int rowsB,
+                                             int colsB,
+                                             int ldA,
+                                             int ldB,
+                                             int ldC,
+                                             int ldD,
+                                             bool transposeA,
+                                             bool transposeB,
+                                             bool transposeC,
+                                             TensorDescriptor::DataType ABCDataType,
+                                             bool &kernelWillRunOnGpu);
 
     // getOptimalKernelTime(...) will give you the average time the kernel took when chooseOptimalMatrixMultiplyKernel was called for the
     // matrix multiply operation with those dimensions on that GPU. It is an error to call this for an operation where the
