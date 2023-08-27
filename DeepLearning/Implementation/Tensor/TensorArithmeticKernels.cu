@@ -2090,3 +2090,52 @@ void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream) {
         }
     }
 }
+
+////////////////////////////////////////////
+
+
+void Tensor::max(double numerator, Tensor denominator, Stream stream) {
+    assert(denominator.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(denominator.getDataType() == getDataType());
+
+    TensorDescriptor::DataType dataType = denominator.getDataType();
+    uint64_t numElements = denominator.getTotalNumElements();
+    void *denominatorMem = denominator.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        divideScalarNumeratorHalf<<<gridSize, blockSize, 0, stream>>>((half *)denominatorMem, (half *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator4B<float>
+            <<<gridSize, blockSize, 0, stream>>>((float *)denominatorMem, (float *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator1B<uint8_t>
+            <<<gridSize, blockSize, 0, stream>>>((uint8_t *)denominatorMem, (uint8_t *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator2B<uint16_t>
+            <<<gridSize, blockSize, 0, stream>>>((uint16_t *)denominatorMem, (uint16_t *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator4B<uint32_t>
+            <<<gridSize, blockSize, 0, stream>>>((uint32_t *)denominatorMem, (uint32_t *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator1B<int8_t>
+            <<<gridSize, blockSize, 0, stream>>>((int8_t *)denominatorMem, (int8_t *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator2B<int16_t>
+            <<<gridSize, blockSize, 0, stream>>>((int16_t *)denominatorMem, (int16_t *)destMem, numerator, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        divideScalarNumerator4B<int32_t>
+            <<<gridSize, blockSize, 0, stream>>>((int32_t *)denominatorMem, (int32_t *)destMem, numerator, numElements);
+    } else {
+        assert(false);
+    }
+}
