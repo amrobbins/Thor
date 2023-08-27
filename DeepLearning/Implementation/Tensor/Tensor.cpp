@@ -353,6 +353,55 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     }
 }
 
+void Tensor::memset(int8_t value, uint64_t numElements) {
+    uint64_t numBytes;
+    if (numElements == 0) {
+        numBytes = getArraySizeInBytes();
+    } else {
+        // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
+        if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+            assert(numElements % 8 == 0);
+            numBytes = numElements / 8;
+        } else {
+            numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
+        }
+    }
+
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        ScopedGpu scopedGpu(placement.getDeviceNum());
+        cudaError_t cudaStatus;
+        cudaStatus = cudaMemset(mem, 0, numBytes);
+        assert(cudaStatus == cudaSuccess);
+    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        // invoke global memset instead of member function memset
+        ::memset(mem, value, numBytes);
+    } else {
+        assert(false);
+    }
+}
+
+void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
+    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    uint64_t numBytes;
+    if (numElements == 0) {
+        numBytes = getArraySizeInBytes();
+    } else {
+        // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
+        if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+            assert(numElements % 8 == 0);
+            numBytes = numElements / 8;
+        } else {
+            numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
+        }
+    }
+
+    ScopedGpu scopedGpu(placement.getDeviceNum());
+    cudaError_t cudaStatus;
+    cudaStatus = cudaMemsetAsync(mem, value, numBytes, stream);
+    assert(cudaStatus == cudaSuccess);
+}
+
 string Tensor::dimensionsToString() {
     string s = "[";
     vector<uint64_t> dimensions = getDimensions();
@@ -441,6 +490,43 @@ void Tensor::loadValuesIntoVector(std::vector<T> &values, Stream stream) {
     uint64_t numElements = getTotalNumElements();
     for (uint64_t i = 0; i < numElements; ++i)
         values.push_back(mem[i]);
+}
+
+Tensor Tensor::transposeMatrix(Stream stream) {
+    vector<uint64_t> dimensions = getDimensions();
+    // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
+    // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
+    assert(dimensions.size() == 2);
+    vector<uint64_t> transposedDimensions;
+    transposedDimensions.push_back(dimensions[1]);
+    transposedDimensions.push_back(dimensions[0]);
+    Tensor transposedTensor = clone(transposedDimensions);
+
+    if (getDataType() == TensorDescriptor::DataType::FP16) {
+        matrixTranspose((half *)transposedTensor.getMemPtr(), (half *)getMemPtr(), dimensions[0], dimensions[1], stream);
+    } else if (getDataType() == TensorDescriptor::DataType::FP32) {
+        matrixTranspose((float *)transposedTensor.getMemPtr(), (float *)getMemPtr(), dimensions[0], dimensions[1], stream);
+    } else {
+        assert(false);  // TODO
+    }
+
+    return transposedTensor;
+}
+
+void Tensor::transposeSquareMatrixInPlace(Stream stream) {
+    vector<uint64_t> dimensions = getDimensions();
+    // Generally the transpose of a higher order tensor would be any permutation of the tensor's dimensions, in that case the particular
+    // permutation would also need to be specified. I'm not doing that now and unless some need arises I probably won't implement that.
+    assert(dimensions.size() == 2);
+    assert(dimensions[0] == dimensions[1]);
+
+    if (getDataType() == TensorDescriptor::DataType::FP16) {
+        matrixTransposeSquare((half *)getMemPtr(), (half *)getMemPtr(), dimensions[0], stream);
+    } else if (getDataType() == TensorDescriptor::DataType::FP32) {
+        matrixTransposeSquare((float *)getMemPtr(), (float *)getMemPtr(), dimensions[0], stream);
+    } else {
+        assert(false);  // TODO
+    }
 }
 
 template void Tensor::setValues<half>(vector<half> values, Stream stream);

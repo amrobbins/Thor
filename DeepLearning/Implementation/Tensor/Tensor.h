@@ -6,6 +6,7 @@
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 #include "Utilities/TensorOperations/TypeConversions/TypeConverter.h"
 
 #include <algorithm>
@@ -69,6 +70,12 @@ class Tensor : private ReferenceCounted {
     void copyFromAsync(Tensor source, Stream stream);
 
     void moveFromAsync(Tensor source, Stream stream);
+
+    // numElements = 0 indicates all elements
+    // Note that this takes num elements as its parameter rather than num bytes like regular memset
+    // however the memory is set per byte like other versions of memset. To make this clear, value is int8_t.
+    void memset(int8_t value, uint64_t numElements = 0);
+    void memsetAsync(Stream stream, int8_t value, uint64_t numElements = 0);
 
     // setValues is intended as a test helper to easily populate an entire tensor
     // It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
@@ -551,9 +558,59 @@ class Tensor : private ReferenceCounted {
      */
     void acoth(Tensor radians, Stream stream);
 
-    // FIXME: expand this pattern to cover all useful functions...
-    // abs, max, min
-    // sin(), cos(), trig functions
+    /**
+     * [thisTensor] = max(thisTensor[i], minValue)
+     * <div/>
+     * minValue is first cast to the data type of this tensor.
+     *
+     * FIXME: Currently only supported for tensors of type FP16 and FP32
+     */
+    void max(double minValue, Stream stream);
+
+    /**
+     * [thisTensor] = max(thisTensor[i], minValues[i])
+     *
+     * FIXME: Currently only supported for tensors of type FP16 and FP32
+     */
+    void max(Tensor minValues, Stream stream);
+
+    /**
+     * [thisTensor] = min(thisTensor[i], maxValue)
+     * <div/>
+     * minValue is first cast to the data type of this tensor.
+     *
+     * FIXME: Currently only supported for tensors of type FP16 and FP32
+     */
+    void min(double maxValue, Stream stream);
+
+    /**
+     * [thisTensor] = min(thisTensor[i], maxValues[i])
+     *
+     * FIXME: Currently only supported for tensors of type FP16 and FP32
+     */
+    void min(Tensor maxValues, Stream stream);
+
+    /**
+     * [thisTensor] = max(min(thisTensor[i], maxValue), minValue)
+     * <div/>
+     * minValue is first cast to the data type of this tensor.
+     *
+     */
+    void bound(double minValue, double maxValue, Stream stream);
+
+    /**
+     * returns a new tensor that equals [thisTensor]T
+     *
+     * FIXME: Currently only supported for tensors of type FP16 and FP32
+     */
+    Tensor transposeMatrix(Stream stream);
+
+    /**
+     * Transposes [thisTensor] in-place. Only valid for square tensors.
+     *
+     * FIXME: Currently only supported for tensors of type FP16 and FP32
+     */
+    void transposeSquareMatrixInPlace(Stream stream);
 
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
@@ -562,11 +619,26 @@ class Tensor : private ReferenceCounted {
     using ReferenceCounted::getReferenceCount;
 
     // Convenience functions to pass information from the descriptor
-    TensorDescriptor::DataType getDataType() { return descriptor.getDataType(); }
-    std::vector<unsigned long> getDimensions() { return descriptor.getDimensions(); }
-    unsigned int getNumDimensions() { return descriptor.getNumDimensions(); }
-    unsigned long getTotalNumElements() { return descriptor.getTotalNumElements(); }
-    long unsigned getArraySizeInBytes() { return descriptor.getArraySizeInBytes(); }
+    TensorDescriptor::DataType getDataType() {
+        assert(!uninitialized());
+        return descriptor.getDataType();
+    }
+    std::vector<unsigned long> getDimensions() {
+        assert(!uninitialized());
+        return descriptor.getDimensions();
+    }
+    unsigned int getNumDimensions() {
+        assert(!uninitialized());
+        return descriptor.getNumDimensions();
+    }
+    unsigned long getTotalNumElements() {
+        assert(!uninitialized());
+        return descriptor.getTotalNumElements();
+    }
+    long unsigned getArraySizeInBytes() {
+        assert(!uninitialized());
+        return descriptor.getArraySizeInBytes();
+    }
 
     std::string dimensionsToString();
 

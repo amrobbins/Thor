@@ -176,6 +176,151 @@ void testMatrixTransposeFp16(int rows, int cols, bool print = false, bool verify
     }
 }
 
+void testSquareMatrixTransposeFp32(int width, bool print = false, bool verify = true) {
+    float *matrix;
+    float *matrix_gpu;
+    float *matrix_d;
+    cudaStream_t stream;
+    cudaError_t cudaStatus;
+
+    cudaStatus = cudaHostAlloc(&matrix, width * width * sizeof(float), cudaHostAllocPortable);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaHostAlloc(&matrix_gpu, width * width * sizeof(float), cudaHostAllocPortable);
+    assert(cudaStatus == cudaSuccess);
+
+    if (verify) {
+        for (int i = 0; i < width; ++i) {
+            for (int j = 0; j < width; ++j) {
+                matrix[i * width + j] = i + 0.1 * j;
+            }
+        }
+    }
+
+    cudaStatus = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMalloc(&matrix_d, width * width * sizeof(float));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMemcpyAsync(matrix_d, matrix, width * width * sizeof(float), cudaMemcpyHostToDevice, stream);
+    assert(cudaStatus == cudaSuccess);
+
+    if (print) {
+        printf("width: %d width %d\n", width, width);
+        if (width > 25 && width < 40 && width > 25 && width < 40) {
+            printMatrixFp32(matrix, width, width);
+            printf("\n\n");
+        }
+    }
+
+    matrixTransposeSquare(matrix_d, matrix_d, width, stream);
+
+    cudaStatus = cudaMemcpyAsync(matrix_gpu, matrix_d, width * width * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaStreamSynchronize(stream);
+    if (print) {
+        printf("cudaStatus %d\n", cudaStatus);
+    }
+    assert(cudaStatus == cudaSuccess);
+
+    if (print) {
+        if (width > 25 && width < 40 && width > 25 && width < 40)
+            printMatrixFp32(matrix_gpu, width, width);
+        fflush(stdout);
+    }
+
+    if (verify) {
+        for (int i = 0; i < width; ++i) {
+            for (int j = 0; j < width; ++j) {
+                assert(matrix[i * width + j] == matrix_gpu[j * width + i]);
+            }
+        }
+    }
+
+    cudaStatus = cudaFreeHost(matrix);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFreeHost(matrix_gpu);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(matrix_d);
+    assert(cudaStatus == cudaSuccess);
+
+    assert(cudaStatus == cudaSuccess);
+
+    if (print) {
+        printf("\n\nTest passed.\n");
+    }
+}
+
+void testSquareMatrixTransposeFp16(int width, bool print = false, bool verify = true) {
+    half *matrix;
+    half *matrix_gpu;
+    half *matrix_d;
+    cudaStream_t stream;
+    cudaError_t cudaStatus;
+
+    cudaStatus = cudaHostAlloc(&matrix, width * width * sizeof(half), cudaHostAllocPortable);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaHostAlloc(&matrix_gpu, width * width * sizeof(half), cudaHostAllocPortable);
+    assert(cudaStatus == cudaSuccess);
+
+    if (verify) {
+        for (int i = 0; i < width; ++i) {
+            for (int j = 0; j < width; ++j) {
+                matrix[i * width + j] = i + 0.1 * j;
+            }
+        }
+    }
+
+    cudaStatus = cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    assert(cudaStatus == cudaSuccess);
+
+    cudaStatus = cudaMalloc(&matrix_d, width * width * sizeof(half));
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaMemcpyAsync(matrix_d, matrix, width * width * sizeof(half), cudaMemcpyHostToDevice, stream);
+    assert(cudaStatus == cudaSuccess);
+
+    if (print) {
+        printf("width: %d width %d\n", width, width);
+        if (width < 100 && width < 100) {
+            printMatrixFp16(matrix, width, width);
+            printf("\n\n");
+        }
+    }
+
+    matrixTransposeSquare(matrix_d, matrix_d, width, stream);
+
+    cudaStatus = cudaMemcpyAsync(matrix_gpu, matrix_d, width * width * sizeof(half), cudaMemcpyDeviceToHost, stream);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaStreamSynchronize(stream);
+    if (print) {
+        printf("cudaStatus %d\n", cudaStatus);
+    }
+    assert(cudaStatus == cudaSuccess);
+
+    if (print) {
+        if (width < 100 && width < 100)
+            printMatrixFp16(matrix_gpu, width, width);
+        fflush(stdout);
+    }
+
+    if (verify) {
+        for (int i = 0; i < width; ++i) {
+            for (int j = 0; j < width; ++j) {
+                assert(__half2float(matrix[i * width + j]) == __half2float(matrix_gpu[j * width + i]));
+            }
+        }
+    }
+
+    cudaStatus = cudaFreeHost(matrix);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFreeHost(matrix_gpu);
+    assert(cudaStatus == cudaSuccess);
+    cudaStatus = cudaFree(matrix_d);
+    assert(cudaStatus == cudaSuccess);
+
+    if (print) {
+        printf("\n\nTest passed.\n");
+    }
+}
+
 TEST(MatrixTransposeFp32, OutputIsCorrect) {
     srand(time(nullptr));
 
@@ -206,6 +351,33 @@ TEST(MatrixTransposeFp16, OutputIsCorrect) {
     }
     testMatrixTransposeFp16(5000, 1000);
     testMatrixTransposeFp16(2000, 4001);
+}
+
+TEST(MatrixTransposeSquareFp32, OutputIsCorrect) {
+    srand(time(nullptr));
+
+    if (omp_get_num_procs() > 1)
+        omp_set_num_threads(omp_get_num_procs() - 1);
+
+#pragma omp parallel for schedule(dynamic, 10)
+    for (int width = 1; width < 150; width += (rand() % 5) + 1) {
+        testSquareMatrixTransposeFp32(width);
+    }
+    testSquareMatrixTransposeFp32(2000);
+}
+
+TEST(MatrixTransposeSquareFp16, OutputIsCorrect) {
+    srand(time(nullptr));
+
+    if (omp_get_num_procs() > 1)
+        omp_set_num_threads(omp_get_num_procs() - 1);
+
+#pragma omp parallel for schedule(dynamic, 10)
+    for (int width = 1; width < 150; width += (rand() % 5) + 1) {
+        testSquareMatrixTransposeFp16(width);
+    }
+    testSquareMatrixTransposeFp16(3000);
+    testSquareMatrixTransposeFp16(3001);
 }
 
 /*
