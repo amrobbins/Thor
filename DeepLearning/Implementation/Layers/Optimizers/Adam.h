@@ -22,7 +22,6 @@ class Adam : public Optimizer {
     virtual void initialize();
 
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
-    virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batch_size);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
     virtual std::unordered_map<std::string, float> getAllHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
@@ -39,6 +38,21 @@ class Adam : public Optimizer {
     virtual void setBeta2(float beta2);
     virtual void setEpsilon(float epsilon);
 
+    // For testing or research purposes:
+    // Not to be used in performance critical code, these are not high performance functions - allocates memory and causes synchronization.
+    template <typename T>
+    void getM(std::vector<T> &m);
+    template <typename T>
+    void getV(std::vector<T> &v);
+    template <typename T>
+    void getMBias(std::vector<T> &mBias);
+    template <typename T>
+    void getVBias(std::vector<T> &vBias);
+    template <typename T>
+    void getWeightsUpdate(std::vector<T> &weightsUpdate);
+    template <typename T>
+    void getBiasesUpdate(std::vector<T> &biasesUpdate);
+
    protected:
     float t;
     float alpha;
@@ -50,9 +64,6 @@ class Adam : public Optimizer {
     Tensor v;
     Optional<Tensor> mBias;
     Optional<Tensor> vBias;
-
-    Tensor weightsUpdate;
-    Optional<Tensor> biasesUpdate;
 
     std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayerShared;
     TrainableWeightsBiasesLayer *trainableLayer;

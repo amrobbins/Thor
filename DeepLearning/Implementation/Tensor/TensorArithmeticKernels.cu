@@ -2093,48 +2093,627 @@ void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream) {
 
 ////////////////////////////////////////////
 
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void max1B(DATA_TYPE *mem, DATA_TYPE minValue, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + threadIdx.x * 16;
+    if (offset >= numElements)
+        return;
+    uint64_t offset16Elements = offset >> 4;
 
-void Tensor::max(double numerator, Tensor denominator, Stream stream) {
-    assert(denominator.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(denominator.getDataType() == getDataType());
+    DATA_TYPE buffer[16];
 
-    TensorDescriptor::DataType dataType = denominator.getDataType();
-    uint64_t numElements = denominator.getTotalNumElements();
-    void *denominatorMem = denominator.getMemPtr();
-    void *destMem = getMemPtr();
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset16Elements];
+    buffer[0] = buffer[0] > minValue ? buffer[0] : minValue;
+    buffer[1] = buffer[1] > minValue ? buffer[1] : minValue;
+    buffer[2] = buffer[2] > minValue ? buffer[2] : minValue;
+    buffer[3] = buffer[3] > minValue ? buffer[3] : minValue;
+    buffer[4] = buffer[4] > minValue ? buffer[4] : minValue;
+    buffer[5] = buffer[5] > minValue ? buffer[5] : minValue;
+    buffer[6] = buffer[6] > minValue ? buffer[6] : minValue;
+    buffer[7] = buffer[7] > minValue ? buffer[7] : minValue;
+    buffer[8] = buffer[8] > minValue ? buffer[8] : minValue;
+    buffer[9] = buffer[9] > minValue ? buffer[9] : minValue;
+    buffer[10] = buffer[10] > minValue ? buffer[10] : minValue;
+    buffer[11] = buffer[11] > minValue ? buffer[11] : minValue;
+    buffer[12] = buffer[12] > minValue ? buffer[12] : minValue;
+    buffer[13] = buffer[13] > minValue ? buffer[13] : minValue;
+    buffer[14] = buffer[14] > minValue ? buffer[14] : minValue;
+    buffer[15] = buffer[15] > minValue ? buffer[15] : minValue;
+    ((float4 *)mem)[offset16Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void max2B(DATA_TYPE *mem, DATA_TYPE minValue, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset8Elements];
+    buffer[0] = buffer[0] > minValue ? buffer[0] : minValue;
+    buffer[1] = buffer[1] > minValue ? buffer[1] : minValue;
+    buffer[2] = buffer[2] > minValue ? buffer[2] : minValue;
+    buffer[3] = buffer[3] > minValue ? buffer[3] : minValue;
+    buffer[4] = buffer[4] > minValue ? buffer[4] : minValue;
+    buffer[5] = buffer[5] > minValue ? buffer[5] : minValue;
+    buffer[6] = buffer[6] > minValue ? buffer[6] : minValue;
+    buffer[7] = buffer[7] > minValue ? buffer[7] : minValue;
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void max4B(DATA_TYPE *mem, DATA_TYPE minValue, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    // Note: all tensors end on 16 byte boundary
+    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    buffer[0] = buffer[0] > minValue ? buffer[0] : minValue;
+    buffer[1] = buffer[1] > minValue ? buffer[1] : minValue;
+    buffer[2] = buffer[2] > minValue ? buffer[2] : minValue;
+    buffer[3] = buffer[3] > minValue ? buffer[3] : minValue;
+    buffer[4] = buffer[4] > minValue ? buffer[4] : minValue;
+    buffer[5] = buffer[5] > minValue ? buffer[5] : minValue;
+    buffer[6] = buffer[6] > minValue ? buffer[6] : minValue;
+    buffer[7] = buffer[7] > minValue ? buffer[7] : minValue;
+    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+}
+
+void Tensor::max(double minValue, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    TensorDescriptor::DataType dataType = getDataType();
+    uint64_t numElements = getTotalNumElements();
+    void *mem = getMemPtr();
 
     dim3 blockSize(256);
     if (dataType == TensorDescriptor::DataType::FP16) {
-        dim3 gridSize((numElements + 4095) / 4096);
-        divideScalarNumeratorHalf<<<gridSize, blockSize, 0, stream>>>((half *)denominatorMem, (half *)destMem, numerator, numElements);
+        dim3 gridSize((numElements + 2047) / 2048);
+        max2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
         dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator4B<float>
-            <<<gridSize, blockSize, 0, stream>>>((float *)denominatorMem, (float *)destMem, numerator, numElements);
+        max4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
-        dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator1B<uint8_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint8_t *)denominatorMem, (uint8_t *)destMem, numerator, numElements);
+        dim3 gridSize((numElements + 4095) / 4096);
+        max1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT16) {
         dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator2B<uint16_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint16_t *)denominatorMem, (uint16_t *)destMem, numerator, numElements);
+        max2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
         dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator4B<uint32_t>
-            <<<gridSize, blockSize, 0, stream>>>((uint32_t *)denominatorMem, (uint32_t *)destMem, numerator, numElements);
+        max4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
-        dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator1B<int8_t>
-            <<<gridSize, blockSize, 0, stream>>>((int8_t *)denominatorMem, (int8_t *)destMem, numerator, numElements);
+        dim3 gridSize((numElements + 4095) / 4096);
+        max1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT16) {
         dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator2B<int16_t>
-            <<<gridSize, blockSize, 0, stream>>>((int16_t *)denominatorMem, (int16_t *)destMem, numerator, numElements);
+        max2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
         dim3 gridSize((numElements + 2047) / 2048);
-        divideScalarNumerator4B<int32_t>
-            <<<gridSize, blockSize, 0, stream>>>((int32_t *)denominatorMem, (int32_t *)destMem, numerator, numElements);
+        max4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, minValue, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void min1B(DATA_TYPE *mem, DATA_TYPE maxValue, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + threadIdx.x * 16;
+    if (offset >= numElements)
+        return;
+    uint64_t offset16Elements = offset >> 4;
+
+    DATA_TYPE buffer[16];
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset16Elements];
+    buffer[0] = buffer[0] < maxValue ? buffer[0] : maxValue;
+    buffer[1] = buffer[1] < maxValue ? buffer[1] : maxValue;
+    buffer[2] = buffer[2] < maxValue ? buffer[2] : maxValue;
+    buffer[3] = buffer[3] < maxValue ? buffer[3] : maxValue;
+    buffer[4] = buffer[4] < maxValue ? buffer[4] : maxValue;
+    buffer[5] = buffer[5] < maxValue ? buffer[5] : maxValue;
+    buffer[6] = buffer[6] < maxValue ? buffer[6] : maxValue;
+    buffer[7] = buffer[7] < maxValue ? buffer[7] : maxValue;
+    buffer[8] = buffer[8] < maxValue ? buffer[8] : maxValue;
+    buffer[9] = buffer[9] < maxValue ? buffer[9] : maxValue;
+    buffer[10] = buffer[10] < maxValue ? buffer[10] : maxValue;
+    buffer[11] = buffer[11] < maxValue ? buffer[11] : maxValue;
+    buffer[12] = buffer[12] < maxValue ? buffer[12] : maxValue;
+    buffer[13] = buffer[13] < maxValue ? buffer[13] : maxValue;
+    buffer[14] = buffer[14] < maxValue ? buffer[14] : maxValue;
+    buffer[15] = buffer[15] < maxValue ? buffer[15] : maxValue;
+    ((float4 *)mem)[offset16Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void min2B(DATA_TYPE *mem, DATA_TYPE maxValue, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset8Elements];
+    buffer[0] = buffer[0] < maxValue ? buffer[0] : maxValue;
+    buffer[1] = buffer[1] < maxValue ? buffer[1] : maxValue;
+    buffer[2] = buffer[2] < maxValue ? buffer[2] : maxValue;
+    buffer[3] = buffer[3] < maxValue ? buffer[3] : maxValue;
+    buffer[4] = buffer[4] < maxValue ? buffer[4] : maxValue;
+    buffer[5] = buffer[5] < maxValue ? buffer[5] : maxValue;
+    buffer[6] = buffer[6] < maxValue ? buffer[6] : maxValue;
+    buffer[7] = buffer[7] < maxValue ? buffer[7] : maxValue;
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void min4B(DATA_TYPE *mem, DATA_TYPE maxValue, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    // Note: all tensors end on 16 byte boundary
+    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    buffer[0] = buffer[0] < maxValue ? buffer[0] : maxValue;
+    buffer[1] = buffer[1] < maxValue ? buffer[1] : maxValue;
+    buffer[2] = buffer[2] < maxValue ? buffer[2] : maxValue;
+    buffer[3] = buffer[3] < maxValue ? buffer[3] : maxValue;
+    buffer[4] = buffer[4] < maxValue ? buffer[4] : maxValue;
+    buffer[5] = buffer[5] < maxValue ? buffer[5] : maxValue;
+    buffer[6] = buffer[6] < maxValue ? buffer[6] : maxValue;
+    buffer[7] = buffer[7] < maxValue ? buffer[7] : maxValue;
+    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+}
+
+void Tensor::min(double maxValue, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    TensorDescriptor::DataType dataType = getDataType();
+    uint64_t numElements = getTotalNumElements();
+    void *mem = getMemPtr();
+
+    dim3 blockSize(256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        min1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        min1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, maxValue, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void bound1B(DATA_TYPE *mem, DATA_TYPE minValue, DATA_TYPE maxValue, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + threadIdx.x * 16;
+    if (offset >= numElements)
+        return;
+    uint64_t offset16Elements = offset >> 4;
+
+    DATA_TYPE buffer[16];
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset16Elements];
+    buffer[0] = buffer[0] > minValue ? (buffer[0] < maxValue ? buffer[0] : maxValue) : minValue;
+    buffer[1] = buffer[1] > minValue ? (buffer[1] < maxValue ? buffer[1] : maxValue) : minValue;
+    buffer[2] = buffer[2] > minValue ? (buffer[2] < maxValue ? buffer[2] : maxValue) : minValue;
+    buffer[3] = buffer[3] > minValue ? (buffer[3] < maxValue ? buffer[3] : maxValue) : minValue;
+    buffer[4] = buffer[4] > minValue ? (buffer[4] < maxValue ? buffer[4] : maxValue) : minValue;
+    buffer[5] = buffer[5] > minValue ? (buffer[5] < maxValue ? buffer[5] : maxValue) : minValue;
+    buffer[6] = buffer[6] > minValue ? (buffer[6] < maxValue ? buffer[6] : maxValue) : minValue;
+    buffer[7] = buffer[7] > minValue ? (buffer[7] < maxValue ? buffer[7] : maxValue) : minValue;
+    buffer[8] = buffer[8] > minValue ? (buffer[8] < maxValue ? buffer[8] : maxValue) : minValue;
+    buffer[9] = buffer[9] > minValue ? (buffer[9] < maxValue ? buffer[9] : maxValue) : minValue;
+    buffer[10] = buffer[10] > minValue ? (buffer[10] < maxValue ? buffer[10] : maxValue) : minValue;
+    buffer[11] = buffer[11] > minValue ? (buffer[11] < maxValue ? buffer[11] : maxValue) : minValue;
+    buffer[12] = buffer[12] > minValue ? (buffer[12] < maxValue ? buffer[12] : maxValue) : minValue;
+    buffer[13] = buffer[13] > minValue ? (buffer[13] < maxValue ? buffer[13] : maxValue) : minValue;
+    buffer[14] = buffer[14] > minValue ? (buffer[14] < maxValue ? buffer[14] : maxValue) : minValue;
+    buffer[15] = buffer[15] > minValue ? (buffer[15] < maxValue ? buffer[15] : maxValue) : minValue;
+    ((float4 *)mem)[offset16Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void bound2B(DATA_TYPE *mem, DATA_TYPE minValue, DATA_TYPE maxValue, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset8Elements];
+    buffer[0] = buffer[0] > minValue ? (buffer[0] < maxValue ? buffer[0] : maxValue) : minValue;
+    buffer[1] = buffer[1] > minValue ? (buffer[1] < maxValue ? buffer[1] : maxValue) : minValue;
+    buffer[2] = buffer[2] > minValue ? (buffer[2] < maxValue ? buffer[2] : maxValue) : minValue;
+    buffer[3] = buffer[3] > minValue ? (buffer[3] < maxValue ? buffer[3] : maxValue) : minValue;
+    buffer[4] = buffer[4] > minValue ? (buffer[4] < maxValue ? buffer[4] : maxValue) : minValue;
+    buffer[5] = buffer[5] > minValue ? (buffer[5] < maxValue ? buffer[5] : maxValue) : minValue;
+    buffer[6] = buffer[6] > minValue ? (buffer[6] < maxValue ? buffer[6] : maxValue) : minValue;
+    buffer[7] = buffer[7] > minValue ? (buffer[7] < maxValue ? buffer[7] : maxValue) : minValue;
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void bound4B(DATA_TYPE *mem, DATA_TYPE minValue, DATA_TYPE maxValue, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    // Note: all tensors end on 16 byte boundary
+    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    buffer[0] = buffer[0] > minValue ? (buffer[0] < maxValue ? buffer[0] : maxValue) : minValue;
+    buffer[1] = buffer[1] > minValue ? (buffer[1] < maxValue ? buffer[1] : maxValue) : minValue;
+    buffer[2] = buffer[2] > minValue ? (buffer[2] < maxValue ? buffer[2] : maxValue) : minValue;
+    buffer[3] = buffer[3] > minValue ? (buffer[3] < maxValue ? buffer[3] : maxValue) : minValue;
+    buffer[4] = buffer[4] > minValue ? (buffer[4] < maxValue ? buffer[4] : maxValue) : minValue;
+    buffer[5] = buffer[5] > minValue ? (buffer[5] < maxValue ? buffer[5] : maxValue) : minValue;
+    buffer[6] = buffer[6] > minValue ? (buffer[6] < maxValue ? buffer[6] : maxValue) : minValue;
+    buffer[7] = buffer[7] > minValue ? (buffer[7] < maxValue ? buffer[7] : maxValue) : minValue;
+    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+}
+
+void Tensor::bound(double minValue, double maxValue, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    TensorDescriptor::DataType dataType = getDataType();
+    uint64_t numElements = getTotalNumElements();
+    void *mem = getMemPtr();
+
+    dim3 blockSize(256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        bound2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        bound4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        bound1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        bound2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        bound4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        bound1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        bound2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, minValue, maxValue, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        bound4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, minValue, maxValue, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void min1B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + threadIdx.x * 16;
+    if (offset >= numElements)
+        return;
+    uint64_t offset16Elements = offset >> 4;
+
+    DATA_TYPE buffer[16];
+    DATA_TYPE otherBuffer[16];
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset16Elements];
+    ((float4 *)otherBuffer)[0] = ((float4 *)other)[offset16Elements];
+
+    buffer[0] = buffer[0] < otherBuffer[0] ? buffer[0] : otherBuffer[0];
+    buffer[1] = buffer[1] < otherBuffer[1] ? buffer[1] : otherBuffer[1];
+    buffer[2] = buffer[2] < otherBuffer[2] ? buffer[2] : otherBuffer[2];
+    buffer[3] = buffer[3] < otherBuffer[3] ? buffer[3] : otherBuffer[3];
+    buffer[4] = buffer[4] < otherBuffer[4] ? buffer[4] : otherBuffer[4];
+    buffer[5] = buffer[5] < otherBuffer[5] ? buffer[5] : otherBuffer[5];
+    buffer[6] = buffer[6] < otherBuffer[6] ? buffer[6] : otherBuffer[6];
+    buffer[7] = buffer[7] < otherBuffer[7] ? buffer[7] : otherBuffer[7];
+    buffer[8] = buffer[8] < otherBuffer[8] ? buffer[8] : otherBuffer[8];
+    buffer[9] = buffer[9] < otherBuffer[9] ? buffer[9] : otherBuffer[9];
+    buffer[10] = buffer[10] < otherBuffer[10] ? buffer[10] : otherBuffer[10];
+    buffer[11] = buffer[11] < otherBuffer[11] ? buffer[11] : otherBuffer[11];
+    buffer[12] = buffer[12] < otherBuffer[12] ? buffer[12] : otherBuffer[12];
+    buffer[13] = buffer[13] < otherBuffer[13] ? buffer[13] : otherBuffer[13];
+    buffer[14] = buffer[14] < otherBuffer[14] ? buffer[14] : otherBuffer[14];
+    buffer[15] = buffer[15] < otherBuffer[15] ? buffer[15] : otherBuffer[15];
+
+    ((float4 *)mem)[offset16Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void min2B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE buffer[8];
+    DATA_TYPE otherBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset8Elements];
+    ((float4 *)otherBuffer)[0] = ((float4 *)other)[offset8Elements];
+
+    buffer[0] = buffer[0] < otherBuffer[0] ? buffer[0] : otherBuffer[0];
+    buffer[1] = buffer[1] < otherBuffer[1] ? buffer[1] : otherBuffer[1];
+    buffer[2] = buffer[2] < otherBuffer[2] ? buffer[2] : otherBuffer[2];
+    buffer[3] = buffer[3] < otherBuffer[3] ? buffer[3] : otherBuffer[3];
+    buffer[4] = buffer[4] < otherBuffer[4] ? buffer[4] : otherBuffer[4];
+    buffer[5] = buffer[5] < otherBuffer[5] ? buffer[5] : otherBuffer[5];
+    buffer[6] = buffer[6] < otherBuffer[6] ? buffer[6] : otherBuffer[6];
+    buffer[7] = buffer[7] < otherBuffer[7] ? buffer[7] : otherBuffer[7];
+
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void min4B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE buffer[8];
+    DATA_TYPE otherBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary
+    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    ((double4 *)otherBuffer)[0] = ((double4 *)other)[offset8Elements];
+
+    buffer[0] = buffer[0] < otherBuffer[0] ? buffer[0] : otherBuffer[0];
+    buffer[1] = buffer[1] < otherBuffer[1] ? buffer[1] : otherBuffer[1];
+    buffer[2] = buffer[2] < otherBuffer[2] ? buffer[2] : otherBuffer[2];
+    buffer[3] = buffer[3] < otherBuffer[3] ? buffer[3] : otherBuffer[3];
+    buffer[4] = buffer[4] < otherBuffer[4] ? buffer[4] : otherBuffer[4];
+    buffer[5] = buffer[5] < otherBuffer[5] ? buffer[5] : otherBuffer[5];
+    buffer[6] = buffer[6] < otherBuffer[6] ? buffer[6] : otherBuffer[6];
+    buffer[7] = buffer[7] < otherBuffer[7] ? buffer[7] : otherBuffer[7];
+
+    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+}
+
+void Tensor::min(Tensor other, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    TensorDescriptor::DataType dataType = getDataType();
+    uint64_t numElements = getTotalNumElements();
+    void *mem = getMemPtr();
+    void *otherMem = other.getMemPtr();
+
+    dim3 blockSize(256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, (half *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, (float *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        min1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, (uint8_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, (uint16_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, (uint32_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        min1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, (int8_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, (int16_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        min4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, (int32_t *)otherMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void max1B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + threadIdx.x * 16;
+    if (offset >= numElements)
+        return;
+    uint64_t offset16Elements = offset >> 4;
+
+    DATA_TYPE buffer[16];
+    DATA_TYPE otherBuffer[16];
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset16Elements];
+    ((float4 *)otherBuffer)[0] = ((float4 *)other)[offset16Elements];
+
+    buffer[0] = buffer[0] > otherBuffer[0] ? buffer[0] : otherBuffer[0];
+    buffer[1] = buffer[1] > otherBuffer[1] ? buffer[1] : otherBuffer[1];
+    buffer[2] = buffer[2] > otherBuffer[2] ? buffer[2] : otherBuffer[2];
+    buffer[3] = buffer[3] > otherBuffer[3] ? buffer[3] : otherBuffer[3];
+    buffer[4] = buffer[4] > otherBuffer[4] ? buffer[4] : otherBuffer[4];
+    buffer[5] = buffer[5] > otherBuffer[5] ? buffer[5] : otherBuffer[5];
+    buffer[6] = buffer[6] > otherBuffer[6] ? buffer[6] : otherBuffer[6];
+    buffer[7] = buffer[7] > otherBuffer[7] ? buffer[7] : otherBuffer[7];
+    buffer[8] = buffer[8] > otherBuffer[8] ? buffer[8] : otherBuffer[8];
+    buffer[9] = buffer[9] > otherBuffer[9] ? buffer[9] : otherBuffer[9];
+    buffer[10] = buffer[10] > otherBuffer[10] ? buffer[10] : otherBuffer[10];
+    buffer[11] = buffer[11] > otherBuffer[11] ? buffer[11] : otherBuffer[11];
+    buffer[12] = buffer[12] > otherBuffer[12] ? buffer[12] : otherBuffer[12];
+    buffer[13] = buffer[13] > otherBuffer[13] ? buffer[13] : otherBuffer[13];
+    buffer[14] = buffer[14] > otherBuffer[14] ? buffer[14] : otherBuffer[14];
+    buffer[15] = buffer[15] > otherBuffer[15] ? buffer[15] : otherBuffer[15];
+
+    ((float4 *)mem)[offset16Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void max2B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE buffer[8];
+    DATA_TYPE otherBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset8Elements];
+    ((float4 *)otherBuffer)[0] = ((float4 *)other)[offset8Elements];
+
+    buffer[0] = buffer[0] > otherBuffer[0] ? buffer[0] : otherBuffer[0];
+    buffer[1] = buffer[1] > otherBuffer[1] ? buffer[1] : otherBuffer[1];
+    buffer[2] = buffer[2] > otherBuffer[2] ? buffer[2] : otherBuffer[2];
+    buffer[3] = buffer[3] > otherBuffer[3] ? buffer[3] : otherBuffer[3];
+    buffer[4] = buffer[4] > otherBuffer[4] ? buffer[4] : otherBuffer[4];
+    buffer[5] = buffer[5] > otherBuffer[5] ? buffer[5] : otherBuffer[5];
+    buffer[6] = buffer[6] > otherBuffer[6] ? buffer[6] : otherBuffer[6];
+    buffer[7] = buffer[7] > otherBuffer[7] ? buffer[7] : otherBuffer[7];
+
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void max4B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE buffer[8];
+    DATA_TYPE otherBuffer[8];
+
+    // Note: all tensors end on 16 byte boundary
+    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    ((double4 *)otherBuffer)[0] = ((double4 *)other)[offset8Elements];
+
+    buffer[0] = buffer[0] > otherBuffer[0] ? buffer[0] : otherBuffer[0];
+    buffer[1] = buffer[1] > otherBuffer[1] ? buffer[1] : otherBuffer[1];
+    buffer[2] = buffer[2] > otherBuffer[2] ? buffer[2] : otherBuffer[2];
+    buffer[3] = buffer[3] > otherBuffer[3] ? buffer[3] : otherBuffer[3];
+    buffer[4] = buffer[4] > otherBuffer[4] ? buffer[4] : otherBuffer[4];
+    buffer[5] = buffer[5] > otherBuffer[5] ? buffer[5] : otherBuffer[5];
+    buffer[6] = buffer[6] > otherBuffer[6] ? buffer[6] : otherBuffer[6];
+    buffer[7] = buffer[7] > otherBuffer[7] ? buffer[7] : otherBuffer[7];
+
+    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+}
+
+void Tensor::max(Tensor other, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    TensorDescriptor::DataType dataType = getDataType();
+    uint64_t numElements = getTotalNumElements();
+    void *mem = getMemPtr();
+    void *otherMem = other.getMemPtr();
+
+    dim3 blockSize(256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        max2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, (half *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        max4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, (float *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        max1B<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, (uint8_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        max2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, (uint16_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        max4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, (uint32_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        max1B<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, (int8_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        max2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, (int16_t *)otherMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        max4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, (int32_t *)otherMem, numElements);
     } else {
         assert(false);
     }

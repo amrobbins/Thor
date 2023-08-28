@@ -14,7 +14,7 @@ The goals of this project are:
   7. Educate users about the different pieces and strategies in a straightforward and understandable way. Point users to the latest trends and research. Have a newsletter.
 
 
-This framework is for Linux, and has been tested on Ubuntu 18.04 and 20.04.
+This framework is for Linux, and is currently being developed using Ubunut 22.04.
 
 Dependencies, with installation directions for Ubuntu:
   1. sudo apt-get update

@@ -562,15 +562,11 @@ class Tensor : private ReferenceCounted {
      * [thisTensor] = max(thisTensor[i], minValue)
      * <div/>
      * minValue is first cast to the data type of this tensor.
-     *
-     * FIXME: Currently only supported for tensors of type FP16 and FP32
      */
     void max(double minValue, Stream stream);
 
     /**
      * [thisTensor] = max(thisTensor[i], minValues[i])
-     *
-     * FIXME: Currently only supported for tensors of type FP16 and FP32
      */
     void max(Tensor minValues, Stream stream);
 
@@ -578,15 +574,11 @@ class Tensor : private ReferenceCounted {
      * [thisTensor] = min(thisTensor[i], maxValue)
      * <div/>
      * minValue is first cast to the data type of this tensor.
-     *
-     * FIXME: Currently only supported for tensors of type FP16 and FP32
      */
     void min(double maxValue, Stream stream);
 
     /**
      * [thisTensor] = min(thisTensor[i], maxValues[i])
-     *
-     * FIXME: Currently only supported for tensors of type FP16 and FP32
      */
     void min(Tensor maxValues, Stream stream);
 
@@ -594,7 +586,6 @@ class Tensor : private ReferenceCounted {
      * [thisTensor] = max(min(thisTensor[i], maxValue), minValue)
      * <div/>
      * minValue is first cast to the data type of this tensor.
-     *
      */
     void bound(double minValue, double maxValue, Stream stream);
 

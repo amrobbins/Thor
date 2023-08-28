@@ -74,7 +74,7 @@ class Split : public MultiConnectionLayer {
         assert(featureInputs[0].isPresent());
         std::vector<unsigned long> inputDimensions = featureInputs[0].get().getDescriptor().getDimensions();
         assert(inputDimensions.size() > axis);
-        assert(totalAxisElements = inputDimensions[axis]);
+        assert(totalAxisElements == inputDimensions[axis]);
         assert(featureOutputs.size() == axisElements.size());
         assert(nextLayers.size() == featureOutputs.size());
         for (unsigned int i = 0; i < axisElements.size(); ++i) {

@@ -27,8 +27,8 @@ int main() {
 
     set<string> shardPaths;
 
-    assert(boost::filesystem::exists("/media/andrew/PCIE_SSD/ImageNet2012_1_of_1.shard"));
-    shardPaths.insert("/media/andrew/PCIE_SSD/ImageNet2012_1_of_1.shard");
+    assert(boost::filesystem::exists("/PCIE_SSD/ImageNet2012_1_of_1.shard"));
+    shardPaths.insert("/PCIE_SSD/ImageNet2012_1_of_1.shard");
     ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {3, 224, 224});
     ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {1000});
 
