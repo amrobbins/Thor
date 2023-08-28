@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/CudnnHelper.h"
 
@@ -19,7 +20,7 @@ class Optimizer {
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) { assert(false); }
-    virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) { assert(false); }
+    virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
         assert(false);
@@ -89,6 +90,9 @@ class Optimizer {
 
     Tensor weightsGradient;
     Optional<Tensor> biasesGradient;
+
+    Tensor weightsUpdate;
+    Optional<Tensor> biasesUpdate;
 
    private:
     uint64_t id;

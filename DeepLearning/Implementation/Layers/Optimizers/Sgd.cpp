@@ -60,6 +60,8 @@ void Sgd::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> erro
 void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) {
     assert(weights.getDataType() == TensorDescriptor::DataType::FP16 || weights.getDataType() == TensorDescriptor::DataType::FP32);
 
+    // FIXME: change this function so that it just applies weightsUpdate and biasesUpdate then implement this in optimizer.
+
     if (momentum > 0.0f) {
         if (useNesterovMomentum) {
             assert(false);

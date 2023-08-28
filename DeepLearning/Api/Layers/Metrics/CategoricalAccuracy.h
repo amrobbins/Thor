@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Metrics/Metric.h"
+#include "DeepLearning/Implementation/Layers/Metrics/CategoricalAccuracy.h"
 
 namespace Thor {
 

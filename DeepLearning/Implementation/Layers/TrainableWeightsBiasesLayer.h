@@ -94,6 +94,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         // When receiving the first errorInput of the set, clear the errorOutput and gradients.
         // For the other errorInputs, accumulate the values.
         bool accumulateValues = stillWaitingForErrorInputTensors != allErrorInputTensorIds;
+        printf("accumulateValues %i\n", accumulateValues);
+        fflush(stdout);  // FIXME DONT FORGET TO REMOVE THIS FLUSH!
 
         // Using the errorInput tensor, determine which connection backward is being called for.
         unsigned int connectionNumber = 0;

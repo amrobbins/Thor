@@ -11,13 +11,13 @@ COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_62,code=compute_62 -
 #                       -gencode=arch=compute_70,code=compute_70 -gencode=arch=compute_70,code=sm_70 \
 #                       -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
 COMPUTE_CAPABILITIES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75 \
-                       -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
+                       #-gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
 
 
 #COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_70,code=compute_70 -gencode=arch=compute_70,code=sm_70 \
 #                       -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75
 COMPUTE_CAPABILITIES_WITH_TENSOR_CORES = -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75 \
-										 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
+										 #-gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89
 
 
 BOOST_INCLUDE_DIR = -I /usr/local/boost -ldl -lcurses
@@ -295,8 +295,17 @@ all: $(ML_DEV)
 	@echo ""
 
 
+test: $(ML_DEV)
+	$(MAKE) $(ALL_TESTS)
+	$(RUN_ALL_TESTS)
+	@echo ""
+	@echo ""
+	@echo "Tests Passed"
+	@echo "Build Succeeded"
+	@echo ""
+
+
 build: $(ML_DEV)
-	$(MAKE) $(ALL_DEMOS)
 	@echo ""
 	@echo ""
 	@echo "Build Succeeded, no tests run"

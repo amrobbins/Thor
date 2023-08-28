@@ -58,9 +58,6 @@ void Adam::initialize() {
     else
         biasesUpdate = Optional<Tensor>::empty();
 
-    TensorPlacement cpuPlacement = TensorPlacement(TensorPlacement::MemDevices::CPU);
-    TensorDescriptor scalarDescriptor = TensorDescriptor(weightsGradient.getDataType(), {1});
-
     m = weightsGradient.clone();
     v = weightsGradient.clone();
     if (biasesGradient.isPresent()) {
@@ -68,32 +65,11 @@ void Adam::initialize() {
         vBias = biasesGradient.get().clone();
     }
 
-    Tensor cpuWeightsVectorBufferTensor = Tensor(cpuPlacement, weightsGradient.getDescriptor());
-    Tensor cpuBiasesVectorBufferTensor;
-    if (biasesGradient.isPresent())
-        cpuBiasesVectorBufferTensor = Tensor(cpuPlacement, biasesGradient.get().getDescriptor());
-    if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16) {
-        void *cpuVectorBufferMem = cpuWeightsVectorBufferTensor.getMemPtr();
-        memset(cpuVectorBufferMem, 0, cpuWeightsVectorBufferTensor.getTotalNumElements() * sizeof(half));
-        m.copyFromAsync(cpuWeightsVectorBufferTensor, gradientUpdateStream);
-        v.copyFromAsync(cpuWeightsVectorBufferTensor, gradientUpdateStream);
-        if (biasesGradient.isPresent()) {
-            cpuVectorBufferMem = cpuBiasesVectorBufferTensor.getMemPtr();
-            memset(cpuVectorBufferMem, 0, cpuBiasesVectorBufferTensor.getTotalNumElements() * sizeof(half));
-            mBias.get().copyFromAsync(cpuBiasesVectorBufferTensor, gradientUpdateStream);
-            vBias.get().copyFromAsync(cpuBiasesVectorBufferTensor, gradientUpdateStream);
-        }
-    } else {
-        void *cpuVectorBufferMem = cpuWeightsVectorBufferTensor.getMemPtr();
-        memset(cpuVectorBufferMem, 0, cpuWeightsVectorBufferTensor.getTotalNumElements() * sizeof(float));
-        m.copyFromAsync(cpuWeightsVectorBufferTensor, gradientUpdateStream);
-        v.copyFromAsync(cpuWeightsVectorBufferTensor, gradientUpdateStream);
-        if (biasesGradient.isPresent()) {
-            cpuVectorBufferMem = cpuBiasesVectorBufferTensor.getMemPtr();
-            memset(cpuVectorBufferMem, 0, cpuBiasesVectorBufferTensor.getTotalNumElements() * sizeof(float));
-            mBias.get().copyFromAsync(cpuBiasesVectorBufferTensor, gradientUpdateStream);
-            vBias.get().copyFromAsync(cpuBiasesVectorBufferTensor, gradientUpdateStream);
-        }
+    m.memsetAsync(gradientUpdateStream, 0);
+    v.memsetAsync(gradientUpdateStream, 0);
+    if (biasesGradient.isPresent()) {
+        mBias.get().memsetAsync(gradientUpdateStream, 0);
+        vBias.get().memsetAsync(gradientUpdateStream, 0);
     }
 
     t = 0.0f;
@@ -102,7 +78,10 @@ void Adam::initialize() {
 void Adam::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
     trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
 
-    t += 1;
+    // Only increment t when receiving the first errorInput, because when there are multiple stamps of a layer there will be
+    // multiple error inputs
+    if (!accumulateValues)
+        t += 1;
     if (featureIn.get().getDataType() == TensorDescriptor::DataType::FP16) {
         assert(errorIn.get().getDataType() == TensorDescriptor::DataType::FP16);
         launchAdamStep<half>((half *)weightsUpdate.getMemPtr(),
@@ -160,20 +139,6 @@ void Adam::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> err
     }
 }
 
-void Adam::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) {
-    // Note: the algorithm describes the update for a single example, since this computation is done for
-    // each example in a minibatch and summed, the update must be divided by the batch size to get the average update.
-    // Note also that this summation is part of the matrix multiply of weightsGradient = featureInput * errorInput in the case of FC layer.
-    const float ALPHA = 1.0f / (Loss::getLossScalingFactor() * batchSize);
-    const float BETA = 1.0f;
-
-    accumulateScale(weights, weightsUpdate, &ALPHA, &BETA, gradientUpdateStream);
-    if (biases.isPresent()) {
-        assert(biasesUpdate.isPresent());
-        accumulateScale(biases, biasesUpdate, &ALPHA, &BETA, gradientUpdateStream);
-    }
-}
-
 float Adam::getT() { return t; }
 float Adam::getAlpha() { return alpha; }
 float Adam::getBeta1() { return beta1; }
@@ -206,3 +171,109 @@ unordered_map<std::string, float> Adam::getAllHyperParameters(uint64_t epoch, ui
     hyperParameters["epsilon"] = epsilon;
     return hyperParameters;
 }
+
+template <typename T>
+void Adam::getM(vector<T> &m) {
+    if (is_same<T, half>::value)
+        assert(this->m.getDataType() == TensorDescriptor::DataType::FP16);
+    else if (is_same<T, float>::value)
+        assert(this->m.getDataType() == TensorDescriptor::DataType::FP32);
+    else
+        assert(false);
+
+    m.clear();
+    this->m.loadValuesIntoVector(m, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+}
+
+template <typename T>
+void Adam::getV(vector<T> &v) {
+    if (is_same<T, half>::value)
+        assert(this->v.getDataType() == TensorDescriptor::DataType::FP16);
+    else if (is_same<T, float>::value)
+        assert(this->v.getDataType() == TensorDescriptor::DataType::FP32);
+    else
+        assert(false);
+
+    v.clear();
+    this->v.loadValuesIntoVector(v, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+}
+
+template <typename T>
+void Adam::getMBias(vector<T> &mBias) {
+    mBias.clear();
+    if (this->mBias.isEmpty())
+        return;
+
+    if (is_same<T, half>::value)
+        assert(this->mBias.get().getDataType() == TensorDescriptor::DataType::FP16);
+    else if (is_same<T, float>::value)
+        assert(this->mBias.get().getDataType() == TensorDescriptor::DataType::FP32);
+    else
+        assert(false);
+
+    this->mBias.get().loadValuesIntoVector(mBias, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+}
+
+template <typename T>
+void Adam::getVBias(vector<T> &vBias) {
+    vBias.clear();
+    if (this->vBias.isEmpty())
+        return;
+
+    if (is_same<T, half>::value)
+        assert(this->vBias.get().getDataType() == TensorDescriptor::DataType::FP16);
+    else if (is_same<T, float>::value)
+        assert(this->vBias.get().getDataType() == TensorDescriptor::DataType::FP32);
+    else
+        assert(false);
+
+    this->vBias.get().loadValuesIntoVector(vBias, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+}
+
+template <typename T>
+void Adam::getWeightsUpdate(std::vector<T> &weightsUpdate) {
+    if (is_same<T, half>::value)
+        assert(this->weightsUpdate.getDataType() == TensorDescriptor::DataType::FP16);
+    else if (is_same<T, float>::value)
+        assert(this->weightsUpdate.getDataType() == TensorDescriptor::DataType::FP32);
+    else
+        assert(false);
+
+    weightsUpdate.clear();
+    this->weightsUpdate.loadValuesIntoVector(weightsUpdate, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+}
+
+template <typename T>
+void Adam::getBiasesUpdate(std::vector<T> &biasesUpdate) {
+    vBias.clear();
+    if (this->biasesUpdate.isEmpty())
+        return;
+
+    if (is_same<T, half>::value)
+        assert(this->biasesUpdate.get().getDataType() == TensorDescriptor::DataType::FP16);
+    else if (is_same<T, float>::value)
+        assert(this->biasesUpdate.get().getDataType() == TensorDescriptor::DataType::FP32);
+    else
+        assert(false);
+
+    this->biasesUpdate.get().loadValuesIntoVector(biasesUpdate, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+}
+
+template void Adam::getM<half>(vector<half> &m);
+template void Adam::getM<float>(vector<float> &m);
+template void Adam::getV<half>(vector<half> &v);
+template void Adam::getV<float>(vector<float> &v);
+template void Adam::getMBias<half>(vector<half> &mBias);
+template void Adam::getMBias<float>(vector<float> &mBias);
+template void Adam::getVBias<half>(vector<half> &vBias);
+template void Adam::getVBias<float>(vector<float> &vBias);
+template void Adam::getWeightsUpdate<half>(vector<half> &weightsUpdate);
+template void Adam::getWeightsUpdate<float>(vector<float> &weightsUpdate);
+template void Adam::getBiasesUpdate<half>(vector<half> &biasesUpdate);
+template void Adam::getBiasesUpdate<float>(vector<float> &biasesUpdate);
