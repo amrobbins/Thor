@@ -311,7 +311,6 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
     cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
 
-    printf("ZZZ arows %d acols %d lda %d dataType %d\n", A_rows, A_cols, ld_A, ABCDDataTypeCuda);
     cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, ABCDDataTypeCuda, A_rows, A_cols, ld_A);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));

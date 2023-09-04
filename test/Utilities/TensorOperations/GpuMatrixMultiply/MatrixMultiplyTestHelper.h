@@ -39,21 +39,22 @@ void verifyOperationIsLegal(int rowsA,
                             void *D,
                             void *C_d,
                             void *D_d) {
-    printf("rowsA %d colsA %d rowsB %d colsB %d rowsC %d colsC %d ldA %d ldB %d ldC %d ldD %d transposeA %i transposeB %i transposeC %i\n",
-           rowsA,
-           colsA,
-           rowsB,
-           colsB,
-           rowsC,
-           colsC,
-           ldA,
-           ldB,
-           ldC,
-           ldD,
-           transposeA,
-           transposeB,
-           transposeC);
-    fflush(stdout);
+    //    printf("rowsA %d colsA %d rowsB %d colsB %d rowsC %d colsC %d ldA %d ldB %d ldC %d ldD %d transposeA %i transposeB %i transposeC
+    //    %i\n",
+    //           rowsA,
+    //           colsA,
+    //           rowsB,
+    //           colsB,
+    //           rowsC,
+    //           colsC,
+    //           ldA,
+    //           ldB,
+    //           ldC,
+    //           ldD,
+    //           transposeA,
+    //           transposeB,
+    //           transposeC);
+    //    fflush(stdout);
 
     assert(ldA >= colsA);
     assert(ldB >= colsB);
