@@ -107,8 +107,7 @@ void CublasMatrixMultiply::gemm(Tensor A,
     int32_t D_rows = C_rows;
     int32_t D_cols = C_cols;
 
-    // FIXME: TEMP
-    assert(transposeC == false);
+    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
     assert(!(C == D && transposeC));
 
@@ -244,8 +243,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     int32_t D_rows = C_rows;
     int32_t D_cols = C_cols;
 
-    // FIXME: TEMP
-    assert(transposeC == false);
+    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
     assert(!(C == D && transposeC));
 
