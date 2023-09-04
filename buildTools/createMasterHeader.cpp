@@ -25,14 +25,7 @@ int main(int argc, char *argv[]) {
     FILE *fout = fopen("Thor.h", "w");
     assert(fout != NULL);
 
-    vector<string> initialLines = {"#pragma once",
-                                   "",
-                                   "#ifdef THOR_DEBUG",
-                                   "#define DEBUG_FLUSH_STDOUT() fflush(stdout)",
-                                   "#else",
-                                   "#define DEBUG_FLUSH_STDOUT() ((void)0)",
-                                   "#endif",
-                                   ""};
+    vector<string> initialLines = {"#pragma once", ""};
     for (unsigned int i = 0; i < initialLines.size(); ++i)
         fputs((initialLines[i] + "\n").c_str(), fout);
 
