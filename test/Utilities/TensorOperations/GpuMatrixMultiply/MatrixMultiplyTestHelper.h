@@ -402,3 +402,82 @@ void gemmCpuFp32(float *A,
     if (transposeC)
         delete C;
 }
+
+void gemmCpuFp16(half *A,
+                 half *B,
+                 half *C,
+                 half *D,
+                 int rowsA,
+                 int colsA,
+                 int rowsB,
+                 int colsB,
+                 int lda,
+                 int ldb,
+                 int ldc,
+                 int ldd,
+                 bool transposeA,
+                 bool transposeB,
+                 bool transposeC,
+                 float alpha,
+                 float beta) {
+    int num_threads = omp_get_num_procs() - 1;
+    if (num_threads < 1)
+        num_threads = 1;
+    omp_set_num_threads(num_threads);
+
+    half *A_t = nullptr;
+    if (transposeA) {
+        A_t = A;
+        A = new half[rowsA * colsA];
+
+        transposeHalf(A, A_t, rowsA, colsA, lda);
+        swap(rowsA, colsA);
+        lda = colsA;
+    }
+
+    half *B_t = nullptr;
+    if (transposeB) {
+        B_t = B;
+        B = new half[rowsB * colsB];
+
+        transposeHalf(B, B_t, rowsB, colsB, ldb);
+        swap(rowsB, colsB);
+        ldb = colsB;
+    }
+
+    int colsC = colsB;
+    int rowsC = rowsA;
+    half *C_t = nullptr;
+    if (transposeC) {
+        assert(C != D);
+        C_t = C;
+        C = new half[rowsC * colsC];
+
+        transposeHalf(C, C_t, rowsC, colsC, ldc);
+        swap(rowsC, colsC);
+        ldc = colsC;
+    }
+
+    if (C == D)
+        assert(ldc == ldd);
+
+    verifyOperationIsLegal(rowsA, colsA, rowsB, colsB, lda, ldb, ldc);
+
+#pragma omp parallel for schedule(static, 3)
+    for (int ra = 0; ra < rowsA; ra++) {
+        for (int cb = 0; cb < colsB; cb++) {
+            float accum = 0.0;
+            for (int carb = 0; carb < colsA; carb++)
+                accum += (float)(A[ra * lda + carb] * B[carb * ldb + cb]);
+
+            D[ra * ldd + cb] = alpha * accum + beta * (float)C[ra * ldc + cb];
+        }
+    }
+
+    if (transposeA)
+        delete A;
+    if (transposeB)
+        delete B;
+    if (transposeC)
+        delete C;
+}

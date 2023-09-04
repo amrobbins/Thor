@@ -192,6 +192,7 @@ cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(TensorDescriptor::DataT
         assert(false);
 }
 
+// FIXME: This one now just calls gemmUsingH...
 void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
                                                               Tensor B,
                                                               Tensor C,
@@ -436,6 +437,319 @@ void CublasMatrixMultiply::multiplyUsingHeuristicKernelChoice(Tensor A,
     assert(kernelLaunchedSuccessfully);
 
     cublasStatus = cublasLtMatmulPreferenceDestroy(searchPreferences);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+}
+
+void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
+    Tensor A,
+    Tensor B,
+    Tensor C,
+    Tensor D,
+    const int32_t A_rows,
+    const int32_t A_cols,
+    const int32_t B_rows,
+    const int32_t B_cols,
+    // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two adjacent rows in
+    // memory. Some slots at the end of a row may be unused.
+    bool transposeA,
+    bool transposeB,
+    bool transposeC,
+    float alpha,
+    float beta,
+    const TensorDescriptor::DataType ABCDDataType,
+    Stream stream) {
+    assert(A.getDimensions().size() == 2);
+    assert(B.getDimensions().size() == 2);
+    assert(C.getDimensions().size() == 2);
+    assert(D.getDimensions().size() == 2);
+    const int32_t ld_A = A.getDimensions()[1];
+    const int32_t ld_B = B.getDimensions()[1];
+    const int32_t ld_C = C.getDimensions()[1];
+    const int32_t ld_D = D.getDimensions()[1];
+
+    const int32_t C_rows = (transposeA == false ? A_rows : A_cols);
+    const int32_t C_cols = (transposeB == false ? B_cols : B_rows);
+    int32_t D_rows = C_rows;
+    int32_t D_cols = C_cols;
+
+    // FIXME: TEMP
+    assert(transposeC == false);
+
+    assert(!(C == D && transposeC));
+
+    assert(A_rows > 0);
+    assert(A_cols > 0);
+    assert(B_rows > 0);
+    assert(B_cols > 0);
+    assert(ld_A >= A_cols);
+    assert(ld_B >= B_cols);
+    assert(ld_C >= C_cols);
+    assert(ld_D >= D_cols);
+    // Check dataType of tensors
+    assert(A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP32 ||
+           A.getDescriptor().getDataType() == TensorDescriptor::DataType::FP16);
+    assert(A.getDescriptor().getDataType() == B.getDescriptor().getDataType());
+    assert(A.getDescriptor().getDataType() == C.getDescriptor().getDataType());
+    assert(A.getDescriptor().getDataType() == D.getDescriptor().getDataType());
+    // Check dimensions of tensors
+    vector<unsigned long> ADimensions = A.getDescriptor().getDimensions();
+    vector<unsigned long> BDimensions = B.getDescriptor().getDimensions();
+    vector<unsigned long> CDimensions = C.getDescriptor().getDimensions();
+    vector<unsigned long> DDimensions = D.getDescriptor().getDimensions();
+    assert(ADimensions.size() == 2);
+    assert(ADimensions[0] == (uint32_t)A_rows);
+    assert(ADimensions[1] == (uint32_t)ld_A);
+    assert(BDimensions[0] == (uint32_t)B_rows);
+    assert(BDimensions[1] == (uint32_t)ld_B);
+    assert(CDimensions[0] == (uint32_t)C_rows);
+    assert(CDimensions[1] == (uint32_t)ld_C);
+    assert(DDimensions[0] == (uint32_t)D_rows);
+    assert(DDimensions[1] == (uint32_t)ld_D);
+
+    ScopedGpu scopedGpu(stream.getGpuNum());
+
+    cublasStatus_t cublasStatus;
+
+    cublasLtMatmulDesc_t operationDesc;
+    cublasLtMatrixLayout_t ADesc;
+    cublasLtMatrixLayout_t BDesc;
+    cublasLtMatrixLayout_t CDesc;
+    cublasLtMatrixLayout_t DDesc;
+
+    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
+    const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
+    cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    if (transposeA) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+    if (transposeB) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+    if (transposeC) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+
+    cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
+
+    printf("ZZZ arows %d acols %d lda %d dataType %d\n", A_rows, A_cols, ld_A, ABCDDataTypeCuda);
+    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, ABCDDataTypeCuda, A_rows, A_cols, ld_A);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    int64_t ld = ld_A;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, ABCDDataTypeCuda, B_rows, B_cols, ld_B);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    ld = ld_B;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, ABCDDataTypeCuda, C_rows, C_cols, ld_C);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    ld = ld_C;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, ABCDDataTypeCuda, D_rows, D_cols, ld_D);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    ld = ld_D;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(stream.getGpuNum()),
+                                        A_rows,
+                                        A_cols,
+                                        B_rows,
+                                        B_cols,
+                                        transposeA,
+                                        transposeB,
+                                        transposeC,
+                                        ld_A,
+                                        ld_B,
+                                        ld_C,
+                                        ld_D,
+                                        false);
+
+    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
+    CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
+
+    // If there is already a known kernel, use it. Otherwise a heuristic search will be performed and the kernel remembered.
+    CublasMatrixMultiply::instance().mtx.lock();
+    if (optimalKernels.count(cublasKernelRequirement) == 1) {
+        cublasLtMatmulAlgo_t algorithm = optimalKernels[cublasKernelRequirement].getAlgorithm(stream.getGpuNum());
+        CublasMatrixMultiply::instance().mtx.unlock();
+
+        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                      operationDesc,
+                                      &alpha,
+                                      A.getMemPtr(),
+                                      ADesc,
+                                      B.getMemPtr(),
+                                      BDesc,
+                                      &beta,
+                                      C.getMemPtr(),
+                                      CDesc,
+                                      D.getMemPtr(),
+                                      DDesc,
+                                      &algorithm,
+                                      nullptr,
+                                      0,
+                                      stream);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        return;
+    } else if (knownHeuristicAlgorithms.count(cublasKernelRequirement) == 1) {
+        cublasLtMatmulAlgo_t algorithm = knownHeuristicAlgorithms[cublasKernelRequirement];
+        CublasMatrixMultiply::instance().mtx.unlock();
+
+        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                      operationDesc,
+                                      &alpha,
+                                      A.getMemPtr(),
+                                      ADesc,
+                                      B.getMemPtr(),
+                                      BDesc,
+                                      &beta,
+                                      C.getMemPtr(),
+                                      CDesc,
+                                      D.getMemPtr(),
+                                      DDesc,
+                                      &algorithm,
+                                      nullptr,
+                                      0,
+                                      stream);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        return;
+    }
+    CublasMatrixMultiply::instance().mtx.unlock();
+
+    cublasLtMatmulPreference_t searchPreferences;
+    cublasStatus = cublasLtMatmulPreferenceCreate(&searchPreferences);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatmulPreferenceInit(searchPreferences);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    // cublasLtMatmulPreferenceAttributes_t attribute = CUBLASLT_MATMUL_PREF_IMPL_MASK;
+    // cublasLtNumericalImplFlags_t computeType = CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_TYPE_MASK |
+    // CUBLASLT_NUMERICAL_IMPL_FLAGS_ACCUMULATOR_32F; cublasStatus = cublasLtMatmulPreferenceSetAttribute(searchPreferences, attribute,
+    // &computeType, sizeof(computeType)); assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    int returnedAlgoCount;
+    vector<cublasLtMatmulHeuristicResult_t> results(30);
+    cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                                  operationDesc,
+                                                  ADesc,
+                                                  BDesc,
+                                                  CDesc,
+                                                  DDesc,
+                                                  searchPreferences,
+                                                  30,
+                                                  results.data(),
+                                                  &returnedAlgoCount);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    // Algorithms aren't guaranteed to run, so find the first one that does and then return.
+    bool kernelLaunchedSuccessfully = false;
+    for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
+        // have seen kernels that say wavesCount == 0 that sporadically fail.
+        if (!(results[i].wavesCount > 0.0f))
+            continue;
+        cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                      operationDesc,
+                                      &alpha,
+                                      A.getMemPtr(),
+                                      ADesc,
+                                      B.getMemPtr(),
+                                      BDesc,
+                                      &beta,
+                                      C.getMemPtr(),
+                                      CDesc,
+                                      D.getMemPtr(),
+                                      DDesc,
+                                      &(results[i].algo),
+                                      nullptr,
+                                      0,
+                                      stream);
+        if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+            kernelLaunchedSuccessfully = true;
+            CublasMatrixMultiply::instance().mtx.lock();
+            knownHeuristicAlgorithms[cublasKernelRequirement] = results[i].algo;
+            CublasMatrixMultiply::instance().mtx.unlock();
+        }
+    }
+
+    if (!kernelLaunchedSuccessfully) {
+        results = vector<cublasLtMatmulHeuristicResult_t>(10000);
+        cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                                      operationDesc,
+                                                      ADesc,
+                                                      BDesc,
+                                                      CDesc,
+                                                      DDesc,
+                                                      searchPreferences,
+                                                      10000,
+                                                      results.data(),
+                                                      &returnedAlgoCount);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+        for (int i = 0; i < returnedAlgoCount && !kernelLaunchedSuccessfully; ++i) {
+            cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
+                                          operationDesc,
+                                          &alpha,
+                                          A.getMemPtr(),
+                                          ADesc,
+                                          B.getMemPtr(),
+                                          BDesc,
+                                          &beta,
+                                          C.getMemPtr(),
+                                          CDesc,
+                                          D.getMemPtr(),
+                                          DDesc,
+                                          &(results[i].algo),
+                                          nullptr,
+                                          0,
+                                          stream);
+            if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
+                kernelLaunchedSuccessfully = true;
+                // FIXME: may need an algo per gpu
+                // FIXME: add their top N heuristic kernels to the set of optimal candidates, will need to change CublasKernel to take
+                // algorithm in constructor
+                CublasMatrixMultiply::instance().mtx.lock();
+                knownHeuristicAlgorithms[cublasKernelRequirement] = results[i].algo;
+                CublasMatrixMultiply::instance().mtx.unlock();
+            }
+        }
+    }
+
+    assert(kernelLaunchedSuccessfully);
+
+    cublasStatus = cublasLtMatmulPreferenceDestroy(searchPreferences);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);

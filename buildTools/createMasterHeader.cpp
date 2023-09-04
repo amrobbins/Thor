@@ -1,8 +1,9 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string>
+#include <vector>
 
-using std::string;
+using namespace std;
 
 bool readLine(FILE *fin, string &line) {
     line = "";
@@ -24,7 +25,16 @@ int main(int argc, char *argv[]) {
     FILE *fout = fopen("Thor.h", "w");
     assert(fout != NULL);
 
-    fputs("#pragma once\n\n", fout);
+    vector<string> initialLines = {"#pragma once",
+                                   "",
+                                   "#ifdef THOR_DEBUG",
+                                   "#define DEBUG_FLUSH_STDOUT() fflush(stdout)",
+                                   "#else",
+                                   "#define DEBUG_FLUSH_STDOUT() ((void)0)",
+                                   "#endif",
+                                   ""};
+    for (unsigned int i = 0; i < initialLines.size(); ++i)
+        fputs((initialLines[i] + "\n").c_str(), fout);
 
     string line;
     while (readLine(fin, line)) {
