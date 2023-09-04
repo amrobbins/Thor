@@ -274,8 +274,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                   numOutputFeatures,
                                                   true,
                                                   false,
-                                                  false,
                                                   accumulateGradient,
+                                                  false,
                                                   TensorDescriptor::DataType::FP16,
                                                   gradientUpdateStream);
 
