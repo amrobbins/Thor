@@ -41,10 +41,10 @@ NVCC_DEBUG = -g
 RELEASE = false
 
 ifeq ($(RELEASE),true)
-	Gpp = g++ -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed
+	Gpp = g++ -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed -DTHOR_RELEASE
 	Nvcc = nvcc -O3
 else
-	Gpp = g++ -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed
+	Gpp = g++ -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed -DTHOR_DEBUG
 	Nvcc = nvcc -D_GLIBCXX_DEBUG -g
 endif
 

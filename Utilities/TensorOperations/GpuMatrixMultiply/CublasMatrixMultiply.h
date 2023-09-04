@@ -82,9 +82,11 @@ class CublasMatrixMultiply {
                   const TensorDescriptor::DataType ABCDataType,
                   Stream stream);
 
-    // This exposes the full GEMM functionality and using optimal kernel
+    // This exposes the full GEMM functionality using an optimal kernel
     // D = alpha*(A*B) + beta*(C)
     // C and D may be the same tensor. It should be this way for beta = 0 because then no tensor will be loaded for the addition stage.
+    // When C and D are the same tensor transposeC must be false:
+    // https://docs.nvidia.com/cuda/archive/10.2/cublas/index.html#cublasLtMatmulDescAttributes_t
     void gemm(Tensor A,
               Tensor B,
               Tensor C,
@@ -112,8 +114,8 @@ class CublasMatrixMultiply {
     // This version of multiply should be used when you can't predict in advance the dimensions of the matrix multiplications that you will
     // need to do.
     //
-    // Performance is not as good as the other 2 variants, but you are getting a GPU tensor core matrix multiply kernel that fits your
-    // computation size pretty well, so it is very fast, i.e. sub millisecond for large matrices.
+    // Performance is not as good as the other variant, but you are getting a GPU tensor core matrix multiply kernel that fits your
+    // computation size and hardware pretty well, so it is very fast, i.e. sub millisecond for large matrices.
     void multiplyUsingHeuristicKernelChoice(Tensor A,
                                             Tensor B,
                                             Tensor C,
@@ -127,6 +129,32 @@ class CublasMatrixMultiply {
                                             const bool negate,
                                             const TensorDescriptor::DataType ABCDataType,
                                             Stream stream);
+
+    // This exposes the full GEMM functionality using an optimal kernel
+    // D = alpha*(A*B) + beta*(C)
+    // C and D may be the same tensor. It should be this way for beta = 0 because then no tensor will be loaded for the addition stage.
+    // When C and D are the same tensor transposeC must be false:
+    // https://docs.nvidia.com/cuda/archive/10.2/cublas/index.html#cublasLtMatmulDescAttributes_t
+    //
+    // The uses a kernel that will fit the hardware well, though perhaps not the optimal kernel. For that we need to test a bunch
+    // of them and measure the speed. Still this is way faster than any non-cublas based GEMM, as an understatement.
+    void gemmUsingHeuristicKernelChoice(Tensor A,
+                                        Tensor B,
+                                        Tensor C,
+                                        Tensor D,
+                                        const int32_t A_rows,
+                                        const int32_t A_cols,
+                                        const int32_t B_rows,
+                                        const int32_t B_cols,
+                                        // Leading dimension of A, i.e. number of elements (not bytes) that separate the beginning of two
+                                        // adjacent rows in memory. Some slots at the end of a row may be unused.
+                                        bool transposeA,
+                                        bool transposeB,
+                                        bool transposeC,
+                                        float alpha,
+                                        float beta,
+                                        const TensorDescriptor::DataType ABCDDataType,
+                                        Stream stream);
 
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
     // Find any gpu of the specififed type and measure the optimal kernel for the matrix multiply operation
