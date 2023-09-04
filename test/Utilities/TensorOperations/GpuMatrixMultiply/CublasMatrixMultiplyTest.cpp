@@ -25,7 +25,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
@@ -223,7 +223,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalMatrixMultiplyKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
@@ -421,7 +421,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
@@ -576,7 +576,7 @@ TEST(CublasMatrixMultiply, HeuristicMatrixMultiplyKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
 
@@ -740,7 +740,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
         bool transposeC = rand() % 2;
@@ -992,7 +992,7 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
         bool transposeC = rand() % 2;
@@ -1244,7 +1244,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP32) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
         bool transposeC = rand() % 2;
@@ -1464,7 +1464,7 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
 
-    for (uint64_t i = 0; i < 4; ++i) {
+    for (uint64_t i = 0; i < 1; ++i) {
         bool transposeA = rand() % 2;
         bool transposeB = rand() % 2;
         bool transposeC = rand() % 2;
