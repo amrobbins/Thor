@@ -358,7 +358,6 @@ void Tensor::memset(int8_t value, uint64_t numElements) {
     if (numElements == 0) {
         numBytes = getArraySizeInBytes();
     } else {
-        // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
         if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
             assert(numElements % 8 == 0);
             numBytes = numElements / 8;

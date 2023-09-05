@@ -8,6 +8,7 @@
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn.h>
+#include "cublas_v2.h"
 #include "cuda.h"
 #include "cuda_runtime.h"
 
@@ -128,6 +129,28 @@ class Stream : private ReferenceCounted {
         return *cudnnHandle;
     }
 
+    cublasHandle_t getCublasHandle() {
+        assert(!uninitialized());
+        mtx->lock();
+        if (cublasHandle->isEmpty()) {
+            ScopedGpu scopedGpu(gpuNum);
+            cublasStatus_t cublasStatus;
+            cublasHandle_t handle;
+            cublasStatus = cublasCreate(&handle);
+            if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
+                printf("cublasStatus %d    gpu:%d   numcublasHandles %d\n", cublasStatus, gpuNum, numCublasHandles);
+                fflush(stdout);
+            }
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            numCublasHandles += 1;
+            cublasStatus = cublasSetStream(handle, cudaStream);
+            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            *cublasHandle = handle;
+        }
+        mtx->unlock();
+        return *cublasHandle;
+    }
+
     int getGpuNum() const {
         assert(!uninitialized());
         return gpuNum;
@@ -161,6 +184,7 @@ class Stream : private ReferenceCounted {
         ReferenceCounted::initialize();
 
         cudnnHandle = new Optional<cudnnHandle_t>;
+        cublasHandle = new Optional<cublasHandle_t>;
         mtx = new std::mutex;
 
         ScopedGpu scopedGpu(gpuNum);
@@ -190,6 +214,7 @@ class Stream : private ReferenceCounted {
         gpuNum = other.gpuNum;
         cudaStream = other.cudaStream;
         cudnnHandle = other.cudnnHandle;
+        cublasHandle = other.cublasHandle;
         isStatic = other.isStatic;
         mtx = other.mtx;
     }
@@ -209,12 +234,22 @@ class Stream : private ReferenceCounted {
                 assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
             }
 
+            if (cublasHandle->isPresent()) {
+                numCublasHandles -= 1;
+
+                cublasStatus_t cublasStatus;
+                cublasStatus = cublasDestroy(*cublasHandle);
+                assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            }
+
             cudaError_t cudaStatus;
             cudaStatus = cudaStreamDestroy(cudaStream);
             assert(cudaStatus == cudaSuccess);
 
             delete cudnnHandle;
             cudnnHandle = nullptr;
+            delete cublasHandle;
+            cublasHandle = nullptr;
         }
         delete mtx;
         mtx = nullptr;
@@ -224,11 +259,13 @@ class Stream : private ReferenceCounted {
     int gpuNum;
     cudaStream_t cudaStream;
     Optional<cudnnHandle_t> *cudnnHandle;
+    Optional<cublasHandle_t> *cublasHandle;
 
     bool isStatic;
     static std::unordered_map<uint32_t, Stream> staticDeviceStreams;
 
     static int numCudnnHandles;
+    static int numCublasHandles;
 
     std::mutex *mtx;
 };

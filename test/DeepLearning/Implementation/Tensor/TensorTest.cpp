@@ -302,6 +302,285 @@ TEST(Tensor, AddTensor) {
     }
 }
 
+TEST(Tensor, AddScalarWithAlpha) {
+    srand(time(nullptr));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        Stream stream(0);
+        vector<unsigned long> dimensions;
+        dimensions.push_back(1 + (rand() % 200));
+        dimensions.push_back(1 + (rand() % 200));
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 8;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::INT16;
+        else
+            dataType = TensorDescriptor::DataType::INT32;
+
+        TensorDescriptor descriptor(dataType, dimensions);
+
+        Tensor source_h(cpuPlacement, descriptor);
+        Tensor source_float_h = source_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor source_d = source_h.clone(gpuPlacement);
+        Tensor dest_d = source_d.clone();
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+
+        float alpha = 200.0f / ((rand() % 100) + 100);
+        if (rand() % 2 && dt != 2 && dt != 3 && dt != 4)
+            alpha = -alpha;
+
+        float *source_float_h_mem = (float *)source_float_h.getMemPtr();
+        for (uint32_t i = 0; i < dimensions[0]; ++i) {
+            for (uint32_t j = 0; j < dimensions[1]; ++j) {
+                if (dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32)
+                    source_float_h_mem[i * dimensions[1] + j] = (rand() % 20) / ((rand() % 10) + 1.0);
+                else
+                    source_float_h_mem[i * dimensions[1] + j] = rand() % 50;
+                if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                    dataType != TensorDescriptor::DataType::UINT32) {
+                    if (rand() % 2 == 0)
+                        source_float_h_mem[i * dimensions[1] + j] *= -1;
+                }
+            }
+        }
+        float scalar;
+        if (dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32)
+            scalar = (rand() % 20) / ((rand() % 10) + 1.0);
+        else
+            scalar = rand() % 50;
+        if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+            dataType != TensorDescriptor::DataType::UINT32) {
+            if (rand() % 2 == 0)
+                scalar *= -1;
+        }
+
+        source_h.copyFromAsync(source_float_h, stream);
+        source_d.copyFromAsync(source_h, stream);
+        if (rand() % 2 == 0)
+            dest_d.add(source_d, scalar, alpha, stream);
+        else
+            dest_d.add(scalar, source_d, alpha, stream);
+        dest_gpu_float_h.copyFromAsync(dest_d, stream);
+        stream.synchronize();
+
+        float *dest_gpu_float_h_mem = (float *)dest_gpu_float_h.getMemPtr();
+        float thresh = 0.01;
+        if (dt == 0)
+            thresh = 0.05;
+        for (uint32_t i = 0; i < dimensions[0]; ++i) {
+            for (uint32_t j = 0; j < dimensions[1]; ++j) {
+                float rawAddend = alpha * source_float_h_mem[i * dimensions[1] + j];
+                float addend;
+                if (dt == 0)
+                    addend = half(rawAddend);
+                else if (dt == 1)
+                    addend = float(rawAddend);
+                else if (dt == 2)
+                    addend = uint8_t(rawAddend);
+                else if (dt == 3)
+                    addend = uint16_t(rawAddend);
+                else if (dt == 4)
+                    addend = uint32_t(rawAddend);
+                else if (dt == 5)
+                    addend = int8_t(rawAddend);
+                else if (dt == 6)
+                    addend = int16_t(rawAddend);
+                else
+                    addend = int32_t(rawAddend);
+                if (dt >= 2 && abs(rawAddend - addend) < 0.07f)
+                    thresh = 1.0f;
+                float expected = addend + scalar;
+                if (dt == 2) {
+                    if (expected > 255)
+                        expected = 255;
+                } else if (dt == 5) {
+                    if (expected > 127)
+                        expected = 127;
+                    else if (expected < -128)
+                        expected = -128;
+                }
+
+                if (abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]) >= thresh)
+                    printf("%f * %f + %f = (%f) %f | %f     dt %d\n",
+                           alpha,
+                           source_float_h_mem[i * dimensions[1] + j],
+                           scalar,
+                           rawAddend + scalar,
+                           expected,
+                           dest_gpu_float_h_mem[i * dimensions[1] + j],
+                           dt);
+
+                ASSERT_LT(abs(expected - dest_gpu_float_h_mem[i * dimensions[1] + j]), thresh);
+            }
+        }
+    }
+}
+
+TEST(Tensor, AddTensorWithAlphaBeta) {
+    srand(time(nullptr));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        Stream stream(0);
+        vector<unsigned long> dimensions;
+        dimensions.push_back(1 + (rand() % 200));
+        dimensions.push_back(1 + (rand() % 200));
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 8;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::INT16;
+        else
+            dataType = TensorDescriptor::DataType::INT32;
+
+        TensorDescriptor descriptor(dataType, dimensions);
+
+        Tensor augend_h(cpuPlacement, descriptor);
+        Tensor augend_float_h = augend_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor augend_d = augend_h.clone(gpuPlacement);
+        Tensor addend_h(cpuPlacement, descriptor);
+        Tensor addend_float_h = augend_h.clone(TensorDescriptor::DataType::FP32);
+        Tensor addend_d = augend_h.clone(gpuPlacement);
+        Tensor dest_d = augend_d.clone();
+        Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+
+        float alpha = 200.0f / ((rand() % 100) + 100);
+        if (rand() % 2 && dt != 2 && dt != 3 && dt != 4)
+            alpha = -alpha;
+        float beta = 200.0f / ((rand() % 100) + 100);
+        if (rand() % 2 && dt != 2 && dt != 3 && dt != 4)
+            beta = -beta;
+
+        float *augend_float_h_mem = (float *)augend_float_h.getMemPtr();
+        float *addend_float_h_mem = (float *)addend_float_h.getMemPtr();
+        for (uint32_t i = 0; i < dimensions[0]; ++i) {
+            for (uint32_t j = 0; j < dimensions[1]; ++j) {
+                if (dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32) {
+                    augend_float_h_mem[i * dimensions[1] + j] = (rand() % 10) / ((rand() % 10) + 1.0);
+                    addend_float_h_mem[i * dimensions[1] + j] = (rand() % 10) / ((rand() % 10) + 1.0);
+                } else {
+                    augend_float_h_mem[i * dimensions[1] + j] = rand() % 10;
+                    addend_float_h_mem[i * dimensions[1] + j] = rand() % 10;
+                    if (dataType != TensorDescriptor::DataType::UINT8 && dataType != TensorDescriptor::DataType::UINT16 &&
+                        dataType != TensorDescriptor::DataType::UINT32) {
+                        if (rand() % 2 == 0)
+                            augend_float_h_mem[i * dimensions[1] + j] *= -1;
+                        if (rand() % 2 == 0)
+                            addend_float_h_mem[i * dimensions[1] + j] *= -1;
+                    }
+                }
+            }
+        }
+
+        augend_h.copyFromAsync(augend_float_h, stream);
+        augend_d.copyFromAsync(augend_h, stream);
+        addend_h.copyFromAsync(addend_float_h, stream);
+        addend_d.copyFromAsync(addend_h, stream);
+        dest_d.add(augend_d, addend_d, alpha, beta, stream);
+        dest_gpu_float_h.copyFromAsync(dest_d, stream);
+        stream.synchronize();
+
+        float *dest_gpu_float_h_mem = (float *)dest_gpu_float_h.getMemPtr();
+        float thresh = 0.035;
+        for (uint32_t i = 0; i < dimensions[0]; ++i) {
+            for (uint32_t j = 0; j < dimensions[1]; ++j) {
+                float rawScaledAugend = augend_float_h_mem[i * dimensions[1] + j] * alpha;
+                float rawScaledAddend = addend_float_h_mem[i * dimensions[1] + j] * beta;
+                float scaledAugend, scaledAddend;
+                if (dt == 0) {
+                    scaledAugend = half(rawScaledAugend);
+                    scaledAddend = half(rawScaledAddend);
+                } else if (dt == 1) {
+                    scaledAugend = float(rawScaledAugend);
+                    scaledAddend = float(rawScaledAddend);
+                } else if (dt == 2) {
+                    scaledAugend = uint8_t(rawScaledAugend);
+                    scaledAddend = uint8_t(rawScaledAddend);
+                } else if (dt == 3) {
+                    scaledAugend = uint16_t(rawScaledAugend);
+                    scaledAddend = uint16_t(rawScaledAddend);
+                } else if (dt == 4) {
+                    scaledAugend = uint32_t(rawScaledAugend);
+                    scaledAddend = uint32_t(rawScaledAddend);
+                } else if (dt == 5) {
+                    scaledAugend = int8_t(rawScaledAugend);
+                    scaledAddend = int8_t(rawScaledAddend);
+                } else if (dt == 6) {
+                    scaledAugend = int16_t(rawScaledAugend);
+                    scaledAddend = int16_t(rawScaledAddend);
+                } else if (dt == 7) {
+                    scaledAugend = int32_t(rawScaledAugend);
+                    scaledAddend = int32_t(rawScaledAddend);
+                }
+                if (dt >= 2 && abs(rawScaledAugend - scaledAugend) < 0.07f)
+                    thresh += 1.0f;
+                if (dt >= 2 && abs(rawScaledAddend - scaledAddend) < 0.07f)
+                    thresh += 1.0f;
+                float expected = scaledAugend + scaledAddend;
+                if (dt == 2) {
+                    if (expected > 255)
+                        expected = 255;
+                } else if (dt == 5) {
+                    if (expected > 127)
+                        expected = 127;
+                    else if (expected < -128)
+                        expected = -128;
+                }
+                float actual = dest_gpu_float_h_mem[i * dimensions[1] + j];
+
+                if (abs(expected - actual) >= thresh)
+                    printf("%f (%f) + %f (%f) = %f (%f) : %f      | rawAugend %f rawAddend %f alpha %f   beta %f  [%d,%d] dt %d\n",
+                           rawScaledAugend,
+                           scaledAugend,
+                           rawScaledAddend,
+                           scaledAddend,
+                           rawScaledAugend + rawScaledAddend,
+                           expected,
+                           actual,
+                           augend_float_h_mem[i * dimensions[1] + j],
+                           addend_float_h_mem[i * dimensions[1] + j],
+                           alpha,
+                           beta,
+                           i,
+                           j,
+                           dt);
+
+                // printf("%f %f [%ld]  %f %f %d\n", expected, dest_gpu_float_h_mem[i * dimensions[1] + j], i * dimensions[1] + j,
+                //    augend_float_h_mem[i * dimensions[1] + j], addend_float_h_mem[i * dimensions[1] + j], (int)dataType);
+                ASSERT_LT(abs(expected - actual), thresh);
+            }
+        }
+    }
+}
+
 TEST(Tensor, SubtractScalarSubtrahend) {
     srand(time(nullptr));
 

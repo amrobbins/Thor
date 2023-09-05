@@ -3,6 +3,7 @@
 using namespace std;
 
 int Stream::numCudnnHandles = 0;
+int Stream::numCublasHandles = 0;
 
 // Note: These are global because destroying a stream when static members are destroyed seems to be a problem.
 // Also Note: I would rather be able to use unlimited streams to avoid potential false dependencies in very large very branched networks
