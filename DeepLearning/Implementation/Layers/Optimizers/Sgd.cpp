@@ -46,8 +46,18 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     Optional<Tensor> biases = trainableLayer->getBiases();
     if (biases.isPresent())
         biasesGradient = biases.get().clone();
+
+    if (momentum > 0.0f) {
+        previousWeightsUpdate = weightsGradient.clone();
+        previousWeightsUpdate.memset(0);
+        if (biases.isPresent()) {
+            previousBiasesUpdate = biasesGradient.get().clone();
+            previousBiasesUpdate.memset(0);
+        }
+    }
 }
 
+// This function just accumulates the gradient
 void Sgd::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
     if (errorIn.isEmpty())
         return;
@@ -57,34 +67,43 @@ void Sgd::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> erro
     trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
 }
 
+// Now having the full gradient the weight update computation is completed in this function
 void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) {
     assert(weights.getDataType() == TensorDescriptor::DataType::FP16 || weights.getDataType() == TensorDescriptor::DataType::FP32);
 
-    // FIXME: change this function so that it just applies weightsUpdate and biasesUpdate then implement this in optimizer.
-
     if (momentum > 0.0f) {
         if (useNesterovMomentum) {
+            // WeightUpdate_t = momentum * weightUpdate_t-1 - (lr * gradient(weights_t + momentum * weightUpdate_t-1)) / batch_size
+            // So I think this means that when training only, during the forward pass the layer needs to use:
+            // weights_t + momentum * weightUpdate_t-1
+            // to make predictions rather than just weights. I don't like this because the layer would need to know about this
+            // optimizer feature. Need to think about how to solve this in a good way.
+            // I could possibly add infer(projectedWeights, projectedBiases) to trainable weights biases layer,
+            // where infer() { infer(weights, biases) }
+            // but I'll leave that for later on.
             assert(false);
         } else {
-            // Need to save of previous weights update, scale this by momentum, add to scaled gradient and add that to weights:
-            // weights += previousWeightsUpdate * momentum - weightsGradient * scaleFromBelow
-            // There is unfortunately no cublasHgeam: grep geam /usr/local/cuda-11.4/targets/x86_64-linux/include/cublas_api.h
-            // but this function does implement this: C = α*A + β*B for fp32
-            // so create a custom one for fp16 and use cublas for fp32. Wrap this in a function called addMatrixMatrix
-            assert(false);
+            // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
+            float alpha = momentum;
+            float beta = (-1.0f * currentLearningRate) / batchSize;
+
+            weightsUpdate.add(previousWeightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
+            previousWeightsUpdate.copyFromAsync(weightsUpdate, gradientUpdateStream);
+            if (biases.isPresent()) {
+                biasesUpdate.get().add(previousBiasesUpdate, biasesGradient, alpha, beta, gradientUpdateStream);
+                previousBiasesUpdate.copyFromAsync(biasesUpdate, gradientUpdateStream);
+            }
+
+            Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
         }
     } else {
         // subtract the gradient, scaled by the learning rate, from the weights
         // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
         // processing a batch, and each item in the batch provides a share of that update.
-        float alpha = (-1.0f * currentLearningRate) / (Loss::getLossScalingFactor() * batchSize);
-        float beta = 1.0f;
-
-        accumulateScale(weights, weightsGradient, &alpha, &beta, gradientUpdateStream);
-        if (biases.isPresent()) {
-            assert(biasesGradient.isPresent());
-            accumulateScale(biases, biasesGradient, &alpha, &beta, gradientUpdateStream);
-        }
+        float weightUpdateScalingFactor = (-1.0f * currentLearningRate) / batchSize;
+        weightsUpdate = weightsGradient;
+        biasesUpdate = biasesGradient;
+        Optimizer::updateWeightsWithScale(weights, biases, weightUpdateScalingFactor);
     }
 }
 

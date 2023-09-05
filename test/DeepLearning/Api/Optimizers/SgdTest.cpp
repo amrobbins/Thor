@@ -194,7 +194,7 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
     ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
 }
 
-/* FIXME: put this back in once multile stamps is supported
+/* FIXME: put this back in once multiple stamps is supported
 TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
     Network network = buildNetwork(2);
     float initialLearningRate = 0.25;
