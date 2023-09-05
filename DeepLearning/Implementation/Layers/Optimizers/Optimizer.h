@@ -21,6 +21,7 @@ class Optimizer {
     //       And that the data stream will be blocked until
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) { assert(false); }
     virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize);
+    virtual void updateWeightsWithScale(Tensor weights, Optional<Tensor> biases, float weightUpdateScalingFactor);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
         assert(false);
@@ -69,11 +70,17 @@ class Optimizer {
             assert(dimensionsA[i] == dimensionsC[i] || dimensionsA[i] == 1);
         }
 
-        cudnnTensorDescriptor_t cudnnTensorADescriptor = Layer::createCudnnTensorDescriptor(dimensionsA, descriptorA.getDataType());
-        cudnnTensorDescriptor_t cudnnTensorCDescriptor = Layer::createCudnnTensorDescriptor(dimensionsC, descriptorC.getDataType());
+        if (descriptorA != previousDescriptorA) {
+            previousDescriptorA = descriptorA;
+            cudnnTensorDescriptorA = Layer::createCudnnTensorDescriptor(dimensionsA, descriptorA.getDataType());
+        }
+        if (descriptorC != previousDescriptorC) {
+            previousDescriptorC = descriptorC;
+            cudnnTensorDescriptorC = Layer::createCudnnTensorDescriptor(dimensionsC, descriptorC.getDataType());
+        }
 
         cudnnStatus_t cudnnStatus = cudnnAddTensor(
-            stream.getCudnnHandle(), alpha, cudnnTensorADescriptor, A.getMemPtr(), beta, cudnnTensorCDescriptor, C.getMemPtr());
+            stream.getCudnnHandle(), alpha, cudnnTensorDescriptorA, A.getMemPtr(), beta, cudnnTensorDescriptorC, C.getMemPtr());
 
         if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
             printf("cudnnStatus %d : %s\n", cudnnStatus, cudnnGetErrorString(cudnnStatus));
@@ -97,6 +104,11 @@ class Optimizer {
    private:
     uint64_t id;
     static std::atomic<int64_t> nextId;
+
+    cudnnTensorDescriptor_t cudnnTensorDescriptorA;
+    cudnnTensorDescriptor_t cudnnTensorDescriptorC;
+    TensorDescriptor previousDescriptorA;
+    TensorDescriptor previousDescriptorC;
 };
 
 }  // namespace ThorImplementation
