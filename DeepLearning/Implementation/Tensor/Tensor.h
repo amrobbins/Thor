@@ -117,6 +117,27 @@ class Tensor : private ReferenceCounted {
     void add(Tensor augend, Tensor addend, Stream stream);
 
     /**
+     * [thisTensor] = alpha * [augend] + addend, elementwise
+     * <div/>
+     * addend is first cast to the data type of augend.
+     */
+    void add(Tensor augend, double addend, float alpha, Stream stream);
+
+    /**
+     * [thisTensor] = augend + beta * [addend], elementwise
+     * <div/>
+     * augend is first cast to the data type of addend.
+     */
+    void add(double augend, Tensor addend, float beta, Stream stream);
+
+    /**
+     * [thisTensor] = alpha * [augend] + beta * [addend], elementwise
+     * <div/>
+     * augend and addend need to be of the same data type.
+     */
+    void add(Tensor augend, Tensor addend, float alpha, float beta, Stream stream);
+
+    /**
      * [thisTensor] = [minuend] - subtrahend, elementwise
      * <div/>
      * subtrahend is first cast to the data type of minuend.

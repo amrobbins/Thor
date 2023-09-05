@@ -797,7 +797,6 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
 
     // Ensure there are no unreported runtime errors
     stream.synchronize();
-    cublasGetError();
 
     // Allocate a lot of memory, to ensure subsequent calls are not benefitting from cache hits
     long memPerInstance = (rowsA * ldA + rowsB * ldB + initialRowsC * ldC) * ELEMENT_SIZE;
@@ -855,12 +854,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
              ++i) {
             cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, false, stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
-                // Wait for execution to finish to catch any runtime errors that are reported asynchronously
                 stream.synchronize();
-                cublasStatus = cublasGetError();
-                if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
-                    prunedKernels.push_back(kernels[i]);
-                }
+                prunedKernels.push_back(kernels[i]);
             }
         }
         kernels = prunedKernels;
@@ -871,12 +866,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
         for (unsigned int i = 0; i < kernels.size(); ++i) {
             cublasStatus = kernels[i].runWithoutChecks(A[0], B[0], C[0], C[0], workspace[0], false, false, stream);
             if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
-                // Wait for execution to finish to catch any runtime errors that are reported asynchronously
                 stream.synchronize();
-                cublasStatus = cublasGetError();
-                if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
-                    prunedKernels.push_back(kernels[i]);
-                }
+                prunedKernels.push_back(kernels[i]);
             }
         }
         kernels = prunedKernels;
