@@ -150,13 +150,18 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
     }
 
-    virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {
+    virtual void infer(Optional<Tensor> inputTensor,
+                       Optional<Tensor> outputTensor,
+                       Stream stream,
+                       unsigned int connectionNumber,
+                       Tensor weightsParameterization,
+                       Optional<Tensor> biasesParameterization) {
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
         assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         CublasMatrixMultiply::instance().multiply(inputTensor,
-                                                  weights,
+                                                  weightsParameterization,
                                                   outputTensor,
                                                   workspaceForward,
                                                   batchSize,
@@ -171,14 +176,14 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                   stream);
 
         if (hasBias) {
-            assert(biases.isPresent());
+            assert(biasesParameterization.isPresent());
             assert(cudnnBiasDescriptor.isPresent());
             assert(cudnnFeatureOutputDescriptor.isPresent());
 
             cudnnAddTensor(stream.getCudnnHandle(),
                            &ALPHA_NO_SCALE,
                            cudnnBiasDescriptor.get(),
-                           biases.get().getMemPtr(),
+                           biasesParameterization.get().getMemPtr(),
                            &BETA_ACCUMULATE,
                            cudnnFeatureOutputDescriptor.get(),
                            outputTensor.get().getMemPtr());
@@ -191,7 +196,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                           Optional<Tensor> errorOut,
                           Stream dataStream,
                           unsigned int connectionNumber,
-                          bool accumulateGradient) {
+                          bool accumulateGradient,
+                          Tensor weightsParameterization,
+                          Optional<Tensor> biasesParameterization) {
         assert(errorIn.isPresent());
         assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
@@ -199,7 +206,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             assert(dataStream.isInitialized());
 
             CublasMatrixMultiply::instance().multiply(errorIn,
-                                                      weights,
+                                                      weightsParameterization,
                                                       errorOut,
                                                       workspaceBackwardData,
                                                       batchSize,
@@ -228,7 +235,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
             // Upon processing the last connection, schedule the upate to the weights memory.
             if (stillWaitingForErrorInputTensors.empty()) {
-                optimizer.get()->updateWeights(weights, biases, batchSize);
+                optimizer.get()->updateWeights(weights, biasesParameterization, batchSize);
             }
 
             // weights will be updated at the current end of the gradientUpdateStream
@@ -244,18 +251,20 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                         Optional<Tensor> featureIn,
                                         Optional<Tensor> errorIn,
                                         Stream gradientUpdateStream,
-                                        bool accumulateGradient) {
+                                        bool accumulateGradient,
+                                        Tensor weightsParameterization,
+                                        Optional<Tensor> biasesParameterization) {
         // Ensure all memory properly allocated
         assert(weightsGradient.isPresent());
-        assert(weightsGradient.get().getDescriptor() == weights.getDescriptor());
-        assert(weightsGradient.get().getPlacement() == weights.getPlacement());
-        assert(weightsGradient.get().getMemPtr() != weights.getMemPtr());
+        assert(weightsGradient.get().getDescriptor() == weightsParameterization.getDescriptor());
+        assert(weightsGradient.get().getPlacement() == weightsParameterization.getPlacement());
+        assert(weightsGradient.get().getMemPtr() != weightsParameterization.getMemPtr());
         if (hasBias) {
             assert(biasesGradient.isPresent());
-            assert(biases.isPresent());
+            assert(biasesParameterization.isPresent());
             assert(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
-            assert(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
-            assert(biasesGradient.get().getPlacement() == biases.get().getPlacement());
+            assert(biasesGradient.get().getMemPtr() != biasesParameterization.get().getMemPtr());
+            assert(biasesGradient.get().getPlacement() == biasesParameterization.get().getPlacement());
         } else {
             assert(biasesGradient.isEmpty());
         }
