@@ -47,12 +47,21 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     if (biases.isPresent())
         biasesGradient = biases.get().clone();
 
-    if (momentum > 0.0f) {
-        previousWeightsUpdate = weightsGradient.clone();
-        previousWeightsUpdate.memset(0);
-        if (biases.isPresent()) {
-            previousBiasesUpdate = biasesGradient.get().clone();
-            previousBiasesUpdate.memset(0);
+    if (momentum > 0.) {
+        weightsUpdate = weightsGradient.clone();
+        weightsUpdate.memset(0);
+        if (biasesUpdate.isPresent()) {
+            assert(biasesGradient.isPresent());
+            biasesUpdate = biasesGradient.get().clone();
+            biasesUpdate.get().memset(0);
+
+            if (useNesterovMomentum) {
+                projectedWeights = weights.clone();
+                if (biases.isPresent())
+                    projectedBiases = biases.get().clone();
+                this->trainableLayer->assignWeightsParameterizationTensor(projectedWeights, projectedBiases);
+            }
+        } else {
         }
     }
 }
@@ -74,25 +83,36 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
     if (momentum > 0.0f) {
         if (useNesterovMomentum) {
             // WeightUpdate_t = momentum * weightUpdate_t-1 - (lr * gradient(weights_t + momentum * weightUpdate_t-1)) / batch_size
-            // So I think this means that when training only, during the forward pass the layer needs to use:
-            // weights_t + momentum * weightUpdate_t-1
-            // to make predictions rather than just weights. I don't like this because the layer would need to know about this
-            // optimizer feature. Need to think about how to solve this in a good way.
-            // I could possibly add infer(projectedWeights, projectedBiases) to trainable weights biases layer,
-            // where infer() { infer(weights, biases) }
-            // but I'll leave that for later on.
-            assert(false);
+
+            // Note that the gradients below are computed wrt the projected weights, computed further below
+            float alpha = momentum;
+            float beta = (-1.0f * currentLearningRate) / batchSize;
+            weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
+            if (biases.isPresent()) {
+                biasesUpdate.get().add(biasesUpdate, biasesGradient, alpha, beta, gradientUpdateStream);
+            }
+
+            // Next line increments t from these equations:
+            Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
+
+            // projectedWeights_t+1 = weights_t+1 + momentum * weightUpdate_t
+            // Note updateWeightsWithScale automatially applies the loss scaling factor, since I am projecting the update to the weights
+            // I need to apply to it the projection here.
+            projectedWeights.get().add(weights, weightsUpdate, 1.0f, momentum / Loss::getLossScalingFactor(), gradientUpdateStream);
+            if (projectedBiases.isPresent()) {
+                assert(biases.isPresent());
+                projectedBiases.get().add(biases, biasesUpdate, 1.0f, momentum, gradientUpdateStream);
+            }
+
+            Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
         } else {
             // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
             float alpha = momentum;
             float beta = (-1.0f * currentLearningRate) / batchSize;
 
-            weightsUpdate.add(previousWeightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
-            previousWeightsUpdate.copyFromAsync(weightsUpdate, gradientUpdateStream);
-            if (biases.isPresent()) {
-                biasesUpdate.get().add(previousBiasesUpdate, biasesGradient, alpha, beta, gradientUpdateStream);
-                previousBiasesUpdate.copyFromAsync(biasesUpdate, gradientUpdateStream);
-            }
+            weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
+            if (biases.isPresent())
+                biasesUpdate.get().add(biasesUpdate, biasesGradient, alpha, beta, gradientUpdateStream);
 
             Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
         }

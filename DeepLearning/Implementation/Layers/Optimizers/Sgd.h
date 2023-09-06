@@ -54,8 +54,8 @@ class Sgd : public Optimizer {
     uint32_t numInputFeatures;
     uint32_t numOutputputFeatures;
 
-    Tensor previousWeightsUpdate;
-    Tensor previousBiasesUpdate;
+    Optional<Tensor> projectedWeights;
+    Optional<Tensor> projectedBiases;
 };
 
 }  // namespace ThorImplementation

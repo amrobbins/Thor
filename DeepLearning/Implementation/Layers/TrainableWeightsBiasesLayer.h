@@ -41,14 +41,32 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual void createWeightsIfNecessary() = 0;
 
+    virtual void assignWeightsParameterizationTensor(Tensor weightsParameterization, Optional<Tensor> biasesParameterization) {
+        this->weightsParameterization = weightsParameterization;
+        this->biasesParameterization = biasesParameterization;
+    }
+
     virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         // Forward direction must wait for weights update to finish before inference is called
         assert(streams.size() > 0);
 
+        if (!isInferenceOnly() && weightsParameterization.isPresent() && !weightsParameterizationInitialized) {
+            weightsParameterization.get().copyFromAsync(weights, streams[0]);
+            if (biasesParameterization.isPresent()) {
+                assert(biases.isPresent());
+                biasesParameterization.get().copyFromAsync(biases, streams[0]);
+            }
+            Event copiedFinished = streams[0].putEvent();
+            for (uint32_t i = 1; i < streams.size(); ++i)
+                streams[i].waitEvent(copiedFinished);
+            weightsParameterizationInitialized = true;
+        }
+
         if (optimizer.isPresent()) {
             Stream gradientUpdateStream = optimizer.get()->getGradientUpdateStream();
+            Event gradientUpdateFinished = gradientUpdateStream.putEvent();
             for (uint32_t i = 0; i < streams.size(); ++i)
-                streams[i].waitEvent(gradientUpdateStream.putEvent());
+                streams[i].waitEvent(gradientUpdateFinished);
         }
 
         MultiConnectionLayer::forward(featureInput, validationPass);
@@ -146,6 +164,27 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         }
     }
 
+    // Note: not virtual, layers need to implement computeWeightsGradient(..., weightsParameterization, biasesParameterization)
+    void computeWeightsGradient(Optional<Tensor> weightsGradient,
+                                Optional<Tensor> biasesGradient,
+                                Optional<Tensor> featureIn,
+                                Optional<Tensor> errorIn,
+                                Stream gradientUpdateStream,
+                                bool accumulateGradient) {
+        if (weightsParameterization.isPresent() && !isInferenceOnly())
+            computeWeightsGradient(weightsGradient,
+                                   biasesGradient,
+                                   featureIn,
+                                   errorIn,
+                                   gradientUpdateStream,
+                                   accumulateGradient,
+                                   weightsParameterization,
+                                   biasesParameterization);
+        else
+            computeWeightsGradient(
+                weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateGradient, weights, biases);
+    }
+
     // errorInput must be ready on data stream when calling computeWeightsGradient
     // gradientUpdateStream will first synchronize with data stream.
     // weightsGradient and biasesGradient will be ready at end of gradientUpdateStream
@@ -154,7 +193,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                                         Optional<Tensor> featureIn,
                                         Optional<Tensor> errorIn,
                                         Stream gradientUpdateStream,
-                                        bool accumulateGradient) = 0;
+                                        bool accumulateGradient,
+                                        Tensor weightsParameterization,
+                                        Optional<Tensor> biasesParameterization) = 0;
 
     virtual Tensor getWeights() { return weights; }
     virtual Optional<Tensor> getBiases() { return biases; }
@@ -187,16 +228,57 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Tensor weights;
     Optional<Tensor> biases;
 
+    // Note: not virtual, layers need to implement infer(..., weightsParameterization, biasesParameterization)
+    void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {
+        if (weightsParameterization.isPresent() && !isInferenceOnly())
+            infer(inputTensor, outputTensor, stream, connectionNumber, weightsParameterization, biasesParameterization);
+        else
+            infer(inputTensor, outputTensor, stream, connectionNumber, weights, biases);
+    }
+
+    virtual void infer(Optional<Tensor> inputTensor,
+                       Optional<Tensor> outputTensor,
+                       Stream stream,
+                       unsigned int connectionNumber,
+                       Tensor weightsParameterization,
+                       Optional<Tensor> biasesParameterization) = 0;
+
+    // Note: not virtual, layers need to implement backProp(..., weightsParameterization, biasesParameterization)
+    void backProp(Optional<Tensor> dataIn,
+                  Optional<Tensor> errorIn,
+                  Optional<Tensor> errorOut,
+                  Stream dataStream,
+                  unsigned int connectionNumber,
+                  bool accumulateGradient) {
+        if (weightsParameterization.isPresent() && !isInferenceOnly())
+            backProp(dataIn,
+                     errorIn,
+                     errorOut,
+                     dataStream,
+                     connectionNumber,
+                     accumulateGradient,
+                     weightsParameterization,
+                     biasesParameterization);
+        else
+            backProp(dataIn, errorIn, errorOut, dataStream, connectionNumber, accumulateGradient, weights, biases);
+    }
+
     virtual void backProp(Optional<Tensor> dataIn,
                           Optional<Tensor> errorIn,
                           Optional<Tensor> errorOut,
                           Stream dataStream,
                           unsigned int connectionNumber,
-                          bool accumulateGradient) = 0;
+                          bool accumulateGradient,
+                          Tensor weightsParameterization,
+                          Optional<Tensor> biasesParameterization) = 0;
 
    protected:
     Optional<std::shared_ptr<Optimizer>> optimizerShared;
     Optional<Optimizer *> optimizer;
+
+    Optional<Tensor> weightsParameterization;
+    Optional<Tensor> biasesParameterization;
+    bool weightsParameterizationInitialized = false;
 
    private:
     virtual void backProp(
