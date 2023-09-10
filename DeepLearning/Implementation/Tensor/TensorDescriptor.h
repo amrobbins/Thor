@@ -29,6 +29,9 @@ class TensorDescriptor {
         UINT32 = 19,
         UINT64 = 20,
         BOOLEAN = 21,
+        // FIXME: PACKED_BOOLEAN is broken for multi-dimensional case when rows are not multiple of 8 elements
+        // FIXME: to fix this I need to round each dimension to (dimensionSize+7)/8 uint8_t's and I  need to save these dimensions off
+        // and use them. So that say two rows do not share bits in a single uint8_t.
         PACKED_BOOLEAN = 22
     };
 
