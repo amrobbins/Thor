@@ -98,6 +98,12 @@ class Stream : private ReferenceCounted {
         assert(cudaStatus == cudaSuccess);
     }
 
+    void enqueueHostFunction(cudaHostFn_t function, void *userData) {
+        cudaError_t cudaStatus;
+        cudaStatus = cudaLaunchHostFunc(*this, function, userData);
+        assert(cudaStatus == cudaSuccess);
+    }
+
     cudaStream_t getStream() {
         assert(!uninitialized());
         return cudaStream;

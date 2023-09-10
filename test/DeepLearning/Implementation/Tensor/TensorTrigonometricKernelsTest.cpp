@@ -38,7 +38,7 @@ TEST(Tensor, Sin) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -98,7 +98,7 @@ TEST(Tensor, Cos) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -175,7 +175,7 @@ TEST(Tensor, Tan) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -248,7 +248,7 @@ TEST(Tensor, Csc) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -314,7 +314,7 @@ TEST(Tensor, Sec) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -380,7 +380,7 @@ TEST(Tensor, Cot) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -442,7 +442,7 @@ TEST(Tensor, Asin) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -502,7 +502,7 @@ TEST(Tensor, Acos) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -562,7 +562,7 @@ TEST(Tensor, Atan) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -622,7 +622,7 @@ TEST(Tensor, Acsc) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -682,7 +682,7 @@ TEST(Tensor, Asec) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();
@@ -742,7 +742,7 @@ TEST(Tensor, Acot) {
         Tensor argument_h(cpuPlacement, termDescriptor);
         Tensor argument_float_h = argument_h.clone(TensorDescriptor::DataType::FP32);
         Tensor argument_d = argument_h.clone(gpuPlacement);
-        Tensor dest_d = argument_h.clone(destDataType);
+        Tensor dest_d(gpuPlacement, destDescriptor);
         Tensor dest_gpu_float_h = dest_d.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
 
         float *argument_float_h_mem = (float *)argument_float_h.getMemPtr();

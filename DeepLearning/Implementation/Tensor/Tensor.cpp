@@ -80,10 +80,11 @@ void Tensor::allocateMemory() {
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
-    // All tensors end on an 16 byte boundary so that kernels can overshoot when writing arrays of type half4 or float4
-    // without risking accessing another memory block
-    memBytes = (memBytes + 15) / 16;
-    memBytes *= 16;
+    // All tensors end on an 132 byte boundary so that kernels can overshoot when writing arrays in chunks of the maximum sized type
+    // (double4) without risking accessing another memory block. Consider the overhead of having 1 million tensors instantiated: the
+    // overhead is less than 32 MB of GPU memory.
+    memBytes = (memBytes + 31) / 32;
+    memBytes *= 32;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
@@ -401,6 +402,10 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
     assert(cudaStatus == cudaSuccess);
 }
 
+void Tensor::clear() { this->memset(0); }
+
+void Tensor::clearAsync(Stream stream) { this->memsetAsync(stream, 0); }
+
 string Tensor::dimensionsToString() {
     string s = "[";
     vector<uint64_t> dimensions = getDimensions();
@@ -490,6 +495,137 @@ void Tensor::loadValuesIntoVector(std::vector<T> &values, Stream stream) {
     for (uint64_t i = 0; i < numElements; ++i)
         values.push_back(mem[i]);
 }
+
+// The following uses inheritance only so that I can use dynamic_cast of the void* that I am forced to accept as my parameter.
+struct CpuFillParamsBase {
+    virtual ~CpuFillParamsBase() = default;
+};
+
+template <typename T>
+struct CpuFillParams : CpuFillParamsBase {
+    CpuFillParams(T value, T *mem, uint64_t numElements) : value(value), mem(mem), numElements(numElements) {}
+
+    T value;
+    T *mem;
+    uint64_t numElements;
+};
+
+template <typename T>
+void fillValue(void *params) {
+    CpuFillParamsBase *baseParams = static_cast<CpuFillParamsBase *>(params);
+    assert(baseParams != nullptr);
+    CpuFillParams<T> *cpuFillParams = dynamic_cast<CpuFillParams<T> *>(baseParams);
+    assert(cpuFillParams != nullptr);
+
+    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), cpuFillParams->numElements / 1000000), uint64_t(1));
+
+#pragma omp parallel for schedule(static, numProcs) shared(numProcs, cpuFillParams) default(none)
+    for (uint64_t i = 0; i < cpuFillParams->numElements; ++i) {
+        cpuFillParams->mem[i] = cpuFillParams->value;
+    }
+
+    // fillValue function is responsible for deleting its params
+    delete cpuFillParams;
+}
+
+// FIXME need to instantiate all template versions
+template <typename T>
+void Tensor::fill(const T value, Stream stream) {
+    TensorDescriptor::DataType dataType = getDataType();
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<half> *fillValueParams = new CpuFillParams<half>((half)(float)value, (half *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<half>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<half>(
+                (half)(float)value, (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<float> *fillValueParams = new CpuFillParams<float>(value, (float *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<float>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<uint8_t> *fillValueParams = new CpuFillParams<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<uint8_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<uint16_t> *fillValueParams = new CpuFillParams<uint16_t>(value, (uint16_t *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<uint16_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<uint16_t>(
+                value, (uint16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<uint32_t> *fillValueParams = new CpuFillParams<uint32_t>(value, (uint32_t *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<uint32_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<uint32_t>(
+                value, (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<int8_t> *fillValueParams = new CpuFillParams<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<int8_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<int16_t> *fillValueParams = new CpuFillParams<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<int16_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<int32_t> *fillValueParams = new CpuFillParams<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements());
+            stream.enqueueHostFunction(fillValue<int32_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        }
+    } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+        assert((float)value == 1 || (float)value == 0);
+        uint8_t packedValue = 0;
+        if (value)
+            packedValue = 0b11111111;
+        uint64_t numPackedBytes = (getTotalNumElements() + 7) / 8;
+        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+            // fillValue function is responsible for deleting its params
+            CpuFillParams<uint8_t> *fillValueParams = new CpuFillParams<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes);
+            stream.enqueueHostFunction(fillValue<uint8_t>, fillValueParams);
+        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+            launchFillValueGpuKernel<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes, getPlacement().getDeviceNum(), stream);
+        }
+    } else {
+        assert(false);
+    }
+}
+
+template void Tensor::fill(const half value, Stream stream);
+template void Tensor::fill(const float value, Stream stream);
+template void Tensor::fill(const uint8_t value, Stream stream);
+template void Tensor::fill(const uint16_t value, Stream stream);
+template void Tensor::fill(const uint32_t value, Stream stream);
+template void Tensor::fill(const int8_t value, Stream stream);
+template void Tensor::fill(const int16_t value, Stream stream);
+template void Tensor::fill(const int32_t value, Stream stream);
+template void Tensor::fill(const bool value, Stream stream);
 
 Tensor Tensor::transposeMatrix(Stream stream) {
     vector<uint64_t> dimensions = getDimensions();
