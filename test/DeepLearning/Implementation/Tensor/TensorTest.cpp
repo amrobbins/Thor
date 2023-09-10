@@ -3458,6 +3458,269 @@ TEST(Tensor, TransposeSquareMatrixInPlace) {
     }
 }
 
+TEST(Tensor, FillCpu) {
+    srand(time(nullptr));
+
+    Stream stream(0);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+
+    for (uint32_t test = 0; test < 1; ++test) {
+        uint32_t numDimensions = 1 + (rand() % 5);
+        vector<uint64_t> dimensions;
+        uint32_t maxDimensionSize = pow(100000.0, 1.0 / numDimensions);
+        uint32_t totalNumElements = 1;
+        while (dimensions.size() < numDimensions) {
+            dimensions.push_back(1 + (rand() % maxDimensionSize));
+            totalNumElements *= dimensions.back();
+        }
+
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 9;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::INT32;
+        else
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        TensorDescriptor descriptor(dataType, dimensions);
+
+        float fillValue;
+        if (dt < 2) {
+            fillValue = (rand() % 100) / (1 + (rand() % 50));
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else if (dt == 2) {
+            fillValue = rand() % 100;
+        } else if (dt == 3) {
+            fillValue = rand() % 1000;
+        } else if (dt == 4) {
+            fillValue = rand() % 10000;
+        } else if (dt == 5) {
+            fillValue = rand() % 100;
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else if (dt == 6) {
+            fillValue = rand() % 1000;
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else if (dt == 7) {
+            fillValue = rand() % 10000;
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else {
+            fillValue = rand() % 2 ? true : false;
+        }
+
+        Tensor t_h(cpuPlacement, descriptor);
+        t_h.fill(fillValue, stream);
+        stream.synchronize();
+
+        if (dt == 0) {
+            half *mem = (half *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                half value = mem[i];
+                ASSERT_EQ((half)fillValue, value);
+            }
+        } else if (dt == 1) {
+            float *mem = (float *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                float value = mem[i];
+                ASSERT_EQ((float)fillValue, value);
+            }
+        } else if (dt == 2) {
+            uint8_t *mem = (uint8_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                uint8_t value = mem[i];
+                ASSERT_EQ((uint8_t)fillValue, value);
+            }
+        } else if (dt == 3) {
+            uint16_t *mem = (uint16_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                uint16_t value = mem[i];
+                ASSERT_EQ((uint16_t)fillValue, value);
+            }
+        } else if (dt == 4) {
+            uint32_t *mem = (uint32_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                uint32_t value = mem[i];
+                ASSERT_EQ((uint32_t)fillValue, value);
+            }
+        } else if (dt == 5) {
+            int8_t *mem = (int8_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                int8_t value = mem[i];
+                ASSERT_EQ((int8_t)fillValue, value);
+            }
+        } else if (dt == 6) {
+            int16_t *mem = (int16_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                int16_t value = mem[i];
+                ASSERT_EQ((int16_t)fillValue, value);
+            }
+        } else if (dt == 7) {
+            int32_t *mem = (int32_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                int32_t value = mem[i];
+                ASSERT_EQ((int32_t)fillValue, value);
+            }
+        } else {
+            uint8_t expected = fillValue ? 0b11111111 : 0b00000000;
+            uint8_t *mem = (uint8_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < (totalNumElements + 7) / 8; ++i) {
+                uint8_t value = mem[i];
+                ASSERT_EQ(expected, value);
+            }
+        }
+    }
+}
+
+TEST(Tensor, FillGpu) {
+    srand(time(nullptr));
+
+    Stream stream(0);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+
+    for (uint32_t test = 0; test < 1; ++test) {
+        uint32_t numDimensions = 1 + (rand() % 5);
+        vector<uint64_t> dimensions;
+        uint32_t maxDimensionSize = pow(100000.0, 1.0 / numDimensions);
+        uint32_t totalNumElements = 1;
+        while (dimensions.size() < numDimensions) {
+            dimensions.push_back(1 + (rand() % maxDimensionSize));
+            totalNumElements *= dimensions.back();
+        }
+
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 9;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::INT32;
+        else
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        TensorDescriptor descriptor(dataType, dimensions);
+
+        float fillValue;
+        if (dt < 2) {
+            fillValue = (rand() % 100) / (1 + (rand() % 50));
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else if (dt == 2) {
+            fillValue = rand() % 100;
+        } else if (dt == 3) {
+            fillValue = rand() % 1000;
+        } else if (dt == 4) {
+            fillValue = rand() % 10000;
+        } else if (dt == 5) {
+            fillValue = rand() % 100;
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else if (dt == 6) {
+            fillValue = rand() % 1000;
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else if (dt == 7) {
+            fillValue = rand() % 10000;
+            if (rand() % 2)
+                fillValue = -fillValue;
+        } else {
+            fillValue = rand() % 2 ? true : false;
+        }
+
+        Tensor t_h(cpuPlacement, descriptor);
+        Tensor t_d = t_h.clone(gpuPlacement);
+        t_d.fill(fillValue, stream);
+        t_h.copyFromAsync(t_d, stream);
+        stream.synchronize();
+
+        if (dt == 0) {
+            half *mem = (half *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                half value = mem[i];
+                ASSERT_EQ((half)fillValue, value);
+            }
+        } else if (dt == 1) {
+            float *mem = (float *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                float value = mem[i];
+                ASSERT_EQ((float)fillValue, value);
+            }
+        } else if (dt == 2) {
+            uint8_t *mem = (uint8_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                uint8_t value = mem[i];
+                ASSERT_EQ((uint8_t)fillValue, value);
+            }
+        } else if (dt == 3) {
+            uint16_t *mem = (uint16_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                uint16_t value = mem[i];
+                ASSERT_EQ((uint16_t)fillValue, value);
+            }
+        } else if (dt == 4) {
+            uint32_t *mem = (uint32_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                uint32_t value = mem[i];
+                ASSERT_EQ((uint32_t)fillValue, value);
+            }
+        } else if (dt == 5) {
+            int8_t *mem = (int8_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                int8_t value = mem[i];
+                ASSERT_EQ((int8_t)fillValue, value);
+            }
+        } else if (dt == 6) {
+            int16_t *mem = (int16_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                int16_t value = mem[i];
+                ASSERT_EQ((int16_t)fillValue, value);
+            }
+        } else if (dt == 7) {
+            int32_t *mem = (int32_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < totalNumElements; ++i) {
+                int32_t value = mem[i];
+                ASSERT_EQ((int32_t)fillValue, value);
+            }
+        } else {
+            // Note that this is actually wrong for a packed boolean whose flags are segregated to the proper dimension
+            // packed boolean needs to be fixed overall and this condition will change then.
+            uint8_t expected = fillValue ? 0b11111111 : 0b00000000;
+            uint8_t *mem = (uint8_t *)t_h.getMemPtr();
+            for (uint32_t i = 0; i < (totalNumElements + 7) / 8; ++i) {
+                uint8_t value = mem[i];
+                ASSERT_EQ(expected, value);
+            }
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
