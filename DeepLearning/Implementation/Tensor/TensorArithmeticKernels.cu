@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 using namespace ThorImplementation;
+using namespace std;
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 8 elements : 2048 elements processed per block
@@ -2250,6 +2251,10 @@ void Tensor::add(Tensor augend, double addend, Stream stream) {
     assert(augend.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(augend.getDataType() == getDataType());
 
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
     TensorDescriptor::DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
     void *augendMem = augend.getMemPtr();
@@ -2294,6 +2299,10 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
     assert(augend.getDataType() == getDataType());
     assert(augend.getTotalNumElements() == addend.getTotalNumElements());
     assert(augend.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
@@ -2340,6 +2349,10 @@ void Tensor::add(Tensor augend, Tensor addend, Stream stream) {
 void Tensor::add(Tensor augend, double addend, float alpha, Stream stream) {
     assert(augend.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(augend.getDataType() == getDataType());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
@@ -2391,6 +2404,10 @@ void Tensor::add(Tensor augend, Tensor addend, float alpha, float beta, Stream s
     assert(augend.getDataType() == getDataType());
     assert(augend.getTotalNumElements() == addend.getTotalNumElements());
     assert(augend.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = augend.getDataType();
     uint64_t numElements = augend.getTotalNumElements();
@@ -2446,6 +2463,10 @@ void Tensor::subtract(double minuend, Tensor subtrahend, Stream stream) {
     assert(subtrahend.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(subtrahend.getDataType() == getDataType());
 
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
     TensorDescriptor::DataType dataType = subtrahend.getDataType();
     uint64_t numElements = subtrahend.getTotalNumElements();
     void *subtrahendMem = subtrahend.getMemPtr();
@@ -2490,6 +2511,10 @@ void Tensor::subtract(double minuend, Tensor subtrahend, Stream stream) {
 void Tensor::subtract(Tensor minuend, double subtrahend, Stream stream) {
     assert(minuend.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(minuend.getDataType() == getDataType());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = minuend.getDataType();
     uint64_t numElements = minuend.getTotalNumElements();
@@ -2540,6 +2565,10 @@ void Tensor::subtract(Tensor minuend, Tensor subtrahend, Stream stream) {
     assert(minuend.getTotalNumElements() == subtrahend.getTotalNumElements());
     assert(minuend.getTotalNumElements() == getTotalNumElements());
 
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
     TensorDescriptor::DataType dataType = minuend.getDataType();
     uint64_t numElements = minuend.getTotalNumElements();
     void *minuendMem = minuend.getMemPtr();
@@ -2587,6 +2616,10 @@ void Tensor::subtract(Tensor minuend, Tensor subtrahend, Stream stream) {
 void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
     assert(multiplicand.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(multiplicand.getDataType() == getDataType());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = multiplicand.getDataType();
     uint64_t numElements = multiplicand.getTotalNumElements();
@@ -2639,6 +2672,10 @@ void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
     assert(multiplicand.getTotalNumElements() == multiplier.getTotalNumElements());
     assert(multiplicand.getTotalNumElements() == getTotalNumElements());
 
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
     TensorDescriptor::DataType dataType = multiplicand.getDataType();
     uint64_t numElements = multiplicand.getTotalNumElements();
     void *multiplicandMem = multiplicand.getMemPtr();
@@ -2687,6 +2724,10 @@ void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
     assert(numerator.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(numerator.getDataType() == getDataType());
 
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
     TensorDescriptor::DataType dataType = numerator.getDataType();
     uint64_t numElements = numerator.getTotalNumElements();
     void *numeratorMem = numerator.getMemPtr();
@@ -2732,6 +2773,10 @@ void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
 void Tensor::divide(double numerator, Tensor denominator, Stream stream) {
     assert(denominator.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(denominator.getDataType() == getDataType());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = denominator.getDataType();
     uint64_t numElements = denominator.getTotalNumElements();
@@ -2781,6 +2826,10 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
     assert(numerator.getDataType() == getDataType());
     assert(numerator.getTotalNumElements() == denominator.getTotalNumElements());
     assert(numerator.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = numerator.getDataType();
     uint64_t numElements = numerator.getTotalNumElements();
@@ -2844,6 +2893,10 @@ void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream) {
     assert(a.getTotalNumElements() == getTotalNumElements());
     assert(b.getTotalNumElements() == getTotalNumElements());
     assert(c.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = a.getTotalNumElements();
@@ -2972,32 +3025,30 @@ __global__ void max2B(DATA_TYPE *mem, DATA_TYPE minValue, uint64_t numElements) 
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
+// each thread reads 4 elements : 1024 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void max4B(DATA_TYPE *mem, DATA_TYPE minValue, uint64_t numElements) {
-    DATA_TYPE buffer[8];
+    DATA_TYPE buffer[4];
 
-    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset8Elements = offset >> 3;
+    uint64_t offset4Elements = offset >> 2;
 
     // Note: all tensors end on 16 byte boundary
-    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset4Elements];
     buffer[0] = buffer[0] > minValue ? buffer[0] : minValue;
     buffer[1] = buffer[1] > minValue ? buffer[1] : minValue;
     buffer[2] = buffer[2] > minValue ? buffer[2] : minValue;
     buffer[3] = buffer[3] > minValue ? buffer[3] : minValue;
-    buffer[4] = buffer[4] > minValue ? buffer[4] : minValue;
-    buffer[5] = buffer[5] > minValue ? buffer[5] : minValue;
-    buffer[6] = buffer[6] > minValue ? buffer[6] : minValue;
-    buffer[7] = buffer[7] > minValue ? buffer[7] : minValue;
-    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+    ((float4 *)mem)[offset4Elements] = ((float4 *)buffer)[0];
 }
 
 void Tensor::max(double minValue, Stream stream) {
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
@@ -3008,7 +3059,7 @@ void Tensor::max(double minValue, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         max4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3017,7 +3068,7 @@ void Tensor::max(double minValue, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         max4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3026,7 +3077,7 @@ void Tensor::max(double minValue, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, minValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         max4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, minValue, numElements);
     } else {
         assert(false);
@@ -3092,32 +3143,30 @@ __global__ void min2B(DATA_TYPE *mem, DATA_TYPE maxValue, uint64_t numElements) 
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
+// each thread reads 4 elements : 1024 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void min4B(DATA_TYPE *mem, DATA_TYPE maxValue, uint64_t numElements) {
-    DATA_TYPE buffer[8];
-
-    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset8Elements = offset >> 3;
+    uint64_t offset4Elements = offset >> 2;
+
+    DATA_TYPE buffer[4];
 
     // Note: all tensors end on 16 byte boundary
-    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset4Elements];
     buffer[0] = buffer[0] < maxValue ? buffer[0] : maxValue;
     buffer[1] = buffer[1] < maxValue ? buffer[1] : maxValue;
     buffer[2] = buffer[2] < maxValue ? buffer[2] : maxValue;
     buffer[3] = buffer[3] < maxValue ? buffer[3] : maxValue;
-    buffer[4] = buffer[4] < maxValue ? buffer[4] : maxValue;
-    buffer[5] = buffer[5] < maxValue ? buffer[5] : maxValue;
-    buffer[6] = buffer[6] < maxValue ? buffer[6] : maxValue;
-    buffer[7] = buffer[7] < maxValue ? buffer[7] : maxValue;
-    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+    ((float4 *)mem)[offset4Elements] = ((float4 *)buffer)[0];
 }
 
 void Tensor::min(double maxValue, Stream stream) {
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
@@ -3128,7 +3177,7 @@ void Tensor::min(double maxValue, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, maxValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         min4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, maxValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3137,7 +3186,7 @@ void Tensor::min(double maxValue, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, maxValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         min4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, maxValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3146,7 +3195,7 @@ void Tensor::min(double maxValue, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, maxValue, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         min4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, maxValue, numElements);
     } else {
         assert(false);
@@ -3238,6 +3287,8 @@ __global__ void bound4B(DATA_TYPE *mem, DATA_TYPE minValue, DATA_TYPE maxValue, 
 
 void Tensor::bound(double minValue, double maxValue, Stream stream) {
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
@@ -3340,36 +3391,34 @@ __global__ void min2B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
+// each thread reads 4 elements : 1024 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void min4B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset8Elements = offset >> 3;
+    uint64_t offset4Elements = offset >> 2;
 
-    DATA_TYPE buffer[8];
-    DATA_TYPE otherBuffer[8];
+    DATA_TYPE buffer[4];
+    DATA_TYPE otherBuffer[4];
 
     // Note: all tensors end on 16 byte boundary
-    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
-    ((double4 *)otherBuffer)[0] = ((double4 *)other)[offset8Elements];
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset4Elements];
+    ((float4 *)otherBuffer)[0] = ((float4 *)other)[offset4Elements];
 
     buffer[0] = buffer[0] < otherBuffer[0] ? buffer[0] : otherBuffer[0];
     buffer[1] = buffer[1] < otherBuffer[1] ? buffer[1] : otherBuffer[1];
     buffer[2] = buffer[2] < otherBuffer[2] ? buffer[2] : otherBuffer[2];
     buffer[3] = buffer[3] < otherBuffer[3] ? buffer[3] : otherBuffer[3];
-    buffer[4] = buffer[4] < otherBuffer[4] ? buffer[4] : otherBuffer[4];
-    buffer[5] = buffer[5] < otherBuffer[5] ? buffer[5] : otherBuffer[5];
-    buffer[6] = buffer[6] < otherBuffer[6] ? buffer[6] : otherBuffer[6];
-    buffer[7] = buffer[7] < otherBuffer[7] ? buffer[7] : otherBuffer[7];
 
-    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+    ((float4 *)mem)[offset4Elements] = ((float4 *)buffer)[0];
 }
 
 void Tensor::min(Tensor other, Stream stream) {
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
@@ -3381,7 +3430,7 @@ void Tensor::min(Tensor other, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, (half *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         min4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, (float *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3390,7 +3439,7 @@ void Tensor::min(Tensor other, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, (uint16_t *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         min4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, (uint32_t *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3399,7 +3448,7 @@ void Tensor::min(Tensor other, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         min2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, (int16_t *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         min4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, (int32_t *)otherMem, numElements);
     } else {
         assert(false);
@@ -3473,36 +3522,34 @@ __global__ void max2B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
 }
 
 // Each block is 8 warps of 32 threads = 256 threads per block
-// each thread reads 8 elements : 2048 elements processed per block
+// each thread reads 4 elements : 1024 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DATA_TYPE>
 __global__ void max4B(DATA_TYPE *mem, DATA_TYPE *other, uint64_t numElements) {
-    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
     if (offset >= numElements)
         return;
-    uint64_t offset8Elements = offset >> 3;
+    uint64_t offset8Elements = offset >> 2;
 
-    DATA_TYPE buffer[8];
-    DATA_TYPE otherBuffer[8];
+    DATA_TYPE buffer[4];
+    DATA_TYPE otherBuffer[4];
 
     // Note: all tensors end on 16 byte boundary
-    ((double4 *)buffer)[0] = ((double4 *)mem)[offset8Elements];
-    ((double4 *)otherBuffer)[0] = ((double4 *)other)[offset8Elements];
+    ((float4 *)buffer)[0] = ((float4 *)mem)[offset8Elements];
+    ((float4 *)otherBuffer)[0] = ((float4 *)other)[offset8Elements];
 
     buffer[0] = buffer[0] > otherBuffer[0] ? buffer[0] : otherBuffer[0];
     buffer[1] = buffer[1] > otherBuffer[1] ? buffer[1] : otherBuffer[1];
     buffer[2] = buffer[2] > otherBuffer[2] ? buffer[2] : otherBuffer[2];
     buffer[3] = buffer[3] > otherBuffer[3] ? buffer[3] : otherBuffer[3];
-    buffer[4] = buffer[4] > otherBuffer[4] ? buffer[4] : otherBuffer[4];
-    buffer[5] = buffer[5] > otherBuffer[5] ? buffer[5] : otherBuffer[5];
-    buffer[6] = buffer[6] > otherBuffer[6] ? buffer[6] : otherBuffer[6];
-    buffer[7] = buffer[7] > otherBuffer[7] ? buffer[7] : otherBuffer[7];
 
-    ((double4 *)mem)[offset8Elements] = ((double4 *)buffer)[0];
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
 }
 
 void Tensor::max(Tensor other, Stream stream) {
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType dataType = getDataType();
     uint64_t numElements = getTotalNumElements();
@@ -3514,7 +3561,7 @@ void Tensor::max(Tensor other, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<half><<<gridSize, blockSize, 0, stream>>>((half *)mem, (half *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         max4B<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, (float *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3523,7 +3570,7 @@ void Tensor::max(Tensor other, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, (uint16_t *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         max4B<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, (uint32_t *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         dim3 gridSize((numElements + 4095) / 4096);
@@ -3532,9 +3579,108 @@ void Tensor::max(Tensor other, Stream stream) {
         dim3 gridSize((numElements + 2047) / 2048);
         max2B<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, (int16_t *)otherMem, numElements);
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        dim3 gridSize((numElements + 2047) / 2048);
+        dim3 gridSize((numElements + 1023) / 1024);
         max4B<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, (int32_t *)otherMem, numElements);
     } else {
         assert(false);
     }
 }
+
+template <typename DATA_TYPE>
+__global__ void fillValue1B(DATA_TYPE value, DATA_TYPE *mem, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + threadIdx.x * 16;
+    if (offset >= numElements)
+        return;
+    uint64_t offset16Elements = offset >> 4;
+
+    DATA_TYPE buffer[16];
+    buffer[0] = value;
+    buffer[1] = value;
+    buffer[2] = value;
+    buffer[3] = value;
+    buffer[4] = value;
+    buffer[5] = value;
+    buffer[6] = value;
+    buffer[7] = value;
+    buffer[8] = value;
+    buffer[9] = value;
+    buffer[10] = value;
+    buffer[11] = value;
+    buffer[12] = value;
+    buffer[13] = value;
+    buffer[14] = value;
+    buffer[15] = value;
+
+    ((float4 *)mem)[offset16Elements] = ((float4 *)buffer)[0];
+}
+
+template <typename DATA_TYPE>
+__global__ void fillValue2B(DATA_TYPE value, DATA_TYPE *mem, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE buffer[8];
+    buffer[0] = value;
+    buffer[1] = value;
+    buffer[2] = value;
+    buffer[3] = value;
+    buffer[4] = value;
+    buffer[5] = value;
+    buffer[6] = value;
+    buffer[7] = value;
+
+    ((float4 *)mem)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+template <typename DATA_TYPE>
+__global__ void fillValue4B(DATA_TYPE value, DATA_TYPE *mem, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 1024 + threadIdx.x * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    DATA_TYPE buffer[4];
+    buffer[0] = value;
+    buffer[1] = value;
+    buffer[2] = value;
+    buffer[3] = value;
+
+    ((float4 *)mem)[offset4Elements] = ((float4 *)buffer)[0];
+}
+
+template <typename T>
+void Tensor::launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
+    dim3 blockSize(256);
+    if (is_same<T, half>::value || is_same<T, uint16_t>::value || is_same<T, int16_t>::value) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        fillValue2B<T><<<gridSize, blockSize, 0, stream>>>(value, mem, numElements);
+    } else if (is_same<T, float>::value || is_same<T, uint32_t>::value || is_same<T, int32_t>::value) {
+        dim3 gridSize((numElements + 1023) / 1024);
+        fillValue4B<T><<<gridSize, blockSize, 0, stream>>>(value, mem, numElements);
+    } else if (is_same<T, uint8_t>::value || is_same<T, int8_t>::value) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        fillValue1B<T><<<gridSize, blockSize, 0, stream>>>(value, mem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+template void Tensor::launchFillValueGpuKernel<half>(half value, half *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<float>(float value, float *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<uint8_t>(
+    uint8_t value, uint8_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<uint16_t>(
+    uint16_t value, uint16_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<uint32_t>(
+    uint32_t value, uint32_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<int8_t>(int8_t value, int8_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<int16_t>(
+    int16_t value, int16_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<int32_t>(
+    int32_t value, int32_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);

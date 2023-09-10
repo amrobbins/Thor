@@ -1195,11 +1195,17 @@ __global__ void log10Dest4B(DEST_DATA_TYPE *dest, half *argument, uint64_t numEl
  */
 void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
     assert(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(base.getPlacement() == exponent.getPlacement());
     assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((base.getDataType() == TensorDescriptor::DataType::FP32 && exponent.getDataType() == TensorDescriptor::DataType::FP32));
     assert(base.getTotalNumElements() == exponent.getTotalNumElements());
     assert(base.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = base.getTotalNumElements();
@@ -1237,8 +1243,13 @@ void Tensor::pow(Tensor base, Tensor exponent, Stream stream) {
  */
 void Tensor::pow(Tensor base, float exponent, Stream stream) {
     assert(base.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(base.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(base.getDataType() == TensorDescriptor::DataType::FP32);
     assert(base.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = base.getTotalNumElements();
@@ -1276,8 +1287,13 @@ void Tensor::pow(Tensor base, float exponent, Stream stream) {
  */
 void Tensor::pow(float base, Tensor exponent, Stream stream) {
     assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(exponent.getDataType() == TensorDescriptor::DataType::FP32);
     assert(exponent.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = exponent.getTotalNumElements();
@@ -1316,8 +1332,13 @@ void Tensor::pow(float base, Tensor exponent, Stream stream) {
  */
 void Tensor::exp(Tensor exponent, Stream stream) {
     assert(exponent.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(exponent.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(exponent.getDataType() == TensorDescriptor::DataType::FP32);
     assert(exponent.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = exponent.getTotalNumElements();
@@ -1356,8 +1377,13 @@ void Tensor::exp(Tensor exponent, Stream stream) {
  */
 void Tensor::log(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3152,10 +3178,15 @@ __global__ void lgammaDest4B(DEST_DATA_TYPE *dest, float *argument, uint64_t num
  */
 void Tensor::log(Tensor argument, float base, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
 
     assert(base > 0.0f && base != 1.0f);
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3307,8 +3338,13 @@ void Tensor::log(Tensor argument, float base, Stream stream) {
  */
 void Tensor::ceil(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3369,8 +3405,13 @@ void Tensor::ceil(Tensor argument, Stream stream) {
  */
 void Tensor::floor(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3431,8 +3472,13 @@ void Tensor::floor(Tensor argument, Stream stream) {
  */
 void Tensor::round(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3492,8 +3538,13 @@ void Tensor::round(Tensor argument, Stream stream) {
  */
 void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3554,8 +3605,13 @@ void Tensor::truncateFloatingPoint(Tensor argument, Stream stream) {
  */
 void Tensor::reciprocal(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(argument.getDataType() == TensorDescriptor::DataType::FP16);
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3594,8 +3650,13 @@ void Tensor::reciprocal(Tensor argument, Stream stream) {
  */
 void Tensor::sqrt(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3656,8 +3717,13 @@ void Tensor::sqrt(Tensor argument, Stream stream) {
  */
 void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
     assert(argument.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(argument.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert((argument.getDataType() == TensorDescriptor::DataType::FP32 || argument.getDataType() == TensorDescriptor::DataType::FP16));
     assert(argument.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = argument.getTotalNumElements();
@@ -3718,9 +3784,14 @@ void Tensor::reciprocalSqrt(Tensor argument, Stream stream) {
  */
 void Tensor::erf(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
@@ -3747,9 +3818,14 @@ void Tensor::erf(Tensor x, Stream stream) {
  */
 void Tensor::erfinv(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
@@ -3776,9 +3852,14 @@ void Tensor::erfinv(Tensor x, Stream stream) {
  */
 void Tensor::erfc(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
@@ -3804,9 +3885,14 @@ void Tensor::erfc(Tensor x, Stream stream) {
  */
 void Tensor::erfcinv(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
@@ -3833,9 +3919,14 @@ void Tensor::erfcinv(Tensor x, Stream stream) {
  */
 void Tensor::erfcx(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
@@ -3861,9 +3952,14 @@ void Tensor::erfcx(Tensor x, Stream stream) {
  */
 void Tensor::tgamma(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();
@@ -3889,9 +3985,14 @@ void Tensor::tgamma(Tensor x, Stream stream) {
  */
 void Tensor::lgamma(Tensor x, Stream stream) {
     assert(x.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(x.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(x.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(x.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType destDataType = getDataType();
     uint64_t numElements = x.getTotalNumElements();

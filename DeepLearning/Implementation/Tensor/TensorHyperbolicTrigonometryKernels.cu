@@ -803,9 +803,14 @@ __global__ void acothDest4B(DEST_DATA_TYPE *dest, SOURCE_DATA_TYPE *argument, ui
  */
 void Tensor::sinh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -832,9 +837,14 @@ void Tensor::sinh(Tensor radians, Stream stream) {
  */
 void Tensor::cosh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -861,9 +871,14 @@ void Tensor::cosh(Tensor radians, Stream stream) {
  */
 void Tensor::tanh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -890,9 +905,14 @@ void Tensor::tanh(Tensor radians, Stream stream) {
  */
 void Tensor::csch(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -919,9 +939,14 @@ void Tensor::csch(Tensor radians, Stream stream) {
  */
 void Tensor::sech(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -948,9 +973,14 @@ void Tensor::sech(Tensor radians, Stream stream) {
  */
 void Tensor::coth(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -977,9 +1007,14 @@ void Tensor::coth(Tensor radians, Stream stream) {
  */
 void Tensor::asinh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -1006,9 +1041,14 @@ void Tensor::asinh(Tensor radians, Stream stream) {
  */
 void Tensor::acosh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -1035,9 +1075,14 @@ void Tensor::acosh(Tensor radians, Stream stream) {
  */
 void Tensor::atanh(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -1064,9 +1109,14 @@ void Tensor::atanh(Tensor radians, Stream stream) {
  */
 void Tensor::acsch(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -1093,9 +1143,14 @@ void Tensor::acsch(Tensor radians, Stream stream) {
  */
 void Tensor::asech(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();
@@ -1122,9 +1177,14 @@ void Tensor::asech(Tensor radians, Stream stream) {
  */
 void Tensor::acoth(Tensor radians, Stream stream) {
     assert(radians.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(radians.getPlacement().getDeviceNum() == getPlacement().getDeviceNum());
     assert(radians.getDataType() == TensorDescriptor::DataType::FP32);
     assert(getDataType() == TensorDescriptor::DataType::FP32 || getDataType() == TensorDescriptor::DataType::FP16);
     assert(radians.getTotalNumElements() == getTotalNumElements());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
 
     TensorDescriptor::DataType sourceDataType = radians.getDataType();
     TensorDescriptor::DataType destDataType = getDataType();

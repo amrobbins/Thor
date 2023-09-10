@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -25,6 +26,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <omp.h>
 
 namespace ThorImplementation {
 
@@ -76,6 +78,8 @@ class Tensor : private ReferenceCounted {
     // however the memory is set per byte like other versions of memset. To make this clear, value is int8_t.
     void memset(int8_t value, uint64_t numElements = 0);
     void memsetAsync(Stream stream, int8_t value, uint64_t numElements = 0);
+    void clear();
+    void clearAsync(Stream stream);
 
     // setValues is intended as a test helper to easily populate an entire tensor
     // It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
@@ -90,6 +94,9 @@ class Tensor : private ReferenceCounted {
     void resize(std::vector<unsigned long> dimensions);
     void concatenateFrom(std::vector<Tensor> sources);
     void splitInto(std::vector<Tensor> destinations);
+
+    template <typename T>
+    void fill(const T value, Stream stream);
 
     // The scalar is casted to the type of the argument tensor, same behavior for the other scalar operations:
     // These functions perform the operation on the source tensor and write into this tensor
@@ -681,6 +688,9 @@ class Tensor : private ReferenceCounted {
     static std::atomic<unsigned long> nextInstanceId;
 
     void allocateMemory();
+
+    template <typename T>
+    void launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
 
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();
