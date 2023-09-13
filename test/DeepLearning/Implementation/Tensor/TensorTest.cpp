@@ -3499,7 +3499,7 @@ TEST(Tensor, FillCpu) {
 
         float fillValue;
         if (dt < 2) {
-            fillValue = (rand() % 100) / (1 + (rand() % 50));
+            fillValue = (rand() % 100) / (1.0 + (rand() % 50));
             if (rand() % 2)
                 fillValue = -fillValue;
         } else if (dt == 2) {
@@ -3629,7 +3629,7 @@ TEST(Tensor, FillGpu) {
 
         float fillValue;
         if (dt < 2) {
-            fillValue = (rand() % 100) / (1 + (rand() % 50));
+            fillValue = (rand() % 100) / (1.0 + (rand() % 50));
             if (rand() % 2)
                 fillValue = -fillValue;
         } else if (dt == 2) {
