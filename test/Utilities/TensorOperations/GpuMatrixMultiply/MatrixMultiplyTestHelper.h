@@ -92,6 +92,7 @@ void transpose(float *A, float *A_t, int rows, int cols, int ld) {
 void transposeHalf(half *A, half *A_t, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
+            // printf("[%d,%d] = [%d,%d]\n", j, i, i, j); fflush(stdout);
             A[j * rows + i] = A_t[i * ld + j];
         }
     }

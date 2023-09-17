@@ -139,6 +139,36 @@ void Tensor::destroy() {
     mem = nullptr;
 }
 
+template <typename ElementDataType>
+ElementDataType *Tensor::getMemPtr() {
+    assert(isInitialized());
+    assert(mem != nullptr);
+    // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
+    if (!(is_same<ElementDataType, void>::value)) {
+        if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+            assert((is_same<ElementDataType, half>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+            assert((is_same<ElementDataType, float>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+            assert((is_same<ElementDataType, int8_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+            assert((is_same<ElementDataType, int16_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+            assert((is_same<ElementDataType, int32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+            assert((is_same<ElementDataType, uint8_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+            assert((is_same<ElementDataType, uint16_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+            assert((is_same<ElementDataType, uint32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+            assert((is_same<ElementDataType, bool>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+            assert((is_same<ElementDataType, uint8_t>::value));
+    }
+    return (ElementDataType *)mem;
+}
+
 bool Tensor::isUsingExternallyManagedMemory() { return usingExternallyManagedMemory; }
 
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
@@ -458,7 +488,7 @@ void Tensor::setValues(vector<T> values, Stream stream) {
 }
 
 template <typename T>
-void Tensor::loadValuesIntoVector(std::vector<T> &values, Stream stream) {
+void Tensor::loadValuesIntoVector(vector<T> &values, Stream stream) {
     if (is_same<T, half>::value)
         assert(descriptor.getDataType() == TensorDescriptor::DataType::FP16);
     else if (is_same<T, float>::value)
@@ -528,7 +558,7 @@ void fillValue(void *params) {
     delete cpuFillParams;
 }
 
-// FIXME need to instantiate all template versions
+// Note: if T does not match the dataType of the tensor elements, T will be cast to the type of the elements
 template <typename T>
 void Tensor::fill(const T value, Stream stream) {
     TensorDescriptor::DataType dataType = getDataType();
@@ -663,6 +693,15 @@ void Tensor::transposeSquareMatrixInPlace(Stream stream) {
         assert(false);  // TODO
     }
 }
+
+template half *Tensor::getMemPtr();
+template float *Tensor::getMemPtr();
+template int8_t *Tensor::getMemPtr();
+template int16_t *Tensor::getMemPtr();
+template int32_t *Tensor::getMemPtr();
+template uint8_t *Tensor::getMemPtr();
+template uint16_t *Tensor::getMemPtr();
+template uint32_t *Tensor::getMemPtr();
 
 template void Tensor::setValues<half>(vector<half> values, Stream stream);
 template void Tensor::setValues<float>(vector<float> values, Stream stream);
