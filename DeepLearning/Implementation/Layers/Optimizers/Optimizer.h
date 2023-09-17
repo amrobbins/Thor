@@ -49,45 +49,7 @@ class Optimizer {
     /**
      * C = alpha * A + beta * C
      */
-    void accumulateScale(Tensor C, Tensor A, const void *alpha, const void *beta, Stream stream) {
-        // Verify compatibility
-        TensorDescriptor descriptorA = A.getDescriptor();
-        TensorDescriptor descriptorC = C.getDescriptor();
-        std::vector<uint64_t> dimensionsA = A.getDimensions();
-        std::vector<uint64_t> dimensionsC = C.getDimensions();
-
-        assert(dimensionsA.size() > 0);
-        assert(dimensionsA.size() <= 5);
-        assert(dimensionsC.size() > 0);
-        assert(dimensionsC.size() <= 5);
-        assert(dimensionsA.size() == dimensionsC.size());
-
-        assert(descriptorA.getDataType() == descriptorC.getDataType());
-
-        for (uint32_t i = 0; i < dimensionsA.size(); ++i) {
-            assert(dimensionsA[i] > 0);
-            assert(dimensionsC[i] > 0);
-            assert(dimensionsA[i] == dimensionsC[i] || dimensionsA[i] == 1);
-        }
-
-        if (descriptorA != previousDescriptorA) {
-            previousDescriptorA = descriptorA;
-            cudnnTensorDescriptorA = Layer::createCudnnTensorDescriptor(dimensionsA, descriptorA.getDataType());
-        }
-        if (descriptorC != previousDescriptorC) {
-            previousDescriptorC = descriptorC;
-            cudnnTensorDescriptorC = Layer::createCudnnTensorDescriptor(dimensionsC, descriptorC.getDataType());
-        }
-
-        cudnnStatus_t cudnnStatus = cudnnAddTensor(
-            stream.getCudnnHandle(), alpha, cudnnTensorDescriptorA, A.getMemPtr(), beta, cudnnTensorDescriptorC, C.getMemPtr());
-
-        if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
-            printf("cudnnStatus %d : %s\n", cudnnStatus, cudnnGetErrorString(cudnnStatus));
-            fflush(stdout);
-        }
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-    }
+    void accumulateScale(Tensor C, Tensor A, const void *alpha, const void *beta, Stream stream);
 
    protected:
     uint64_t currentEpoch;

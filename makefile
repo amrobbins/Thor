@@ -1,5 +1,5 @@
 CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include
-CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn /lib/x86_64-linux-gnu/libboost_filesystem.a -lX11
+CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn -l boost_filesystem -lX11
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
 # https://en.wikipedia.org/wiki/CUDA#GPUs_supported
 COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_62,code=compute_62 -gencode=arch=compute_62,code=sm_62 \
@@ -1014,7 +1014,7 @@ build/test/DeepLearning/Api/Optimizers/AdamTest: build/test/googletest/libgtest.
 	mkdir -p build/test/DeepLearning/Api/Optimizers
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Optimizers/AdamTest test/DeepLearning/Api/Optimizers/AdamTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Optimizers/SgdTest.cpp $(THOR)
+build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Optimizers/SgdTest.cpp test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Optimizers
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest test/DeepLearning/Implementation/Layers/Optimizers/SgdTest.cpp -std=c++11 -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
