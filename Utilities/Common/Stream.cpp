@@ -122,3 +122,12 @@ void Stream::setMaxNumDownloadStreams(uint32_t numDownloadStreams) {
 
     maxNumDownloadStreams = numDownloadStreams;
 }
+
+void cleanUpHostFunctionArgs(Stream stream, HostFunctionArgsBase *args) {
+    stream.synchronize();
+    delete args;
+}
+
+void launchCleanUpHostFunctionArgs(Stream stream, HostFunctionArgsBase *args) {
+    ThreadJoinQueue::instance().push(std::thread(&cleanUpHostFunctionArgs, stream, args));
+}

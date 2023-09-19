@@ -44,13 +44,14 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     weightsGradient = weights.clone();
 
     Optional<Tensor> biases = trainableLayer->getBiases();
-    if (biases.isPresent())
+    if (biases.isPresent()) {
         biasesGradient = biases.get().clone();
+    }
 
-    if (momentum > 0.) {
+    if (momentum > 0.0f) {
         weightsUpdate = weightsGradient.clone();
         weightsUpdate.memset(0);
-        if (biasesUpdate.isPresent()) {
+        if (biases.isPresent()) {
             assert(biasesGradient.isPresent());
             biasesUpdate = biasesGradient.get().clone();
             biasesUpdate.get().memset(0);

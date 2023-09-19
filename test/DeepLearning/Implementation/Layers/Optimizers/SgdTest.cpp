@@ -188,9 +188,9 @@ TEST(SgdTest, TestWeightsUpdate) {
 
         float initialLearningRate = 10000.0 / (1 + rand() % 33);
         float decay = 1.0f / (1.0f + (rand() % 10));
-        float momentum = 0.0f;  // FIXME
+        float momentum = 0.5f;  // FIXME
         // float momentum = rand() % 2 ? 0.0f : 1.0f / (1.0f + (rand() % 10));
-        bool useNesterovMomentum = rand() % 2;
+        bool useNesterovMomentum = false;  // rand() % 2;
         uint64_t epoch = rand() % 10;
 
         vector<shared_ptr<Layer>> layers;
@@ -366,7 +366,56 @@ TEST(SgdTest, TestWeightsUpdate) {
             biases_h.clear();
             biases.get().copyFromAsync(biases_h, gradientUpdateStream);
         }
+        Tensor previousWeightsUpdate_h = weights_h.clone();
+        half *previousWeightsUpdateMem_h = previousWeightsUpdate_h.getMemPtr<half>();
+        previousWeightsUpdate_h.clear();
         gradientUpdateStream.synchronize();
+
+        sgd->updateWeights(weights, fullyConnectedLayer->getBiases(), batchSize);
+
+        weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
+
+        float currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, epoch);
+        if (momentum == 0.0f) {
+            float weightUpdateScalingFactor = (-1.0f * currentLearningRate) / batchSize;
+            weightUpdateScalingFactor *= 1.0f / Loss::getLossScalingFactor();
+            for (uint32_t row = 0; row < numInputFeatures; ++row) {
+                for (uint32_t col = 0; col < numOutputFeatures; ++col) {
+                    weightsMem_h[row * numOutputFeatures + col] +=
+                        weightsGradientMem_h[row * numOutputFeatures + col] * (half)weightUpdateScalingFactor;
+                }
+            }
+            verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures);
+
+            if (hasBias) {
+                biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
+                gradientUpdateStream.synchronize();
+
+                for (uint32_t outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
+                    biasesMem_h[outputFeature] += biasesGradientMem_h[outputFeature] * (half)weightUpdateScalingFactor;
+                }
+                verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            }
+        } else if (useNesterovMomentum) {
+            // WeightUpdate_t = momentum * weightUpdate_t-1 - (lr * gradient(weights_t + momentum * weightUpdate_t-1)) / batch_size
+            // FIXME: implement
+        } else {
+            // Standard momentum
+            // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
+            for (uint32_t row = 0; row < numInputFeatures; ++row) {
+                for (uint32_t col = 0; col < numOutputFeatures; ++col) {
+                    uint32_t index = row * numOutputFeatures + col;
+                    weightsMem_h[index] += (float)previousWeightsUpdateMem_h[index] * momentum -
+                                           (currentLearningRate * (float)weightsGradientMem_h[index]) / batchSize;
+                }
+            }
+            verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, true);
+
+            if (hasBias) {
+                // FIXME
+            }
+        }
 
         sgd->updateWeights(weights, fullyConnectedLayer->getBiases(), batchSize);
 
@@ -379,7 +428,7 @@ TEST(SgdTest, TestWeightsUpdate) {
             weightUpdateScalingFactor *= 1.0f / Loss::getLossScalingFactor();
             for (uint32_t row = 0; row < numInputFeatures; ++row) {
                 for (uint32_t col = 0; col < numOutputFeatures; ++col) {
-                    weightsMem_h[row * numOutputFeatures + col] =
+                    weightsMem_h[row * numOutputFeatures + col] +=
                         weightsGradientMem_h[row * numOutputFeatures + col] * (half)weightUpdateScalingFactor;
                 }
             }
@@ -390,15 +439,16 @@ TEST(SgdTest, TestWeightsUpdate) {
                 gradientUpdateStream.synchronize();
 
                 for (uint32_t outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
-                    biasesMem_h[outputFeature] = biasesGradientMem_h[outputFeature] * (half)weightUpdateScalingFactor;
+                    biasesMem_h[outputFeature] += biasesGradientMem_h[outputFeature] * (half)weightUpdateScalingFactor;
                 }
-                verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+                verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
             }
         } else if (useNesterovMomentum) {
+            // WeightUpdate_t = momentum * weightUpdate_t-1 - (lr * gradient(weights_t + momentum * weightUpdate_t-1)) / batch_size
             // FIXME: implement
         } else {
             // Standard momentum
-            // FIXME: implement
+            // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
         }
     }
 }

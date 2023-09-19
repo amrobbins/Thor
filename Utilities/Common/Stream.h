@@ -5,6 +5,7 @@
 #include "ScopedGpu.h"
 #include "Utilities/Common/Optional.h"
 #include "Utilities/Common/ReferenceCounted.h"
+#include "Utilities/Common/ThreadJoinQueue.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn.h>
@@ -15,7 +16,9 @@
 #include <assert.h>
 #include <stdio.h>
 #include <deque>
+#include <future>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 
 #define DEBUG_REF_COUNTS
@@ -275,3 +278,13 @@ class Stream : private ReferenceCounted {
 
     std::mutex *mtx;
 };
+
+// The following struct is defined to be a base class of the struct that will hold the args to the function that is enqueued.
+// The reason for this is that it declares a virtual method so that I can use a dynamic cast to ensure everything is correct.
+// Also on the enqueued thread I can't call any cuda function, so I can't delete a tensor for example, so this base class
+// allows the parameters to be deleted on another thread.
+struct HostFunctionArgsBase {
+    virtual ~HostFunctionArgsBase() {}
+};
+
+void launchCleanUpHostFunctionArgs(Stream stream, HostFunctionArgsBase *args);

@@ -84,7 +84,9 @@ class CublasMatrixMultiply {
 
     // This exposes the full GEMM functionality using an optimal kernel
     // D = alpha*(A*B) + beta*(C)
-    // C and D may be the same tensor. It should be this way for beta = 0 because then no tensor will be loaded for the addition stage.
+    // C and D may be the same tensor.
+    // When beta = 0, then no tensor will be loaded for the addition stage, so you can fill the C parameter with D,
+    // since you need to pass some compatible tensor and D is compatible.
     // When C and D are the same tensor transposeC must be false:
     // https://docs.nvidia.com/cuda/archive/10.2/cublas/index.html#cublasLtMatmulDescAttributes_t
     void gemm(Tensor A,
@@ -132,7 +134,9 @@ class CublasMatrixMultiply {
 
     // This exposes the full GEMM functionality using an optimal kernel
     // D = alpha*(A*B) + beta*(C)
-    // C and D may be the same tensor. It should be this way for beta = 0 because then no tensor will be loaded for the addition stage.
+    // C and D may be the same tensor.
+    // When beta = 0, then no tensor will be loaded for the addition stage, so you can fill the C parameter with D,
+    // since you need to pass some compatible tensor and D is compatible.
     // When C and D are the same tensor transposeC must be false:
     // https://docs.nvidia.com/cuda/archive/10.2/cublas/index.html#cublasLtMatmulDescAttributes_t
     //

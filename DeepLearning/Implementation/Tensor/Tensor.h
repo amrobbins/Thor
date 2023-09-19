@@ -13,6 +13,7 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -74,6 +75,12 @@ class Tensor : private ReferenceCounted {
 
     void moveFromAsync(Tensor source, Stream stream);
 
+    // The values are set at the end of stream
+    static Tensor zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
+    static Tensor ones(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
+    static Tensor randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, float minValue, float maxValue);
+    static Tensor identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream);
+
     // numElements = 0 indicates all elements
     // Note that this takes num elements as its parameter rather than num bytes like regular memset
     // however the memory is set per byte like other versions of memset. To make this clear, value is int8_t.
@@ -81,6 +88,9 @@ class Tensor : private ReferenceCounted {
     void memsetAsync(Stream stream, int8_t value, uint64_t numElements = 0);
     void clear();
     void clearAsync(Stream stream);
+
+    // Note minValue and maxValue are igorned for boolean types.
+    void fillRandom(double minValue, double maxValue, Stream stream);
 
     // setValues is intended as a test helper to easily populate an entire tensor
     // It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
@@ -96,8 +106,7 @@ class Tensor : private ReferenceCounted {
     void concatenateFrom(std::vector<Tensor> sources);
     void splitInto(std::vector<Tensor> destinations);
 
-    template <typename T>
-    void fill(const T value, Stream stream);
+    void fill(const double value, Stream stream);
 
     // The scalar is casted to the type of the argument tensor, same behavior for the other scalar operations:
     // These functions perform the operation on the source tensor and write into this tensor
@@ -167,6 +176,47 @@ class Tensor : private ReferenceCounted {
     void subtract(Tensor minuend, Tensor subtrahend, Stream stream);
 
     /**
+     * This operation is defined by the shape of the input tensors.
+     *
+     * All 1 dimensional tensors will be interpreted as having 2 dimensions with a size 1 second (columns) dimension.
+     *
+     * 1. If either input tensor is one element, then this will result in a tensor scaling operation. (i.e. scalar broadcast multiplication)
+     * 2. If both inputs are vectors of the same shape, an element-wise multiplication will be performed.
+     *    i.e. Two column vectors of dimensions (N,1) or two row vectors of dimensions (1,N)
+     * 3. If both inputs are matrices of compatible sizes then a matrix multiplication will be performed.
+     *    Note that there is no overlap between cases 2 and 3 except where both tensors contain a single element, in which case scalar
+     *    multiplication will be performed as described in (1).
+     * 4. If one tensor has more than 2 dimensions and the other tensor is not a scalar, the operation is not supported.
+     *
+     * </div>
+     * Note: for case 3 (matrix matrix multiply) using CublasMatrixMultiply and finding the optimal kernel is preferred, whereas this
+     * version uses a heuristic kernel choice. Also CublasMatrixMultiply gives more options, such as scaling and transposing and allowing
+     * non-packed leading dimensions. CublasMatrixMultiply is used for the implementation here, where its full API is not exposed.
+     *
+     * <div/>
+     * multiplicand and multiplier need to be of the same data type. And for case 3 that data type must be FP16 or FP32.
+     */
+    void multiply(Tensor multiplicand, Tensor multiplier, Stream stream);
+
+    /**
+     * [thisTensor] = alpha * [A] * [B] + beta * [C]
+     *
+     * The shape of all tensors must be matrices with dimensions that are valid for this computation, specifically that:
+     * A_cols == B_rows, A_rows == C_rows, B_cols == C_cols, thisTensor_dimensions = C_dimensions.
+     * Tensors with 1 dimension are taken to be a matrix with a column size of 1.
+     * When beta = 0.0f, then C is not loaded and can be empty.
+     *
+     * </div>
+     * Note: Using CublasMatrixMultiply and finding the optimal kernel is preferred, whereas this version uses a heuristic kernel choice.
+     *       Also CublasMatrixMultiply gives more options, such as scaling and transposing and allowing non-packed leading dimensions.
+     *       CublasMatrixMultiply is used for the implementation here, where its full API is not exposed.
+     *
+     * <div/>
+     * A, B and C must be the same data type and must be either FP16 or FP32.
+     */
+    void gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float beta, Stream stream);
+
+    /**
      * [thisTensor] = [multiplicand] * multiplier, elementwise
      * <div/>
      * multiplier is first cast to the data type of multiplicand.
@@ -181,11 +231,18 @@ class Tensor : private ReferenceCounted {
     void multiply(double multiplicand, Tensor multiplier, Stream stream);
 
     /**
-     * [thisTensor] = [multiplicand] * [multiplier], elementwise
+     * [thisTensor] = A · B
      * <div/>
-     * multiplicand and multiplier need to be of the same data type.
+     * AKA inner product. All tensors must be the same data type.
      */
-    void multiply(Tensor multiplicand, Tensor multiplier, Stream stream);
+    void dotProduct(Tensor A, Tensor B, Stream stream);
+
+    /**
+     * [thisTensor] = A ⊗ B
+     * <div/>
+     * All tensors must be the same data type.
+     */
+    void outerProduct(Tensor A, Tensor B, Stream stream);
 
     /**
      * [thisTensor] = [numerator] / denominator, elementwise
@@ -301,12 +358,38 @@ class Tensor : private ReferenceCounted {
     void truncateFloatingPoint(Tensor argument, Stream stream);
 
     /**
+     * [thisTensor] = [tensor] * scalar, elementwise
+     *
+     * <div/>
+     * Both tensors need to be of the same size and type.
+     */
+    void multiplyTensorScalar(Tensor tensor, Tensor scalar, Stream stream);
+
+    /**
+     * [thisTensor] = [tensor] * scalar, elementwise
+     *
+     * <div/>
+     * Both tensors need to be of the same size and type.
+     */
+    void multiplyScalarTensor(Tensor scalar, Tensor tensor, Stream stream);
+
+    /**
+     * [thisTensor] = [multiplicand] * [multiplier], elementwise
+     *
+     * <div/>
+     * Both tensors need to be of the same size and type.
+     */
+    void multiplyElementwise(Tensor multiplicand, Tensor multiplier, Stream stream);
+
+    /**
      * [thisTensor] = [a] * [b] + [c], elementwise
      * <div/>
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
+     *
+     * Note: if you had been looking for a GEMM operation rather than this element-wise one, see class CublasMatrixMultiply.
      */
-    void multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream);
+    void multiplyAccumulateElementwise(Tensor a, Tensor b, Tensor c, Stream stream);
 
     /**
      * [thisTensor] = 1 / [argument], elementwise
@@ -692,6 +775,7 @@ class Tensor : private ReferenceCounted {
 
     template <typename T>
     void launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+    void fillGpuIdentityMatrixOnes(Stream stream);
 
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();

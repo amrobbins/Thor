@@ -385,6 +385,10 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
 }
 
 void Tensor::memset(int8_t value, uint64_t numElements) {
+    // On GPU this would require device synchronization so this is not supported.
+    assert(placement.getMemDevice() != TensorPlacement::MemDevices::GPU);
+    assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU);
+
     uint64_t numBytes;
     if (numElements == 0) {
         numBytes = getArraySizeInBytes();
@@ -397,39 +401,110 @@ void Tensor::memset(int8_t value, uint64_t numElements) {
         }
     }
 
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(placement.getDeviceNum());
-        cudaError_t cudaStatus;
-        cudaStatus = cudaMemset(mem, 0, numBytes);
-        assert(cudaStatus == cudaSuccess);
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        // invoke global memset instead of member function memset
-        ::memset(mem, value, numBytes);
+    // invoke global memset instead of member function memset
+    ::memset(mem, value, numBytes);
+}
+
+struct IdentityMatrixArgs : HostFunctionArgsBase {
+    IdentityMatrixArgs(Tensor tensor) : tensor(tensor) {}
+    Tensor tensor;
+};
+
+void fillCpuIdentityMatrixOnes(void *data) {
+    HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
+    assert(baseArgs != nullptr);
+    IdentityMatrixArgs *args = dynamic_cast<IdentityMatrixArgs *>(baseArgs);
+    assert(args != nullptr);
+
+    assert(args->tensor.getPlacement() == TensorPlacement::MemDevices::CPU);
+    TensorDescriptor::DataType dataType = args->tensor.getDataType();
+
+    uint64_t N = args->tensor.getDimensions()[0];
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        half *mem = args->tensor.getMemPtr<half>();
+        for (uint32_t i = 0; i < N; ++i)
+            mem[i * N + i] = 1.0f;
     } else {
-        assert(false);
+        float *mem = args->tensor.getMemPtr<float>();
+        for (uint32_t i = 0; i < N; ++i)
+            mem[i * N + i] = 1.0f;
     }
 }
 
-void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
-    assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream) {
+    assert(dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32);
+    Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
-    uint64_t numBytes;
-    if (numElements == 0) {
-        numBytes = getArraySizeInBytes();
+    if (placement == TensorPlacement::MemDevices::CPU) {
+        tensor.clearAsync(stream);
+        HostFunctionArgsBase *args = new IdentityMatrixArgs(tensor);
+        stream.enqueueHostFunction(fillCpuIdentityMatrixOnes, args);
+        launchCleanUpHostFunctionArgs(stream, args);
     } else {
-        // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
-        if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-            assert(numElements % 8 == 0);
-            numBytes = numElements / 8;
-        } else {
-            numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
-        }
+        tensor.clearAsync(stream);
+        tensor.fillGpuIdentityMatrixOnes(stream);
     }
 
-    ScopedGpu scopedGpu(placement.getDeviceNum());
-    cudaError_t cudaStatus;
-    cudaStatus = cudaMemsetAsync(mem, value, numBytes, stream);
-    assert(cudaStatus == cudaSuccess);
+    return tensor;
+}
+
+Tensor Tensor::zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream) {
+    Tensor tensor(placement, descriptor);
+    tensor.fill(0, stream);
+    return tensor;
+}
+
+Tensor Tensor::ones(TensorPlacement placement, TensorDescriptor descriptor, Stream stream) {
+    Tensor tensor(placement, descriptor);
+    tensor.fill(1, stream);
+    return tensor;
+}
+
+Tensor Tensor::randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, float minValue, float maxValue) {
+    Tensor tensor(placement, descriptor);
+    tensor.fillRandom(minValue, maxValue, stream);
+    return tensor;
+}
+
+struct MemsetArgs : HostFunctionArgsBase {
+    MemsetArgs(Tensor tensor, int8_t value, uint64_t numElements) : tensor(tensor), value(value), numElements(numElements) {}
+    Tensor tensor;
+    int8_t value;
+    uint64_t numElements;
+};
+
+void callMemsetOnTensor(void *data) {
+    HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
+    assert(baseArgs != nullptr);
+    MemsetArgs *args = dynamic_cast<MemsetArgs *>(baseArgs);
+    assert(args != nullptr);
+    args->tensor.memset(args->value, args->numElements);
+}
+
+void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        uint64_t numBytes;
+        if (numElements == 0) {
+            numBytes = getArraySizeInBytes();
+        } else {
+            // If you need to set part of the last packed boolean to 0, you will need 2 calls to memset, one for zeros one for last value.
+            if (getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+                assert(numElements % 8 == 0);
+                numBytes = numElements / 8;
+            } else {
+                numBytes = numElements * (getArraySizeInBytes() / getTotalNumElements());
+            }
+        }
+
+        ScopedGpu scopedGpu(placement.getDeviceNum());
+        cudaError_t cudaStatus;
+        cudaStatus = cudaMemsetAsync(mem, value, numBytes, stream);
+        assert(cudaStatus == cudaSuccess);
+    } else {
+        HostFunctionArgsBase *args = new MemsetArgs(*this, value, numElements);
+        stream.enqueueHostFunction(callMemsetOnTensor, args);
+        launchCleanUpHostFunctionArgs(stream, args);
+    }
 }
 
 void Tensor::clear() { this->memset(0); }
@@ -446,6 +521,348 @@ string Tensor::dimensionsToString() {
     }
     s += "]";
     return s;
+}
+
+struct FillRandomArgs : HostFunctionArgsBase {
+    FillRandomArgs(Tensor tensor, double minValue, double maxValue) : tensor(tensor), minValue(minValue), maxValue(maxValue) {}
+    Tensor tensor;
+    double minValue;
+    double maxValue;
+};
+
+void fillCpuRandom(void *data) {
+    HostFunctionArgsBase *baseArgs = static_cast<HostFunctionArgsBase *>(data);
+    assert(baseArgs != nullptr);
+    FillRandomArgs *args = dynamic_cast<FillRandomArgs *>(baseArgs);
+    assert(args != nullptr);
+
+    assert(args->tensor.getPlacement() == TensorPlacement::MemDevices::CPU);
+    TensorDescriptor::DataType dataType = args->tensor.getDataType();
+
+    random_device rd;
+    Tensor tensor = args->tensor;
+    double minValue = args->minValue;
+    double maxValue = args->maxValue;
+    uint64_t numElements = tensor.getTotalNumElements();
+    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
+    const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        half *mem = tensor.getMemPtr<half>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (half)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (half)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        float *mem = tensor.getMemPtr<float>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (float)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (float)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        int8_t *mem = tensor.getMemPtr<int8_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (int8_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (int8_t)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        int16_t *mem = tensor.getMemPtr<int16_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (int16_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (int16_t)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        int32_t *mem = tensor.getMemPtr<int32_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (int32_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (int32_t)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        uint8_t *mem = tensor.getMemPtr<uint8_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (uint8_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (uint8_t)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        uint16_t *mem = tensor.getMemPtr<uint16_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (uint16_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (uint16_t)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        uint32_t *mem = tensor.getMemPtr<uint32_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (uint32_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (uint32_t)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+        minValue = 0;
+        maxValue = 1;
+        bool *mem = tensor.getMemPtr<bool>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (bool)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (bool)dis(gen);
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+        minValue = 0b00000000;
+        maxValue = 0b11111111;
+        numElements = (numElements + 7) / 8;
+        const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
+        const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+
+        uint8_t *mem = tensor.getMemPtr<uint8_t>();
+        if (numProcs > 1) {
+#pragma omp parallel num_threads(numProcs)
+            {
+                random_device rd_private;   // Create a private random device for each thread
+                mt19937 gen(rd_private());  // Use the private random device
+                uniform_real_distribution<double> dis(minValue, maxValue);
+
+#pragma omp for schedule(static, elementsPerThread)
+                for (uint64_t i = 0; i < numElements; ++i) {
+                    mem[i] = (uint8_t)dis(gen);
+                }
+            }
+        } else {
+            random_device rd_private;   // Create a private random device for each thread
+            mt19937 gen(rd_private());  // Use the private random device
+            uniform_real_distribution<double> dis(minValue, maxValue);
+
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = (uint8_t)dis(gen);
+            }
+        }
+    }
+}
+
+void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    random_device rd;
+    mt19937 gen(rd());
+    if (maxValue < minValue)
+        swap(maxValue, minValue);
+    uniform_real_distribution<double> dis(minValue, maxValue);
+
+    if (getPlacement() == TensorPlacement::MemDevices::CPU) {
+        HostFunctionArgsBase *args = new FillRandomArgs(*this, minValue, maxValue);
+        stream.enqueueHostFunction(fillCpuRandom, args);
+        launchCleanUpHostFunctionArgs(stream, args);
+    } else {
+        // FIXME: GPU implementation
+        // launchGpuFilLRandom(*this, minValue, maxValue, stream);
+    }
+
+    /*
+    TensorDescriptor::DataType dataType = getDataType();
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        half *mem = (half *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (half)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        float *mem = (float *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (float)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        assert(maxValue <= 127 && minValue >= -128);
+        int8_t *mem = (int8_t *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (int8_t)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        assert(maxValue <= 32768 && minValue >= -32768);
+        int16_t *mem = (int16_t *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (int16_t)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        assert(maxValue <= 2147483647 && minValue >= -2147483648);
+        int32_t *mem = (int32_t *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (int32_t)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        assert(maxValue <= 255 && minValue >= 0);
+        uint8_t *mem = (uint8_t *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (uint8_t)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        assert(maxValue <= 65535 && minValue >= 0);
+        uint16_t *mem = (uint16_t *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (uint16_t)dis(gen);
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        assert(maxValue <= 4294967295 && minValue >= 0);
+        uint32_t *mem = (uint32_t *)getMemPtr();
+        uint64_t numElements = getTotalNumElements();
+        for (uint64_t i = 0; i < numElements; ++i) {
+            mem[i] = (uint32_t)dis(gen);
+        }
+    }
+     */
 }
 
 // setValues is intended as a test helper to easily populate an entire tensor
@@ -526,136 +943,201 @@ void Tensor::loadValuesIntoVector(vector<T> &values, Stream stream) {
         values.push_back(mem[i]);
 }
 
-// The following uses inheritance only so that I can use dynamic_cast of the void* that I am forced to accept as my parameter.
-struct CpuFillParamsBase {
-    virtual ~CpuFillParamsBase() = default;
+struct CpuFillParams : HostFunctionArgsBase {
+    CpuFillParams(double value, Tensor tensor) : value(value), tensor(tensor) {}
+
+    double value;
+    Tensor tensor;
 };
 
-template <typename T>
-struct CpuFillParams : CpuFillParamsBase {
-    CpuFillParams(T value, T *mem, uint64_t numElements) : value(value), mem(mem), numElements(numElements) {}
-
-    T value;
-    T *mem;
-    uint64_t numElements;
-};
-
-template <typename T>
 void fillValue(void *params) {
-    CpuFillParamsBase *baseParams = static_cast<CpuFillParamsBase *>(params);
+    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
     assert(baseParams != nullptr);
-    CpuFillParams<T> *cpuFillParams = dynamic_cast<CpuFillParams<T> *>(baseParams);
+    CpuFillParams *cpuFillParams = dynamic_cast<CpuFillParams *>(baseParams);
     assert(cpuFillParams != nullptr);
 
-    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), cpuFillParams->numElements / 1000000), uint64_t(1));
+    uint64_t numElements = cpuFillParams->tensor.getTotalNumElements();
+    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
+    const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
-#pragma omp parallel for schedule(static, numProcs) shared(numProcs, cpuFillParams) default(none)
-    for (uint64_t i = 0; i < cpuFillParams->numElements; ++i) {
-        cpuFillParams->mem[i] = cpuFillParams->value;
-    }
+    TensorDescriptor::DataType dataType = cpuFillParams->tensor.getDataType();
 
-    // fillValue function is responsible for deleting its params
-    delete cpuFillParams;
-}
-
-// Note: if T does not match the dataType of the tensor elements, T will be cast to the type of the elements
-template <typename T>
-void Tensor::fill(const T value, Stream stream) {
-    TensorDescriptor::DataType dataType = getDataType();
     if (dataType == TensorDescriptor::DataType::FP16) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<half> *fillValueParams = new CpuFillParams<half>((half)(float)value, (half *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<half>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<half>(
-                (half)(float)value, (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        half *mem = cpuFillParams->tensor.getMemPtr<half>();
+        half value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
         }
     } else if (dataType == TensorDescriptor::DataType::FP32) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<float> *fillValueParams = new CpuFillParams<float>(value, (float *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<float>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<uint8_t> *fillValueParams = new CpuFillParams<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<uint8_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<uint16_t> *fillValueParams = new CpuFillParams<uint16_t>(value, (uint16_t *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<uint16_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<uint16_t>(
-                value, (uint16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<uint32_t> *fillValueParams = new CpuFillParams<uint32_t>(value, (uint32_t *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<uint32_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<uint32_t>(
-                value, (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        float *mem = cpuFillParams->tensor.getMemPtr<float>();
+        float value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
         }
     } else if (dataType == TensorDescriptor::DataType::INT8) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<int8_t> *fillValueParams = new CpuFillParams<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<int8_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        int8_t *mem = cpuFillParams->tensor.getMemPtr<int8_t>();
+        int8_t value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
         }
     } else if (dataType == TensorDescriptor::DataType::INT16) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<int16_t> *fillValueParams = new CpuFillParams<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<int16_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        int16_t *mem = cpuFillParams->tensor.getMemPtr<int16_t>();
+        int16_t value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
         }
     } else if (dataType == TensorDescriptor::DataType::INT32) {
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<int32_t> *fillValueParams = new CpuFillParams<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements());
-            stream.enqueueHostFunction(fillValue<int32_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        int32_t *mem = cpuFillParams->tensor.getMemPtr<int32_t>();
+        int32_t value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        uint8_t *mem = cpuFillParams->tensor.getMemPtr<uint8_t>();
+        uint8_t value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        uint16_t *mem = cpuFillParams->tensor.getMemPtr<uint16_t>();
+        uint16_t value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        uint32_t *mem = cpuFillParams->tensor.getMemPtr<uint32_t>();
+        uint32_t value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        }
+    } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+        bool *mem = cpuFillParams->tensor.getMemPtr<bool>();
+        bool value = cpuFillParams->value;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
         }
     } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-        assert((float)value == 1 || (float)value == 0);
-        uint8_t packedValue = 0;
+        uint8_t *mem = cpuFillParams->tensor.getMemPtr<uint8_t>();
+        uint8_t value = cpuFillParams->value;
         if (value)
-            packedValue = 0b11111111;
-        uint64_t numPackedBytes = (getTotalNumElements() + 7) / 8;
-        if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // fillValue function is responsible for deleting its params
-            CpuFillParams<uint8_t> *fillValueParams = new CpuFillParams<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes);
-            stream.enqueueHostFunction(fillValue<uint8_t>, fillValueParams);
-        } else if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-            launchFillValueGpuKernel<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes, getPlacement().getDeviceNum(), stream);
+            value = 0b11111111;
+        numElements = (numElements + 7) / 8;
+        if (numProcs > 1) {
+#pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
+        } else {
+            for (uint64_t i = 0; i < numElements; ++i) {
+                mem[i] = value;
+            }
         }
-    } else {
-        assert(false);
     }
 }
 
-template void Tensor::fill(const half value, Stream stream);
-template void Tensor::fill(const float value, Stream stream);
-template void Tensor::fill(const uint8_t value, Stream stream);
-template void Tensor::fill(const uint16_t value, Stream stream);
-template void Tensor::fill(const uint32_t value, Stream stream);
-template void Tensor::fill(const int8_t value, Stream stream);
-template void Tensor::fill(const int16_t value, Stream stream);
-template void Tensor::fill(const int32_t value, Stream stream);
-template void Tensor::fill(const bool value, Stream stream);
+// Note: value will be cast to the type of the tensor elements
+void Tensor::fill(double value, Stream stream) {
+    TensorDescriptor::DataType dataType = getDataType();
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        HostFunctionArgsBase *args = new CpuFillParams(value, *this);
+        stream.enqueueHostFunction(fillValue, args);
+        launchCleanUpHostFunctionArgs(stream, args);
+    } else {
+        if (dataType == TensorDescriptor::DataType::FP16) {
+            launchFillValueGpuKernel<half>(
+                (half)(float)value, (half *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::FP32) {
+            launchFillValueGpuKernel<float>(value, (float *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT8) {
+            launchFillValueGpuKernel<uint8_t>(value, (uint8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT16) {
+            launchFillValueGpuKernel<uint16_t>(
+                value, (uint16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT32) {
+            launchFillValueGpuKernel<uint32_t>(
+                value, (uint32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::INT8) {
+            launchFillValueGpuKernel<int8_t>(value, (int8_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::INT16) {
+            launchFillValueGpuKernel<int16_t>(value, (int16_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::INT32) {
+            launchFillValueGpuKernel<int32_t>(value, (int32_t *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+            launchFillValueGpuKernel<bool>(value, (bool *)getMemPtr(), getTotalNumElements(), getPlacement().getDeviceNum(), stream);
+        } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+            uint8_t packedValue = 0;
+            if (value)
+                packedValue = 0b11111111;
+            uint64_t numPackedBytes = (getTotalNumElements() + 7) / 8;
+            launchFillValueGpuKernel<uint8_t>(packedValue, (uint8_t *)getMemPtr(), numPackedBytes, getPlacement().getDeviceNum(), stream);
+        } else {
+            assert(false);
+        }
+    }
+}
 
 Tensor Tensor::transposeMatrix(Stream stream) {
     vector<uint64_t> dimensions = getDimensions();
