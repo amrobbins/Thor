@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp"
 
 using namespace ThorImplementation;
 using namespace std;
@@ -113,6 +114,127 @@ __global__ void multiplyScalarMultiplier4B(DATA_TYPE *multiplicand, DATA_TYPE *d
     buffer[1] = buffer[1] * multiplier;
     buffer[2] = buffer[2] * multiplier;
     buffer[3] = buffer[3] * multiplier;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void multiplyScalarTensor1B(DATA_TYPE *tensor, DATA_TYPE *dest, DATA_TYPE *scalar, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE scalarBuffer = *scalar;
+
+    ((float2 *)buffer)[0] = ((float2 *)tensor)[offset8Elements];
+    buffer[0] = buffer[0] * scalarBuffer;
+    buffer[1] = buffer[1] * scalarBuffer;
+    buffer[2] = buffer[2] * scalarBuffer;
+    buffer[3] = buffer[3] * scalarBuffer;
+    buffer[4] = buffer[4] * scalarBuffer;
+    buffer[5] = buffer[5] * scalarBuffer;
+    buffer[6] = buffer[6] * scalarBuffer;
+    buffer[7] = buffer[7] * scalarBuffer;
+    ((float2 *)dest)[offset8Elements] = ((float2 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void multiplyScalarTensor2B(DATA_TYPE *tensor, DATA_TYPE *dest, DATA_TYPE *scalar, uint64_t numElements) {
+    DATA_TYPE buffer[8];
+
+    uint64_t offset = blockIdx.x * 2048 + threadIdx.x * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    DATA_TYPE scalarBuffer = *scalar;
+
+    ((double2 *)buffer)[0] = ((double2 *)tensor)[offset8Elements];
+    buffer[0] = buffer[0] * scalarBuffer;
+    buffer[1] = buffer[1] * scalarBuffer;
+    buffer[2] = buffer[2] * scalarBuffer;
+    buffer[3] = buffer[3] * scalarBuffer;
+    buffer[4] = buffer[4] * scalarBuffer;
+    buffer[5] = buffer[5] * scalarBuffer;
+    buffer[6] = buffer[6] * scalarBuffer;
+    buffer[7] = buffer[7] * scalarBuffer;
+    ((double2 *)dest)[offset8Elements] = ((double2 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 16 elements : 4096 elements processed per block
+// Note that this kernel is memory bandwidth bound
+__global__ void multiplyScalarTensorHalf(half *tensor, half *dest, half *scalar, uint64_t numElements) {
+    uint64_t offset = blockIdx.x * 4096 + 512 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
+    if (offset >= numElements)
+        return;
+    uint64_t offset8Elements = offset >> 3;
+
+    half scalarBuffer = *scalar;
+
+    half2 buffer[4];
+    half2 scalarHalf2;
+    scalarHalf2.x = scalarBuffer;
+    scalarHalf2.y = scalarBuffer;
+
+    // Note: all tensors end on 16 byte boundary
+    ((float4 *)buffer)[0] = ((float4 *)tensor)[offset8Elements];
+    buffer[0] = __hmul2(buffer[0], scalarHalf2);
+    buffer[1] = __hmul2(buffer[1], scalarHalf2);
+    buffer[2] = __hmul2(buffer[2], scalarHalf2);
+    buffer[3] = __hmul2(buffer[3], scalarHalf2);
+    ((float4 *)dest)[offset8Elements] = ((float4 *)buffer)[0];
+
+    offset += 256;
+    if (offset >= numElements)
+        return;
+    offset8Elements = offset >> 3;
+    ((float4 *)buffer)[0] = ((float4 *)tensor)[offset8Elements];
+    buffer[0] = __hmul2(buffer[0], scalarHalf2);
+    buffer[1] = __hmul2(buffer[1], scalarHalf2);
+    buffer[2] = __hmul2(buffer[2], scalarHalf2);
+    buffer[3] = __hmul2(buffer[3], scalarHalf2);
+    ((float4 *)dest)[offset8Elements] = ((float4 *)buffer)[0];
+}
+
+// Each block is 8 warps of 32 threads = 256 threads per block
+// each thread reads 8 elements : 2048 elements processed per block
+// Note that this kernel is memory bandwidth bound
+template <typename DATA_TYPE>
+__global__ void multiplyScalarTensor4B(DATA_TYPE *tensor, DATA_TYPE *dest, DATA_TYPE *scalar, uint64_t numElements) {
+    DATA_TYPE buffer[4];
+
+    uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
+    if (offset >= numElements)
+        return;
+    uint64_t offset4Elements = offset >> 2;
+
+    DATA_TYPE scalarBuffer = *scalar;
+
+    ((double2 *)buffer)[0] = ((double2 *)tensor)[offset4Elements];
+    buffer[0] = buffer[0] * scalarBuffer;
+    buffer[1] = buffer[1] * scalarBuffer;
+    buffer[2] = buffer[2] * scalarBuffer;
+    buffer[3] = buffer[3] * scalarBuffer;
+    ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
+
+    offset += 128;
+    if (offset >= numElements)
+        return;
+    offset4Elements = offset >> 2;
+    ((double2 *)buffer)[0] = ((double2 *)tensor)[offset4Elements];
+    buffer[0] = buffer[0] * scalarBuffer;
+    buffer[1] = buffer[1] * scalarBuffer;
+    buffer[2] = buffer[2] * scalarBuffer;
+    buffer[3] = buffer[3] * scalarBuffer;
     ((double2 *)dest)[offset4Elements] = ((double2 *)buffer)[0];
 }
 
@@ -2009,7 +2131,7 @@ __global__ void divideElementwise4B(DATA_TYPE *numerator, DATA_TYPE *dest, DATA_
 // each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
-__global__ void multiplyAccumulateDest1B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
+__global__ void multiplyAccumulateElementwiseDest1B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
     if (offset >= numElements)
         return;
@@ -2039,7 +2161,7 @@ __global__ void multiplyAccumulateDest1B(DEST_DATA_TYPE *dest, float *a, float *
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
-__global__ void multiplyAccumulateDest2B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
+__global__ void multiplyAccumulateElementwiseDest2B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -2078,7 +2200,7 @@ __global__ void multiplyAccumulateDest2B(DEST_DATA_TYPE *dest, float *a, float *
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
-__global__ void multiplyAccumulateDest4B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
+__global__ void multiplyAccumulateElementwiseDest4B(DEST_DATA_TYPE *dest, float *a, float *b, float *c, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -2117,7 +2239,7 @@ __global__ void multiplyAccumulateDest4B(DEST_DATA_TYPE *dest, float *a, float *
 // each thread reads 16 elements : 4096 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
-__global__ void multiplyAccumulateDest1B(DEST_DATA_TYPE *dest, half *a, half *b, half *c, uint64_t numElements) {
+__global__ void multiplyAccumulateElementwiseDest1B(DEST_DATA_TYPE *dest, half *a, half *b, half *c, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 8;
     if (offset >= numElements)
         return;
@@ -2155,7 +2277,7 @@ __global__ void multiplyAccumulateDest1B(DEST_DATA_TYPE *dest, half *a, half *b,
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
-__global__ void multiplyAccumulateDest2B(DEST_DATA_TYPE *dest, half *a, half *b, half *c, uint64_t numElements) {
+__global__ void multiplyAccumulateElementwiseDest2B(DEST_DATA_TYPE *dest, half *a, half *b, half *c, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -2202,7 +2324,7 @@ __global__ void multiplyAccumulateDest2B(DEST_DATA_TYPE *dest, half *a, half *b,
 // each thread reads 8 elements : 2048 elements processed per block
 // Note that this kernel is memory bandwidth bound
 template <typename DEST_DATA_TYPE>
-__global__ void multiplyAccumulateDest4B(DEST_DATA_TYPE *dest, half *a, half *b, half *c, uint64_t numElements) {
+__global__ void multiplyAccumulateElementwiseDest4B(DEST_DATA_TYPE *dest, half *a, half *b, half *c, uint64_t numElements) {
     uint64_t offset = blockIdx.x * 2048 + 256 * (threadIdx.x / 32) + (threadIdx.x % 32) * 4;
     if (offset >= numElements)
         return;
@@ -2665,7 +2787,60 @@ void Tensor::multiply(Tensor multiplicand, double multiplier, Stream stream) {
 
 void Tensor::multiply(double multiplicand, Tensor multiplier, Stream stream) { multiply(multiplier, multiplicand, stream); }
 
-void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
+void Tensor::multiplyTensorScalar(Tensor tensor, Tensor scalar, Stream stream) {
+    assert(tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(tensor.getDataType() == getDataType());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
+    TensorDescriptor::DataType dataType = tensor.getDataType();
+    uint64_t numElements = tensor.getTotalNumElements();
+    void *tensorMem = tensor.getMemPtr();
+    void *scalarMem = scalar.getMemPtr();
+    void *destMem = getMemPtr();
+
+    dim3 blockSize(256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        dim3 gridSize((numElements + 4095) / 4096);
+        multiplyScalarTensorHalf<<<gridSize, blockSize, 0, stream>>>((half *)tensorMem, (half *)destMem, (half *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::FP32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor4B<float>
+            <<<gridSize, blockSize, 0, stream>>>((float *)tensorMem, (float *)destMem, (float *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT8) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor1B<uint8_t>
+            <<<gridSize, blockSize, 0, stream>>>((uint8_t *)tensorMem, (uint8_t *)destMem, (uint8_t *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor2B<uint16_t>
+            <<<gridSize, blockSize, 0, stream>>>((uint16_t *)tensorMem, (uint16_t *)destMem, (uint16_t *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::UINT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor4B<uint32_t>
+            <<<gridSize, blockSize, 0, stream>>>((uint32_t *)tensorMem, (uint32_t *)destMem, (uint32_t *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT8) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor1B<int8_t>
+            <<<gridSize, blockSize, 0, stream>>>((int8_t *)tensorMem, (int8_t *)destMem, (int8_t *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT16) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor2B<int16_t>
+            <<<gridSize, blockSize, 0, stream>>>((int16_t *)tensorMem, (int16_t *)destMem, (int16_t *)scalarMem, numElements);
+    } else if (dataType == TensorDescriptor::DataType::INT32) {
+        dim3 gridSize((numElements + 2047) / 2048);
+        multiplyScalarTensor4B<int32_t>
+            <<<gridSize, blockSize, 0, stream>>>((int32_t *)tensorMem, (int32_t *)destMem, (int32_t *)scalarMem, numElements);
+    } else {
+        assert(false);
+    }
+}
+
+void Tensor::multiplyScalarTensor(Tensor scalar, Tensor tensor, Stream stream) { multiplyTensorScalar(tensor, scalar, stream); }
+
+void Tensor::multiplyElementwise(Tensor multiplicand, Tensor multiplier, Stream stream) {
     assert(multiplicand.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(multiplicand.getDataType() == multiplier.getDataType());
     assert(multiplicand.getDataType() == getDataType());
@@ -2718,6 +2893,146 @@ void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
     } else {
         assert(false);
     }
+}
+
+/**
+ * This operation is defined by the shape of the input tensors.
+ *
+ * All 1 dimensional tensors will be interpreted as having 2 dimensions with a size 1 second (columns) dimension.
+ *
+ * 1. If either input tensor is one element, then this will result in a tensor scaling operation. (i.e. scalar broadcast multiplication)
+ * 2. If both inputs are vectors of the same shape, an element-wise multiplication will be performed.
+ *    i.e. Two column vectors of dimensions (N,1) or two row vectors of dimensions (1,N)
+ * 3. If both inputs are matrices of compatible sizes then a matrix multiplication will be performed.
+ *    Note that there is no overlap between cases 2 and 3 except where both tensors contain a single element, in which case scalar
+ *    multiplication will be performed as described in (1).
+ * 4. If one tensor has more than 2 dimensions and the other tensor is not a scalar, the operation is not supported.
+ *
+ *
+ * <div/>
+ * multiplicand and multiplier need to be of the same data type.
+ */
+void Tensor::multiply(Tensor multiplicand, Tensor multiplier, Stream stream) {
+    assert(multiplicand.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(multiplicand.getDataType() == multiplier.getDataType());
+    assert(multiplicand.getDataType() == getDataType());
+
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
+    // Note that reshaping does not affect tensor that was passed in, this only takes effect here
+    if (multiplicand.getDimensions().size() == 1)
+        multiplicand.reshape({multiplicand.getDimensions()[0], 1});
+    if (multiplier.getDimensions().size() == 1)
+        multiplier.reshape({multiplier.getDimensions()[0], 1});
+    bool multiplicandIsVector =
+        multiplicand.getDimensions().size() == 2 && ((multiplicand.getDimensions()[0] == 1) || (multiplicand.getDimensions()[1] == 1));
+    bool multiplierIsVector =
+        multiplier.getDimensions().size() == 2 && ((multiplier.getDimensions()[0] == 1) || (multiplier.getDimensions()[1] == 1));
+
+    if (multiplicand.getTotalNumElements() == 1) {
+        // Matrix scaling, considering that it is possible for both matrices to be size 1
+        assert(getTotalNumElements() == multiplier.getTotalNumElements());
+        multiplyScalarTensor(multiplier, multiplicand, stream);
+    } else if (multiplier.getTotalNumElements() == 1) {
+        assert(getTotalNumElements() == multiplicand.getTotalNumElements());
+        multiplyScalarTensor(multiplicand, multiplier, stream);
+    } else if (multiplicandIsVector && multiplierIsVector && multiplicand.getDimensions() == multiplier.getDimensions()) {
+        // Vector vector elementwise multiplication
+        assert(getTotalNumElements() == multiplicand.getTotalNumElements());
+        multiplyElementwise(multiplicand, multiplier, stream);
+    } else if (multiplicand.getDimensions().size() == 2 && multiplier.getDimensions().size() == 2) {
+        assert(getDataType() == TensorDescriptor::DataType::FP16 || getDataType() == TensorDescriptor::DataType::FP32);
+        assert(multiplicand.getDimensions()[1] == multiplier.getDimensions()[0]);
+        assert(getDimensions()[0] = multiplicand.getDimensions()[0]);
+        if (getDimensions().size() == 1)
+            reshape({getDimensions()[0], 1});
+        assert(getDimensions()[1] = multiplier.getDimensions()[1]);
+
+        CublasMatrixMultiply::instance().multiplyUsingHeuristicKernelChoice(multiplicand,
+                                                                            multiplier,
+                                                                            *this,
+                                                                            multiplicand.getDimensions()[0],
+                                                                            multiplicand.getDimensions()[1],
+                                                                            multiplier.getDimensions()[0],
+                                                                            multiplier.getDimensions()[1],
+                                                                            false,
+                                                                            false,
+                                                                            false,
+                                                                            false,
+                                                                            getDataType(),
+                                                                            stream);
+    } else {
+        assert(false);  // Not supported
+    }
+}
+
+// Tensors needs to be the right sizes, the shape is enforced
+void Tensor::dotProduct(Tensor A, Tensor B, Stream stream) {
+    uint64_t numElements = A.getTotalNumElements();
+    assert(B.getTotalNumElements() == numElements);
+    assert(getTotalNumElements() == 1);
+    vector<uint64_t> originalDimensions = getDimensions();
+    A.reshape({1, numElements});
+    B.reshape({numElements, 1});
+    reshape({1, 1});
+    multiply(A, B, stream);
+    // It's one element in any case, lets not change the dimensionality in this function.
+    // Sometimes the dimensions will be [1], sometimes [1,1] maybe more doesn't matter, keeping it how it was.
+    reshape(originalDimensions);
+}
+
+// Tensors needs to be the right sizes, the shape is enforced
+void Tensor::outerProduct(Tensor A, Tensor B, Stream stream) {
+    uint64_t numElements = A.getTotalNumElements();
+    assert(B.getTotalNumElements() == numElements);
+    assert(getTotalNumElements() == numElements * numElements);
+    A.reshape({numElements, 1});
+    B.reshape({1, numElements});
+    reshape({numElements, numElements});
+    // The result of this is really defined as an N x N matrix, since the tensor was the right size it will be interpretted
+    // as an N x N matrix in all cases, since it is receiving the outerProduct.
+    multiply(A, B, stream);
+}
+
+void Tensor::gemm(Tensor A, Tensor B, Optional<Tensor> C, float alpha, float beta, Stream stream) {
+    assert(A.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(A.getPlacement() == B.getPlacement());
+    assert(A.getPlacement() == getPlacement());
+    assert(A.getDataType() == B.getDataType());
+    assert(A.getDataType() == getDataType());
+    assert(A.getDimensions()[1] == B.getDimensions()[0]);
+    assert(A.getDimensions()[0] == getDimensions()[0]);
+    assert(B.getDimensions()[1] == getDimensions()[1]);
+
+    if (C.isPresent()) {
+        assert(A.getPlacement() == C.get().getPlacement());
+        assert(A.getDataType() == C.get().getDataType());
+        assert(C.get().getDimensions() == getDimensions());
+    } else {
+        assert(beta = 0.0f);
+    }
+
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
+    // When C is not present, I still need to pass a compatible tensor, in this case I pass D since it is the same size as C.
+    CublasMatrixMultiply::instance().gemmUsingHeuristicKernelChoice(A,
+                                                                    B,
+                                                                    C.isPresent() ? C.get() : *this,
+                                                                    *this,
+                                                                    A.getDimensions()[0],
+                                                                    A.getDimensions()[1],
+                                                                    B.getDimensions()[0],
+                                                                    B.getDimensions()[1],
+                                                                    false,
+                                                                    false,
+                                                                    false,
+                                                                    alpha,
+                                                                    beta,
+                                                                    getDataType(),
+                                                                    stream);
 }
 
 void Tensor::divide(Tensor numerator, double denominator, Stream stream) {
@@ -2881,7 +3196,7 @@ void Tensor::divide(Tensor numerator, Tensor denominator, Stream stream) {
  * argument must be float or half.
  * there is no restriction on the data type of this destination tensor.
  */
-void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream) {
+void Tensor::multiplyAccumulateElementwise(Tensor a, Tensor b, Tensor c, Stream stream) {
     assert(a.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(b.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(c.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -2909,56 +3224,56 @@ void Tensor::multiplyAccumulate(Tensor a, Tensor b, Tensor c, Stream stream) {
     dim3 gridSize((numElements + 2047) / 2048);
     if (a.getDataType() == TensorDescriptor::DataType::FP16) {
         if (destDataType == TensorDescriptor::DataType::FP16) {
-            multiplyAccumulateDest2B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (half *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::FP32) {
-            multiplyAccumulateDest4B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (float *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::UINT8) {
-            multiplyAccumulateDest1B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (uint8_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::UINT16) {
-            multiplyAccumulateDest2B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (uint16_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::UINT32) {
-            multiplyAccumulateDest4B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (uint32_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::INT8) {
-            multiplyAccumulateDest1B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (int8_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::INT16) {
-            multiplyAccumulateDest2B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (int16_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
-            multiplyAccumulateDest4B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (int32_t *)destMem, (half *)aMem, (half *)bMem, (half *)cMem, numElements);
         } else {
             assert(false);
         }
     } else {
         if (destDataType == TensorDescriptor::DataType::FP16) {
-            multiplyAccumulateDest2B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (half *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::FP32) {
-            multiplyAccumulateDest4B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (float *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::UINT8) {
-            multiplyAccumulateDest1B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (uint8_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::UINT16) {
-            multiplyAccumulateDest2B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (uint16_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::UINT32) {
-            multiplyAccumulateDest4B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (uint32_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::INT8) {
-            multiplyAccumulateDest1B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest1B<<<gridSize, blockSize, 0, stream>>>(
                 (int8_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::INT16) {
-            multiplyAccumulateDest2B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest2B<<<gridSize, blockSize, 0, stream>>>(
                 (int16_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else if (destDataType == TensorDescriptor::DataType::INT32) {
-            multiplyAccumulateDest4B<<<gridSize, blockSize, 0, stream>>>(
+            multiplyAccumulateElementwiseDest4B<<<gridSize, blockSize, 0, stream>>>(
                 (int32_t *)destMem, (float *)aMem, (float *)bMem, (float *)cMem, numElements);
         } else {
             assert(false);
@@ -3663,7 +3978,7 @@ void Tensor::launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uin
     } else if (is_same<T, float>::value || is_same<T, uint32_t>::value || is_same<T, int32_t>::value) {
         dim3 gridSize((numElements + 1023) / 1024);
         fillValue4B<T><<<gridSize, blockSize, 0, stream>>>(value, mem, numElements);
-    } else if (is_same<T, uint8_t>::value || is_same<T, int8_t>::value) {
+    } else if (is_same<T, uint8_t>::value || is_same<T, int8_t>::value || is_same<T, bool>::value) {
         dim3 gridSize((numElements + 4095) / 4096);
         fillValue1B<T><<<gridSize, blockSize, 0, stream>>>(value, mem, numElements);
     } else {
@@ -3684,3 +3999,38 @@ template void Tensor::launchFillValueGpuKernel<int16_t>(
     int16_t value, int16_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
 template void Tensor::launchFillValueGpuKernel<int32_t>(
     int32_t value, int32_t *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+template void Tensor::launchFillValueGpuKernel<bool>(bool value, bool *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
+
+__global__ void fillIdentityOnesHalf(half *mem, uint32_t N) {
+    uint32_t index = blockIdx.x * 256 + threadIdx.x > N;
+    if (index >= N)
+        return;
+
+    mem[index * N + index] = half(1.0f);
+}
+
+__global__ void fillIdentityOnesFloat(float *mem, uint32_t N) {
+    uint32_t index = blockIdx.x * 256 + threadIdx.x > N;
+    if (index >= N)
+        return;
+
+    mem[index * N + index] = 1.0f;
+}
+
+void Tensor::fillGpuIdentityMatrixOnes(Stream stream) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    uint32_t gpuNum = getPlacement().getDeviceNum();
+    ScopedGpu scopedGpu(gpuNum);
+
+    TensorDescriptor::DataType dataType = getDataType();
+    assert(dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32);
+    uint32_t N = getDimensions()[0];
+
+    dim3 blockSize(256);
+    dim3 gridSize((N + 255) / 256);
+    if (dataType == TensorDescriptor::DataType::FP16) {
+        fillIdentityOnesHalf<<<gridSize, blockSize, 0, stream>>>(getMemPtr<half>(), N);
+    } else {
+        fillIdentityOnesFloat<<<gridSize, blockSize, 0, stream>>>(getMemPtr<float>(), N);
+    }
+}

@@ -216,6 +216,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Layers/Loss/CrossEntropy.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o \
                    build/Utilities/Common/ReferenceCounted.o \
+                   build/Utilities/Common/ThreadJoinQueue.o \
                    build/Utilities/Common/CudnnHelper.o \
                    build/Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.o \
                    build/Utilities/ComputeTopology/MachineEvaluator.o \
@@ -563,6 +564,10 @@ build/Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.o: Utilities/Ten
 build/Utilities/Common/ReferenceCounted.o: Utilities/Common/ReferenceCounted.h Utilities/Common/ReferenceCounted.cpp
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -std=c++11 Utilities/Common/ReferenceCounted.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/ReferenceCounted.o
+
+build/Utilities/Common/ThreadJoinQueue.o: Utilities/Common/ThreadJoinQueue.h Utilities/Common/ThreadJoinQueue.cpp
+	mkdir -p build/Utilities/Common
+	$(Gpp) -c -std=c++11 Utilities/Common/ThreadJoinQueue.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/ThreadJoinQueue.o
 
 build/Utilities/Common/CudnnHelper.o: Utilities/Common/CudnnHelper.h Utilities/Common/CudnnHelper.cpp
 	mkdir -p build/Utilities/Common
