@@ -460,9 +460,15 @@ Tensor Tensor::ones(TensorPlacement placement, TensorDescriptor descriptor, Stre
     return tensor;
 }
 
-Tensor Tensor::randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, float minValue, float maxValue) {
+Tensor Tensor::randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double minValue, double maxValue) {
     Tensor tensor(placement, descriptor);
     tensor.fillRandom(minValue, maxValue, stream);
+    return tensor;
+}
+
+Tensor Tensor::values(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double value) {
+    Tensor tensor(placement, descriptor);
+    tensor.fill(value, stream);
     return tensor;
 }
 
@@ -539,7 +545,6 @@ void fillCpuRandom(void *data) {
     assert(args->tensor.getPlacement() == TensorPlacement::MemDevices::CPU);
     TensorDescriptor::DataType dataType = args->tensor.getDataType();
 
-    random_device rd;
     Tensor tensor = args->tensor;
     double minValue = args->minValue;
     double maxValue = args->maxValue;
@@ -552,8 +557,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -562,8 +569,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -575,8 +584,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -585,8 +596,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -598,8 +611,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -608,8 +623,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -621,8 +638,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -631,8 +650,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -644,8 +665,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -654,8 +677,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -667,8 +692,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -677,8 +704,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -690,8 +719,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -700,8 +731,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -713,8 +746,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -723,8 +758,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -738,8 +775,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -748,8 +787,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -767,8 +808,10 @@ void fillCpuRandom(void *data) {
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
-                random_device rd_private;   // Create a private random device for each thread
-                mt19937 gen(rd_private());  // Use the private random device
+                random_device rd;
+                hash<thread::id> hasher;
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
@@ -777,8 +820,10 @@ void fillCpuRandom(void *data) {
                 }
             }
         } else {
-            random_device rd_private;   // Create a private random device for each thread
-            mt19937 gen(rd_private());  // Use the private random device
+            random_device rd;
+            hash<thread::id> hasher;
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
@@ -790,11 +835,6 @@ void fillCpuRandom(void *data) {
 
 void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-    random_device rd;
-    mt19937 gen(rd());
-    if (maxValue < minValue)
-        swap(maxValue, minValue);
-    uniform_real_distribution<double> dis(minValue, maxValue);
 
     if (getPlacement() == TensorPlacement::MemDevices::CPU) {
         HostFunctionArgsBase *args = new FillRandomArgs(*this, minValue, maxValue);
@@ -804,65 +844,6 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
         // FIXME: GPU implementation
         // launchGpuFilLRandom(*this, minValue, maxValue, stream);
     }
-
-    /*
-    TensorDescriptor::DataType dataType = getDataType();
-    if (dataType == TensorDescriptor::DataType::FP16) {
-        half *mem = (half *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (half)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::FP32) {
-        float *mem = (float *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (float)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT8) {
-        assert(maxValue <= 127 && minValue >= -128);
-        int8_t *mem = (int8_t *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (int8_t)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT16) {
-        assert(maxValue <= 32768 && minValue >= -32768);
-        int16_t *mem = (int16_t *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (int16_t)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::INT32) {
-        assert(maxValue <= 2147483647 && minValue >= -2147483648);
-        int32_t *mem = (int32_t *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (int32_t)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT8) {
-        assert(maxValue <= 255 && minValue >= 0);
-        uint8_t *mem = (uint8_t *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (uint8_t)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT16) {
-        assert(maxValue <= 65535 && minValue >= 0);
-        uint16_t *mem = (uint16_t *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (uint16_t)dis(gen);
-        }
-    } else if (dataType == TensorDescriptor::DataType::UINT32) {
-        assert(maxValue <= 4294967295 && minValue >= 0);
-        uint32_t *mem = (uint32_t *)getMemPtr();
-        uint64_t numElements = getTotalNumElements();
-        for (uint64_t i = 0; i < numElements; ++i) {
-            mem[i] = (uint32_t)dis(gen);
-        }
-    }
-     */
 }
 
 // setValues is intended as a test helper to easily populate an entire tensor

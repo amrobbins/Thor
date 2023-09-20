@@ -1,8 +1,37 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp"
+#include <curand.h>
+#include <curand_kernel.h>
 
 using namespace ThorImplementation;
 using namespace std;
+
+// CUDA kernel to set random values in GPU device memory
+template <typename DATA_TYPE>
+__global__ void setRandomValues(DATA_TYPE* mem, uint64_t numElements, DATA_TYPE minValue, DATA_TYPE maxValue, uint64_t seed) {
+    uint64_t offset = blockIdx.x * blockDim.x + threadIdx.x;
+    if (offset >= numElements)
+        return;
+
+    curandState_t state;
+    curand_init(seed, offset, 0, &state);
+    DATA_TYPE randomValue = curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+}
+
+// Function to set random values in GPU device memory
+template <typename DATA_TYPE>
+void setRandomValuesGPU(void* mem, uint64_t numElements, double minValue, double maxValue, Stream stream) {
+    random_device rd;
+    hash<thread::id> hasher;
+    uint64_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+    int blockSize = 256;
+    int gridSize = (numElements + blockSize - 1) / blockSize;
+    if (is_same<DATA_TYPE, half>::value)
+        setRandomValues<half><<<gridSize, blockSize, 0, stream>>>(mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, float>::value)
+        setRandomValues<float><<<gridSize, blockSize, 0, stream>>>(mem, numElements, minValue, maxValue, seed);
+}
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 8 elements : 2048 elements processed per block
