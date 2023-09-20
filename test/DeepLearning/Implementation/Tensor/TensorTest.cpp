@@ -1272,6 +1272,9 @@ TEST(Tensor, onesCpu) {}
 TEST(Tensor, onesGpu) {}
 TEST(Tensor, randomsCpu) {}
 TEST(Tensor, randomsGpu) {}
+TEST(Tensor, valuesCpu) {}
+TEST(Tensor, valuesGpu) {}
+
 
 TEST(Tensor, fillRandom) {
     srand(time(nullptr));

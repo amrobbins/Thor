@@ -78,7 +78,8 @@ class Tensor : private ReferenceCounted {
     // The values are set at the end of stream
     static Tensor zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
     static Tensor ones(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
-    static Tensor randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, float minValue, float maxValue);
+    static Tensor randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double minValue, double maxValue);
+    static Tensor values(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double value);
     static Tensor identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream);
 
     // numElements = 0 indicates all elements
