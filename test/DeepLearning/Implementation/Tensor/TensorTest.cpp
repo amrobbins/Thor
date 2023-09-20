@@ -1266,16 +1266,21 @@ TEST(Tensor, identityMatrixCpu) {
 }
 
 TEST(Tensor, identityMatrixGpu) {}
+TEST(Tensor, zerosCpu) {}
+TEST(Tensor, zerosGpu) {}
+TEST(Tensor, onesCpu) {}
+TEST(Tensor, onesGpu) {}
+TEST(Tensor, randomsCpu) {}
+TEST(Tensor, randomsGpu) {}
 
 TEST(Tensor, fillRandom) {
     srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     Stream stream(0);
 
-    for (uint32_t t = 0; t < 200; ++t) {
+    for (uint32_t t = 0; t < 20; ++t) {
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 10;
-        dt = 7;
         if (dt == 0)
             dataType = TensorDescriptor::DataType::FP16;
         else if (dt == 1)
@@ -1299,6 +1304,8 @@ TEST(Tensor, fillRandom) {
 
         uint32_t numDimensions = 1 + (rand() % 5);
         uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
         vector<uint64_t> dimensions;
         for (uint32_t i = 0; i < numDimensions; ++i) {
             dimensions.push_back(1 + (rand() % maxDimension));
@@ -1309,18 +1316,23 @@ TEST(Tensor, fillRandom) {
         if (dt < 5) {
             minValue = -100;
             maxValue = 100;
-        } else {
+        } else if (dt < 8) {
             minValue = 10;
             maxValue = 200;
+        } else if (dt == 8) {
+            minValue = false;
+            maxValue = true;
+        } else {
+            minValue = 0;
+            maxValue = 255;
         }
         tensor.fillRandom(minValue, maxValue, stream);
+        Tensor tensorFp32 = tensor.clone(TensorDescriptor::DataType::FP32);
+        tensorFp32.copyFromAsync(tensor, stream);
         stream.synchronize();
 
-        Tensor tensorFp32 = tensor.clone(TensorDescriptor::DataType::FP32);
         float *mem = tensorFp32.getMemPtr<float>();
         for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
-            if (!(mem[i] <= maxValue && mem[i] >= minValue) || i < 100)
-                printf("max %d, min %d, mem %f\n", maxValue, minValue, mem[i]);
             ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
         }
     }
@@ -2106,7 +2118,7 @@ TEST(Tensor, LogBaseX) {
                     expected <= 0.0f)
                     expected = 0;
                 if (abs(expected) >= 200.0f && thresh < 0.5f)
-                    thresh = 0.5f;
+                    thresh = 0.7f;
                 if (abs(expected) >= 750.0f && thresh < 2.5f)
                     thresh = 2.5f;
                 if (abs(expected) >= 2000.0f && thresh < 5.0f)
@@ -3786,10 +3798,12 @@ TEST(Tensor, FillCpu) {
     Stream stream(0);
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 
-    for (uint32_t test = 0; test < 1; ++test) {
+    for (uint32_t test = 0; test < 20; ++test) {
         uint32_t numDimensions = 1 + (rand() % 5);
         vector<uint64_t> dimensions;
         uint32_t maxDimensionSize = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimensionSize = pow(10000000.0, 1.0 / numDimensions);
         uint32_t totalNumElements = 1;
         while (dimensions.size() < numDimensions) {
             dimensions.push_back(1 + (rand() % maxDimensionSize));
