@@ -1,15 +1,15 @@
-#include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp"
 #include <curand.h>
 #include <curand_kernel.h>
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp"
 
 using namespace ThorImplementation;
 using namespace std;
 
 // CUDA kernel to set random values in GPU device memory
 template <typename DATA_TYPE>
-__global__ void setRandomValues(DATA_TYPE* mem, uint64_t numElements, DATA_TYPE minValue, DATA_TYPE maxValue, uint64_t seed) {
-    uint64_t offset = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void setRandomValues(DATA_TYPE *mem, uint64_t numElements, DATA_TYPE minValue, DATA_TYPE maxValue, uint64_t seed) {
+    uint64_t offset = 4 * blockIdx.x * blockDim.x + threadIdx.x;
     if (offset >= numElements)
         return;
 
@@ -17,21 +17,92 @@ __global__ void setRandomValues(DATA_TYPE* mem, uint64_t numElements, DATA_TYPE 
     curand_init(seed, offset, 0, &state);
     DATA_TYPE randomValue = curand_uniform(&state) * (maxValue - minValue) + minValue;
     mem[offset] = randomValue;
+
+    offset += blockDim.x;
+    if (offset >= numElements)
+        return;
+    randomValue = curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+
+    offset += blockDim.x;
+    if (offset >= numElements)
+        return;
+    randomValue = curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+
+    offset += blockDim.x;
+    if (offset >= numElements)
+        return;
+    randomValue = curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+}
+
+__global__ void setRandomValues(half *mem, uint64_t numElements, half minValue, half maxValue, uint64_t seed) {
+    uint64_t offset = 4 * blockIdx.x * blockDim.x + threadIdx.x;
+    if (offset >= numElements)
+        return;
+
+    curandState_t state;
+    curand_init(seed, offset, 0, &state);
+    half randomValue = (half)curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+
+    offset += blockDim.x;
+    if (offset >= numElements)
+        return;
+    randomValue = (half)curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+
+    offset += blockDim.x;
+    if (offset >= numElements)
+        return;
+    randomValue = (half)curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
+
+    offset += blockDim.x;
+    if (offset >= numElements)
+        return;
+    randomValue = (half)curand_uniform(&state) * (maxValue - minValue) + minValue;
+    mem[offset] = randomValue;
 }
 
 // Function to set random values in GPU device memory
 template <typename DATA_TYPE>
-void setRandomValuesGPU(void* mem, uint64_t numElements, double minValue, double maxValue, Stream stream) {
+void Tensor::launchGpuFilLRandom(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream) {
     random_device rd;
     hash<thread::id> hasher;
     uint64_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
     int blockSize = 256;
-    int gridSize = (numElements + blockSize - 1) / blockSize;
+    int gridSize = (numElements + (4 * blockSize) - 1) / (4 * blockSize);
     if (is_same<DATA_TYPE, half>::value)
-        setRandomValues<half><<<gridSize, blockSize, 0, stream>>>(mem, numElements, minValue, maxValue, seed);
+        setRandomValues<<<gridSize, blockSize, 0, stream>>>((half *)mem, numElements, minValue, maxValue, seed);
     else if (is_same<DATA_TYPE, float>::value)
-        setRandomValues<float><<<gridSize, blockSize, 0, stream>>>(mem, numElements, minValue, maxValue, seed);
+        setRandomValues<float><<<gridSize, blockSize, 0, stream>>>((float *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, int8_t>::value)
+        setRandomValues<int8_t><<<gridSize, blockSize, 0, stream>>>((int8_t *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, int16_t>::value)
+        setRandomValues<int16_t><<<gridSize, blockSize, 0, stream>>>((int16_t *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, int32_t>::value)
+        setRandomValues<int32_t><<<gridSize, blockSize, 0, stream>>>((int32_t *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, uint8_t>::value)
+        setRandomValues<uint8_t><<<gridSize, blockSize, 0, stream>>>((uint8_t *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, uint16_t>::value)
+        setRandomValues<uint16_t><<<gridSize, blockSize, 0, stream>>>((uint16_t *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, uint32_t>::value)
+        setRandomValues<uint32_t><<<gridSize, blockSize, 0, stream>>>((uint32_t *)mem, numElements, minValue, maxValue, seed);
+    else if (is_same<DATA_TYPE, bool>::value)
+        setRandomValues<bool><<<gridSize, blockSize, 0, stream>>>((bool *)mem, numElements, minValue, maxValue, seed);
 }
+
+template void Tensor::launchGpuFilLRandom<half>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<float>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<int8_t>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<int16_t>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<int32_t>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<uint8_t>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<uint16_t>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<uint32_t>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+template void Tensor::launchGpuFilLRandom<bool>(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
 
 // Each block is 8 warps of 32 threads = 256 threads per block
 // each thread reads 8 elements : 2048 elements processed per block
@@ -4031,7 +4102,7 @@ template void Tensor::launchFillValueGpuKernel<int32_t>(
 template void Tensor::launchFillValueGpuKernel<bool>(bool value, bool *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
 
 __global__ void fillIdentityOnesHalf(half *mem, uint32_t N) {
-    uint32_t index = blockIdx.x * 256 + threadIdx.x > N;
+    uint32_t index = blockIdx.x * 256 + threadIdx.x;
     if (index >= N)
         return;
 
@@ -4039,7 +4110,7 @@ __global__ void fillIdentityOnesHalf(half *mem, uint32_t N) {
 }
 
 __global__ void fillIdentityOnesFloat(float *mem, uint32_t N) {
-    uint32_t index = blockIdx.x * 256 + threadIdx.x > N;
+    uint32_t index = blockIdx.x * 256 + threadIdx.x;
     if (index >= N)
         return;
 

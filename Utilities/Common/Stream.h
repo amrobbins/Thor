@@ -89,7 +89,7 @@ class Stream : private ReferenceCounted {
 
         cudaError_t cudaStatus = cudaStreamSynchronize(cudaStream);
         if (cudaStatus != cudaSuccess) {
-            printf("cuda error on stream synchronize. cudaStatus = %d\n", cudaStatus);
+            printf("cuda error on stream synchronize. cudaStatus = %d : %s\n", cudaStatus, cudaGetErrorString(cudaStatus));
             fflush(stdout);
         }
         assert(cudaStatus == cudaSuccess);

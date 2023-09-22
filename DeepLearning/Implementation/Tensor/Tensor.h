@@ -77,7 +77,6 @@ class Tensor : private ReferenceCounted {
 
     // The values are set at the end of stream
     static Tensor zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
-    static Tensor ones(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
     static Tensor randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double minValue, double maxValue);
     static Tensor values(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double value);
     static Tensor identityMatrix(uint32_t N, TensorPlacement placement, TensorDescriptor::DataType dataType, Stream stream);
@@ -777,6 +776,8 @@ class Tensor : private ReferenceCounted {
     template <typename T>
     void launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
     void fillGpuIdentityMatrixOnes(Stream stream);
+    template <typename DATA_TYPE>
+    void launchGpuFilLRandom(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
 
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();

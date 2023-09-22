@@ -1235,7 +1235,7 @@ TEST(Tensor, identityMatrixCpu) {
 
         uint32_t N = 1 + (rand() % 300);
 
-        Tensor I = Tensor::identityMatrix(N, TensorPlacement::MemDevices::CPU, dataType, stream);
+        Tensor I = Tensor::identityMatrix(N, cpuPlacement, dataType, stream);
         stream.synchronize();
 
         if (dt == 0) {
@@ -1265,18 +1265,470 @@ TEST(Tensor, identityMatrixCpu) {
     Tensor::identityMatrix(300, TensorPlacement::MemDevices::CPU, TensorDescriptor::DataType::FP32, stream);
 }
 
-TEST(Tensor, identityMatrixGpu) {}
-TEST(Tensor, zerosCpu) {}
-TEST(Tensor, zerosGpu) {}
-TEST(Tensor, onesCpu) {}
-TEST(Tensor, onesGpu) {}
-TEST(Tensor, randomsCpu) {}
-TEST(Tensor, randomsGpu) {}
-TEST(Tensor, valuesCpu) {}
-TEST(Tensor, valuesGpu) {}
+TEST(Tensor, identityMatrixGpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
 
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 2;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else
+            dataType = TensorDescriptor::DataType::FP32;
 
-TEST(Tensor, fillRandom) {
+        uint32_t N = 1 + (rand() % 300);
+
+        Tensor I = Tensor::identityMatrix(N, gpuPlacement, dataType, stream);
+        Tensor I_h = I.clone(cpuPlacement);
+        I_h.copyFromAsync(I, stream);
+        stream.synchronize();
+
+        if (dt == 0) {
+            half *mem = I_h.getMemPtr<half>();
+            for (uint32_t row = 0; row < N; ++row) {
+                for (uint32_t col = 0; col < N; ++col) {
+                    if (row == col)
+                        ASSERT_EQ(mem[row * N + col], half(1.0f));
+                    else
+                        ASSERT_EQ(mem[row * N + col], half(0.0f));
+                }
+            }
+        } else {
+            float *mem = I_h.getMemPtr<float>();
+            for (uint32_t row = 0; row < N; ++row) {
+                for (uint32_t col = 0; col < N; ++col) {
+                    if (row == col)
+                        ASSERT_EQ(mem[row * N + col], 1.0f);
+                    else
+                        ASSERT_EQ(mem[row * N + col], 0.0f);
+                }
+            }
+        }
+    }
+
+    // Ensure that the async host function works properly when the only reference to the tensor is immediately dropped
+    Tensor::identityMatrix(300, TensorPlacement::MemDevices::GPU, TensorDescriptor::DataType::FP32, stream);
+}
+
+TEST(Tensor, zerosCpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else if (dt == 9)
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        Tensor tensor = Tensor::zeros(cpuPlacement, TensorDescriptor(dataType, dimensions), stream);
+        Tensor tensorFp32 = tensor.clone(TensorDescriptor::DataType::FP32);
+        tensorFp32.copyFromAsync(tensor, stream);
+        stream.synchronize();
+
+        float *mem = tensorFp32.getMemPtr<float>();
+        for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+            ASSERT_TRUE(mem[i] == 0.0f);
+        }
+    }
+}
+
+TEST(Tensor, zerosGpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else if (dt == 9)
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        Tensor tensor = Tensor::zeros(gpuPlacement, TensorDescriptor(dataType, dimensions), stream);
+        Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+        tensorFp32.copyFromAsync(tensor, stream);
+        stream.synchronize();
+
+        float *mem = tensorFp32.getMemPtr<float>();
+        for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+            ASSERT_TRUE(mem[i] == 0.0f);
+        }
+    }
+}
+
+TEST(Tensor, randomsCpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else if (dt == 9)
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        int16_t minValue;
+        int16_t maxValue;
+        if (dt < 5) {
+            int r = rand() % 3;
+            if (r == 0) {
+                minValue = -100;
+                maxValue = 100;
+            } else if (r == 1) {
+                minValue = 10;
+                maxValue = 100;
+            } else {
+                minValue = -100;
+                maxValue = -10;
+            }
+        } else if (dt < 8) {
+            minValue = 10;
+            maxValue = 200;
+        } else if (dt == 8) {
+            minValue = false;
+            maxValue = true;
+        } else {
+            minValue = 0;
+            maxValue = 255;
+        }
+        Tensor tensor = Tensor::randoms(cpuPlacement, TensorDescriptor(dataType, dimensions), stream, minValue, maxValue);
+        stream.synchronize();
+
+        if (dt == 9) {
+            uint8_t *mem = tensor.getMemPtr<uint8_t>();
+            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+            for (uint32_t i = 0; i < numElements; ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        } else {
+            Tensor tensorFp32_h = tensor.clone(TensorDescriptor::DataType::FP32);
+            tensorFp32_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            float *mem = tensorFp32_h.getMemPtr<float>();
+            for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        }
+    }
+}
+
+TEST(Tensor, randomsGpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else if (dt == 9)
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        int16_t minValue;
+        int16_t maxValue;
+        if (dt < 5) {
+            int r = rand() % 3;
+            if (r == 0) {
+                minValue = -100;
+                maxValue = 100;
+            } else if (r == 1) {
+                minValue = 10;
+                maxValue = 100;
+            } else {
+                minValue = -100;
+                maxValue = -10;
+            }
+        } else if (dt < 8) {
+            minValue = 10;
+            maxValue = 200;
+        } else if (dt == 8) {
+            minValue = false;
+            maxValue = true;
+        } else {
+            minValue = 0;
+            maxValue = 255;
+        }
+        Tensor tensor = Tensor::randoms(gpuPlacement, TensorDescriptor(dataType, dimensions), stream, minValue, maxValue);
+        stream.synchronize();
+
+        if (dt == 9) {
+            Tensor tensor_h = tensor.clone(cpuPlacement);
+            tensor_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            uint8_t *mem = tensor_h.getMemPtr<uint8_t>();
+            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+            for (uint32_t i = 0; i < numElements; ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        } else {
+            Tensor tensorFp32_h = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+            tensorFp32_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            float *mem = tensorFp32_h.getMemPtr<float>();
+            for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        }
+    }
+}
+
+TEST(Tensor, valuesCpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        int16_t value;
+        if (dt < 5) {
+            value = (rand() % 200) - 100;
+        } else if (dt < 8) {
+            value = rand() % 200;
+        } else if (dt >= 8) {
+            value = rand() % 2;
+        }
+        Tensor tensor = Tensor::values(cpuPlacement, TensorDescriptor(dataType, dimensions), stream, value);
+        stream.synchronize();
+
+        if (dt == 9) {
+            if (value)
+                value = 0b11111111;
+            uint8_t *mem = tensor.getMemPtr<uint8_t>();
+            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+            for (uint32_t i = 0; i < numElements; ++i) {
+                if (mem[i] != value)
+                    printf("dt %d i %d actual %d vs expected %d\n", dt, i, (uint32_t)mem[i], value);
+                ASSERT_TRUE(mem[i] == value);
+            }
+        } else {
+            Tensor tensorFp32 = tensor.clone(TensorDescriptor::DataType::FP32);
+            tensorFp32.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            float *mem = tensorFp32.getMemPtr<float>();
+            for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                if (mem[i] != value)
+                    printf("dt %d i %d actual %f vs expected %d\n", dt, i, mem[i], value);
+                ASSERT_TRUE(mem[i] == value);
+            }
+        }
+    }
+}
+
+TEST(Tensor, valuesGpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 20; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        int16_t value;
+        if (dt < 5) {
+            value = (rand() % 200) - 100;
+        } else if (dt < 8) {
+            value = rand() % 200;
+        } else if (dt >= 8) {
+            value = rand() % 2;
+        }
+        Tensor tensor = Tensor::values(gpuPlacement, TensorDescriptor(dataType, dimensions), stream, value);
+        stream.synchronize();
+
+        if (dt == 9) {
+            if (value)
+                value = 0b11111111;
+            Tensor tensor_h = tensor.clone(cpuPlacement);
+            tensor_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            uint8_t *mem = tensor_h.getMemPtr<uint8_t>();
+            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+            for (uint32_t i = 0; i < numElements; ++i) {
+                if (mem[i] != value)
+                    printf("dt %d i %d actual %d vs expected %d\n", dt, i, (uint32_t)mem[i], value);
+                ASSERT_TRUE(mem[i] == value);
+            }
+        } else {
+            Tensor tensorFp32 = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+            tensorFp32.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            float *mem = tensorFp32.getMemPtr<float>();
+            for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                if (mem[i] != value)
+                    printf("dt %d i %d actual %f vs expected %d\n", dt, i, mem[i], value);
+                ASSERT_TRUE(mem[i] == value);
+            }
+        }
+    }
+}
+
+TEST(Tensor, fillRandomCpu) {
     srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     Stream stream(0);
@@ -1317,8 +1769,17 @@ TEST(Tensor, fillRandom) {
         int16_t minValue;
         int16_t maxValue;
         if (dt < 5) {
-            minValue = -100;
-            maxValue = 100;
+            int r = rand() % 3;
+            if (r == 0) {
+                minValue = -100;
+                maxValue = 100;
+            } else if (r == 1) {
+                minValue = 10;
+                maxValue = 100;
+            } else {
+                minValue = -100;
+                maxValue = -10;
+            }
         } else if (dt < 8) {
             minValue = 10;
             maxValue = 200;
@@ -1330,13 +1791,109 @@ TEST(Tensor, fillRandom) {
             maxValue = 255;
         }
         tensor.fillRandom(minValue, maxValue, stream);
-        Tensor tensorFp32 = tensor.clone(TensorDescriptor::DataType::FP32);
-        tensorFp32.copyFromAsync(tensor, stream);
         stream.synchronize();
 
-        float *mem = tensorFp32.getMemPtr<float>();
-        for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
-            ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+        if (dt == 9) {
+            uint8_t *mem = tensor.getMemPtr<uint8_t>();
+            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+            for (uint32_t i = 0; i < numElements; ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        } else {
+            Tensor tensorFp32_h = tensor.clone(TensorDescriptor::DataType::FP32);
+            tensorFp32_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            float *mem = tensorFp32_h.getMemPtr<float>();
+            for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        }
+    }
+}
+
+TEST(Tensor, fillRandomGpu) {
+    srand(time(nullptr));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
+    Stream stream(0);
+
+    for (uint32_t t = 0; t < 1000; ++t) {
+        TensorDescriptor::DataType dataType;
+        uint32_t dt = rand() % 10;
+        if (dt == 0)
+            dataType = TensorDescriptor::DataType::FP16;
+        else if (dt == 1)
+            dataType = TensorDescriptor::DataType::FP32;
+        else if (dt == 2)
+            dataType = TensorDescriptor::DataType::INT8;
+        else if (dt == 3)
+            dataType = TensorDescriptor::DataType::INT16;
+        else if (dt == 4)
+            dataType = TensorDescriptor::DataType::INT32;
+        else if (dt == 5)
+            dataType = TensorDescriptor::DataType::UINT8;
+        else if (dt == 6)
+            dataType = TensorDescriptor::DataType::UINT16;
+        else if (dt == 7)
+            dataType = TensorDescriptor::DataType::UINT32;
+        else if (dt == 8)
+            dataType = TensorDescriptor::DataType::BOOLEAN;
+        else if (dt == 9)
+            dataType = TensorDescriptor::DataType::PACKED_BOOLEAN;
+
+        uint32_t numDimensions = 1 + (rand() % 5);
+        uint32_t maxDimension = pow(100000.0, 1.0 / numDimensions);
+        if (rand() % 5 == 0)
+            maxDimension = pow(10000000.0, 1.0 / numDimensions);
+        vector<uint64_t> dimensions;
+        for (uint32_t i = 0; i < numDimensions; ++i) {
+            dimensions.push_back(1 + (rand() % maxDimension));
+        }
+        Tensor tensor(gpuPlacement, TensorDescriptor(dataType, dimensions));
+        int16_t minValue;
+        int16_t maxValue;
+        if (dt < 5) {
+            int r = rand() % 3;
+            if (r == 0) {
+                minValue = -100;
+                maxValue = 100;
+            } else if (r == 1) {
+                minValue = 10;
+                maxValue = 100;
+            } else {
+                minValue = -100;
+                maxValue = -10;
+            }
+        } else if (dt < 8) {
+            minValue = 10;
+            maxValue = 200;
+        } else if (dt == 8) {
+            minValue = false;
+            maxValue = true;
+        } else {
+            minValue = 0;
+            maxValue = 255;
+        }
+        tensor.fillRandom(minValue, maxValue, stream);
+        stream.synchronize();
+
+        if (dt == 9) {
+            Tensor tensor_h = tensor.clone(cpuPlacement);
+            tensor_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            uint8_t *mem = tensor_h.getMemPtr<uint8_t>();
+            uint32_t numElements = (tensor.getTotalNumElements() + 7) / 8;
+            for (uint32_t i = 0; i < numElements; ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
+        } else {
+            Tensor tensorFp32_h = tensor.clone(cpuPlacement, TensorDescriptor::DataType::FP32);
+            tensorFp32_h.copyFromAsync(tensor, stream);
+            stream.synchronize();
+            float *mem = tensorFp32_h.getMemPtr<float>();
+            for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
+            }
         }
     }
 }
