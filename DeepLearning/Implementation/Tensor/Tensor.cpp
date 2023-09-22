@@ -454,12 +454,6 @@ Tensor Tensor::zeros(TensorPlacement placement, TensorDescriptor descriptor, Str
     return tensor;
 }
 
-Tensor Tensor::ones(TensorPlacement placement, TensorDescriptor descriptor, Stream stream) {
-    Tensor tensor(placement, descriptor);
-    tensor.fill(1, stream);
-    return tensor;
-}
-
 Tensor Tensor::randoms(TensorPlacement placement, TensorDescriptor descriptor, Stream stream, double minValue, double maxValue) {
     Tensor tensor(placement, descriptor);
     tensor.fillRandom(minValue, maxValue, stream);
@@ -548,6 +542,8 @@ void fillCpuRandom(void *data) {
     Tensor tensor = args->tensor;
     double minValue = args->minValue;
     double maxValue = args->maxValue;
+    if (minValue > maxValue)
+        swap(minValue, maxValue);
     uint64_t numElements = tensor.getTotalNumElements();
     const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
     const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
@@ -834,15 +830,33 @@ void fillCpuRandom(void *data) {
 }
 
 void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
-    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-
     if (getPlacement() == TensorPlacement::MemDevices::CPU) {
         HostFunctionArgsBase *args = new FillRandomArgs(*this, minValue, maxValue);
         stream.enqueueHostFunction(fillCpuRandom, args);
         launchCleanUpHostFunctionArgs(stream, args);
     } else {
-        // FIXME: GPU implementation
-        // launchGpuFilLRandom(*this, minValue, maxValue, stream);
+        TensorDescriptor::DataType dataType = getDataType();
+        if (dataType == TensorDescriptor::DataType::FP16) {
+            launchGpuFilLRandom<half>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::FP32) {
+            launchGpuFilLRandom<float>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::INT8) {
+            launchGpuFilLRandom<int8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::INT16) {
+            launchGpuFilLRandom<int16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::INT32) {
+            launchGpuFilLRandom<int32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT8) {
+            launchGpuFilLRandom<uint8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT16) {
+            launchGpuFilLRandom<uint16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::UINT32) {
+            launchGpuFilLRandom<uint32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+        } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
+            launchGpuFilLRandom<bool>(getMemPtr(), getTotalNumElements(), false, true, stream);
+        } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
+            launchGpuFilLRandom<uint8_t>(getMemPtr(), (getTotalNumElements() + 7) / 8, 0b00000000, 0b11111111, stream);
+        }
     }
 }
 
@@ -1049,7 +1063,7 @@ void fillValue(void *params) {
         }
     } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
         bool *mem = cpuFillParams->tensor.getMemPtr<bool>();
-        bool value = cpuFillParams->value;
+        bool value = cpuFillParams->value ? true : false;
         if (numProcs > 1) {
 #pragma omp parallel for schedule(static, elementsPerThread) shared(mem, value, elementsPerThread, numElements) default(none)
             for (uint64_t i = 0; i < numElements; ++i) {
