@@ -80,7 +80,7 @@ void Tensor::allocateMemory() {
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
-    // All tensors end on an 132 byte boundary so that kernels can overshoot when writing arrays in chunks of the maximum sized type
+    // All tensors end on a 32 byte boundary so that kernels can overshoot when writing arrays in chunks of the maximum sized type
     // (double4) without risking accessing another memory block. Consider the overhead of having 1 million tensors instantiated: the
     // overhead is less than 32 MB of GPU memory.
     memBytes = (memBytes + 31) / 32;
