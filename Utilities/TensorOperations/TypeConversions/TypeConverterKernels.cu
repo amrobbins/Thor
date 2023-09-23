@@ -8,8 +8,6 @@ using namespace std;
 // Launch out-of-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-template <typename TO_TYPE>
-void launchOutOfPlaceConvertKernel_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 template <typename FROM_TYPE>
 void launchOutOfPlaceConvertKernel_integralToHalf(FROM_TYPE *source_d, half *dest_d, long numElements, Stream stream);
 template <typename FROM_TYPE>
@@ -18,6 +16,9 @@ void launchOutOfPlaceConvertKernel_halfToPackedBoolean(half *source_d, uint8_t *
 template <typename TO_TYPE>
 void launchOutOfPlaceConvertKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 void launchOutOfPlaceConvertKernel_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream);
+
+template <typename TO_TYPE>
+__global__ void convertOutOfPlaceKernel_halfToIntegralNoOvershoot(half *source_d, TO_TYPE *dest_d, long numElements);
 
 // Launch in-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
@@ -643,10 +644,19 @@ __global__ void convertOutOfPlaceKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE 
 
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    constexpr int elementsPerBlock = 256 * 8;
-    dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    convertOutOfPlaceKernelNoOvershoot<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+    if (is_same<FROM_TYPE, half>::value && is_integral<TO_TYPE>::value) {
+        dim3 blockSize(256);
+        constexpr int elementsPerBlock = 256 * 8;
+        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+        convertOutOfPlaceKernel_halfToIntegralNoOvershoot<TO_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
+    } else {
+        dim3 blockSize(256);
+        constexpr int elementsPerBlock = 256 * 8;
+        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+        convertOutOfPlaceKernelNoOvershoot<FROM_TYPE, TO_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+    }
 }
 
 // To Smaller
@@ -701,7 +711,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_halfToIntegral(half *so
     while (numElementsLeft > 0) {
         chunkSize = availableBytes / sizeof(TO_TYPE);
 
-        launchOutOfPlaceConvertKernel_halfToIntegral<TO_TYPE>(
+        launchOutOfPlaceConvertKernelNoOvershoot<half, TO_TYPE>(
             source_d + startingElement, dest_d + startingElement, chunkSize < numElementsLeft ? chunkSize : numElementsLeft, stream);
 
         numElementsLeft -= chunkSize;
@@ -866,7 +876,7 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_halfToIntegral(half *sou
         long chunkSize = numEmptyBytes / sizeof(TO_TYPE);
         long startingElement = numElementsLeft - chunkSize;
 
-        launchOutOfPlaceConvertKernel_halfToIntegral<TO_TYPE>(source_d + startingElement, dest_d + startingElement, chunkSize, stream);
+        launchOutOfPlaceConvertKernelNoOvershoot<half, TO_TYPE>(source_d + startingElement, dest_d + startingElement, chunkSize, stream);
 
         numEmptyBytes += (sizeof(half) - sizeof(TO_TYPE)) * chunkSize;
         numElementsLeft = startingElement;
@@ -1074,7 +1084,7 @@ void TypeConverter::gpuConvertTypeFromHalfToIntegralImpl(half *source_d, TO_TYPE
     // Also, PACKED_BOOLEAN is supported
     // InPlace and out of place conversions are supported in all cases
     if (!inPlaceConversion || sizeof(half) == sizeof(TO_TYPE)) {
-        launchOutOfPlaceConvertKernel_halfToIntegral<TO_TYPE>(source_d, dest_d, numElements, stream);
+        launchOutOfPlaceConvertKernel<half, TO_TYPE>(source_d, dest_d, numElements, stream);
     } else {
         if (sizeof(half) > sizeof(TO_TYPE))
             convertToSmallerElementsInPlaceOnGpu_halfToIntegral<TO_TYPE>(source_d, dest_d, numElements, stream);
@@ -1752,7 +1762,7 @@ __global__ void convertOutOfPlaceKernelS8D8(FROM_TYPE *source_d, TO_TYPE *dest_d
 
 // Reads 8 writes 8
 template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements) {
+__global__ void convertOutOfPlaceKernel_halfToIntegralNoOvershoot(half *source_d, TO_TYPE *dest_d, long numElements) {
 #pragma unroll 8
     for (int i = 0; i < 8; ++i) {
         long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
@@ -1761,6 +1771,106 @@ __global__ void convertOutOfPlaceKernel_halfToIntegral(half *source_d, TO_TYPE *
 
         dest_d[index] = (TO_TYPE)(float)(source_d[index]);
     }
+}
+
+// Reads 16 writes 16
+template <typename TO_TYPE>
+__global__ void convertOutOfPlaceKernel_halfToIntegralD1(half *source_d, TO_TYPE *dest_d, long numElements) {
+    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 16;
+    if (index >= numElements)
+        return;
+
+    half inBuff[16];
+    long index16Elements = index >> 4;
+    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index16Elements];
+
+    char outBuff[16];
+    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
+    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
+    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
+    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
+    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)(float)inBuff[4];
+    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)(float)inBuff[5];
+    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)(float)inBuff[6];
+    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)(float)inBuff[7];
+    ((TO_TYPE *)outBuff)[8] = (TO_TYPE)(float)inBuff[8];
+    ((TO_TYPE *)outBuff)[9] = (TO_TYPE)(float)inBuff[9];
+    ((TO_TYPE *)outBuff)[10] = (TO_TYPE)(float)inBuff[10];
+    ((TO_TYPE *)outBuff)[11] = (TO_TYPE)(float)inBuff[11];
+    ((TO_TYPE *)outBuff)[12] = (TO_TYPE)(float)inBuff[12];
+    ((TO_TYPE *)outBuff)[13] = (TO_TYPE)(float)inBuff[13];
+    ((TO_TYPE *)outBuff)[14] = (TO_TYPE)(float)inBuff[14];
+    ((TO_TYPE *)outBuff)[15] = (TO_TYPE)(float)inBuff[15];
+
+    ((float4 *)dest_d)[index16Elements] = ((float4 *)outBuff)[0];
+}
+
+// Reads 8 writes 8
+template <typename TO_TYPE>
+__global__ void convertOutOfPlaceKernel_halfToIntegralD2(half *source_d, TO_TYPE *dest_d, long numElements) {
+    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
+    if (index >= numElements)
+        return;
+
+    half inBuff[8];
+    long index8Elements = index >> 3;
+    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
+
+    half outBuff[8];
+    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
+    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
+    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
+    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
+    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)(float)inBuff[4];
+    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)(float)inBuff[5];
+    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)(float)inBuff[6];
+    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)(float)inBuff[7];
+
+    ((float4 *)dest_d)[index8Elements] = ((float4 *)outBuff)[0];
+}
+
+// Reads 8 writes 8
+template <typename TO_TYPE>
+__global__ void convertOutOfPlaceKernel_halfToIntegralD4(half *source_d, TO_TYPE *dest_d, long numElements) {
+    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
+    if (index >= numElements)
+        return;
+
+    half inBuff[8];
+    long index8Elements = index >> 3;
+    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
+
+    float outBuff[8];
+    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
+    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
+    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
+    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
+    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)(float)inBuff[4];
+    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)(float)inBuff[5];
+    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)(float)inBuff[6];
+    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)(float)inBuff[7];
+
+    ((double4 *)dest_d)[index8Elements] = ((double4 *)outBuff)[0];
+}
+
+// Reads 4 writes 4
+template <typename TO_TYPE>
+__global__ void convertOutOfPlaceKernel_halfToIntegralD8(half *source_d, TO_TYPE *dest_d, long numElements) {
+    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
+    if (index >= numElements)
+        return;
+
+    half inBuff[4];
+    long index4Elements = index >> 2;
+    ((float2 *)inBuff)[0] = ((float2 *)source_d)[index4Elements];
+
+    double outBuff[4];
+    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
+    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
+    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
+    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
+
+    ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
 }
 
 // Reads 8 writes 8
@@ -1855,97 +1965,123 @@ __global__ void convertOutOfPlaceKernel_halfToPackedBoolean(half *source_d, uint
 
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    if (sizeof(FROM_TYPE) == 1 && sizeof(TO_TYPE) == 1) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 16;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS1D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 1 && sizeof(TO_TYPE) == 2) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 16;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS1D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 1 && sizeof(TO_TYPE) == 4) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 8;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS1D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 1 && sizeof(TO_TYPE) == 8) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS1D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 2 && sizeof(TO_TYPE) == 1) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 16;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS2D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 2 && sizeof(TO_TYPE) == 2) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 8;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS2D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 2 && sizeof(TO_TYPE) == 4) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 8;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS2D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 2 && sizeof(TO_TYPE) == 8) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS2D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 4 && sizeof(TO_TYPE) == 1) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 8;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS4D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 4 && sizeof(TO_TYPE) == 2) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 8;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS4D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 4 && sizeof(TO_TYPE) == 4) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS4D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 4 && sizeof(TO_TYPE) == 8) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS4D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 8 && sizeof(TO_TYPE) == 1) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS8D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 8 && sizeof(TO_TYPE) == 2) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS8D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 8 && sizeof(TO_TYPE) == 4) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS8D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-    } else if (sizeof(FROM_TYPE) == 8 && sizeof(TO_TYPE) == 8) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 4;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernelS8D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+    if (sizeof(FROM_TYPE) == 1) {
+        if (sizeof(TO_TYPE) == 1) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 16;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS1D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 2) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 16;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS1D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 4) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 8;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS1D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 8) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS1D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        }
+    } else if (sizeof(FROM_TYPE) == 2) {
+        if (is_same<FROM_TYPE, half>::value && is_integral<TO_TYPE>::value) {
+            if (sizeof(TO_TYPE) == 1) {
+                dim3 blockSize(256);
+                constexpr int elementsPerBlock = 256 * 16;
+                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+                convertOutOfPlaceKernel_halfToIntegralD1<TO_TYPE>
+                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
+            } else if (sizeof(TO_TYPE) == 2) {
+                dim3 blockSize(256);
+                constexpr int elementsPerBlock = 256 * 8;
+                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+                convertOutOfPlaceKernel_halfToIntegralD2<TO_TYPE>
+                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
+            } else if (sizeof(TO_TYPE) == 4) {
+                dim3 blockSize(256);
+                constexpr int elementsPerBlock = 256 * 8;
+                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+                convertOutOfPlaceKernel_halfToIntegralD4<TO_TYPE>
+                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
+            } else if (sizeof(TO_TYPE) == 8) {
+                dim3 blockSize(256);
+                constexpr int elementsPerBlock = 256 * 4;
+                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+                convertOutOfPlaceKernel_halfToIntegralD8<TO_TYPE>
+                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
+            }
+        } else if (sizeof(TO_TYPE) == 1) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 16;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS2D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 2) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 8;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS2D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 4) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 8;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS2D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 8) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS2D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        }
+    } else if (sizeof(FROM_TYPE) == 4) {
+        if (sizeof(TO_TYPE) == 1) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 8;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS4D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 2) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 8;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS4D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 4) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS4D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 8) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS4D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        }
+    } else if (sizeof(FROM_TYPE) == 8) {
+        if (sizeof(TO_TYPE) == 1) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS8D1<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 2) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS8D2<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 4) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS8D4<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        } else if (sizeof(TO_TYPE) == 8) {
+            dim3 blockSize(256);
+            constexpr int elementsPerBlock = 256 * 4;
+            dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
+            convertOutOfPlaceKernelS8D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+        }
     } else {
         assert(false);
     }
-}
-
-template <typename TO_TYPE>
-void launchOutOfPlaceConvertKernel_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    constexpr int elementsPerBlock = 256 * 8;
-    dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    convertOutOfPlaceKernel_halfToIntegral<TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename FROM_TYPE>
