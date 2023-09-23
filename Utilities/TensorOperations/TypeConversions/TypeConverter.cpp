@@ -657,8 +657,22 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
         assert(sourceEnd < destStart || sourceStart > destEnd);
     }
 
-    if (sizeof(TO_TYPE) <= sizeof(FROM_TYPE) || !inPlaceConversion) {
-        // Out of place or in place and converting to a non-larger type
+    if (!inPlaceConversion || sizeof(TO_TYPE) == sizeof(FROM_TYPE)) {
+        // Out of place or in place or conversion to a same sized type
+        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
+        if (numProcs > 1) {
+            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (TO_TYPE)(source[i]);
+            }
+        } else {
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (TO_TYPE)(source[i]);
+            }
+        }
+    } else if (sizeof(TO_TYPE) < sizeof(FROM_TYPE)) {
+        // In place and converting to a smaller type
         for (long i = 0; i < numElements; ++i) {
             dest[i] = (TO_TYPE)(source[i]);
         }
@@ -692,15 +706,29 @@ void TypeConverter::cpuConvertTypeFromIntegralToHalfImpl(FROM_TYPE *source, half
         assert(sourceEnd < destStart || sourceStart > destEnd);
     }
 
-    if (sizeof(FROM_TYPE) < 2 || !inPlaceConversion) {
-        // converting to a larger type
-        for (long i = numElements - 1; i >= 0; --i) {
-            dest[i] = (half)((float)(source[i]));
+    if (!inPlaceConversion || sizeof(half) == sizeof(FROM_TYPE)) {
+        // Out of place or in place or conversion to a same sized type
+        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
+        if (numProcs > 1) {
+            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (half)(float)(source[i]);
+            }
+        } else {
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (half)(float)(source[i]);
+            }
+        }
+    } else if (sizeof(half) < sizeof(FROM_TYPE)) {
+        // In place and converting to a smaller type
+        for (long i = 0; i < numElements; ++i) {
+            dest[i] = (half)(float)(source[i]);
         }
     } else {
-        // converting to a smaller or same size type
-        for (long i = 0; i < numElements; ++i) {
-            dest[i] = (half)((float)(source[i]));
+        // In place and converting to a larger type
+        for (long i = numElements - 1; i >= 0; --i) {
+            dest[i] = (half)(float)(source[i]);
         }
     }
 }
@@ -723,9 +751,25 @@ void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *d
         assert(sourceEnd < destStart || sourceStart > destEnd);
     }
 
-    // Converting to a larger type
-    for (long i = numElements - 1; i >= 0; --i) {
-        dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
+    if (!inPlaceConversion) {
+        // Out of place
+        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
+        if (numProcs > 1) {
+            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
+            }
+        } else {
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
+            }
+        }
+    } else {
+        // In place and to a larger type
+        for (long i = numElements - 1; i >= 0; --i) {
+            dest[i] = (TO_TYPE)PackedBoolean::getElement(i, source);
+        }
     }
 }
 
@@ -747,9 +791,25 @@ void TypeConverter::cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *d
         assert(sourceEnd < destStart || sourceStart > destEnd);
     }
 
-    // Converting to a non-larger type
-    for (long i = 0; i < numElements; ++i) {
-        PackedBoolean::setElement((bool)source[i], i, dest);
+    if (!inPlaceConversion) {
+        // Out of place
+        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
+        if (numProcs > 1) {
+            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
+            for (long i = 0; i < numElements; ++i) {
+                PackedBoolean::setElement((bool)source[i], i, dest);
+            }
+        } else {
+            for (long i = 0; i < numElements; ++i) {
+                PackedBoolean::setElement((bool)source[i], i, dest);
+            }
+        }
+    } else {
+        // In place and to a smaller type
+        for (long i = 0; i < numElements; ++i) {
+            PackedBoolean::setElement((bool)source[i], i, dest);
+        }
     }
 }
 
@@ -771,8 +831,24 @@ void TypeConverter::cpuConvertTypeFromPackedBooleanToHalfImpl(void *source, half
         assert(sourceEnd < destStart || sourceStart > destEnd);
     }
 
-    // Converting to a larger type
-    for (long i = numElements - 1; i >= 0; --i) {
-        dest[i] = (half)((float)PackedBoolean::getElement(i, source));
+    if (!inPlaceConversion) {
+        // Out of place
+        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
+        if (numProcs > 1) {
+            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
+#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (half)((float)PackedBoolean::getElement(i, source));
+            }
+        } else {
+            for (long i = 0; i < numElements; ++i) {
+                dest[i] = (half)((float)PackedBoolean::getElement(i, source));
+            }
+        }
+    } else {
+        // In place
+        for (long i = numElements - 1; i >= 0; --i) {
+            dest[i] = (half)((float)PackedBoolean::getElement(i, source));
+        }
     }
 }

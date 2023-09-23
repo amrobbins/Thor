@@ -5,6 +5,8 @@
 #include "Utilities/Common/Stream.h"
 
 #include <assert.h>
+#include <omp.h>
+#include <algorithm>
 #include <type_traits>
 
 #include "cuda.h"
