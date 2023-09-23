@@ -545,7 +545,7 @@ void fillCpuRandom(void *data) {
     if (minValue > maxValue)
         swap(minValue, maxValue);
     uint64_t numElements = tensor.getTotalNumElements();
-    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
+    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
     const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
     if (dataType == TensorDescriptor::DataType::FP16) {
@@ -797,7 +797,7 @@ void fillCpuRandom(void *data) {
         minValue = 0b00000000;
         maxValue = 0b11111111;
         numElements = (numElements + 7) / 8;
-        const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
+        const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
         const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
         uint8_t *mem = tensor.getMemPtr<uint8_t>();
@@ -952,7 +952,7 @@ void fillValue(void *params) {
     assert(cpuFillParams != nullptr);
 
     uint64_t numElements = cpuFillParams->tensor.getTotalNumElements();
-    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 1000000), uint64_t(1));
+    const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
     const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 
     TensorDescriptor::DataType dataType = cpuFillParams->tensor.getDataType();

@@ -9,12 +9,12 @@
    1. https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2023-0/cblas-gemm-001.html
    2. https://oneapi-src.github.io/oneDNN/v0/index.html
 8. Add functional support to Tensor to implement a full high performance linear algebra library, for example matrix inverse, cholesky decomposition, SVD, vector normalization, batched vector normalization (in general vector operations should have a batched version for high performance), cross product, ...
+9. Fix PACKED_BOOLEAN
 9. Python Bindings - using pybind11
 9. Multi-Gpu support
    1. Multiple stamps with accumulation.
       1. Not that the current implementation updates the layers as they are added to the network so that their inputs and outputs remain correct after flattening multi-layers. However only single layers are added to the network and so it may be stamped as many times as desired.
    2. Defer kernel selection due to mem requirements of workspace until logic that determines number of stamps
-10. Additional math function support including backward pass logic.
 11. Recurrent Neural Network support
     1. LSTM
     1. GRU

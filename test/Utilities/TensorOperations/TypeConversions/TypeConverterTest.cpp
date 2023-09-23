@@ -23,7 +23,9 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             if (sourceDataType == destDataType)
                 continue;
 
-            const int NUM_ELEMENTS = 1 + (rand() % 2000);
+            int NUM_ELEMENTS = 1 + (rand() % 2000);
+            if (rand() % 20 == 0)
+                NUM_ELEMENTS = 1000000 + rand() % 1000000;
 
             void *source;
             void *dest;
@@ -168,7 +170,9 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
             if (sourceDataType == destDataType)
                 continue;
 
-            const int NUM_ELEMENTS = 1 + (rand() % 2000);
+            int NUM_ELEMENTS = 1 + (rand() % 2000);
+            if (rand() % 30 == 0)
+                NUM_ELEMENTS = 1000000 + rand() % 1000000;
 
             void *source;
             void *dest;
