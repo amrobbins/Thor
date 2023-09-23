@@ -327,6 +327,8 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
 
             const int NUM_ELEMENTS = 1 + (rand() % 25000);
 
+            // printf("source data type %d dest data type %d numElements %d\n", (int)sourceDataType, (int)destDataType, NUM_ELEMENTS);
+
             void *source;
             void *dest;
             int numSourceBytes = TensorDescriptor::getArraySizeInBytes(NUM_ELEMENTS, sourceDataType);
@@ -462,14 +464,22 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
 
                 if (TensorDescriptor::isIntegralType(sourceDataType)) {
                     if (TensorDescriptor::isIntegralType(destDataType)) {
+                        if (sourceVal != destVal)
+                            printf("[%d] source %f dest %f\n", i, sourceVal, destVal);
                         ASSERT_EQ(sourceVal, destVal);
                     } else {
+                        if (abs(sourceVal - destVal) >= 0.1)
+                            printf("[%d] source %f dest %f\n", i, sourceVal, destVal);
                         ASSERT_LT(abs(sourceVal - destVal), 0.1);
                     }
                 } else {
                     if (TensorDescriptor::isIntegralType(destDataType)) {
+                        if (abs(sourceVal - destVal) >= 1.0)
+                            printf("[%d] source %f dest %f\n", i, sourceVal, destVal);
                         ASSERT_LT(abs(sourceVal - destVal), 1.0);
                     } else {
+                        if (abs(sourceVal - destVal) >= 0.1)
+                            printf("[%d] source %f dest %f\n", i, sourceVal, destVal);
                         ASSERT_LT(abs(sourceVal - destVal), 0.1);
                     }
                 }
