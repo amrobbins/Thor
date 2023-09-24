@@ -184,7 +184,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::INT8:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<int8_t>((int8_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<int8_t, half>((int8_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<int8_t, float>((int8_t *)args->source, (float *)args->dest, numElements);
@@ -229,7 +229,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::INT16:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<int16_t>((int16_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<int16_t, half>((int16_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<int16_t, float>((int16_t *)args->source, (float *)args->dest, numElements);
@@ -274,7 +274,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::INT32:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<int32_t>((int32_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<int32_t, half>((int32_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<int32_t, float>((int32_t *)args->source, (float *)args->dest, numElements);
@@ -319,7 +319,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::INT64:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<int64_t>((int64_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<int64_t, half>((int64_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<int64_t, float>((int64_t *)args->source, (float *)args->dest, numElements);
@@ -364,7 +364,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::UINT8:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<uint8_t>((uint8_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<uint8_t, half>((uint8_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<uint8_t, float>((uint8_t *)args->source, (float *)args->dest, numElements);
@@ -409,7 +409,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::UINT16:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<uint16_t>((uint16_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<uint16_t, half>((uint16_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<uint16_t, float>((uint16_t *)args->source, (float *)args->dest, numElements);
@@ -454,7 +454,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::UINT32:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<uint32_t>((uint32_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<uint32_t, half>((uint32_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<uint32_t, float>((uint32_t *)args->source, (float *)args->dest, numElements);
@@ -499,7 +499,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::UINT64:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<uint64_t>((uint64_t *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<uint64_t, half>((uint64_t *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<uint64_t, float>((uint64_t *)args->source, (float *)args->dest, numElements);
@@ -544,7 +544,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::BOOLEAN:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromIntegralToHalfImpl<bool>((bool *)args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeImpl<bool, half>((bool *)args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeImpl<bool, float>((bool *)args->source, (float *)args->dest, numElements);
@@ -589,7 +589,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
         case TensorDescriptor::DataType::PACKED_BOOLEAN:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    cpuConvertTypeFromPackedBooleanToHalfImpl(args->source, (half *)args->dest, numElements);
+                    cpuConvertTypeFromPackedBooleanImpl<half>(args->source, (half *)args->dest, numElements);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     cpuConvertTypeFromPackedBooleanImpl<float>(args->source, (float *)args->dest, numElements);

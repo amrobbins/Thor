@@ -10,25 +10,21 @@ template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 template <typename FROM_TYPE>
 void launchOutOfPlaceConvertKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
-void launchOutOfPlaceConvertKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements, Stream stream);
 template <typename TO_TYPE>
 void launchOutOfPlaceConvertKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-void launchOutOfPlaceConvertKernel_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream);
-
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralNoOvershoot(half *source_d, TO_TYPE *dest_d, long numElements);
-template <typename FROM_TYPE>
-__global__ void convertOutOfPlaceKernel_integralToHalfNoOvershoot(FROM_TYPE *source_d, half *dest_d, long numElements);
 
 // Launch in-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 template <typename FROM_TYPE>
 void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
-void launchReadConvertSyncWriteKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements, Stream stream);
 template <typename TO_TYPE>
 void launchReadConvertSyncWriteKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-void launchReadConvertSyncWriteKernel_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream);
+
+template <typename TO_TYPE>
+__global__ void convertOutOfPlaceKernel_halfToIntegralNoOvershoot(half *source_d, TO_TYPE *dest_d, long numElements);
+template <typename FROM_TYPE>
+__global__ void convertOutOfPlaceKernel_integralToHalfNoOvershoot(FROM_TYPE *source_d, half *dest_d, long numElements);
 
 void TypeConverter::gpuConvertType(void *source_d,
                                    void *dest_d,
@@ -76,7 +72,7 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeImpl<half, bool>((half *)source_d, (bool *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::PACKED_BOOLEAN:
-                    gpuConvertTypeFromHalfToPackedBooleanImpl((half *)source_d, (uint8_t *)dest_d, numElements, stream);
+                    gpuConvertTypeToPackedBooleanImpl<half>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 default:
                     assert(false);
@@ -580,7 +576,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::PACKED_BOOLEAN:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromPackedBooleanToHalfImpl((uint8_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeFromPackedBooleanImpl((uint8_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeFromPackedBooleanImpl<float>((uint8_t *)source_d, (float *)dest_d, numElements, stream);
@@ -728,40 +724,6 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TY
     }
 }
 
-void TypeConverter::convertToSmallerElementsInPlaceOnGpu_halfToPackedBoolean(half *source_d,
-                                                                             uint8_t *dest_d,
-                                                                             long numElements,
-                                                                             Stream stream) {
-    assert(numElements > 0);
-    if (numElements == 0)
-        return;
-
-    // First, make some empty space in the front by converting some number of the front-most elements to smaller elements
-    long availableBytes = 0;
-    long chunkSize = 8 * 256;
-
-    launchReadConvertSyncWriteKernel_halfToPackedBoolean(source_d, dest_d, numElements < chunkSize ? numElements : chunkSize, stream);
-
-    long numElementsLeft = numElements - chunkSize;
-    long startingElement = chunkSize;
-    availableBytes =
-        (sizeof(half) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN);
-
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat untill all elements are converted.
-    while (numElementsLeft > 0) {
-        chunkSize = availableBytes * 8;
-        if (chunkSize > numElementsLeft)
-            chunkSize = numElementsLeft;
-
-        launchOutOfPlaceConvertKernel_halfToPackedBoolean(source_d + startingElement, dest_d + startingElement / 8, chunkSize, stream);
-
-        numElementsLeft -= chunkSize;
-        startingElement += chunkSize;
-        availableBytes +=
-            (sizeof(half) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN);
-    }
-}
-
 // To Bigger
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
@@ -827,41 +789,6 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_
 
     if (numElementsLeft > 0) {
         launchReadConvertSyncWriteKernel_fromPackedBoolean<TO_TYPE>(source_d, dest_d, numElementsLeft, stream);
-    }
-}
-
-void TypeConverter::convertToBiggerElementsInPlaceOnGpu_packedBooleanToHalf(uint8_t *source_d,
-                                                                            half *dest_d,
-                                                                            long numElements,
-                                                                            Stream stream) {
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    // I have empty space in the allocated memory since I have the smaller element occupying enough memory to hold the bigger elements
-    // So convert some number of the trailing elements and put them in the back of the memory space, the trick here is that my writes cannot
-    // overlap my reads, so I choose a number of elements such that there is enough empty space existing that I can write all converted
-    // elements to it, after this the elements I just read and converted become empty space, so repeat until all elements are converted
-
-    long numElementsLeft = numElements;
-    long numEmptyBytes =
-        (sizeof(half) * numElements) - TensorDescriptor::getArraySizeInBytes(numElements, TensorDescriptor::DataType::PACKED_BOOLEAN);
-
-    while (numElementsLeft > 8 * 256) {
-        long chunkSize = numEmptyBytes / sizeof(half);
-        long startingElement = numElementsLeft - chunkSize;
-        startingElement = 8 * ((startingElement + 7) / 8);
-        chunkSize = numElementsLeft - startingElement;
-
-        launchOutOfPlaceConvertKernel_packedBooleanToHalf(source_d + startingElement / 8, dest_d + startingElement, chunkSize, stream);
-
-        numEmptyBytes +=
-            TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN) - (sizeof(half) * chunkSize);
-        numElementsLeft = startingElement;
-    }
-
-    if (numElementsLeft > 0) {
-        launchReadConvertSyncWriteKernel_packedBooleanToHalf(source_d, dest_d, numElementsLeft, stream);
     }
 }
 
@@ -931,34 +858,6 @@ void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8
     }
 }
 
-void TypeConverter::gpuConvertTypeFromHalfToPackedBooleanImpl(half *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[numElements - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[((numElements + 7) / 8) - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion) {
-        launchOutOfPlaceConvertKernel_halfToPackedBoolean(source_d, dest_d, numElements, stream);
-    } else {
-        convertToSmallerElementsInPlaceOnGpu_halfToPackedBoolean(source_d, dest_d, numElements, stream);
-    }
-}
-
 template <typename TO_TYPE>
 void TypeConverter::gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     assert((is_convertible<bool, TO_TYPE>::value));
@@ -987,34 +886,6 @@ void TypeConverter::gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TY
         launchOutOfPlaceConvertKernel_fromPackedBoolean<TO_TYPE>(source_d, dest_d, numElements, stream);
     } else {
         convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean<TO_TYPE>(source_d, dest_d, numElements, stream);
-    }
-}
-
-void TypeConverter::gpuConvertTypeFromPackedBooleanToHalfImpl(uint8_t *source_d, half *dest_d, long numElements, Stream stream) {
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[((numElements + 7) / 8) - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion) {
-        launchOutOfPlaceConvertKernel_packedBooleanToHalf(source_d, dest_d, numElements, stream);
-    } else {
-        convertToBiggerElementsInPlaceOnGpu_packedBooleanToHalf(source_d, dest_d, numElements, stream);
     }
 }
 
@@ -2016,18 +1887,13 @@ void launchOutOfPlaceConvertKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t 
     dim3 blockSize(256);
     constexpr int elementsPerBlock = 256 * 8;
     dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    // This one needs syncing anyway so it the synced kernel is used here.
-    convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean<FROM_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
 
-void launchOutOfPlaceConvertKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    constexpr int elementsPerBlock = 256 * 8;
-    dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    // This one needs syncing anyway so it the synced kernel is used here.
-    convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean<<<gridSize, blockSize, 0, stream.getStream()>>>(
-        source_d, dest_d, numElements);
+    if (is_same<FROM_TYPE, half>::value)
+        convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean<<<gridSize, blockSize, 0, stream.getStream()>>>(
+            (half *)source_d, dest_d, numElements);
+    else
+        convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean<FROM_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename TO_TYPE>
@@ -2035,18 +1901,13 @@ void launchOutOfPlaceConvertKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE 
     dim3 blockSize(256);
     constexpr int elementsPerBlock = 256 * 8;
     dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    // This one needs syncing anyway so it the synced kernel is used here.
-    convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean<TO_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
 
-void launchOutOfPlaceConvertKernel_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    constexpr int elementsPerBlock = 256 * 8;
-    dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    // This one needs syncing anyway so it the synced kernel is used here.
-    convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf<<<gridSize, blockSize, 0, stream.getStream()>>>(
-        source_d, dest_d, numElements);
+    if (is_same<TO_TYPE, half>::value)
+        convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf<<<gridSize, blockSize, 0, stream.getStream()>>>(
+            source_d, (half *)dest_d, numElements);
+    else
+        convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean<TO_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename FROM_TYPE, typename TO_TYPE>
@@ -2068,28 +1929,22 @@ template <typename FROM_TYPE>
 void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean<FROM_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-void launchReadConvertSyncWriteKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean<<<gridSize, blockSize, 0, stream.getStream()>>>(
-        source_d, dest_d, numElements);
+    if (is_same<FROM_TYPE, half>::value)
+        convertReadWholeChunkThenWriteWholeChunkKernel_halfToPackedBoolean<<<gridSize, blockSize, 0, stream.getStream()>>>(
+            (half *)source_d, dest_d, numElements);
+    else
+        convertReadWholeChunkThenWriteWholeChunkKernel_toPackedBoolean<FROM_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename TO_TYPE>
 void launchReadConvertSyncWriteKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean<TO_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-void launchReadConvertSyncWriteKernel_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf<<<gridSize, blockSize, 0, stream.getStream()>>>(
-        source_d, dest_d, numElements);
+    if (is_same<TO_TYPE, half>::value)
+        convertReadWholeChunkThenWriteWholeChunkKernel_packedBooleanToHalf<<<gridSize, blockSize, 0, stream.getStream()>>>(
+            source_d, (half *)dest_d, numElements);
+    else
+        convertReadWholeChunkThenWriteWholeChunkKernel_fromPackedBoolean<TO_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
