@@ -168,6 +168,7 @@ ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossE
 
 
 ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o \
+                   build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
 				   build/DeepLearning/Implementation/Layers/Activation/Softmax.o \
                    build/Utilities/TensorOperations/Activation/Tanh.o \
                    build/Utilities/TensorOperations/Activation/Relu.o \
@@ -227,7 +228,6 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o \
                    build/DeepLearning/Implementation/Layers/Layer.o \
                    build/Utilities/TensorOperations/TypeConversions/TypeConverter.o \
-                   build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.o \
                    build/DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.o \
                    build/DeepLearning/Implementation/Layers/Optimizers/Optimizer.o \
