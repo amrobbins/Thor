@@ -60,12 +60,12 @@ class TypeConverter {
 
     template <typename FROM_TYPE, typename TO_TYPE>
     static void cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long numElements);
-    template <typename FROM_TYPE>
-    static void cpuConvertTypeFromIntegralToHalfImpl(FROM_TYPE *source, half *dest, long numElements);
     template <typename TO_TYPE>
     static void cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *dest, long numElements);
     template <typename FROM_TYPE>
     static void cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *dest, long numElements);
+    template <typename FROM_TYPE>
+    static void cpuConvertTypeFromIntegralToHalfImpl(FROM_TYPE *source, half *dest, long numElements);
     static void cpuConvertTypeFromPackedBooleanToHalfImpl(void *source, half *dest, long numElements);
 
     // Convert on GPU between two types. In place or out of place is supported.
@@ -80,10 +80,8 @@ class TypeConverter {
     static void gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
     template <typename FROM_TYPE>
     static void gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
-    static void gpuConvertTypeFromHalfToPackedBooleanImpl(half *source_d, uint8_t *dest_d, long numElements, Stream stream);
     template <typename TO_TYPE>
     static void gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-    static void gpuConvertTypeFromPackedBooleanToHalfImpl(uint8_t *source_d, half *dest_d, long numElements, Stream stream);
 
     template <typename FROM_TYPE, typename TO_TYPE>
     static void convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
@@ -91,10 +89,8 @@ class TypeConverter {
     static void convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
     template <typename FROM_TYPE>
     static void convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
-    static void convertToSmallerElementsInPlaceOnGpu_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements, Stream stream);
     template <typename TO_TYPE>
     static void convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-    static void convertToBiggerElementsInPlaceOnGpu_packedBooleanToHalf(uint8_t *source_d, half *dest_d, long numElements, Stream stream);
 };
 
 }  // namespace ThorImplementation
