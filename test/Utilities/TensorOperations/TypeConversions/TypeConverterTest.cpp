@@ -468,7 +468,7 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
                             printf("[%d] source %f dest %f\n", i, sourceVal, destVal);
                         ASSERT_EQ(sourceVal, destVal);
                     } else {
-                        if (abs(sourceVal - destVal) >= 0.1)
+                        if (!(abs(sourceVal - destVal) < 0.1))
                             printf("[%d] source %f dest %f\n", i, sourceVal, destVal);
                         ASSERT_LT(abs(sourceVal - destVal), 0.1);
                     }
