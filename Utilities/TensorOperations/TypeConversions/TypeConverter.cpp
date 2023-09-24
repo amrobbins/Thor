@@ -684,55 +684,6 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
     }
 }
 
-// when converting from an integeral type to half, first convert to float to remove the abiguity between calling
-// __half(float) and __half(double)
-template <typename FROM_TYPE>
-void TypeConverter::cpuConvertTypeFromIntegralToHalfImpl(FROM_TYPE *source, half *dest, long numElements) {
-    assert((is_integral<FROM_TYPE>::value));
-    assert((is_convertible<FROM_TYPE, float>::value));
-    assert((is_convertible<float, half>::value));
-
-    if (numElements == 0)
-        return;
-
-    bool inPlaceConversion = ((void *)source == (void *)dest);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source;
-        void *sourceEnd = (void *)&(source[numElements - 1]);
-        void *destStart = dest;
-        void *destEnd = (void *)&(dest[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    if (!inPlaceConversion || sizeof(half) == sizeof(FROM_TYPE)) {
-        // Out of place or in place or conversion to a same sized type
-        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
-        if (numProcs > 1) {
-            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
-#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
-            for (long i = 0; i < numElements; ++i) {
-                dest[i] = (half)(float)(source[i]);
-            }
-        } else {
-            for (long i = 0; i < numElements; ++i) {
-                dest[i] = (half)(float)(source[i]);
-            }
-        }
-    } else if (sizeof(half) < sizeof(FROM_TYPE)) {
-        // In place and converting to a smaller type
-        for (long i = 0; i < numElements; ++i) {
-            dest[i] = (half)(float)(source[i]);
-        }
-    } else {
-        // In place and converting to a larger type
-        for (long i = numElements - 1; i >= 0; --i) {
-            dest[i] = (half)(float)(source[i]);
-        }
-    }
-}
-
 template <typename TO_TYPE>
 void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *dest, long numElements) {
     assert((is_convertible<bool, TO_TYPE>::value));
@@ -809,46 +760,6 @@ void TypeConverter::cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *d
         // In place and to a smaller type
         for (long i = 0; i < numElements; ++i) {
             PackedBoolean::setElement((bool)source[i], i, dest);
-        }
-    }
-}
-
-void TypeConverter::cpuConvertTypeFromPackedBooleanToHalfImpl(void *source, half *dest, long numElements) {
-    assert((is_convertible<bool, float>::value));
-    assert((is_convertible<float, half>::value));
-
-    if (numElements == 0)
-        return;
-
-    bool inPlaceConversion = ((void *)source == (void *)dest);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source;
-        void *sourceEnd = (void *)&(((uint8_t *)source)[((numElements - 1) + 7) / 8]);
-        void *destStart = dest;
-        void *destEnd = (void *)&(dest[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    if (!inPlaceConversion) {
-        // Out of place
-        const uint32_t numProcs = max(min((long)omp_get_num_procs(), numElements / 500000), 1L);
-        if (numProcs > 1) {
-            const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
-#pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
-            for (long i = 0; i < numElements; ++i) {
-                dest[i] = (half)((float)PackedBoolean::getElement(i, source));
-            }
-        } else {
-            for (long i = 0; i < numElements; ++i) {
-                dest[i] = (half)((float)PackedBoolean::getElement(i, source));
-            }
-        }
-    } else {
-        // In place
-        for (long i = numElements - 1; i >= 0; --i) {
-            dest[i] = (half)((float)PackedBoolean::getElement(i, source));
         }
     }
 }

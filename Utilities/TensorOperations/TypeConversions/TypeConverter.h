@@ -64,9 +64,6 @@ class TypeConverter {
     static void cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *dest, long numElements);
     template <typename FROM_TYPE>
     static void cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *dest, long numElements);
-    template <typename FROM_TYPE>
-    static void cpuConvertTypeFromIntegralToHalfImpl(FROM_TYPE *source, half *dest, long numElements);
-    static void cpuConvertTypeFromPackedBooleanToHalfImpl(void *source, half *dest, long numElements);
 
     // Convert on GPU between two types. In place or out of place is supported.
     static void gpuConvertType(void *source_d,
