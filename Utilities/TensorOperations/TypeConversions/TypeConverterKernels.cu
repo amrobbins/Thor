@@ -21,8 +21,6 @@ void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8
 template <typename TO_TYPE>
 void launchReadConvertSyncWriteKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralNoOvershoot(half *source_d, TO_TYPE *dest_d, long numElements);
 template <typename FROM_TYPE>
 __global__ void convertOutOfPlaceKernel_integralToHalfNoOvershoot(FROM_TYPE *source_d, half *dest_d, long numElements);
 
@@ -636,13 +634,7 @@ __global__ void convertOutOfPlaceKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE 
 
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    if (is_same<FROM_TYPE, half>::value && is_integral<TO_TYPE>::value) {
-        dim3 blockSize(256);
-        constexpr int elementsPerBlock = 256 * 8;
-        dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-        convertOutOfPlaceKernel_halfToIntegralNoOvershoot<TO_TYPE>
-            <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
-    } else if (is_integral<FROM_TYPE>::value && is_same<TO_TYPE, half>::value) {
+    if (is_integral<FROM_TYPE>::value && is_same<TO_TYPE, half>::value) {
         dim3 blockSize(256);
         constexpr int elementsPerBlock = 256 * 8;
         dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
@@ -908,30 +900,6 @@ __global__ void convertReadWholeChunkThenWriteWholeChunkKernel(FROM_TYPE *source
         long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
         if (index < numElements)
             dest_d[index] = (TO_TYPE)(buffer_shared[i * 256 + threadIdx.x]);
-    }
-}
-
-// Reads 8 writes 8
-template <typename TO_TYPE>
-__global__ void convertReadWholeChunkThenWriteWholeChunkKernel_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements) {
-    __shared__ half buffer_shared[8 * 256];
-
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
-        if (index < numElements)
-            buffer_shared[i * 256 + threadIdx.x] = source_d[index];
-
-        buffer_shared[i * 256 + threadIdx.x] = source_d[index];
-    }
-
-    __syncthreads();
-
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
-        if (index < numElements)
-            dest_d[index] = (TO_TYPE)(float)(buffer_shared[i * 256 + threadIdx.x]);
     }
 }
 
@@ -1438,119 +1406,6 @@ __global__ void convertOutOfPlaceKernelS8D8(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
 }
 
-// Reads 8 writes 8
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralNoOvershoot(half *source_d, TO_TYPE *dest_d, long numElements) {
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
-        if (index >= numElements)
-            return;
-
-        dest_d[index] = (TO_TYPE)(float)(source_d[index]);
-    }
-}
-
-// Reads 16 writes 16
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralD1(half *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 16;
-    if (index >= numElements)
-        return;
-
-    half inBuff[16];
-    long index16Elements = index >> 4;
-    ((double4 *)inBuff)[0] = ((double4 *)source_d)[index16Elements];
-
-    char outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)(float)inBuff[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)(float)inBuff[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)(float)inBuff[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)(float)inBuff[7];
-    ((TO_TYPE *)outBuff)[8] = (TO_TYPE)(float)inBuff[8];
-    ((TO_TYPE *)outBuff)[9] = (TO_TYPE)(float)inBuff[9];
-    ((TO_TYPE *)outBuff)[10] = (TO_TYPE)(float)inBuff[10];
-    ((TO_TYPE *)outBuff)[11] = (TO_TYPE)(float)inBuff[11];
-    ((TO_TYPE *)outBuff)[12] = (TO_TYPE)(float)inBuff[12];
-    ((TO_TYPE *)outBuff)[13] = (TO_TYPE)(float)inBuff[13];
-    ((TO_TYPE *)outBuff)[14] = (TO_TYPE)(float)inBuff[14];
-    ((TO_TYPE *)outBuff)[15] = (TO_TYPE)(float)inBuff[15];
-
-    ((float4 *)dest_d)[index16Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 8 writes 8
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralD2(half *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    half inBuff[8];
-    long index8Elements = index >> 3;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
-
-    half outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)(float)inBuff[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)(float)inBuff[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)(float)inBuff[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)(float)inBuff[7];
-
-    ((float4 *)dest_d)[index8Elements] = ((float4 *)outBuff)[0];
-}
-
-// Reads 8 writes 8
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralD4(half *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 8;
-    if (index >= numElements)
-        return;
-
-    half inBuff[8];
-    long index8Elements = index >> 3;
-    ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
-
-    float outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)(float)inBuff[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)(float)inBuff[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)(float)inBuff[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)(float)inBuff[7];
-
-    ((double4 *)dest_d)[index8Elements] = ((double4 *)outBuff)[0];
-}
-
-// Reads 4 writes 4
-template <typename TO_TYPE>
-__global__ void convertOutOfPlaceKernel_halfToIntegralD8(half *source_d, TO_TYPE *dest_d, long numElements) {
-    long index = (threadIdx.x + blockIdx.x * blockDim.x) * 4;
-    if (index >= numElements)
-        return;
-
-    half inBuff[4];
-    long index4Elements = index >> 2;
-    ((float2 *)inBuff)[0] = ((float2 *)source_d)[index4Elements];
-
-    double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)(float)inBuff[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)(float)inBuff[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)(float)inBuff[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)(float)inBuff[3];
-
-    ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
-}
-
 // Reads 16 writes 16
 template <typename FROM_TYPE>
 __global__ void convertOutOfPlaceKernel_integralToHalfS1(FROM_TYPE *source_d, half *dest_d, long numElements) {
@@ -1664,46 +1519,6 @@ __global__ void convertOutOfPlaceKernel_integralToHalfNoOvershoot(FROM_TYPE *sou
     }
 }
 
-/*
-// Reads 8 writes 1
-template <typename FROM_TYPE>
-__global__ void convertOutOfPlaceKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements) {
-    __shared__ FROM_TYPE buffer_shared[256];
-
-    long blockElementChunkStart = blockIdx.x * 256 * 8;
-    long threadInputElementIndex = threadIdx.x + blockElementChunkStart;
-    long threadOutputElementChunkStart = blockElementChunkStart + threadIdx.x * 8;
-
-    // So this thread has at least one element of an 8 element packed boolean uint8_t
-    uint8_t toBuff = 0;
-#pragma unroll 8
-    for (int i = 0; i < 8; ++i) {
-        __syncthreads();
-        if (threadInputElementIndex < numElements)
-            buffer_shared[threadIdx.x] = source_d[threadInputElementIndex];
-        __syncthreads();
-
-        // Now all of these elements belong to 1/8 of the threads.
-        // Each of those threads will read its elements out of shared and shift them into the toBuff;
-        if (threadIdx.x / (256 / 8) == i) {
-#pragma unroll 8
-            for (int j = 0; j < 8; ++j) {
-                if (threadOutputElementChunkStart + j < numElements) {
-                    FROM_TYPE fromBuff = buffer_shared[((threadIdx.x * 8) % 256) + j];
-                    bool toBuffRaw = (bool)fromBuff;
-                    toBuff |= (toBuffRaw) << j;
-                }
-            }
-        }
-        threadInputElementIndex += 256;
-    }
-    if (threadOutputElementChunkStart < numElements) {
-        long destMemIndex = threadOutputElementChunkStart / 8;
-        dest_d[destMemIndex] = toBuff;
-    }
-}
-*/
-
 // Reads 8 writes 1
 __global__ void convertOutOfPlaceKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements) {
     __shared__ half buffer_shared[256];
@@ -1771,33 +1586,7 @@ void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long nu
             convertOutOfPlaceKernelS1D8<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
         }
     } else if (sizeof(FROM_TYPE) == 2) {
-        if (is_same<FROM_TYPE, half>::value && is_integral<TO_TYPE>::value) {
-            if (sizeof(TO_TYPE) == 1) {
-                dim3 blockSize(256);
-                constexpr int elementsPerBlock = 256 * 16;
-                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-                convertOutOfPlaceKernel_halfToIntegralD1<TO_TYPE>
-                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
-            } else if (sizeof(TO_TYPE) == 2) {
-                dim3 blockSize(256);
-                constexpr int elementsPerBlock = 256 * 8;
-                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-                convertOutOfPlaceKernel_halfToIntegralD2<TO_TYPE>
-                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
-            } else if (sizeof(TO_TYPE) == 4) {
-                dim3 blockSize(256);
-                constexpr int elementsPerBlock = 256 * 8;
-                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-                convertOutOfPlaceKernel_halfToIntegralD4<TO_TYPE>
-                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
-            } else if (sizeof(TO_TYPE) == 8) {
-                dim3 blockSize(256);
-                constexpr int elementsPerBlock = 256 * 4;
-                dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-                convertOutOfPlaceKernel_halfToIntegralD8<TO_TYPE>
-                    <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
-            }
-        } else if (sizeof(TO_TYPE) == 1) {
+        if (sizeof(TO_TYPE) == 1) {
             dim3 blockSize(256);
             constexpr int elementsPerBlock = 256 * 16;
             dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
@@ -1914,10 +1703,7 @@ template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize(1);
-    if (is_same<FROM_TYPE, half>::value && is_integral<TO_TYPE>::value)
-        convertReadWholeChunkThenWriteWholeChunkKernel_halfToIntegral<TO_TYPE>
-            <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
-    else if (is_integral<FROM_TYPE>::value && is_same<TO_TYPE, half>::value)
+    if (is_integral<FROM_TYPE>::value && is_same<TO_TYPE, half>::value)
         convertReadWholeChunkThenWriteWholeChunkKernel_integralToHalf<FROM_TYPE>
             <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, (half *)dest_d, numElements);
     else
