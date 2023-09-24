@@ -23,10 +23,6 @@ __global__ void convertOutOfPlaceKernel_integralToHalfNoOvershoot(FROM_TYPE *sou
 // Launch in-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-template <typename TO_TYPE>
-void launchReadConvertSyncWriteKernel_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
-template <typename FROM_TYPE>
-void launchReadConvertSyncWriteKernel_integralToHalf(FROM_TYPE *source_d, half *dest_d, long numElements, Stream stream);
 template <typename FROM_TYPE>
 void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream);
 void launchReadConvertSyncWriteKernel_halfToPackedBoolean(half *source_d, uint8_t *dest_d, long numElements, Stream stream);
@@ -53,31 +49,31 @@ void TypeConverter::gpuConvertType(void *source_d,
                     gpuConvertTypeImpl<half, double>((half *)source_d, (double *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::INT8:
-                    gpuConvertTypeFromHalfToIntegralImpl<int8_t>((half *)source_d, (int8_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, int8_t>((half *)source_d, (int8_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::INT16:
-                    gpuConvertTypeFromHalfToIntegralImpl<int16_t>((half *)source_d, (int16_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, int16_t>((half *)source_d, (int16_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::INT32:
-                    gpuConvertTypeFromHalfToIntegralImpl<int32_t>((half *)source_d, (int32_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, int32_t>((half *)source_d, (int32_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::INT64:
-                    gpuConvertTypeFromHalfToIntegralImpl<int64_t>((half *)source_d, (int64_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, int64_t>((half *)source_d, (int64_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::UINT8:
-                    gpuConvertTypeFromHalfToIntegralImpl<uint8_t>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, uint8_t>((half *)source_d, (uint8_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::UINT16:
-                    gpuConvertTypeFromHalfToIntegralImpl<uint16_t>((half *)source_d, (uint16_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, uint16_t>((half *)source_d, (uint16_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::UINT32:
-                    gpuConvertTypeFromHalfToIntegralImpl<uint32_t>((half *)source_d, (uint32_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, uint32_t>((half *)source_d, (uint32_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::UINT64:
-                    gpuConvertTypeFromHalfToIntegralImpl<uint64_t>((half *)source_d, (uint64_t *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, uint64_t>((half *)source_d, (uint64_t *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::BOOLEAN:
-                    gpuConvertTypeFromHalfToIntegralImpl<bool>((half *)source_d, (bool *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<half, bool>((half *)source_d, (bool *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::PACKED_BOOLEAN:
                     gpuConvertTypeFromHalfToPackedBooleanImpl((half *)source_d, (uint8_t *)dest_d, numElements, stream);
@@ -179,7 +175,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::INT8:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<int8_t>((int8_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<int8_t, half>((int8_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<int8_t, float>((int8_t *)source_d, (float *)dest_d, numElements, stream);
@@ -224,7 +220,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::INT16:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<int16_t>((int16_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<int16_t, half>((int16_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<int16_t, float>((int16_t *)source_d, (float *)dest_d, numElements, stream);
@@ -269,7 +265,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::INT32:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<int32_t>((int32_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<int32_t, half>((int32_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<int32_t, float>((int32_t *)source_d, (float *)dest_d, numElements, stream);
@@ -314,7 +310,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::INT64:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<int64_t>((int64_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<int64_t, half>((int64_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<int64_t, float>((int64_t *)source_d, (float *)dest_d, numElements, stream);
@@ -359,7 +355,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::UINT8:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<uint8_t>((uint8_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<uint8_t, half>((uint8_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<uint8_t, float>((uint8_t *)source_d, (float *)dest_d, numElements, stream);
@@ -404,7 +400,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::UINT16:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<uint16_t>((uint16_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<uint16_t, half>((uint16_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<uint16_t, float>((uint16_t *)source_d, (float *)dest_d, numElements, stream);
@@ -449,7 +445,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::UINT32:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<uint32_t>((uint32_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<uint32_t, half>((uint32_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<uint32_t, float>((uint32_t *)source_d, (float *)dest_d, numElements, stream);
@@ -494,7 +490,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::UINT64:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<uint64_t>((uint64_t *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<uint64_t, half>((uint64_t *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<uint64_t, float>((uint64_t *)source_d, (float *)dest_d, numElements, stream);
@@ -539,7 +535,7 @@ void TypeConverter::gpuConvertType(void *source_d,
         case TensorDescriptor::DataType::BOOLEAN:
             switch (destDataType) {
                 case TensorDescriptor::DataType::FP16:
-                    gpuConvertTypeFromIntegralToHalfImpl<bool>((bool *)source_d, (half *)dest_d, numElements, stream);
+                    gpuConvertTypeImpl<bool, half>((bool *)source_d, (half *)dest_d, numElements, stream);
                     break;
                 case TensorDescriptor::DataType::FP32:
                     gpuConvertTypeImpl<bool, float>((bool *)source_d, (float *)dest_d, numElements, stream);
@@ -695,71 +691,6 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO
     }
 }
 
-template <typename TO_TYPE>
-void TypeConverter::convertToSmallerElementsInPlaceOnGpu_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert((is_integral<TO_TYPE>::value));
-
-    assert(numElements > 0);
-    if (numElements == 0)
-        return;
-
-    // First, make some empty space in the front by converting some number of the front-most elements to smaller elements
-    long availableBytes = 0;
-    long chunkSize = 8 * 256;
-
-    launchReadConvertSyncWriteKernel_halfToIntegral<TO_TYPE>(source_d, dest_d, numElements < chunkSize ? numElements : chunkSize, stream);
-
-    long numElementsLeft = numElements - chunkSize;
-    long startingElement = chunkSize;
-    availableBytes = (sizeof(half) - sizeof(TO_TYPE)) * chunkSize;
-
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat untill all elements are converted.
-    while (numElementsLeft > 0) {
-        chunkSize = availableBytes / sizeof(TO_TYPE);
-
-        launchOutOfPlaceConvertKernelNoOvershoot<half, TO_TYPE>(
-            source_d + startingElement, dest_d + startingElement, chunkSize < numElementsLeft ? chunkSize : numElementsLeft, stream);
-
-        numElementsLeft -= chunkSize;
-        startingElement += chunkSize;
-        availableBytes += (sizeof(half) - sizeof(TO_TYPE)) * chunkSize;
-    }
-}
-
-template <typename FROM_TYPE>
-void TypeConverter::convertToSmallerElementsInPlaceOnGpu_integralToHalf(FROM_TYPE *source_d,
-                                                                        half *dest_d,
-                                                                        long numElements,
-                                                                        Stream stream) {
-    assert((is_integral<FROM_TYPE>::value));
-
-    assert(numElements > 0);
-    if (numElements == 0)
-        return;
-
-    // First, make some empty space in the front by converting some number of the front-most elements to smaller elements
-    long availableBytes = 0;
-    long chunkSize = 8 * 256;
-
-    launchReadConvertSyncWriteKernel_integralToHalf<FROM_TYPE>(source_d, dest_d, numElements < chunkSize ? numElements : chunkSize, stream);
-
-    long numElementsLeft = numElements - chunkSize;
-    long startingElement = chunkSize;
-    availableBytes = (sizeof(FROM_TYPE) - sizeof(half)) * chunkSize;
-
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat untill all elements are converted.
-    while (numElementsLeft > 0) {
-        chunkSize = availableBytes / sizeof(half);
-
-        launchOutOfPlaceConvertKernelNoOvershoot<FROM_TYPE, half>(
-            source_d + startingElement, dest_d + startingElement, chunkSize < numElementsLeft ? chunkSize : numElementsLeft, stream);
-
-        numElementsLeft -= chunkSize;
-        startingElement += chunkSize;
-        availableBytes += (sizeof(FROM_TYPE) - sizeof(half)) * chunkSize;
-    }
-}
-
 template <typename FROM_TYPE>
 void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TYPE *source_d,
                                                                          uint8_t *dest_d,
@@ -859,68 +790,6 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO_
 
     if (numElementsLeft > 0) {
         launchReadConvertSyncWriteKernel<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElementsLeft, stream);
-    }
-}
-
-template <typename TO_TYPE>
-void TypeConverter::convertToBiggerElementsInPlaceOnGpu_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert((is_integral<TO_TYPE>::value));
-
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    // I have empty space in the allocated memory since I have the smaller element occupying enough memory to hold the bigger elements
-    // So convert some number of the trailing elements and put them in the back of the memory space, the trick here is that my writes cannot
-    // overlap my reads, so I choose a number of elements such that there is enough empty space existing that I can write all converted
-    // elements to it, after this the elements I just read and converted become empty space, so repeat until all elements are converted
-
-    long numElementsLeft = numElements;
-    long numEmptyBytes = (sizeof(TO_TYPE) - sizeof(half)) * numElements;
-
-    while (numElementsLeft > 8 * 256) {
-        long chunkSize = numEmptyBytes / sizeof(TO_TYPE);
-        long startingElement = numElementsLeft - chunkSize;
-
-        launchOutOfPlaceConvertKernelNoOvershoot<half, TO_TYPE>(source_d + startingElement, dest_d + startingElement, chunkSize, stream);
-
-        numEmptyBytes += (sizeof(half) - sizeof(TO_TYPE)) * chunkSize;
-        numElementsLeft = startingElement;
-    }
-
-    if (numElementsLeft > 0) {
-        launchReadConvertSyncWriteKernel_halfToIntegral<TO_TYPE>(source_d, dest_d, numElementsLeft, stream);
-    }
-}
-
-template <typename FROM_TYPE>
-void TypeConverter::convertToBiggerElementsInPlaceOnGpu_integralToHalf(FROM_TYPE *source_d, half *dest_d, long numElements, Stream stream) {
-    assert((is_integral<FROM_TYPE>::value));
-
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    // I have empty space in the allocated memory since I have the smaller element occupying enough memory to hold the bigger elements
-    // So convert some number of the trailing elements and put them in the back of the memory space, the trick here is that my writes cannot
-    // overlap my reads, so I choose a number of elements such that there is enough empty space existing that I can write all converted
-    // elements to it, after this the elements I just read and converted become empty space, so repeat until all elements are converted
-
-    long numElementsLeft = numElements;
-    long numEmptyBytes = (sizeof(half) - sizeof(FROM_TYPE)) * numElements;
-
-    while (numElementsLeft > 8 * 256) {
-        long chunkSize = numEmptyBytes / sizeof(half);
-        long startingElement = numElementsLeft - chunkSize;
-
-        launchOutOfPlaceConvertKernelNoOvershoot<FROM_TYPE, half>(source_d + startingElement, dest_d + startingElement, chunkSize, stream);
-
-        numEmptyBytes += (sizeof(FROM_TYPE) - sizeof(half)) * chunkSize;
-        numElementsLeft = startingElement;
-    }
-
-    if (numElementsLeft > 0) {
-        launchReadConvertSyncWriteKernel_integralToHalf<FROM_TYPE>(source_d, dest_d, numElementsLeft, stream);
     }
 }
 
@@ -1028,74 +897,6 @@ void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, lon
             convertToSmallerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
         else
             convertToBiggerElementsInPlaceOnGpu<FROM_TYPE, TO_TYPE>(source_d, dest_d, numElements, stream);
-    }
-}
-
-template <typename FROM_TYPE>
-void TypeConverter::gpuConvertTypeFromIntegralToHalfImpl(FROM_TYPE *source_d, half *dest_d, long numElements, Stream stream) {
-    assert(!(is_same<FROM_TYPE, half>::value));
-
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[numElements - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion || sizeof(FROM_TYPE) == sizeof(half)) {
-        launchOutOfPlaceConvertKernel<FROM_TYPE, half>(source_d, dest_d, numElements, stream);
-    } else {
-        if (sizeof(FROM_TYPE) > sizeof(half))
-            convertToSmallerElementsInPlaceOnGpu_integralToHalf<FROM_TYPE>(source_d, dest_d, numElements, stream);
-        else
-            convertToBiggerElementsInPlaceOnGpu_integralToHalf<FROM_TYPE>(source_d, dest_d, numElements, stream);
-    }
-}
-
-template <typename TO_TYPE>
-void TypeConverter::gpuConvertTypeFromHalfToIntegralImpl(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert(!(is_same<half, TO_TYPE>::value));
-
-    assert(numElements >= 0);
-    if (numElements == 0)
-        return;
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    bool inPlaceConversion = ((void *)source_d == (void *)dest_d);
-
-    // When not doing an inplace operation, the memory regions must not overlap
-    if (!inPlaceConversion) {
-        void *sourceStart = source_d;
-        void *sourceEnd = (void *)&(source_d[numElements - 1]);
-        void *destStart = dest_d;
-        void *destEnd = (void *)&(dest_d[numElements - 1]);
-        assert(sourceEnd < destStart || sourceStart > destEnd);
-    }
-
-    // All conversions to and from all element sizes of 1, 2, 4, and 8 bytes are supported.
-    // Also, PACKED_BOOLEAN is supported
-    // InPlace and out of place conversions are supported in all cases
-    if (!inPlaceConversion || sizeof(half) == sizeof(TO_TYPE)) {
-        launchOutOfPlaceConvertKernel<half, TO_TYPE>(source_d, dest_d, numElements, stream);
-    } else {
-        if (sizeof(half) > sizeof(TO_TYPE))
-            convertToSmallerElementsInPlaceOnGpu_halfToIntegral<TO_TYPE>(source_d, dest_d, numElements, stream);
-        else
-            convertToBiggerElementsInPlaceOnGpu_halfToIntegral<TO_TYPE>(source_d, dest_d, numElements, stream);
     }
 }
 
@@ -2252,24 +2053,15 @@ template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel<FROM_TYPE, TO_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-template <typename TO_TYPE>
-void launchReadConvertSyncWriteKernel_halfToIntegral(half *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel_halfToIntegral<TO_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
-}
-
-template <typename FROM_TYPE>
-void launchReadConvertSyncWriteKernel_integralToHalf(FROM_TYPE *source_d, half *dest_d, long numElements, Stream stream) {
-    dim3 blockSize(256);
-    dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel_integralToHalf<FROM_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+    if (is_same<FROM_TYPE, half>::value && is_integral<TO_TYPE>::value)
+        convertReadWholeChunkThenWriteWholeChunkKernel_halfToIntegral<TO_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>((half *)source_d, dest_d, numElements);
+    else if (is_integral<FROM_TYPE>::value && is_same<TO_TYPE, half>::value)
+        convertReadWholeChunkThenWriteWholeChunkKernel_integralToHalf<FROM_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, (half *)dest_d, numElements);
+    else
+        convertReadWholeChunkThenWriteWholeChunkKernel<FROM_TYPE, TO_TYPE>
+            <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename FROM_TYPE>
