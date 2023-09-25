@@ -22,11 +22,13 @@ void ThreadJoinQueue::push(thread&& t) {
     atomic_thread_fence(memory_order_release);
     threadQueue.push(move(t));
     if (joiningThread.valid()) {
+        // If it had previously finished, then re-launch it. Otherwise don't need to do anything.
         if (joiningThread.wait_for(chrono::seconds(0)) == future_status::ready) {
             joiningThread.get();
             joiningThread = async(launch::async, ThreadJoinQueue::joinAllThreads);
         }
     } else {
+        // First time so launch it.
         joiningThread = async(launch::async, ThreadJoinQueue::joinAllThreads);
     }
 }

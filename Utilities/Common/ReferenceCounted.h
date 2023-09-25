@@ -34,7 +34,7 @@
  * 1. The object initially referred to by tensorToConnect will be destroyed.
  *    tensorToConnect will refer to the object originally referred to by tensor.
  *    tensor will end up referring to no object (reference count of 0).
- *    So the object originally referrred to by tensor was not destroyed, it is being referred to by tensorToConnect.
+ *    So the object originally referred to by tensor was not destroyed, it is being referred to by tensorToConnect.
  *    So tensorToConnect will refer to a tensor that has a referenceCount of 1.
  * 2. Both tensorToConnect and tensor will end up referring to no object (reference count of 0),
  *    the tensor will be destroyed when its reference count goes to 0 in thread 1.
@@ -74,22 +74,20 @@
  * when changing the object that they refer to, if the derived class has a need to do that.
  *
  */
-// FIXME: #define DEBUG_REF_COUNTS
+// #define DEBUG_REF_COUNTS
 
 class ReferenceCounted {
    public:
-    ReferenceCounted() : id(nextId.fetch_add(1)) { referenceCount = nullptr; }
+    ReferenceCounted() : referenceCount(nullptr), id(nextId.fetch_add(1)) {}
 
-    ReferenceCounted(const ReferenceCounted &other) : id(nextId.fetch_add(1)) {
-        referenceCount = nullptr;
-
+    ReferenceCounted(const ReferenceCounted &other) : referenceCount(nullptr), id(nextId.fetch_add(1)) {
         *this = other;  // implemented using operator=
     }
 
-    long getReferenceCountedId() { return id; }
+    uint32_t getReferenceCountedId() const { return id; }
 
     ReferenceCounted &operator=(const ReferenceCounted &other) {
-        std::atomic<long> *otherReferenceCount = other.referenceCount;
+        std::atomic<uint32_t> *otherReferenceCount = other.referenceCount;
 
         // If they already refer to the same instance, or they are both uninitialized, then do nothing.
         if (referenceCount == otherReferenceCount)
@@ -99,7 +97,7 @@ class ReferenceCounted {
             // other is initialized
             otherReferenceCount->fetch_add(1);
             if (referenceCount != nullptr) {
-                // this stream was previously initialized
+                // this one was previously initialized
                 bool shouldDestroy = removeReference();
                 if (shouldDestroy)
                     this->destroy();
@@ -108,9 +106,9 @@ class ReferenceCounted {
 
             return *this;
         } else {
-            // other stream is not initialized
+            // other is not initialized
             if (referenceCount != nullptr) {
-                // this stream was previously initialized
+                // this one was previously initialized
                 bool shouldDestroy = removeReference();
                 if (shouldDestroy)
                     this->destroy();
@@ -141,17 +139,17 @@ class ReferenceCounted {
         }
     }
 
-    long getReferenceCount() { return (referenceCount.load())->fetch_add(0); }
+    uint32_t getReferenceCount() { return referenceCount.load()->load(); }
 
     void initialize() {
-        referenceCount = new std::atomic<long>(1);
+        referenceCount = new std::atomic<uint32_t>(1);
 
 #ifdef DEBUG_REF_COUNTS
         objectsCreated.fetch_add(1);
 #endif
     }
 
-    virtual ~ReferenceCounted() {}
+    virtual ~ReferenceCounted() = default;
 
     bool uninitialized() const { return referenceCount == nullptr; }
     bool initialized() const { return !uninitialized(); }
@@ -165,10 +163,10 @@ class ReferenceCounted {
             return false;
         }
 
-        int refCountBeforeDecrement = (referenceCount.load())->fetch_sub(1);
+        uint32_t refCountBeforeDecrement = referenceCount.load()->fetch_sub(1);
 
         if (refCountBeforeDecrement == 1) {
-            delete referenceCount;
+            delete referenceCount.load();
             referenceCount = nullptr;
 
 #ifdef DEBUG_REF_COUNTS
@@ -183,7 +181,7 @@ class ReferenceCounted {
     }
 
    private:
-    std::atomic<std::atomic<long> *> referenceCount;
+    std::atomic<std::atomic<uint32_t> *> referenceCount;
 
     std::recursive_mutex mtx;
 

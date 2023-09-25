@@ -23,6 +23,14 @@
 
 #define DEBUG_REF_COUNTS
 
+// The following struct is defined to be a base class of the struct that will hold the args to the function that is enqueued.
+// The reason for this is that it declares a virtual method so that I can use a dynamic cast to ensure everything is correct.
+// Also on the enqueued thread I can't call any cuda function, so I can't delete a tensor for example, so this base class
+// allows the parameters to be deleted on another thread.
+struct HostFunctionArgsBase {
+    virtual ~HostFunctionArgsBase() {}
+};
+
 /**
  * A reference counted container for cudaStream_t.
  *
@@ -101,10 +109,11 @@ class Stream : private ReferenceCounted {
         assert(cudaStatus == cudaSuccess);
     }
 
-    void enqueueHostFunction(cudaHostFn_t function, void *userData) {
+    void enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args) {
         cudaError_t cudaStatus;
-        cudaStatus = cudaLaunchHostFunc(*this, function, userData);
+        cudaStatus = cudaLaunchHostFunc(*this, function, args.get());
         assert(cudaStatus == cudaSuccess);
+        launchCleanUpHostFunctionArgs(std::move(args));
     }
 
     cudaStream_t getStream() {
@@ -187,6 +196,8 @@ class Stream : private ReferenceCounted {
 
     static Stream getNextDownloadStream(uint32_t deviceNum);
     static void setMaxNumDownloadStreams(uint32_t numGradientUpdateStreams);
+
+    void launchCleanUpHostFunctionArgs(std::unique_ptr<HostFunctionArgsBase> &&args);
 
    private:
     void construct(int gpuNum, Priority priority) {
@@ -278,13 +289,3 @@ class Stream : private ReferenceCounted {
 
     std::mutex *mtx;
 };
-
-// The following struct is defined to be a base class of the struct that will hold the args to the function that is enqueued.
-// The reason for this is that it declares a virtual method so that I can use a dynamic cast to ensure everything is correct.
-// Also on the enqueued thread I can't call any cuda function, so I can't delete a tensor for example, so this base class
-// allows the parameters to be deleted on another thread.
-struct HostFunctionArgsBase {
-    virtual ~HostFunctionArgsBase() {}
-};
-
-void launchCleanUpHostFunctionArgs(Stream stream, HostFunctionArgsBase *args);
