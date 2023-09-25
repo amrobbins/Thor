@@ -604,6 +604,16 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         int8_t *mem = tensor.getMemPtr<int8_t>();
+        if (maxValue > 0) {
+            // integer rounding (truncation) rounds away from maxValue in this case
+            if (maxValue == int32_t(maxValue))
+                maxValue += 0.9999999;
+        }
+        if (minValue < 0) {
+            // integer rounding (truncation) rounds away from minValue in this case
+            if (minValue == int32_t(minValue))
+                minValue -= 0.9999999;
+        }
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
@@ -631,6 +641,16 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::INT16) {
         int16_t *mem = tensor.getMemPtr<int16_t>();
+        if (maxValue > 0) {
+            // integer rounding (truncation) rounds away from maxValue in this case
+            if (maxValue == int32_t(maxValue))
+                maxValue += 0.9999999;
+        }
+        if (minValue < 0) {
+            // integer rounding (truncation) rounds away from minValue in this case
+            if (minValue == int32_t(minValue))
+                minValue -= 0.9999999;
+        }
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
@@ -658,6 +678,16 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::INT32) {
         int32_t *mem = tensor.getMemPtr<int32_t>();
+        if (maxValue > 0) {
+            // integer rounding (truncation) rounds away from maxValue in this case
+            if (maxValue == int32_t(maxValue))
+                maxValue += 0.9999999;
+        }
+        if (minValue < 0) {
+            // integer rounding (truncation) rounds away from minValue in this case
+            if (minValue == int32_t(minValue))
+                minValue -= 0.9999999;
+        }
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
@@ -685,6 +715,8 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         uint8_t *mem = tensor.getMemPtr<uint8_t>();
+        if (maxValue == uint32_t(maxValue))
+            maxValue += 0.9999999;
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
@@ -712,6 +744,8 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::UINT16) {
         uint16_t *mem = tensor.getMemPtr<uint16_t>();
+        if (maxValue == uint32_t(maxValue))
+            maxValue += 0.9999999;
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
@@ -739,6 +773,8 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
         uint32_t *mem = tensor.getMemPtr<uint32_t>();
+        if (maxValue == uint32_t(maxValue))
+            maxValue += 0.9999999;
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
@@ -766,7 +802,7 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
         minValue = 0;
-        maxValue = 1;
+        maxValue = 1.9999999;
         bool *mem = tensor.getMemPtr<bool>();
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
@@ -794,8 +830,8 @@ void fillCpuRandom(void *data) {
             }
         }
     } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-        minValue = 0b00000000;
-        maxValue = 0b11111111;
+        minValue = 0;
+        maxValue = 255.9999999;
         numElements = (numElements + 7) / 8;
         const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
         const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
@@ -830,6 +866,9 @@ void fillCpuRandom(void *data) {
 }
 
 void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
+    if (maxValue < minValue)
+        swap(maxValue, minValue);
+
     if (getPlacement() == TensorPlacement::MemDevices::CPU) {
         HostFunctionArgsBase *args = new FillRandomArgs(*this, minValue, maxValue);
         stream.enqueueHostFunction(fillCpuRandom, args);
@@ -837,25 +876,64 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
     } else {
         TensorDescriptor::DataType dataType = getDataType();
         if (dataType == TensorDescriptor::DataType::FP16) {
-            launchGpuFilLRandom<half>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            launchGpuFillRandom<half>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::FP32) {
-            launchGpuFilLRandom<float>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            launchGpuFillRandom<float>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::INT8) {
-            launchGpuFilLRandom<int8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            // Since for int I am rounding down for integer types, adding just under 1.0 to the continuous distribution gives
+            // the range [minValue, maxValue] where minValue and maxValue have equal likelihood of being generated to all other values.
+            // Note that converting to an integer truncates and so rounds toward 0.
+            if (maxValue > 0) {
+                // integer rounding (truncation) rounds away from maxValue in this case
+                if (maxValue == int32_t(maxValue))
+                    maxValue += 0.99999;
+            }
+            if (minValue < 0) {
+                // integer rounding (truncation) rounds away from minValue in this case
+                if (minValue == int32_t(minValue))
+                    minValue -= 0.99999;
+            }
+            launchGpuFillRandom<int8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::INT16) {
-            launchGpuFilLRandom<int16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            if (maxValue > 0) {
+                // integer rounding (truncation) rounds away from maxValue in this case
+                if (maxValue == int32_t(maxValue))
+                    maxValue += 0.99999;
+            }
+            if (minValue < 0) {
+                // integer rounding (truncation) rounds away from minValue in this case
+                if (minValue == int32_t(minValue))
+                    minValue -= 0.99999;
+            }
+            launchGpuFillRandom<int16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::INT32) {
-            launchGpuFilLRandom<int32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            if (maxValue > 0) {
+                // integer rounding (truncation) rounds away from maxValue in this case
+                if (maxValue == int32_t(maxValue))
+                    maxValue += 0.99999;
+            }
+            if (minValue < 0) {
+                // integer rounding (truncation) rounds away from minValue in this case
+                if (minValue == int32_t(minValue))
+                    minValue -= 0.99999;
+            }
+            launchGpuFillRandom<int32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::UINT8) {
-            launchGpuFilLRandom<uint8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            if (maxValue == uint32_t(maxValue))
+                maxValue += 0.99999;
+            launchGpuFillRandom<uint8_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::UINT16) {
-            launchGpuFilLRandom<uint16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            if (maxValue == uint32_t(maxValue))
+                maxValue += 0.99999;
+            launchGpuFillRandom<uint16_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::UINT32) {
-            launchGpuFilLRandom<uint32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
+            if (maxValue == uint32_t(maxValue))
+                maxValue += 0.99999;
+            launchGpuFillRandom<uint32_t>(getMemPtr(), getTotalNumElements(), minValue, maxValue, stream);
         } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
-            launchGpuFilLRandom<bool>(getMemPtr(), getTotalNumElements(), false, true, stream);
+            launchGpuFillRandom<bool>(getMemPtr(), getTotalNumElements(), 0, 1.999999, stream);
         } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-            launchGpuFilLRandom<uint8_t>(getMemPtr(), (getTotalNumElements() + 7) / 8, 0b00000000, 0b11111111, stream);
+            launchGpuFillRandom<uint8_t>(getMemPtr(), (getTotalNumElements() + 7) / 8, 0, 255.999999, stream);
         }
     }
 }

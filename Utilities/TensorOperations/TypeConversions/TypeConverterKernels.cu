@@ -634,8 +634,7 @@ void launchOutOfPlaceConvertKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE *dest
     dim3 blockSize(256);
     constexpr int elementsPerBlock = 256 * 8;
     dim3 gridSize((numElements + (elementsPerBlock - 1)) / elementsPerBlock);
-    convertOutOfPlaceKernelNoOvershoot<FROM_TYPE, TO_TYPE>
-        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+    convertOutOfPlaceKernelNoOvershoot<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 // To Smaller
@@ -1537,7 +1536,8 @@ template <typename FROM_TYPE, typename TO_TYPE>
 void launchReadConvertSyncWriteKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     dim3 blockSize(256);
     dim3 gridSize(1);
-    convertReadWholeChunkThenWriteWholeChunkKernel<FROM_TYPE, TO_TYPE><<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
+    convertReadWholeChunkThenWriteWholeChunkKernel<FROM_TYPE, TO_TYPE>
+        <<<gridSize, blockSize, 0, stream.getStream()>>>(source_d, dest_d, numElements);
 }
 
 template <typename FROM_TYPE>
