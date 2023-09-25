@@ -437,9 +437,8 @@ Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescr
 
     if (placement == TensorPlacement::MemDevices::CPU) {
         tensor.clearAsync(stream);
-        HostFunctionArgsBase *args = new IdentityMatrixArgs(tensor);
-        stream.enqueueHostFunction(fillCpuIdentityMatrixOnes, args);
-        launchCleanUpHostFunctionArgs(stream, args);
+        std::unique_ptr<HostFunctionArgsBase> args(new IdentityMatrixArgs(tensor));
+        stream.enqueueHostFunction(fillCpuIdentityMatrixOnes, std::move(args));
     } else {
         tensor.clearAsync(stream);
         tensor.fillGpuIdentityMatrixOnes(stream);
@@ -501,9 +500,8 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         cudaStatus = cudaMemsetAsync(mem, value, numBytes, stream);
         assert(cudaStatus == cudaSuccess);
     } else {
-        HostFunctionArgsBase *args = new MemsetArgs(*this, value, numElements);
-        stream.enqueueHostFunction(callMemsetOnTensor, args);
-        launchCleanUpHostFunctionArgs(stream, args);
+        std::unique_ptr<HostFunctionArgsBase> args(new MemsetArgs(*this, value, numElements));
+        stream.enqueueHostFunction(callMemsetOnTensor, std::move(args));
     }
 }
 
@@ -870,9 +868,8 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
         swap(maxValue, minValue);
 
     if (getPlacement() == TensorPlacement::MemDevices::CPU) {
-        HostFunctionArgsBase *args = new FillRandomArgs(*this, minValue, maxValue);
-        stream.enqueueHostFunction(fillCpuRandom, args);
-        launchCleanUpHostFunctionArgs(stream, args);
+        std::unique_ptr<HostFunctionArgsBase> args(new FillRandomArgs(*this, minValue, maxValue));
+        stream.enqueueHostFunction(fillCpuRandom, std::move(args));
     } else {
         TensorDescriptor::DataType dataType = getDataType();
         if (dataType == TensorDescriptor::DataType::FP16) {
@@ -1175,9 +1172,8 @@ void fillValue(void *params) {
 void Tensor::fill(double value, Stream stream) {
     TensorDescriptor::DataType dataType = getDataType();
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        HostFunctionArgsBase *args = new CpuFillParams(value, *this);
-        stream.enqueueHostFunction(fillValue, args);
-        launchCleanUpHostFunctionArgs(stream, args);
+        std::unique_ptr<HostFunctionArgsBase> args(new CpuFillParams(value, *this));
+        stream.enqueueHostFunction(fillValue, std::move(args));
     } else {
         if (dataType == TensorDescriptor::DataType::FP16) {
             launchFillValueGpuKernel<half>(
