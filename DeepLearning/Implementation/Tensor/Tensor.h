@@ -777,7 +777,7 @@ class Tensor : private ReferenceCounted {
     void launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
     void fillGpuIdentityMatrixOnes(Stream stream);
     template <typename DATA_TYPE>
-    void launchGpuFilLRandom(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
+    void launchGpuFillRandom(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
 
     void overrideDescriptor(TensorDescriptor descriptor);
     void clearDescriptorOverride();

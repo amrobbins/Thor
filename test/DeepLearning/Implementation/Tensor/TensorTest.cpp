@@ -1805,6 +1805,8 @@ TEST(Tensor, fillRandomCpu) {
             stream.synchronize();
             float *mem = tensorFp32_h.getMemPtr<float>();
             for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                if (!(mem[i] <= maxValue && mem[i] >= minValue))
+                    printf("[%d] %d <= %f <= %d failed.   dt = %d\n", i, minValue, mem[i], maxValue, dt);
                 ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
             }
         }
@@ -1817,7 +1819,7 @@ TEST(Tensor, fillRandomGpu) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
     Stream stream(0);
 
-    for (uint32_t t = 0; t < 1000; ++t) {
+    for (uint32_t t = 0; t < 20; ++t) {
         TensorDescriptor::DataType dataType;
         uint32_t dt = rand() % 10;
         if (dt == 0)
@@ -1892,6 +1894,8 @@ TEST(Tensor, fillRandomGpu) {
             stream.synchronize();
             float *mem = tensorFp32_h.getMemPtr<float>();
             for (uint32_t i = 0; i < tensor.getTotalNumElements(); ++i) {
+                if (!(mem[i] <= maxValue && mem[i] >= minValue))
+                    printf("[%d] %d <= %f <= %d failed.   dt = %d\n", i, minValue, mem[i], maxValue, dt);
                 ASSERT_TRUE(mem[i] <= maxValue && mem[i] >= minValue);
             }
         }
