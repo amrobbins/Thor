@@ -1087,17 +1087,67 @@ TEST(Tensor, MultiplyScalarTensor) {
     }
 }
 
-TEST(Tensor, MultiplyMatrix) {
+TEST(Tensor, MultiplyMatrixFp32) {
     // This one needs to handle all 3 interpretations of matrix multiply
     srand(time(nullptr));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Stream stream(0);
     // FIXME implement
     for (uint32_t t = 0; t < 20; ++t) {
         uint32_t testType = rand() % 3;
         if (testType == 0) {
             // Scalar Tensor
+            uint32_t scalarNumDimensions = 1 + (rand() % 3);
+            vector<uint64_t> scalarDimensions;
+            for (uint32_t d = 0; d < scalarNumDimensions; ++d)
+                scalarDimensions.push_back(1);
+            uint32_t tensorNumDimensions = 1 + (rand() % 4);
+            uint32_t maxDimensionSize = pow(100000.0, 1.0 / tensorNumDimensions);
+            vector<uint64_t> tensorDimensions;
+            for (uint32_t d = 0; d < tensorNumDimensions; ++d)
+                tensorDimensions.push_back(1 + (rand() % maxDimensionSize));
+
+            Tensor scalar =
+                Tensor::randoms(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, scalarDimensions), stream, -100, 100);
+            Tensor tensor =
+                Tensor::randoms(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, scalarDimensions), stream, -100, 100);
+            Tensor scalar_h = scalar.clone(cpuPlacement);
+            scalar_h.copyFromAsync(scalar, stream);
+            Tensor tensor_h = tensor.clone(cpuPlacement);
+            tensor_h.copyFromAsync(tensor, stream);
+
+            bool inPlace = rand() % 2;
+            Tensor result;
+            if (inPlace) {
+                result = tensor;
+            } else {
+                result = tensor.clone();
+            }
+            Tensor resultGpu_h = tensor_h.clone();
+
+            if (rand() % 2 == 0)
+                result.multiply(scalar, tensor, stream);
+            else
+                result.multiply(tensor, scalar, stream);
+            resultGpu_h.copyFromAsync(result, stream);
+            stream.synchronize();
+
+            ASSERT_EQ(scalar.getDimensions(), scalarDimensions);
+            ASSERT_EQ(result.getDimensions(), tensor.getDimensions());
+
+            uint32_t numElements = result.getTotalNumElements();
+            float *resultMem = resultGpu_h.getMemPtr<float>();
+            float *tensorMem = tensor_h.getMemPtr<float>();
+            float scalarValue = tensor_h.getMemPtr<float>()[0];
+            for (uint32_t i = 0; i < numElements; ++i) {
+                float actual = resultMem[i];
+                float expected = scalarValue * tensorMem[i];
+                if (!(expected == actual))
+                    printf("[%d] expected %f actual %f\n", i, expected, actual);
+                ASSERT_EQ(expected, actual);
+            }
         } else if (testType == 1) {
             // Vector Vector
         } else {

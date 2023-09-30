@@ -9,7 +9,7 @@
    1. https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2023-0/cblas-gemm-001.html
    2. https://oneapi-src.github.io/oneDNN/v0/index.html
 8. Add functional support to Tensor to implement a full high performance linear algebra library, for example matrix inverse, cholesky decomposition, SVD, vector normalization, batched vector normalization (in general vector operations should have a batched version for high performance), cross product, ...
-9. Fix PACKED_BOOLEAN
+9. Fix PACKED_BOOLEAN: support for dimensions not of multiple of 8, so there will be some unused bits at the end of a row.
 9. Python Bindings - using pybind11
 9. Multi-Gpu support
    1. Multiple stamps with accumulation.

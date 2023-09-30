@@ -66,7 +66,12 @@ class Tensor : private ReferenceCounted {
     TensorPlacement getPlacement() { return placement; }
     template <typename ElementDataType = void>
     ElementDataType *getMemPtr();
-    void *getElement(std::vector<unsigned long> dimensionIndex);
+    template <typename ElementDataType>
+    ElementDataType getElement(std::vector<unsigned long> dimensionIndex);
+    template <typename ElementDataType>
+    void setElement(std::vector<unsigned long> dimensionIndex, const ElementDataType &value);
+    template <typename ElementDataType = void>
+    ElementDataType *getElementPointer(std::vector<unsigned long> dimensionIndex);
     TensorDescriptor getDescriptor();
 
     unsigned long getTensorId() { return instanceId; }
