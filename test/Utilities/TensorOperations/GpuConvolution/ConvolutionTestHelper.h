@@ -26,7 +26,7 @@ class ConvolutionTestHelper {
                                                (uint64_t)inputChannel,
                                                (uint64_t)((filterHeight - 1) - filterRow),
                                                (uint64_t)((filterWidth - 1) - filterCol)};
-        return *((half *)weights.getElement({weightIndex}));
+        return weights.getElement<half>({weightIndex});
     }
 
     static void cpuConvolutionForward(Tensor inputFeatures,
@@ -100,7 +100,7 @@ class ConvolutionTestHelper {
                                                                                    (uint64_t)inputChannel,
                                                                                    (uint64_t)imageRow + filterRow,
                                                                                    (uint64_t)imageCol + filterCol};
-                                        element = *((half *)inputFeatures.getElement({inputImageIndex}));
+                                        element = inputFeatures.getElement<half>({inputImageIndex});
                                         weight = getWeightElement(weights,
                                                                   (uint64_t)outputChannel,
                                                                   (uint64_t)inputChannel,
@@ -113,14 +113,13 @@ class ConvolutionTestHelper {
                         }
 
                         if (bias.isPresent())
-                            accum += (float)*((half *)bias.get().getElement({(uint64_t)outputChannel}));
+                            accum += (float)bias.get().getElement<half>({(uint64_t)outputChannel});
 
                         std::vector<unsigned long> outputImageIndex{(uint64_t)batch,
                                                                     (uint64_t)outputChannel,
                                                                     (uint64_t)(imageRow + verticalPadding) / verticalStride,
                                                                     (uint64_t)(imageCol + horizontalPadding) / horizontalStride};
-                        half *outputElement = (half *)outputFeatures.getElement({outputImageIndex});
-                        *outputElement = (half)accum;
+                        outputFeatures.setElement<half>(outputImageIndex, accum);
                     }
                 }
             }
@@ -193,13 +192,12 @@ class ConvolutionTestHelper {
             for (unsigned int c = 0; c < featureInputDimensionsWithPadding[1]; ++c) {
                 for (unsigned int h = 0; h < featureInputDimensionsWithPadding[2]; ++h) {
                     for (unsigned int w = 0; w < featureInputDimensionsWithPadding[3]; ++w) {
-                        half *paddedElement = (half *)featureInputPadded.getElement({n, c, h, w});
                         if (h < verticalPadding || h >= imageRows + verticalPadding || w < horizontalPadding ||
                             w >= imageCols + horizontalPadding) {
-                            *paddedElement = (half)0.0f;
+                            featureInputPadded.setElement<half>({n, c, h, w}, half(0.0f));
                         } else {
-                            half *nonPaddedElement = (half *)featureInput.getElement({n, c, h - verticalPadding, w - horizontalPadding});
-                            *paddedElement = *nonPaddedElement;
+                            half nonPaddedElement = featureInput.getElement<half>({n, c, h - verticalPadding, w - horizontalPadding});
+                            featureInputPadded.setElement<half>({n, c, h, w}, nonPaddedElement);
                         }
                     }
                 }
@@ -221,15 +219,17 @@ class ConvolutionTestHelper {
                             for (unsigned int filterCol = 0; filterCol < filterWidth; ++filterCol) {
                                 for (unsigned int inputChannel = 0; inputChannel < inputChannels; ++inputChannel) {
                                     float featureElement =
-                                        *(half *)featureInputPadded.getElement({batch,
-                                                                                inputChannel,
-                                                                                verticalStride * errorInputRow + filterRow,
-                                                                                horizontalStride * errorInputCol + filterCol});
-                                    float errorElement =
-                                        *(half *)errorInput.getElement({batch, outputChannel, errorInputRow, errorInputCol});
-                                    float *weightsGradientElement = (float *)weightsGradientFloat.getElement(
+                                        featureInputPadded.getElement<half>({batch,
+                                                                             inputChannel,
+                                                                             verticalStride * errorInputRow + filterRow,
+                                                                             horizontalStride * errorInputCol + filterCol});
+                                    float errorElement = errorInput.getElement<half>({batch, outputChannel, errorInputRow, errorInputCol});
+                                    float weightsGradientElement = weightsGradientFloat.getElement<float>(
                                         {outputChannel, inputChannel, (filterHeight - 1) - filterRow, (filterWidth - 1) - filterCol});
-                                    *weightsGradientElement += featureElement * errorElement;
+                                    weightsGradientElement += featureElement * errorElement;
+                                    weightsGradientFloat.setElement<float>(
+                                        {outputChannel, inputChannel, (filterHeight - 1) - filterRow, (filterWidth - 1) - filterCol},
+                                        weightsGradientElement);
                                 }
                             }
                         }
@@ -299,14 +299,14 @@ class ConvolutionTestHelper {
                                         for (int q = 0; q < convolutionKernelRequirement.getFilterWidth(); ++q) {
                                             if ((p + k * verticalStride == h + verticalPadding) &&
                                                 (q + horizontalStride * l == w + horizontalPadding)) {
-                                                float *errorOutputElement = (float *)errorOutputFloat.getElement(
+                                                float *errorOutputElement = errorOutputFloat.getElementPointer<float>(
                                                     {(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
                                                 float errorInputElement =
-                                                    *(half *)errorInput.getElement({(uint64_t)n, (uint64_t)f, (uint64_t)k, (uint64_t)l});
-                                                float weightElement = *(half *)weights.getElement({(uint64_t)f,
-                                                                                                   (uint64_t)c,
-                                                                                                   (uint64_t)((filterHeight - 1) - p),
-                                                                                                   (uint64_t)((filterWidth - 1) - q)});
+                                                    errorInput.getElement<half>({(uint64_t)n, (uint64_t)f, (uint64_t)k, (uint64_t)l});
+                                                float weightElement = weights.getElement<half>({(uint64_t)f,
+                                                                                                (uint64_t)c,
+                                                                                                (uint64_t)((filterHeight - 1) - p),
+                                                                                                (uint64_t)((filterWidth - 1) - q)});
                                                 *errorOutputElement += errorInputElement * weightElement;
                                             }
                                         }
@@ -352,7 +352,7 @@ class ConvolutionTestHelper {
             for (unsigned int batchItem = 0; batchItem < n; ++batchItem) {
                 for (unsigned int height = 0; height < h; ++height) {
                     for (unsigned int width = 0; width < w; ++width) {
-                        half errorElement = *((half *)errorInput.getElement({batchItem, channel, height, width}));
+                        half errorElement = errorInput.getElement<half>({batchItem, channel, height, width});
                         biasesGradientFloatMem[channel] += (float)errorElement;
                     }
                 }

@@ -88,8 +88,8 @@ TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
 
         // Verify CPU and GPU results match
         for (uint64_t i = 0; i < numFeatureOutputChannels; ++i) {
-            float cpuVal = *(half *)biasesGradientCpu.getElement({(uint64_t)i});
-            float gpuVal = *(half *)biasesGradientGpu_h.getElement({(uint64_t)i});
+            float cpuVal = biasesGradientCpu.getElement<half>({(uint64_t)i});
+            float gpuVal = biasesGradientGpu_h.getElement<half>({(uint64_t)i});
             EXPECT_EQ(cpuVal, gpuVal);
         }
     }
@@ -323,8 +323,8 @@ void backwardFilterTest(bool accumulate) {
             for (uint64_t i = 0; i < numFeatureInputChannels; ++i) {
                 for (uint64_t h = 0; h < filterHeight; ++h) {
                     for (uint64_t w = 0; w < filterWidth; ++w) {
-                        float cpuVal = *(half *)weightsGradientCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
-                        float gpuVal = *(half *)weightsGradientGpu_h.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                        float cpuVal = weightsGradientCpu.getElement<half>({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                        float gpuVal = weightsGradientGpu_h.getElement<half>({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
                         float thresh = batchSize * 0.1 + abs(cpuVal * 0.005);
                         EXPECT_LT(abs(cpuVal - gpuVal), thresh);
                         if (abs(cpuVal - gpuVal) >= thresh)
@@ -441,8 +441,8 @@ TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
             for (uint64_t c = 0; c < errorOutputDescriptor.getDimensions()[1]; ++c) {
                 for (uint64_t h = 0; h < errorOutputDescriptor.getDimensions()[2]; ++h) {
                     for (uint64_t w = 0; w < errorOutputDescriptor.getDimensions()[3]; ++w) {
-                        float cpuVal = *(half *)errorOutputCpu.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
-                        float gpuVal = *(half *)errorOutputGpu_h.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                        float cpuVal = errorOutputCpu.getElement<half>({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                        float gpuVal = errorOutputGpu_h.getElement<half>({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
                         float thresh = batchSize * 0.1 + abs(cpuVal * 0.005);
                         EXPECT_LT(abs(cpuVal - gpuVal), thresh);
                         if (abs(cpuVal - gpuVal) >= thresh)

@@ -165,8 +165,112 @@ ElementDataType *Tensor::getMemPtr() {
             assert((is_same<ElementDataType, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
             assert((is_same<ElementDataType, uint8_t>::value));
+        else
+            assert(false);
     }
     return (ElementDataType *)mem;
+}
+
+template <typename ElementDataType>
+ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
+    assert(!uninitialized());
+
+#ifdef THOR_DEBUG
+    // This seems like too much overhead to get just one element, so it is explicitly removed for release.
+    if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+        assert((is_same<ElementDataType, half>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+        assert((is_same<ElementDataType, float>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+        assert((is_same<ElementDataType, int8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+        assert((is_same<ElementDataType, int16_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+        assert((is_same<ElementDataType, int32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+        assert((is_same<ElementDataType, uint8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+        assert((is_same<ElementDataType, uint16_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+        assert((is_same<ElementDataType, uint32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+        assert((is_same<ElementDataType, bool>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+        assert((is_same<ElementDataType, uint8_t>::value));
+    else
+        assert(false);
+#endif
+
+    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    return *((ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem));
+}
+
+template <typename ElementDataType>
+void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const ElementDataType &value) {
+    assert(!uninitialized());
+
+#ifdef THOR_DEBUG
+    // This seems like too much overhead to get just one element, so it is explicitly removed for release.
+    if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+        assert((is_same<ElementDataType, half>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+        assert((is_same<ElementDataType, float>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+        assert((is_same<ElementDataType, int8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+        assert((is_same<ElementDataType, int16_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+        assert((is_same<ElementDataType, int32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+        assert((is_same<ElementDataType, uint8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+        assert((is_same<ElementDataType, uint16_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+        assert((is_same<ElementDataType, uint32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+        assert((is_same<ElementDataType, bool>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+        assert((is_same<ElementDataType, uint8_t>::value));
+    else
+        assert(false);
+#endif
+
+    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    *((ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem)) = value;
+}
+
+template <typename ElementDataType>
+ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionIndex) {
+    assert(!uninitialized());
+
+#ifdef THOR_DEBUG
+    // This seems like too much overhead to get just one element, so it is explicitly removed for release.
+    if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+        assert((is_same<ElementDataType, half>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+        assert((is_same<ElementDataType, float>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+        assert((is_same<ElementDataType, int8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+        assert((is_same<ElementDataType, int16_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+        assert((is_same<ElementDataType, int32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+        assert((is_same<ElementDataType, uint8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+        assert((is_same<ElementDataType, uint16_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+        assert((is_same<ElementDataType, uint32_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+        assert((is_same<ElementDataType, bool>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+        assert((is_same<ElementDataType, uint8_t>::value));
+    else
+        assert(false);
+#endif
+
+    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
+    return (ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem);
 }
 
 bool Tensor::isUsingExternallyManagedMemory() { return usingExternallyManagedMemory; }
@@ -229,13 +333,6 @@ void Tensor::overrideDescriptor(TensorDescriptor descriptor) {
 void Tensor::clearDescriptorOverride() {
     assert(!uninitialized());
     descriptorOverridden = false;
-}
-
-void *Tensor::getElement(vector<unsigned long> dimensionIndex) {
-    assert(!uninitialized());
-
-    assert(getDescriptor().getDataType() != TensorDescriptor::DataType::PACKED_BOOLEAN);
-    return getDescriptor().getChunkAddress(dimensionIndex, mem);
 }
 
 void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue) {
@@ -1245,6 +1342,7 @@ void Tensor::transposeSquareMatrixInPlace(Stream stream) {
     }
 }
 
+template void *Tensor::getMemPtr();
 template half *Tensor::getMemPtr();
 template float *Tensor::getMemPtr();
 template int8_t *Tensor::getMemPtr();
@@ -1277,3 +1375,31 @@ template void Tensor::loadValuesIntoVector<uint8_t>(vector<uint8_t> &values, Str
 template void Tensor::loadValuesIntoVector<uint16_t>(vector<uint16_t> &values, Stream stream);
 template void Tensor::loadValuesIntoVector<uint32_t>(vector<uint32_t> &values, Stream stream);
 template void Tensor::loadValuesIntoVector<uint64_t>(vector<uint64_t> &values, Stream stream);
+
+template half Tensor::getElement(vector<unsigned long> dimensionIndex);
+template float Tensor::getElement(vector<unsigned long> dimensionIndex);
+template int8_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template int16_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template int32_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template uint8_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template uint16_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template uint32_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const half &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const float &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int8_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int16_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int32_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint8_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint16_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint32_t &value);
+
+template void *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template half *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template float *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template int8_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template int16_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template int32_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template uint8_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template uint16_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template uint32_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);

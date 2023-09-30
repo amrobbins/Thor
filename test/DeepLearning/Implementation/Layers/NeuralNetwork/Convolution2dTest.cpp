@@ -295,8 +295,6 @@ void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
         memset(weightsGradientCpu.getMemPtr(), 0, weightsGradientCpu.getDescriptor().getArraySizeInBytes());
     }
 
-    // printf("cpu before %f\n", (float)*(half*)weightsGradientCpu.getElement({0, 0, 0, 0}));
-
     Optional<Tensor> biasesGradientCpu = biasesCpu.isPresent() ? Optional<Tensor>(biasesCpu.get().clone()) : Optional<Tensor>::empty();
     Optional<Tensor> biasesGradientGpu = convolution2dLayer->getOptimizer().get()->getBiasesGradient();
 
@@ -328,8 +326,8 @@ void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
         for (unsigned int c = 0; c < errorOutputDimensions[1]; ++c) {
             for (unsigned int h = 0; h < errorOutputDimensions[2]; ++h) {
                 for (unsigned int w = 0; w < errorOutputDimensions[3]; ++w) {
-                    float cpuVal = *(half *)errorOutputCpu.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
-                    float gpuVal = *(half *)errorOutputGpu_h.getElement({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                    float cpuVal = errorOutputCpu.getElement<half>({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
+                    float gpuVal = errorOutputGpu_h.getElement<half>({(uint64_t)n, (uint64_t)c, (uint64_t)h, (uint64_t)w});
                     int threshAdjust = abs(cpuVal) > 300.0f ? 3 : 0;
                     if (abs(cpuVal - gpuVal) >= thresh + threshAdjust)
                         printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, n, c, h, w);
@@ -346,17 +344,13 @@ void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
     weightsGradientGpu_h.copyFromAsync(weightsGradientGpu, convolution2dLayer->getOptimizer().get()->getGradientUpdateStream());
     convolution2dLayer->getOptimizer().get()->getGradientUpdateStream().synchronize();
 
-    // printf("cpu after %f gpu after %f\n", (float)*(half*)weightsGradientCpu.getElement({0, 0, 0, 0}),
-    // (float)*(half*)weightsGradientGpu_h.getElement({0, 0, 0, 0}));
-
     for (int o = 0; o < numOutputChannels; ++o) {
         for (int i = 0; i < numInputChannels; ++i) {
             for (int h = 0; h < filterHeight; ++h) {
                 for (int w = 0; w < filterWidth; ++w) {
-                    float cpuGradient = *(half *)weightsGradientCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
-                    // float cpuWeight = *(half *)weightsCpu.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                    float cpuGradient = weightsGradientCpu.getElement<half>({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
                     float cpuVal = cpuGradient;
-                    float gpuVal = *(half *)weightsGradientGpu_h.getElement({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
+                    float gpuVal = weightsGradientGpu_h.getElement<half>({(uint64_t)o, (uint64_t)i, (uint64_t)h, (uint64_t)w});
                     int threshAdjust = abs(cpuVal) > 300.0f ? 3 : 0;
                     if (abs(cpuVal - gpuVal) >= thresh + threshAdjust) {
                         printf("%f %f   at [%d, %d, %d, %d]\n", cpuVal, gpuVal, o, i, h, w);
@@ -404,10 +398,9 @@ void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
         convolution2dLayer->getOptimizer().get()->getGradientUpdateStream().synchronize();
 
         for (int i = 0; i < numOutputChannels; ++i) {
-            float cpuGradient = *(half *)biasesGradientCpu.get().getElement({(uint64_t)i});
-            // float cpuBias = *(half *)biasesCpu.get().getElement({(uint64_t)i});
+            float cpuGradient = biasesGradientCpu.get().getElement<half>({(uint64_t)i});
             float cpuVal = cpuGradient;
-            float gpuVal = *(half *)biasesGradientGpu_h.getElement({(uint64_t)i});
+            float gpuVal = biasesGradientGpu_h.getElement<half>({(uint64_t)i});
             int threshAdjust = abs(cpuVal) > 300.0f ? 3 : 0;
             ASSERT_LT(abs(cpuVal - gpuVal), thresh + threshAdjust);
             if (abs(cpuVal - gpuVal) >= thresh + threshAdjust)

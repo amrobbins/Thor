@@ -60,8 +60,8 @@ Tensor maxPoolingForward(Tensor featureIn,
                             bool inHorizontalPadding = imageCol < horizontalPadding || imageCol >= horizontalPadding + inputWidth;
                             bool inVerticalPadding = imageRow < verticalPadding || imageRow >= verticalPadding + inputHeight;
                             if (!inHorizontalPadding && !inVerticalPadding) {
-                                half value = *(half *)featureIn.getElement(
-                                    {batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
+                                half value =
+                                    featureIn.getElement<half>({batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
                                 if ((float)value > maxValue)
                                     maxValue = value;
                             }
@@ -69,7 +69,7 @@ Tensor maxPoolingForward(Tensor featureIn,
                     }
                     uint32_t outputRow = row / verticalStride;
                     uint32_t outputCol = col / horizontalStride;
-                    *(half *)featureOut.getElement({batch, feature, outputRow, outputCol}) = maxValue;
+                    featureOut.setElement<half>({batch, feature, outputRow, outputCol}, maxValue);
                 }
             }
         }
@@ -116,18 +116,18 @@ Tensor maxPoolingBackward(Tensor featureIn,
                             if (inputRow < 0 || inputCol < 0 || inputRow >= inputHeight || inputCol >= inputWidth)
                                 continue;
 
-                            half featureInValue = *(half *)featureIn.getElement({batch, feature, inputRow, inputCol});
+                            half featureInValue = featureIn.getElement<half>({batch, feature, inputRow, inputCol});
 
                             uint32_t outputRow = verticalWindow;
                             uint32_t outputCol = horizontalWindow;
 
-                            half featureOutValue = *(half *)featureOut.getElement({batch, feature, outputRow, outputCol});
+                            half featureOutValue = featureOut.getElement<half>({batch, feature, outputRow, outputCol});
 
                             // If the input is the max in the window
                             if (featureOutValue == featureInValue) {
-                                half errorValue = *(half *)errorIn.getElement({batch, feature, outputRow, outputCol});
-                                *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) =
-                                    *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) + errorValue;
+                                half errorValue = errorIn.getElement<half>({batch, feature, outputRow, outputCol});
+                                errorOut.setElement<half>({batch, feature, inputRow, inputCol},
+                                                          errorOut.getElement<half>({batch, feature, inputRow, inputCol}) + errorValue);
 
                                 // Looks like cudnn considers just the first max element in the window as the winner.
                                 windowRow = windowHeight;
@@ -187,8 +187,8 @@ Tensor averagePoolingForward(Tensor featureIn,
                             bool inHorizontalPadding = imageCol < horizontalPadding || imageCol >= horizontalPadding + inputWidth;
                             bool inVerticalPadding = imageRow < verticalPadding || imageRow >= verticalPadding + inputHeight;
                             if (!inHorizontalPadding && !inVerticalPadding) {
-                                half value = *(half *)featureIn.getElement(
-                                    {batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
+                                half value =
+                                    featureIn.getElement<half>({batch, feature, imageRow - verticalPadding, imageCol - horizontalPadding});
                                 numValues += 1;
                                 averageValue += (float)value;
                             }
@@ -198,7 +198,7 @@ Tensor averagePoolingForward(Tensor featureIn,
                         averageValue /= numValues;
                     uint32_t outputRow = row / verticalStride;
                     uint32_t outputCol = col / horizontalStride;
-                    *(half *)featureOut.getElement({batch, feature, outputRow, outputCol}) = averageValue;
+                    featureOut.setElement<half>({batch, feature, outputRow, outputCol}, averageValue);
                 }
             }
         }
@@ -268,10 +268,10 @@ Tensor averagePoolingBackward(Tensor errorIn,
                             uint32_t outputRow = verticalWindow;
                             uint32_t outputCol = horizontalWindow;
 
-                            half errorValue = *(half *)errorIn.getElement({batch, feature, outputRow, outputCol});
-                            *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) =
-                                *(half *)errorOut.getElement({batch, feature, inputRow, inputCol}) +
-                                (half)((float)errorValue / numElements[verticalWindow][horizontalWindow]);
+                            half errorValue = errorIn.getElement<half>({batch, feature, outputRow, outputCol});
+                            errorOut.setElement<half>({batch, feature, inputRow, inputCol},
+                                                      errorOut.getElement<half>({batch, feature, inputRow, inputCol}) +
+                                                          (half)((float)errorValue / numElements[verticalWindow][horizontalWindow]));
                         }
                     }
                 }
