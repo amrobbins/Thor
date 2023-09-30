@@ -337,6 +337,7 @@ void Tensor::clearDescriptorOverride() {
 
 void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue) {
     assert(!uninitialized());
+    assert(!source.uninitialized());
 
     if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
         return;
