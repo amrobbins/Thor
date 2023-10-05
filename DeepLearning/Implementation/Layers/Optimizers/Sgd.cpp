@@ -50,19 +50,20 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
 
     if (momentum > 0.0f) {
         weightsUpdate = weightsGradient.clone();
-        weightsUpdate.memset(0);
+        weightsUpdate.clearAsync(gradientUpdateStream);
         if (biases.isPresent()) {
             assert(biasesGradient.isPresent());
             biasesUpdate = biasesGradient.get().clone();
-            biasesUpdate.get().memset(0);
+            biasesUpdate.get().clearAsync(gradientUpdateStream);
+        }
 
-            if (useNesterovMomentum) {
-                projectedWeights = weights.clone();
-                if (biases.isPresent())
-                    projectedBiases = biases.get().clone();
-                this->trainableLayer->assignWeightsParameterizationTensor(projectedWeights, projectedBiases);
-            }
-        } else {
+        if (useNesterovMomentum) {
+            projectedWeights = weights.clone();
+            if (biases.isPresent())
+                projectedBiases = biases.get().clone();
+            else
+                projectedBiases = Optional<Tensor>::empty();
+            this->trainableLayer->assignWeightsParameterizationTensor(projectedWeights, projectedBiases);
         }
     }
 }
@@ -110,6 +111,17 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
             float alpha = momentum;
             float beta = (-1.0f * currentLearningRate) / batchSize;
+
+            Tensor wg_h = weightsGradient.clone(TensorPlacement::MemDevices::CPU);
+            wg_h.copyFromAsync(weightsGradient, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
+            half *wgMem_h = wg_h.getMemPtr<half>();
+            Tensor wu_h = weightsUpdate.clone(TensorPlacement::MemDevices::CPU);
+            wu_h.copyFromAsync(weightsUpdate, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
+            half *wuMem_h = wu_h.getMemPtr<half>();
+            printf(
+                "%f * %f - (%f * %f) / %d\n", (float)wuMem_h[0], (float)momentum, (float)currentLearningRate, (float)wgMem_h[0], batchSize);
 
             weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
             if (biases.isPresent())
