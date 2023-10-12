@@ -87,6 +87,7 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             // WeightUpdate_t = momentum * weightUpdate_t-1 - (lr * gradient(weights_t + momentum * weightUpdate_t-1)) / batch_size
 
             // Note that the gradients below are computed wrt the projected weights, computed further below
+            // (because infer uses the projected weights, which affects the errorInput value)
             float alpha = momentum;
             float beta = (-1.0f * currentLearningRate) / batchSize;
             weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
@@ -98,7 +99,7 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
 
             // projectedWeights_t+1 = weights_t+1 + momentum * weightUpdate_t
-            // Note updateWeightsWithScale automatially applies the loss scaling factor, since I am projecting the update to the weights
+            // Note updateWeightsWithScale automatically applies the loss scaling factor, since I am projecting the update to the weights
             // I need to apply to it the projection here.
             projectedWeights.get().add(weights, weightsUpdate, 1.0f, momentum / Loss::getLossScalingFactor(), gradientUpdateStream);
             if (projectedBiases.isPresent()) {
@@ -111,17 +112,6 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
             float alpha = momentum;
             float beta = (-1.0f * currentLearningRate) / batchSize;
-
-            Tensor wg_h = weightsGradient.clone(TensorPlacement::MemDevices::CPU);
-            wg_h.copyFromAsync(weightsGradient, gradientUpdateStream);
-            gradientUpdateStream.synchronize();
-            half *wgMem_h = wg_h.getMemPtr<half>();
-            Tensor wu_h = weightsUpdate.clone(TensorPlacement::MemDevices::CPU);
-            wu_h.copyFromAsync(weightsUpdate, gradientUpdateStream);
-            gradientUpdateStream.synchronize();
-            half *wuMem_h = wu_h.getMemPtr<half>();
-            printf(
-                "%f * %f - (%f * %f) / %d\n", (float)wuMem_h[0], (float)momentum, (float)currentLearningRate, (float)wgMem_h[0], batchSize);
 
             weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
             if (biases.isPresent())
