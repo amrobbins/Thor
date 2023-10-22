@@ -63,7 +63,7 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
                 projectedBiases = biases.get().clone();
             else
                 projectedBiases = Optional<Tensor>::empty();
-            this->trainableLayer->assignWeightsParameterizationTensor(projectedWeights, projectedBiases);
+            this->trainableLayer->assignProjectedWeightsTensor(projectedWeights, projectedBiases);
         }
     }
 }
@@ -104,10 +104,8 @@ void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchS
             projectedWeights.get().add(weights, weightsUpdate, 1.0f, momentum / Loss::getLossScalingFactor(), gradientUpdateStream);
             if (projectedBiases.isPresent()) {
                 assert(biases.isPresent());
-                projectedBiases.get().add(biases, biasesUpdate, 1.0f, momentum, gradientUpdateStream);
+                projectedBiases.get().add(biases, biasesUpdate, 1.0f, momentum / Loss::getLossScalingFactor(), gradientUpdateStream);
             }
-
-            Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
         } else {
             // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
             float alpha = momentum;
@@ -171,3 +169,7 @@ float Sgd::getDecay() { return decay; }
 float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
+
+Optional<Tensor> Sgd::getProjectedWeights() { return projectedWeights; }
+
+Optional<Tensor> Sgd::getProjectedBiases() { return projectedBiases; }
