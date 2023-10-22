@@ -174,21 +174,16 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                        Optional<Tensor> outputTensor,
                        Stream stream,
                        unsigned int connectionNumber,
-                       Tensor weightsParameterization,
-                       Optional<Tensor> biasesParameterization) {
+                       Tensor weights,
+                       Optional<Tensor> biases) {
         assert(convolutionKernelRequirement.isPresent());
         assert(inputTensor.isPresent());
         assert(outputTensor.isPresent());
 
         assert(inputTensor.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-        GpuConvolution::instance().convolutionForward(convolutionKernelRequirement,
-                                                      inputTensor,
-                                                      weightsParameterization,
-                                                      biasesParameterization,
-                                                      outputTensor,
-                                                      workspaceForward,
-                                                      stream);
+        GpuConvolution::instance().convolutionForward(
+            convolutionKernelRequirement, inputTensor, weights, biases, outputTensor, workspaceForward, stream);
     }
 
     virtual void backProp(Optional<Tensor> dataIn,
@@ -196,9 +191,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                           Optional<Tensor> errorOut,
                           Stream dataStream,
                           unsigned int connectionNumber,
-                          bool accumulateGradient,
-                          Tensor weightsParameterization,
-                          Optional<Tensor> biasesParameterization) {
+                          bool accumulateGradient) {
         assert(convolutionKernelRequirement.isPresent());
         assert(dataIn.isPresent());
         assert(errorIn.isPresent());
@@ -207,7 +200,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         if (errorOut.isPresent()) {
             assert(dataStream.isInitialized());
             GpuConvolution::instance().convolutionBackwardData(
-                convolutionKernelRequirement, errorIn, weightsParameterization, errorOut, workspaceBackwardData, dataStream);
+                convolutionKernelRequirement, errorIn, weights, errorOut, workspaceBackwardData, dataStream);
         }
 
         if (!isInferenceOnly()) {
@@ -238,20 +231,18 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                         Optional<Tensor> featureIn,
                                         Optional<Tensor> errorIn,
                                         Stream gradientUpdateStream,
-                                        bool accumulateGradient,
-                                        Tensor weightsParameterization,
-                                        Optional<Tensor> biasesParameterization) {
+                                        bool accumulateGradient) {
         // Ensure all memory properly allocated
         assert(weightsGradient.isPresent());
-        assert(weightsGradient.get().getDescriptor() == weightsParameterization.getDescriptor());
-        assert(weightsGradient.get().getPlacement() == weightsParameterization.getPlacement());
-        assert(weightsGradient.get().getMemPtr() != weightsParameterization.getMemPtr());
+        assert(weightsGradient.get().getDescriptor() == weights.getDescriptor());
+        assert(weightsGradient.get().getPlacement() == weights.getPlacement());
+        assert(weightsGradient.get().getMemPtr() != weights.getMemPtr());
         if (hasBias) {
             assert(biasesGradient.isPresent());
-            assert(biasesParameterization.isPresent());
+            assert(biases.isPresent());
             assert(biasesGradient.get().getDescriptor() == biasesGradient.get().getDescriptor());
-            assert(biasesGradient.get().getMemPtr() != biasesParameterization.get().getMemPtr());
-            assert(biasesGradient.get().getPlacement() == biasesParameterization.get().getPlacement());
+            assert(biasesGradient.get().getMemPtr() != biases.get().getMemPtr());
+            assert(biasesGradient.get().getPlacement() == biases.get().getPlacement());
         } else {
             assert(biasesGradient.isEmpty());
         }

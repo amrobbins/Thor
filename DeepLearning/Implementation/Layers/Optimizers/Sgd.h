@@ -36,6 +36,9 @@ class Sgd : public Optimizer {
     virtual float getMomentum();
     virtual bool getUseNesterovMomentum();
 
+    Optional<Tensor> getProjectedWeights();
+    Optional<Tensor> getProjectedBiases();
+
    protected:
     float initialLearningRate;
     float decay;
