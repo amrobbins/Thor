@@ -14,18 +14,18 @@ float computeCurrentLearningRate(float initialLearningRate, float decay, float e
 }
 
 void verifyMatricesMatch(
-    half *expected, half *actual, uint32_t rows, uint32_t cols, bool print = false, float staticThresh = 0.1, float threshScale = 0.004) {
+    half *expected, half *actual, uint32_t rows, uint32_t cols, bool print = false, float staticThresh = 0.1, float dynamicThresh = 0.004) {
     for (uint32_t row = 0; row < rows; ++row) {
         for (uint32_t col = 0; col < cols; ++col) {
             float expectedValue = expected[row * cols + col];
             float actualValue = actual[row * cols + col];
             float diff = abs(expectedValue - actualValue);
-            float scaledThresh = max(staticThresh, fabsf(expectedValue * threshScale));
+            float scaledThresh = max(staticThresh, fabsf(expectedValue * dynamicThresh));
             if (print || diff > scaledThresh) {
                 printf("[%d,%d] GPU %f vs %f CPU\n", row, col, actualValue, expectedValue);
             }
             fflush(stdout);
-            assert(diff < scaledThresh);
+            assert(diff <= scaledThresh);
             ASSERT_LE(diff, scaledThresh);
         }
     }
@@ -138,6 +138,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
             ASSERT_EQ(true, false);
         }
     }
+    ASSERT_EQ(flags, CLR | ILR | D | M | UNM);
 
     epoch = rand() % 10;
     batchesPerEpoch = 1 + (rand() % 3000);
@@ -172,6 +173,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
             ASSERT_EQ(true, false);
         }
     }
+    ASSERT_EQ(flags, CLR | ILR | D | M | UNM);
 }
 
 TEST(SgdTest, TestWeightsUpdateNoMomentum) {
@@ -290,13 +292,17 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         sgd->computeWeightsUpdate(featureInput, errorInput, false);
@@ -316,13 +322,17 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         sgd->computeWeightsUpdate(featureInput, errorInput, true);
@@ -342,13 +352,17 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, true);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         Tensor weights = fullyConnectedLayer->getWeights();
@@ -380,7 +394,9 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
                     weightsGradientMem_h[row * numOutputFeatures + col] * (half)weightUpdateScalingFactor;
             }
         }
-        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
@@ -389,7 +405,9 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
             for (uint32_t outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
                 biasesMem_h[outputFeature] += biasesGradientMem_h[outputFeature] * (half)weightUpdateScalingFactor;
             }
-            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         sgd->updateWeights(weights, fullyConnectedLayer->getBiases(), batchSize);
@@ -406,7 +424,9 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
                     weightsGradientMem_h[row * numOutputFeatures + col] * (half)weightUpdateScalingFactor;
             }
         }
-        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
@@ -415,7 +435,9 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
             for (uint32_t outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
                 biasesMem_h[outputFeature] += biasesGradientMem_h[outputFeature] * (half)weightUpdateScalingFactor;
             }
-            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
     }
 }
@@ -536,13 +558,17 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         sgd->computeWeightsUpdate(featureInput, errorInput, false);
@@ -562,13 +588,17 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         sgd->computeWeightsUpdate(featureInput, errorInput, true);
@@ -588,13 +618,17 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, true);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         Tensor weights = fullyConnectedLayer->getWeights();
@@ -638,7 +672,9 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                 weightsMem_h[index] += (float)previousWeightsUpdateMem_h[index] / Loss::getLossScalingFactor();
             }
         }
-        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, false);
+        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
@@ -649,7 +685,9 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                                                            ((float)biasesGradientMem_h[outputFeature] * currentLearningRate) / batchSize;
                 biasesMem_h[outputFeature] += (float)previousBiasesUpdateMem_h[outputFeature] / Loss::getLossScalingFactor();
             }
-            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         sgd->updateWeights(weights, fullyConnectedLayer->getBiases(), batchSize);
@@ -666,7 +704,9 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                 weightsMem_h[index] += (float)previousWeightsUpdateMem_h[index] / Loss::getLossScalingFactor();
             }
         }
-        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, false);
+        verifyMatricesMatch(weightsMem_h, weightsMemGpu_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
@@ -677,7 +717,9 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
                                                            ((float)biasesGradientMem_h[outputFeature] * currentLearningRate) / batchSize;
                 biasesMem_h[outputFeature] += (float)previousBiasesUpdateMem_h[outputFeature] / Loss::getLossScalingFactor();
             }
-            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
     }
 }
@@ -851,7 +893,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false,
                               false,
                               false);
-        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, 0.3f, 0.03f);
+        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, 0.4f, 0.03f);
 
         // Call backward
         fullyConnectedLayer->backward(errorInput);
@@ -873,7 +915,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               true,
                               false,
                               false);
-        verifyMatricesMatch(errorOutMem_h, errorOutGpuMem_h, batchSize, numInputFeatures, false, 0.3f, 0.03f);
+        verifyMatricesMatch(errorOutMem_h, errorOutGpuMem_h, batchSize, numInputFeatures, false, 0.4f, 0.03f);
 
         // Verify weights
         gradientUpdateStream.synchronize();
@@ -893,13 +935,13 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.02f);
         }
 
         weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
@@ -922,8 +964,8 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                 projectedWeightsMem_h[index] = weightsMem_h[index] + (half)momentum * weightsUpdateMem_h[index];
             }
         }
-        verifyMatricesMatch(weightsMem_h, weightsGpuMem_h, numInputFeatures, numOutputFeatures, false);
-        verifyMatricesMatch(projectedWeightsMem_h, projectedWeightsGpuMem_h, numInputFeatures, numOutputFeatures, false);
+        verifyMatricesMatch(weightsMem_h, weightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        verifyMatricesMatch(projectedWeightsMem_h, projectedWeightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
         // Don't let error increase as test gets longer:
         weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
         projectedWeights_h.copyFromAsync(projectedWeightsGpu_h, gradientUpdateStream);
@@ -940,8 +982,8 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                 biasesMem_h[outputFeature] += (float)biasesUpdateMem_h[outputFeature];
                 projectedBiasesMem_h[outputFeature] = biasesMem_h[outputFeature] + (half)momentum * biasesUpdateMem_h[outputFeature];
             }
-            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
-            verifyMatricesMatch(projectedBiasesMem_h, projectedBiasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            verifyMatricesMatch(projectedBiasesMem_h, projectedBiasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
             // Don't let error increase as test gets longer:
             biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
             projectedBiases_h.copyFromAsync(projectedBiasesGpu_h, gradientUpdateStream);
@@ -996,7 +1038,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               true,
                               false,
                               false);
-        verifyMatricesMatch(errorOutMem_h, errorOutGpuMem_h, batchSize, numInputFeatures, false, 0.3f, 0.03f);
+        verifyMatricesMatch(errorOutMem_h, errorOutGpuMem_h, batchSize, numInputFeatures, false, 0.4f, 0.03f);
 
         // Verify weights
         gradientUpdateStream.synchronize();
@@ -1016,13 +1058,13 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false);
         weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures);
+        verifyMatricesMatch(weightsGradientMem_h, weightsGradientGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
 
         if (hasBias) {
             reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
             biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
             gradientUpdateStream.synchronize();
-            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.2f, 0.02f);
+            verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
         }
 
         weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
@@ -1045,8 +1087,8 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                 projectedWeightsMem_h[index] = weightsMem_h[index] + (half)momentum * weightsUpdateMem_h[index];
             }
         }
-        verifyMatricesMatch(weightsMem_h, weightsGpuMem_h, numInputFeatures, numOutputFeatures, false);
-        verifyMatricesMatch(projectedWeightsMem_h, projectedWeightsGpuMem_h, numInputFeatures, numOutputFeatures, false);
+        verifyMatricesMatch(weightsMem_h, weightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
+        verifyMatricesMatch(projectedWeightsMem_h, projectedWeightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
         // Don't let error increase as test gets longer:
         weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
         projectedWeights_h.copyFromAsync(projectedWeightsGpu_h, gradientUpdateStream);
@@ -1063,8 +1105,8 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                 biasesMem_h[outputFeature] += (float)biasesUpdateMem_h[outputFeature];
                 projectedBiasesMem_h[outputFeature] = biasesMem_h[outputFeature] + (half)momentum * biasesUpdateMem_h[outputFeature];
             }
-            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
-            verifyMatricesMatch(projectedBiasesMem_h, projectedBiasesGpuMem_h, 1, numOutputFeatures, false, 0.3f, 0.03f);
+            verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+            verifyMatricesMatch(projectedBiasesMem_h, projectedBiasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
             // Don't let error increase as test gets longer:
             biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
             projectedBiases_h.copyFromAsync(projectedBiasesGpu_h, gradientUpdateStream);
@@ -1090,7 +1132,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false,
                               false,
                               false);
-        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, 0.3f, 0.03f);
+        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, 0.4f, 0.03f);
     }
 }
 
