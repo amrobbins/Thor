@@ -1,7 +1,7 @@
 # TODO:
 1. Additional Losses
-2. Optimizers
-3. Fix multi-connection api layer stamp logic - is this actually broken?
+2. ADAM Optimizer - test and get working
+3. mish activation function
 4. Save and load trained models - native save() and load() functions, also saveAsKeras() and loadFromKeras()
 5. Improve visualizer so that logging to the console is not cleared when run finishes.
 6. Overhaul the build system, possibly using 
@@ -26,6 +26,7 @@
     1. Investigate what can be built into the framework to support GNN's
 13. Embedding support
 14. Kmeans clustering using GpuRtree
+15. DeepDPM implementation
 15. Gaussian Mixture Model clustering using GpuRtree
 16. NN architecture drawing export
     1. support shading units to show tensor values given a particular training example
@@ -38,6 +39,7 @@
 22. PCA support
 23. Streaming server support built in. Hmm, think about this, want to interface with kubernetes.
     1. What would the framework provide?
+24. Other optimizers 
 24. Expand the list of supported clustering algorithms
 25. Expand the list of signal processing algorithms
 26. Audio decoding / support

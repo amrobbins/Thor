@@ -294,15 +294,7 @@ class Tensor : private ReferenceCounted {
     void pow(Tensor base, Tensor exponent, Stream stream);
 
     /**
-     * [thisTensor] = [base] ^ exponent, elementwise
-     * <div/>
-     * the computation will be done in FP32,
-     * there is no restriction on the data type of this destination tensor.
-     */
-    void exp(float exponent, Stream stream);
-
-    /**
-     * [thisTensor] = base ^ [exponent], elementwise
+     * [thisTensor] = e ^ [exponent], elementwise
      * <div/>
      * exponent must have data type FP32,
      * there is no restriction on the data type of this destination tensor.
@@ -319,7 +311,7 @@ class Tensor : private ReferenceCounted {
     void log(Tensor argument, Stream stream);
 
     /**
-     * [thisTensor] = ln([argument]), elementwise
+     * [thisTensor] = log_base([argument]), elementwise
      * <div/>
      * Compute the log with the specified base of the argument tensor
      * argument must be float or half.
@@ -366,7 +358,7 @@ class Tensor : private ReferenceCounted {
      * [thisTensor] = [tensor] * scalar, elementwise
      *
      * <div/>
-     * Both tensors need to be of the same size and type.
+     * Both tensors need to be of the same type.
      */
     void multiplyTensorScalar(Tensor tensor, Tensor scalar, Stream stream);
 
@@ -374,7 +366,7 @@ class Tensor : private ReferenceCounted {
      * [thisTensor] = [tensor] * scalar, elementwise
      *
      * <div/>
-     * Both tensors need to be of the same size and type.
+     * Both tensors need to be of the same type.
      */
     void multiplyScalarTensor(Tensor scalar, Tensor tensor, Stream stream);
 
@@ -392,7 +384,8 @@ class Tensor : private ReferenceCounted {
      * argument must be float or half.
      * there is no restriction on the data type of this destination tensor.
      *
-     * Note: if you had been looking for a GEMM operation rather than this element-wise one, see class CublasMatrixMultiply.
+     * Note: if you had been looking for a GEMM operation rather than this element-wise one, see the gemm() function or class
+     * CublasMatrixMultiply.
      */
     void multiplyAccumulateElementwise(Tensor a, Tensor b, Tensor c, Stream stream);
 
@@ -410,7 +403,6 @@ class Tensor : private ReferenceCounted {
      * <div/>
      * Compute the square root of each element in the argument tensor
      * argument must be float or half.
-     * base will be converted into the type of argument.
      * there is no restriction on the data type of this destination tensor.
      */
     void sqrt(Tensor argument, Stream stream);
@@ -456,6 +448,7 @@ class Tensor : private ReferenceCounted {
      * <div/>
      * Compute the inverse complementary error function defined as erfcinv(erfc(x))=x :
      * https://www.mathworks.com/help/matlab/ref/erfcinv.html#bup512o-2 x must be float. The return type may be float or half
+     * x must be float.
      */
     void erfcinv(Tensor x, Stream stream);
 
@@ -464,6 +457,7 @@ class Tensor : private ReferenceCounted {
      * <div/>
      * Compute the scaled complementary error function that is equal to exp(x^2)*erfc(x):
      * https://www.mathworks.com/help/matlab/ref/erfcx.html x must be float. The return type may be float or half
+     * x must be float.
      */
     void erfcx(Tensor x, Stream stream);
 
@@ -770,9 +764,6 @@ class Tensor : private ReferenceCounted {
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden;
     TensorDescriptor overriddenDescriptor;
-
-    void allocate();
-    void deallocate();
 
     static std::atomic<unsigned long> nextInstanceId;
 
