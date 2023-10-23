@@ -67,9 +67,13 @@ BatchReduce::BatchReduce(uint32_t batchletSize,
                            TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceSizeInBytes}));
 }
 
-bool BatchReduce::isWire() { return batchletSize == 1 && classDimSize == 1 && batchSize == 1; }
+bool BatchReduce::isWire() {
+    return (batchletSize == 1 || !reduceBatch) && (classDimSize == 1 || !reduceClass) && (batchSize == 1 || !doBatchSizeDivide);
+}
 
-bool BatchReduce::isScalarDivide() { return batchletSize == 1 && classDimSize == 1 && batchSize != 1; }
+bool BatchReduce::isScalarDivide() {
+    return (batchletSize == 1 || !reduceBatch) && (classDimSize == 1 || !reduceClass) && (batchSize != 1 && doBatchSizeDivide);
+}
 
 uint64_t BatchReduce::computeWorkspaceSizeInBytes(uint32_t batchletSize,
                                                   uint32_t batchSize,
@@ -147,11 +151,18 @@ Stream BatchReduce::getStream() { return stream; }
 
 void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
     if (isWire()) {
-        if (source != dest)
+        if (accumulate)
+            dest.add(dest, source, stream);
+        else if (source != dest)
             dest.copyFromAsync(source, stream);
         return;
     } else if (isScalarDivide()) {
-        dest.divide(source, batchSize, stream);
+        if (accumulate) {
+            dest.add(dest, source, stream);
+            dest.divide(dest, batchSize, stream);
+        } else {
+            dest.divide(source, batchSize, stream);
+        }
         return;
     }
 
@@ -175,6 +186,13 @@ void BatchReduce::reduce(Tensor source, Tensor dest, bool accumulate) {
 
     if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
         printf("cudnnStatus %d : %s\n", cudnnStatus, cudnnGetErrorString(cudnnStatus));
+        printf("batchletSize %d, batchSize %d, classDimSize %d, reduceBatch %i, reduceClass %i, doBatchSizeDivide %i\n",
+               batchletSize,
+               batchSize,
+               classDimSize,
+               reduceBatch,
+               reduceClass,
+               doBatchSizeDivide);
         fflush(stdout);
     }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
