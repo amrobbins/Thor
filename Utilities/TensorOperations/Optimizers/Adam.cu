@@ -21,11 +21,14 @@ __global__ void adamStep(
     const half2 NEGATIVE_ONE_HALF_2 = __half2half2((half)-1.0f);
 
     half2 gradBuffHalf2 = gradientHalf2[indexHalf2];
-    mHalf2[indexHalf2] = __hadd2(__hmul2(beta1Half2, mHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta1Half2), gradBuffHalf2));
-    vHalf2[indexHalf2] =
-        __hadd2(__hmul2(beta2Half2, vHalf2[indexHalf2]), __hmul2(__hsub2(ONE_HALF_2, beta2Half2), __hmul2(gradBuffHalf2, gradBuffHalf2)));
+    half2 mBuffHalf2 = mHalf2[indexHalf2];
+    half2 vBuffHalf2 = vHalf2[indexHalf2];
+    mBuffHalf2 = __hadd2(__hmul2(beta1Half2, mBuffHalf2), __hmul2(__hsub2(ONE_HALF_2, beta1Half2), gradBuffHalf2));
+    mHalf2[indexHalf2] = mBuffHalf2;
+    vBuffHalf2 = __hadd2(__hmul2(beta2Half2, vBuffHalf2), __hmul2(__hsub2(ONE_HALF_2, beta2Half2), __hmul2(gradBuffHalf2, gradBuffHalf2)));
+    vHalf2[indexHalf2] = vBuffHalf2;
     weightUpdateHalf2[indexHalf2] =
-        __h2div(__hmul2(NEGATIVE_ONE_HALF_2, __hmul2(alphaTHalf2, mHalf2[indexHalf2])), __hadd2(h2sqrt(vHalf2[indexHalf2]), epsilonHalf2));
+        __h2div(__hmul2(NEGATIVE_ONE_HALF_2, __hmul2(alphaTHalf2, mBuffHalf2)), __hadd2(h2sqrt(vBuffHalf2), epsilonHalf2));
 };
 
 __global__ void adamStep(
@@ -35,9 +38,13 @@ __global__ void adamStep(
         return;
 
     float gradBuff = gradient[index];
-    m[index] = beta1 * m[index] + (1.0f - beta1) * gradBuff;
-    v[index] = beta2 * v[index] + (1.0f - beta2) * (gradBuff * gradBuff);
-    weightUpdate[index] = -alphaT * m[index] / (sqrtf(v[index]) + epsilon);
+    float mBuf = m[index];
+    float vBuf = v[index];
+    mBuf = beta1 * mBuf + (1.0f - beta1) * gradBuff;
+    m[index] = mBuf;
+    vBuf = beta2 * vBuf + (1.0f - beta2) * (gradBuff * gradBuff);
+    v[index] = vBuf;
+    weightUpdate[index] = -alphaT * mBuf / (sqrtf(vBuf) + epsilon);
 };
 
 // Note that the t that is passed to launch adam step is the t that should be used in the computation, it is not meant to

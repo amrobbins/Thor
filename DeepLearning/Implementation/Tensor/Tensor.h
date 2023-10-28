@@ -96,6 +96,7 @@ class Tensor : private ReferenceCounted {
 
     // Note minValue and maxValue are igorned for boolean types.
     void fillRandom(double minValue, double maxValue, Stream stream);
+    void fillZero(Stream dataStream);
 
     // setValues is intended as a test helper to easily populate an entire tensor
     // It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
