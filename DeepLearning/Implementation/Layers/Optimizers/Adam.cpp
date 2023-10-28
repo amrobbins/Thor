@@ -156,7 +156,7 @@ void Adam::setBeta2(float beta2) { this->beta2 = beta2; }
 void Adam::setEpsilon(float epsilon) { this->epsilon = epsilon; }
 
 unordered_map<std::string, float> Adam::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
-    // Adam automatically updates its parameters every minibatch
+    // Adam automatically updates its parameters every mini-batch
     unordered_map<string, float> hyperParameters;
     hyperParameters["t"] = t;
     return hyperParameters;

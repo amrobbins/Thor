@@ -547,7 +547,7 @@ Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescr
 
 Tensor Tensor::zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream) {
     Tensor tensor(placement, descriptor);
-    tensor.fill(0, stream);
+    tensor.fillZero(stream);
     return tensor;
 }
 
@@ -1032,6 +1032,8 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
         }
     }
 }
+
+void Tensor::fillZero(Stream dataStream) { this->fill(0.0, dataStream); }
 
 // setValues is intended as a test helper to easily populate an entire tensor
 // It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
