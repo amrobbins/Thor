@@ -19,4 +19,10 @@
  * This will be the CPU version of cudnn.
  * This has its own streams... There is a whole parallel implementation that needs to happen for cpu processing.
  * Thor's Stream needs to be updated to use MKL streams for CPU compute and to interface/schedule between CPU and GPU streams.
+ * Or possibly could just use Stream::enqueueHostFunction(...), however this would preclude async host functions from interacting with Cuda,
+ * maybe that's ok since a layer's implementation should be either CPU or GPU, but what if there is a use case for a hybrid implementation?
+ * On further inspection, MKL streams don't provide much utility and don't seem appropriate for this framework, so cpu will
+ * rely on Stream::enqueueHostFunction(...), so a cpu kernel cannot interact with cuda directly in the enqueued kernel, however
+ * memory can be written to by the cpu kernel which then can be fed into cuda by a different kernel enqueued to the stream that is aware
+ * of the cpu output tensor.
  */

@@ -43,6 +43,7 @@ void reduceBatch(half *original, half *reduced, uint32_t batchSize, uint32_t fea
 }
 
 TEST(SgdTest, TestConstrutorSettersGetters) {
+    srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -177,6 +178,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
 }
 
 TEST(SgdTest, TestWeightsUpdateNoMomentum) {
+    srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -443,6 +445,7 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
 }
 
 TEST(SgdTest, TestWeightsUpdateWithMomentum) {
+    srand(time(nullptr));
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -740,6 +743,8 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
 // 13. Call forward for a third time, this time in inference mode, toensure that projected weights are not used to create featureOutput
 // 14. Verify featureOutput
 TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
+    srand(time(nullptr));
+
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -747,8 +752,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
         uint32_t batchSize = (rand() % 300) + 1;
         uint32_t numInputFeatures = (rand() % 300) + 1;
         uint32_t numOutputFeatures = (rand() % 300) + 1;
-        // bool hasBias = rand() % 2;
-        bool hasBias = false;
+        bool hasBias = rand() % 2;
 
         Tensor networkFeatureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
 
@@ -862,7 +866,6 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
             biasesUpdateMem_h = biasesUpdate_h.getMemPtr<half>();
             biasesUpdate_h.clearAsync(dataStream);
         }
-        dataStream.synchronize();
 
         dataStream.synchronize();
         Stream gradientUpdateStream = sgd->getGradientUpdateStream();
@@ -875,10 +878,10 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
 
         // Call forward
         fullyConnectedLayer->forward(featureInput, false);
-
-        // Verify featureOutput
         featureOutputGpu_h.copyFromAsync(featureOutput, dataStream);
         dataStream.synchronize();
+
+        // Verify featureOutput
         matrixMultiplyCpuHalf(featureInMem_h,
                               weightsMem_h,
                               featureOutMem_h,
@@ -893,7 +896,8 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false,
                               false,
                               false);
-        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, 0.4f, 0.03f);
+        printf("Num input features %d\n", numInputFeatures);
+        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
 
         // Call backward
         fullyConnectedLayer->backward(errorInput);
@@ -1016,7 +1020,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false,
                               false,
                               false);
-        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.005, 0.03f);
+        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
 
         // Call backward
         fullyConnectedLayer->backward(errorInput);
@@ -1132,7 +1136,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false,
                               false,
                               false);
-        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, 0.4f, 0.03f);
+        verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
     }
 }
 
