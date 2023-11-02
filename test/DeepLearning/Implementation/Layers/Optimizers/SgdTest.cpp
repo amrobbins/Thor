@@ -76,6 +76,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     Tensor anErrorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
     shared_ptr<Sgd> sgd =
         make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, anErrorInput, anErrorOutput);
+    sgd->initialize();
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -215,6 +216,7 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd =
             make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
+        sgd->initialize();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -482,6 +484,7 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd =
             make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
+        sgd->initialize();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -787,6 +790,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
         dataStream.synchronize();
         shared_ptr<Sgd> sgd =
             make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
+        sgd->initialize();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         Tensor weightsGradient = sgd->getWeightsGradient();
 
@@ -896,7 +900,7 @@ TEST(SgdTest, TestWeightsUpdateWithNesterovMomentum) {
                               false,
                               false,
                               false);
-        printf("Num input features %d\n", numInputFeatures);
+        // printf("Num input features %d\n", numInputFeatures);
         verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
 
         // Call backward

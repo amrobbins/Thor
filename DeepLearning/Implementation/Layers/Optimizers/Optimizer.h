@@ -51,6 +51,10 @@ class Optimizer {
      */
     void accumulateScale(Tensor C, Tensor A, const void *alpha, const void *beta, Stream stream);
 
+    // For testing or research purposes:
+    virtual Tensor getWeightsUpdate();
+    virtual Optional<Tensor> getBiasesUpdate();
+
    protected:
     uint64_t currentEpoch;
     uint64_t currentBatch;

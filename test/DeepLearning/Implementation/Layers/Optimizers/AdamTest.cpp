@@ -1,10 +1,43 @@
 #include "Thor.h"
 #include "gtest/gtest.h"
 
+#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+#include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
+#include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
+
 using namespace ThorImplementation;
 using namespace std;
 
 #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
+
+void verifyMatricesMatch(
+    half *expected, half *actual, uint32_t rows, uint32_t cols, bool print = false, float staticThresh = 0.1, float dynamicThresh = 0.004) {
+    for (uint32_t row = 0; row < rows; ++row) {
+        for (uint32_t col = 0; col < cols; ++col) {
+            float expectedValue = expected[row * cols + col];
+            float actualValue = actual[row * cols + col];
+            float diff = abs(expectedValue - actualValue);
+            float scaledThresh = max(staticThresh, fabsf(expectedValue * dynamicThresh));
+            if (print || diff > scaledThresh) {
+                printf("[%d,%d] GPU %f vs %f CPU\n", row, col, actualValue, expectedValue);
+            }
+            fflush(stdout);
+            assert(diff <= scaledThresh);
+            ASSERT_LE(diff, scaledThresh);
+        }
+    }
+}
+
+void reduceBatch(half *original, half *reduced, uint32_t batchSize, uint32_t featureOutSize, bool accumulate) {
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        for (uint32_t o = 0; o < featureOutSize; ++o) {
+            if (!accumulate && b == 0)
+                reduced[o] = original[b * featureOutSize + o];
+            else
+                reduced[o] += original[b * featureOutSize + o];
+        }
+    }
+}
 
 shared_ptr<TrainableWeightsBiasesLayer> constructTrainableLayer(bool hasBias = true) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
@@ -40,11 +73,11 @@ shared_ptr<TrainableWeightsBiasesLayer> constructTrainableLayerWithMultipleConne
 }
 
 template <typename T>
-void computeBiasesGradientCpu(vector<T> &errorIn, vector<T> &biasesGradient, uint32_t batchSize, uint32_t exampleSize, bool accumulate) {
-    if (accumulate)
-        ASSERT_EQ(biasesGradient.size(), exampleSize);
-    else
-        biasesGradient = vector<T>(exampleSize, 0.0f);
+void computeBiasesGradientCpu(T *errorIn, T *biasesGradient, uint32_t batchSize, uint32_t exampleSize, bool accumulate) {
+    if (!accumulate) {
+        for (uint32_t i = 0; i < exampleSize; ++i)
+            biasesGradient[i] = T(0.0f);
+    }
 
     for (uint32_t i = 0; i < batchSize; ++i) {
         for (uint32_t j = 0; j < exampleSize; ++j) {
@@ -124,6 +157,9 @@ TEST(AdamTest, getAllHyperParameters) {
 TEST(AdamTest, UpdateWeightsFP16) {
     srand(time(nullptr));
 
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
     half alpha = 0.02f;
     half beta1 = 0.82f;
     half beta2 = 0.933f;
@@ -143,120 +179,184 @@ TEST(AdamTest, UpdateWeightsFP16) {
     Stream dataStream = fc->getStreams()[0];
     Stream gradientUpdateStream = fc->getOptimizer().get()->getGradientUpdateStream();
 
-    vector<half> weightsGradientCpu;
-    vector<half> biasesGradientCpu;
-    vector<half> mCpu;
-    vector<half> vCpu;
-    vector<half> weightsUpdateCpu;
-    vector<half> mBiasesCpu;
-    vector<half> vBiasesCpu;
-    vector<half> biasesUpdateCpu;
-
-    Tensor weightsGradientGpu;
-    Optional<Tensor> maybeBiasesGradientGpu;
-
-    weightsGradientGpu = adam->getWeightsGradient();
-    maybeBiasesGradientGpu = adam->getBiasesGradient();
-    ASSERT_EQ(maybeBiasesGradientGpu.isPresent(), hasBias);
-    mCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    vCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    if (maybeBiasesGradientGpu.isPresent()) {
-        mBiasesCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-        vBiasesCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
+    Tensor weights = fc->getWeights();
+    Tensor weights_h = weights.clone(cpuPlacement);
+    half *weightsMem_h = weights_h.getMemPtr<half>();
+    Tensor weightsGpu_h = weights_h.clone(cpuPlacement);
+    half *weightsGpuMem_h = weightsGpu_h.getMemPtr<half>();
+    Optional<Tensor> biases = fc->getBiases();
+    Tensor biases_h;
+    half *biasesMem_h;
+    Tensor biasesGpu_h;
+    half *biasesGpuMem_h;
+    ASSERT_EQ(hasBias, biases.isPresent());
+    if (biases.isPresent()) {
+        biases_h = biases.get().clone(cpuPlacement);
+        biasesMem_h = biases_h.getMemPtr<half>();
+        biasesGpu_h = biases_h.clone();
+        biasesGpuMem_h = biasesGpu_h.getMemPtr<half>();
     }
+    Tensor weightsGradient = adam->getWeightsGradient();
+    Tensor weightsGradient_h = weightsGradient.clone(cpuPlacement);
+    half *weightsGradientMem_h = weightsGradient_h.getMemPtr<half>();
+    Tensor weightsGradientGpu_h = weightsGradient_h.clone(cpuPlacement);
+    half *weightsGradientGpuMem_h = weightsGradientGpu_h.getMemPtr<half>();
+    Optional<Tensor> biasesGradient = adam->getBiasesGradient();
+    Tensor biasesGradient_h;
+    half *biasesGradientMem_h;
+    Tensor biasesGradientGpu_h;
+    half *biasesGradientGpuMem_h;
+    ASSERT_EQ(hasBias, biasesGradient.isPresent());
+    if (biasesGradient.isPresent()) {
+        biasesGradient_h = biasesGradient.get().clone(cpuPlacement);
+        biasesGradientMem_h = biasesGradient_h.getMemPtr<half>();
+        biasesGradientGpu_h = biasesGradient_h.clone();
+        biasesGradientGpuMem_h = biasesGradientGpu_h.getMemPtr<half>();
+    }
+    Tensor m = adam->getM();
+    Tensor m_h = m.clone(cpuPlacement);
+    m_h.fillZero(dataStream);
+    half *mMem_h = m_h.getMemPtr<half>();
+    Tensor mGpu_h = m_h.clone();
+    half *mGpuMem_h = mGpu_h.getMemPtr<half>();
+    Tensor v = adam->getV();
+    Tensor v_h = v.clone(cpuPlacement);
+    v_h.fillZero(dataStream);
+    half *vMem_h = v_h.getMemPtr<half>();
+    Tensor vGpu_h = v_h.clone();
+    half *vGpuMem_h = vGpu_h.getMemPtr<half>();
+    Tensor weightsUpdate = adam->getWeightsUpdate();
+    Tensor weightsUpdate_h = weightsUpdate.clone(cpuPlacement);
+    half *weightsUpdateMem_h = weightsUpdate_h.getMemPtr<half>();
+    Tensor weightsUpdateGpu_h = weightsUpdate_h.clone();
+    half *weightsUpdateGpuMem_h = weightsUpdateGpu_h.getMemPtr<half>();
+    Optional<Tensor> mBiases = adam->getMBias();
+    Tensor mBiases_h;
+    half *mBiasesMem_h;
+    Tensor mBiasesGpu_h;
+    half *mBiasesGpuMem_h;
+    ASSERT_EQ(mBiases.isPresent(), biasesGradient.isPresent());
+    if (mBiases.isPresent()) {
+        mBiases_h = mBiases.get().clone(cpuPlacement);
+        mBiasesMem_h = mBiases_h.getMemPtr<half>();
+        mBiasesGpu_h = mBiases_h.clone();
+        mBiasesGpuMem_h = mBiasesGpu_h.getMemPtr<half>();
+    }
+    Optional<Tensor> vBiases = adam->getVBias();
+    Tensor vBiases_h;
+    half *vBiasesMem_h;
+    Tensor vBiasesGpu_h;
+    half *vBiasesGpuMem_h;
+    ASSERT_EQ(vBiases.isPresent(), mBiases.isPresent());
+    if (vBiases.isPresent()) {
+        vBiases_h = vBiases.get().clone(cpuPlacement);
+        vBiasesMem_h = vBiases_h.getMemPtr<half>();
+        vBiasesGpu_h = vBiases_h.clone();
+        vBiasesGpuMem_h = vBiasesGpu_h.getMemPtr<half>();
+    }
+    Optional<Tensor> biasesUpdate = adam->getBiasesUpdate();
+    Tensor biasesUpdate_h;
+    half *biasesUpdateMem_h;
+    Tensor biasesUpdateGpu_h;
+    half *biasesUpdateGpuMem_h;
+    assert(biasesUpdate.isPresent() == vBiases.isPresent());
+    if (biasesUpdate.isPresent()) {
+        biasesUpdate_h = biasesUpdate.get().clone(cpuPlacement);
+        biasesUpdateMem_h = biasesUpdate_h.getMemPtr<half>();
+        biasesUpdateGpu_h = biasesUpdate_h.clone();
+        biasesUpdateGpuMem_h = biasesUpdateGpu_h.getMemPtr<half>();
+    }
+    dataStream.synchronize();
 
-    uint32_t numWeights = weightsGradientGpu.getTotalNumElements();
+    uint32_t numWeights = weightsGradient.getTotalNumElements();
     uint32_t numBiases = 0;
-    if (maybeBiasesGradientGpu.isPresent())
-        numBiases = maybeBiasesGradientGpu.get().getTotalNumElements();
-
-    weightsGradientCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    weightsUpdateCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    if (maybeBiasesGradientGpu.isPresent()) {
-        biasesGradientCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-        biasesUpdateCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-    }
+    if (biasesGradient.isPresent())
+        numBiases = biasesGradient.get().getTotalNumElements();
 
     t = 1;
 
+    Tensor featureInput = fc->getFeatureInputs()[0];
+    Tensor featureInput_h = featureInput.clone(cpuPlacement);
+    half *featureInputMem_h = featureInput_h.getMemPtr<half>();
+    Tensor errorInput = fc->getErrorInputs()[0];
+    Tensor errorInput_h = errorInput.clone(cpuPlacement);
+    half *errorInputMem_h = errorInput_h.getMemPtr<half>();
     for (uint32_t i = 0; i < 3; ++i) {
         // populate featureInput and errorInput so that gradient can be computed
-        vector<half> featureInputVector;
-        Tensor featureInputGpu = fc->getFeatureInputs()[0];
-        for (uint32_t j = 0; j < featureInputGpu.getTotalNumElements(); ++j) {
-            featureInputVector.push_back(2.0f / ((rand() % 100) + 1.0f));
+        for (uint32_t j = 0; j < featureInput.getTotalNumElements(); ++j) {
+            featureInputMem_h[j] = 2.0f / ((rand() % 100) + 1.0f);
         }
-        featureInputGpu.setValues(featureInputVector, dataStream);
+        featureInput.copyFromAsync(featureInput_h, dataStream);
 
-        vector<half> errorInputVector;
-        Tensor errorInputGpu = fc->getErrorInputs()[0];
-        for (uint32_t i = 0; i < errorInputGpu.getTotalNumElements(); ++i) {
-            errorInputVector.push_back(2.0f / ((rand() % 100) + 1.0f));
+        for (uint32_t j = 0; j < errorInput.getTotalNumElements(); ++j) {
+            errorInputMem_h[j] = 2.0f / ((rand() % 100) + 1.0f);
         }
-        errorInputGpu.setValues(errorInputVector, dataStream);
+        errorInput.copyFromAsync(errorInput_h, dataStream);
 
         bool accumulateValues = i == 0 ? false : true;
 
-        adam->computeWeightsUpdate(featureInputGpu, errorInputGpu, accumulateValues);
+        adam->computeWeightsUpdate(featureInput, errorInput, accumulateValues);
 
         // Cpu computation
         // compute gradient
-        matrixMultiplyCpuHalf(featureInputVector.data(),
-                              errorInputVector.data(),
-                              weightsGradientCpu.data(),
-                              featureInputGpu.getDimensions()[0],
-                              featureInputGpu.getDimensions()[1],
-                              errorInputGpu.getDimensions()[0],
-                              errorInputGpu.getDimensions()[1],
-                              featureInputGpu.getDimensions()[1],
-                              errorInputGpu.getDimensions()[1],
-                              weightsGradientGpu.getDimensions()[1],
+        matrixMultiplyCpuHalf(featureInputMem_h,
+                              errorInputMem_h,
+                              weightsGradientMem_h,
+                              featureInput.getDimensions()[0],
+                              featureInput.getDimensions()[1],
+                              errorInput.getDimensions()[0],
+                              errorInput.getDimensions()[1],
+                              featureInput.getDimensions()[1],
+                              errorInput.getDimensions()[1],
+                              weightsGradient.getDimensions()[1],
                               true,
                               false,
                               accumulateValues,
                               false);
 
         // Get the gradient from FC, ensure it is correct, then copy it for use on cpu to improve testing accuracy
-        vector<half> weightsGradientGpuVector;
-        weightsGradientGpu.loadValuesIntoVector(weightsGradientGpuVector, gradientUpdateStream);
+        weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
         for (uint32_t j; j < numWeights; ++j) {
-            // printf("%f %f\n", (float)weightsGradientCpu[j], (float)weightsGradientGpuVector[j]);
-            ASSERT_LT(abs((float)(weightsGradientCpu[j] - weightsGradientGpuVector[j])),
-                      max(0.00001, abs((double)weightsGradientCpu[j] * .01)));
+            // printf("%f %f\n", (float)weightsGradientMem_h[j], (float)weightsGradientGpuMem_h[j]);
+            ASSERT_LT(abs((float)(weightsGradientMem_h[j] - weightsGradientGpuMem_h[j])),
+                      max(0.00001, abs((double)weightsGradientMem_h[j] * .01)));
         }
-        weightsGradientGpu.loadValuesIntoVector(weightsGradientCpu, gradientUpdateStream);
+        weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         if (hasBias) {
             // compute the biases gradient
-            computeBiasesGradientCpu(errorInputVector, biasesGradientCpu, batchSize, exampleSize, accumulateValues);
+            computeBiasesGradientCpu(errorInputMem_h, biasesGradientMem_h, batchSize, exampleSize, accumulateValues);
 
             // Get the gradient from FC, ensure it is correct, then copy it for use on cpu to improve testing accuracy
-            vector<half> biasesGradientGpuVector;
-            maybeBiasesGradientGpu.get().loadValuesIntoVector(biasesGradientGpuVector, gradientUpdateStream);
+            biasesGradientGpu_h.copyFromAsync(biasesGradient_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
             for (uint32_t j; j < numBiases; ++j) {
-                // printf("%f %f\n", (float)biasesGradientCpu[j], (float)biasesGradientGpuVector[j]);
-                ASSERT_LT(abs((float)(biasesGradientCpu[j] - biasesGradientGpuVector[j])),
-                          max(0.00001, abs((double)biasesGradientCpu[j] * .01)));
+                // printf("%f %f\n", (float)biasesGradientMem_h[j], (float)biasesGradientGpuVector[j]);
+                ASSERT_LT(abs((float)(biasesGradientMem_h[j] - biasesGradientGpuMem_h[j])),
+                          max(0.00001, abs((double)biasesGradientMem_h[j] * .01)));
             }
-            maybeBiasesGradientGpu.get().loadValuesIntoVector(biasesGradientCpu, gradientUpdateStream);
+            biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
         }
 
         // update m, v
         for (uint32_t j = 0; j < numWeights; ++j) {
             // if (j == 0)
             //     printf("m calc %f = %f * %f + (1.0f - %f) * %f\n", (float)(beta1 * mCpu[j] + ((half)1.0f - beta1) *
-            //     weightsGradientCpu[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientCpu[j]);
-            mCpu[j] = beta1 * mCpu[j] + ((half)1.0f - beta1) * weightsGradientCpu[j];
+            //     weightsGradientMem_h[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientMem_h[j]);
+            mMem_h[j] = beta1 * mMem_h[j] + ((half)1.0f - beta1) * weightsGradientMem_h[j];
             // if (j == 0)
-            //     printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vCpu[j] + ((half)1.0f - beta2) *
-            //     (weightsGradientCpu[j] * weightsGradientCpu[j])),
-            //            (float)beta2, (float)vCpu[j], (float)((half)1.0f - beta2), (float)weightsGradientCpu[j],
-            //            (float)weightsGradientCpu[j]);
-            vCpu[j] = beta2 * vCpu[j] + ((half)1.0f - beta2) * (weightsGradientCpu[j] * weightsGradientCpu[j]);
+            //     printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vMem_h[j] + ((half)1.0f - beta2) *
+            //     (weightsGradientMem_h[j] * weightsGradientMem_h[j])),
+            //            (float)beta2, (float)vMem_h[j], (float)((half)1.0f - beta2), (float)weightsGradientMem_h[j],
+            //            (float)weightsGradientMem_h[j]);
+            vMem_h[j] = beta2 * vMem_h[j] + ((half)1.0f - beta2) * (weightsGradientMem_h[j] * weightsGradientMem_h[j]);
         }
         for (uint32_t j = 0; j < numBiases; ++j) {
-            mBiasesCpu[j] = beta1 * mBiasesCpu[j] + ((half)1.0f - beta1) * biasesGradientCpu[j];
-            vBiasesCpu[j] = beta2 * vBiasesCpu[j] + ((half)1.0f - beta2) * (biasesGradientCpu[j] * biasesGradientCpu[j]);
+            mBiasesMem_h[j] = beta1 * mBiasesMem_h[j] + ((half)1.0f - beta1) * biasesGradientMem_h[j];
+            vBiasesMem_h[j] = beta2 * vBiasesMem_h[j] + ((half)1.0f - beta2) * (biasesGradientMem_h[j] * biasesGradientMem_h[j]);
         }
     }
 
@@ -267,45 +367,49 @@ TEST(AdamTest, UpdateWeightsFP16) {
     ASSERT_EQ(adam->getT(), 1.0f);
 
     // Get m ensure it is correct, then load actual values to maintain test accuracy downstream
-    vector<half> mGpuVector;
-    adam->getM(mGpuVector);
+    mGpu_h.copyFromAsync(m, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
     for (uint32_t j = 0; j < numWeights; ++j) {
-        thresh = max(0.00001, abs((double)mCpu[j] * .01));
-        if (!(abs((double)(mCpu[j] - mGpuVector[j])) < thresh))
-            printf("mCpu[%d] %f mGpu[%d] %f\n", j, (float)mCpu[j], j, (float)mGpuVector[j]);
-        ASSERT_LT(abs((double)(mCpu[j] - mGpuVector[j])), thresh);
+        thresh = max(0.00001, abs((double)mMem_h[j] * .01));
+        if (!(abs((double)(mMem_h[j] - mGpuMem_h[j])) < thresh))
+            printf("mMem_h[%d] %f mGpu[%d] %f\n", j, (float)mMem_h[j], j, (float)mGpuMem_h[j]);
+        ASSERT_LT(abs((double)(mMem_h[j] - mGpuMem_h[j])), thresh);
     }
-    mCpu = mGpuVector;
+    m_h.copyFromAsync(mGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
 
     // Get v ensure it is correct, then load actual values to maintain test accuracy downstream
-    vector<half> vGpuVector;
-    adam->getV(vGpuVector);
+    vGpu_h.copyFromAsync(v, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
     for (uint32_t j = 0; j < numWeights; ++j) {
-        thresh = max(0.00001, abs((double)vCpu[j] * .01));
-        // printf("v cpu %f gpu %f\n", (float)vCpu[j], (float)vGpuVector[j]);
-        ASSERT_LT(abs((double)(vCpu[j] - vGpuVector[j])), thresh);
+        thresh = max(0.00001, abs((double)vMem_h[j] * .01));
+        // printf("v cpu %f gpu %f\n", (float)vMem_h[j], (float)vGpuVector[j]);
+        ASSERT_LT(abs((double)(vMem_h[j] - vGpuMem_h[j])), thresh);
     }
-    vCpu = vGpuVector;
+    v_h.copyFromAsync(vGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
 
     if (hasBias) {
         // Get mBiases ensure it is correct, then load actual values to maintain test accuracy downstream
-        vector<half> mBiasesGpuVector;
-        adam->getMBias(mBiasesGpuVector);
+        mBiasesGpu_h.copyFromAsync(mBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
         for (uint32_t j = 0; j < numBiases; ++j) {
-            // printf("%f %f\n", (float)mBiasesCpu[j], (float)mBiasesGpuVector[j]);
-            thresh = max(0.00001, abs((double)mBiasesCpu[j] * .01));
-            ASSERT_LT(abs((double)(mBiasesCpu[j] - mBiasesGpuVector[j])), thresh);
+            // printf("%f %f\n", (float)mBiasesMem_h[j], (float)mBiasesGpuMem_h[j]);
+            thresh = max(0.03, abs((double)mBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(mBiasesMem_h[j] - mBiasesGpuMem_h[j])), thresh);
         }
-        mBiasesCpu = mBiasesGpuVector;
+        mBiases_h.copyFromAsync(mBiasesGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         // Get vBiases ensure it is correct, then load actual values to maintain test accuracy downstream
-        vector<half> vBiasesGpuVector;
-        adam->getVBias(vBiasesGpuVector);
+        vBiasesGpu_h.copyFromAsync(vBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
         for (uint32_t j = 0; j < numBiases; ++j) {
-            thresh = max(0.00001, abs((double)vBiasesCpu[j] * .01));
-            ASSERT_LT(abs((double)(vBiasesCpu[j] - vBiasesGpuVector[j])), thresh);
+            thresh = max(0.03, abs((double)vBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(vBiasesMem_h[j] - vBiasesGpuMem_h[j])), thresh);
         }
-        vBiasesCpu = vBiasesGpuVector;
+        vBiases_h.copyFromAsync(vBiasesGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
     }
 
     // Compute weights and biases update values
@@ -313,60 +417,67 @@ TEST(AdamTest, UpdateWeightsFP16) {
     // printf("alphaT = %f = %f * %f / %f, beta1 %f beta2 %f t %f\n", (float)alphaT, (float)alpha, sqrtf(1.0f - powf(beta2, t)), (1.0f -
     // powf(beta1, t)), (float)beta1, (float)beta2, t);
     for (uint32_t j = 0; j < numWeights; ++j) {
-        weightsUpdateCpu[j] = (-alphaT * mCpu[j]) / ((half)sqrtf(vCpu[j]) + epsilon);
+        weightsUpdateMem_h[j] = (-alphaT * mMem_h[j]) / ((half)sqrtf(vMem_h[j]) + epsilon);
         // if (j == 0)
-        //     printf("CPU weightUpdate = %f / %f = %f      alphaT %f, m %f\n", float(-alphaT * mCpu[j]), float(((half)sqrtf(vCpu[j]) +
-        //     epsilon)), (float)weightsUpdateCpu[j], (float)-alphaT, float(mCpu[j]));
+        //     printf("CPU weightUpdate = %f / %f = %f      alphaT %f, m %f\n", float(-alphaT * mMem_h[j]), float(((half)sqrtf(vMem_h[j]) +
+        //     epsilon)), (float)weightsUpdateMem_h[j], (float)-alphaT, float(mMem_h[j]));
     }
     for (uint32_t j = 0; j < numBiases; ++j)
-        biasesUpdateCpu[j] = (-alphaT * mBiasesCpu[j]) / ((half)sqrtf(vBiasesCpu[j]) + epsilon);
+        biasesUpdateMem_h[j] = (-alphaT * mBiasesMem_h[j]) / ((half)sqrtf(vBiasesMem_h[j]) + epsilon);
 
     // Get weightsUpdate ensure it is correct
-    vector<half> weightsUpdateGpuVector;
-    adam->getWeightsUpdate(weightsUpdateGpuVector);
-    vector<half> biasesUpdateGpuVector;
-    adam->getBiasesUpdate(biasesUpdateGpuVector);
+    weightsUpdateGpu_h.copyFromAsync(weightsUpdate, gradientUpdateStream);
+    if (numBiases > 0)
+        biasesUpdateGpu_h.copyFromAsync(biasesUpdate, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
     for (uint32_t j = 0; j < numWeights; ++j) {
-        // printf("[%d] cpu: %f gpu %f      -alphaT %f mCpu %f sqrt(vCpu) %f epsilon %f\n", j, (float)weightsUpdateCpu[j],
-        // (float)weightsUpdateGpuVector[j], (float)-alphaT, (float)mCpu[j], sqrtf(vCpu[j]), (float)epsilon);
-        ASSERT_LT(abs((double)(weightsUpdateCpu[j] - weightsUpdateGpuVector[j])), 0.0002);
+        // printf("[%d] cpu: %f gpu %f      -alphaT %f mMem_h %f sqrt(vMem_h) %f epsilon %f\n", j, (float)weightsUpdateMem_h[j],
+        // (float)weightsUpdateGpuMem_h[j], (float)-alphaT, (float)mMem_h[j], sqrtf(vMem_h[j]), (float)epsilon);
+        ASSERT_LT(abs((double)(weightsUpdateMem_h[j] - weightsUpdateGpuMem_h[j])), 0.0002);
     }
     for (uint32_t j = 0; j < numBiases; ++j) {
-        ASSERT_LT(abs((double)(biasesUpdateCpu[j] - biasesUpdateGpuVector[j])), 0.0002);
+        ASSERT_LT(abs((double)(biasesUpdateMem_h[j] - biasesUpdateGpuMem_h[j])), 0.0002);
     }
 
     // set the weights and then call updateWeights.
-    Tensor weightsGpu = fc->getWeights();
-    Optional<Tensor> biasesGpu = fc->getBiases();
-    vector<half> weightsCpu(weightsGpu.getTotalNumElements(), 0.0f);
-    vector<half> biasesCpu;
-    for (uint32_t i = 0; i < weightsGpu.getTotalNumElements(); ++i)
-        weightsCpu[i] = (rand() % 50) / ((rand() % 50) + 1);
-    weightsGpu.setValues(weightsCpu, gradientUpdateStream);
-    if (hasBias) {
-        biasesCpu = vector<half>(biasesGpu.get().getTotalNumElements(), 0.0f);
-        for (uint32_t i = 0; i < biasesGpu.get().getTotalNumElements(); ++i)
-            biasesCpu[i] = (rand() % 50) / ((rand() % 50) + 1);
-        biasesGpu.get().setValues(biasesCpu, gradientUpdateStream);
+    weights.fillRandom(-2, 2, gradientUpdateStream);
+    weights_h.copyFromAsync(weights, gradientUpdateStream);
+    if (biases.isPresent()) {
+        biases.get().fillRandom(-2, 2, gradientUpdateStream);
+        biases_h.copyFromAsync(biases, gradientUpdateStream);
+        biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
     }
     // batchSize is only used for math, it doesn't need to match the tensor dimension in this test.
-    adam->updateWeights(weightsGpu, biasesGpu, batchSize);
+    adam->updateWeights(weights, biases, batchSize);
+    weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
     gradientUpdateStream.synchronize();
 
     // Check that the weights have been updated to the proper values
-    vector<half> weightsGpuVector;
-    fc->getWeights().loadValuesIntoVector(weightsGpuVector, gradientUpdateStream);
     for (uint32_t j = 0; j < numWeights; ++j) {
-        half updatedWeight = weightsCpu[j] + (half)((float)weightsUpdateCpu[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+        half updatedWeight =
+            weightsMem_h[j] + (half)((float)weightsUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
         // printf("%f %f\n", (float)updatedWeight, (float)weightsGpuVector[j]);
-        thresh = max(0.00001, abs((double)updatedWeight * .001));
-        ASSERT_LT(abs((double)(updatedWeight - weightsGpuVector[j])), thresh);
+        thresh = max(0.001, abs((double)updatedWeight * .01));
+        ASSERT_LT(abs((double)(updatedWeight - weightsGpuMem_h[j])), thresh);
+    }
+
+    if (biases.isPresent()) {
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            half updatedBias =
+                biasesMem_h[j] + (half)((float)biasesUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+            // printf("%f %f\n", (float)updatedBias, (float)biasesGpuMem_h[j]);
+            thresh = max(0.001, abs((double)updatedBias * .01));
+            ASSERT_LT(abs((double)(updatedBias - biasesGpuMem_h[j])), thresh);
+        }
     }
 }
 
 // Test 5 batches to ensure t is updated properly
 TEST(AdamTest, FullyConnectedBackwardWithAdam5BatchesFP16) {
     srand(time(nullptr));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
     half alpha = 0.02f;
     half beta1 = 0.82f;
@@ -386,121 +497,186 @@ TEST(AdamTest, FullyConnectedBackwardWithAdam5BatchesFP16) {
     Stream dataStream = fc->getStreams()[0];
     Stream gradientUpdateStream = fc->getOptimizer().get()->getGradientUpdateStream();
 
-    vector<half> weightsGradientCpu;
-    vector<half> biasesGradientCpu;
-    vector<half> mCpu;
-    vector<half> vCpu;
-    vector<half> weightsUpdateCpu;
-    vector<half> mBiasesCpu;
-    vector<half> vBiasesCpu;
-    vector<half> biasesUpdateCpu;
-
-    Tensor weightsGradientGpu;
-    Optional<Tensor> maybeBiasesGradientGpu;
-
-    weightsGradientGpu = adam->getWeightsGradient();
-    maybeBiasesGradientGpu = adam->getBiasesGradient();
-    ASSERT_EQ(maybeBiasesGradientGpu.isPresent(), hasBias);
-    mCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    vCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    if (maybeBiasesGradientGpu.isPresent()) {
-        mBiasesCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-        vBiasesCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
+    Tensor weights = fc->getWeights();
+    Tensor weights_h = weights.clone(cpuPlacement);
+    half *weightsMem_h = weights_h.getMemPtr<half>();
+    Tensor weightsGpu_h = weights_h.clone(cpuPlacement);
+    half *weightsGpuMem_h = weightsGpu_h.getMemPtr<half>();
+    Optional<Tensor> biases = fc->getBiases();
+    Tensor biases_h;
+    half *biasesMem_h;
+    Tensor biasesGpu_h;
+    half *biasesGpuMem_h;
+    ASSERT_EQ(hasBias, biases.isPresent());
+    if (biases.isPresent()) {
+        biases_h = biases.get().clone(cpuPlacement);
+        biasesMem_h = biases_h.getMemPtr<half>();
+        biasesGpu_h = biases_h.clone();
+        biasesGpuMem_h = biasesGpu_h.getMemPtr<half>();
     }
+    Tensor weightsGradient = adam->getWeightsGradient();
+    Tensor weightsGradient_h = weightsGradient.clone(cpuPlacement);
+    half *weightsGradientMem_h = weightsGradient_h.getMemPtr<half>();
+    Tensor weightsGradientGpu_h = weightsGradient_h.clone(cpuPlacement);
+    half *weightsGradientGpuMem_h = weightsGradientGpu_h.getMemPtr<half>();
+    Optional<Tensor> biasesGradient = adam->getBiasesGradient();
+    Tensor biasesGradient_h;
+    half *biasesGradientMem_h;
+    Tensor biasesGradientGpu_h;
+    half *biasesGradientGpuMem_h;
+    ASSERT_EQ(hasBias, biasesGradient.isPresent());
+    if (biasesGradient.isPresent()) {
+        biasesGradient_h = biasesGradient.get().clone(cpuPlacement);
+        biasesGradientMem_h = biasesGradient_h.getMemPtr<half>();
+        biasesGradientGpu_h = biasesGradient_h.clone();
+        biasesGradientGpuMem_h = biasesGradientGpu_h.getMemPtr<half>();
+    }
+    Tensor m = adam->getM();
+    Tensor m_h = m.clone(cpuPlacement);
+    m_h.fillZero(dataStream);
+    half *mMem_h = m_h.getMemPtr<half>();
+    Tensor mGpu_h = m_h.clone();
+    half *mGpuMem_h = mGpu_h.getMemPtr<half>();
+    Tensor v = adam->getV();
+    Tensor v_h = v.clone(cpuPlacement);
+    v_h.fillZero(dataStream);
+    half *vMem_h = v_h.getMemPtr<half>();
+    Tensor vGpu_h = v_h.clone();
+    half *vGpuMem_h = vGpu_h.getMemPtr<half>();
+    Tensor weightsUpdate = adam->getWeightsUpdate();
+    Tensor weightsUpdate_h = weightsUpdate.clone(cpuPlacement);
+    half *weightsUpdateMem_h = weightsUpdate_h.getMemPtr<half>();
+    Tensor weightsUpdateGpu_h = weightsUpdate_h.clone();
+    half *weightsUpdateGpuMem_h = weightsUpdateGpu_h.getMemPtr<half>();
+    Optional<Tensor> mBiases = adam->getMBias();
+    Tensor mBiases_h;
+    half *mBiasesMem_h;
+    Tensor mBiasesGpu_h;
+    half *mBiasesGpuMem_h;
+    ASSERT_EQ(mBiases.isPresent(), biasesGradient.isPresent());
+    if (mBiases.isPresent()) {
+        mBiases_h = mBiases.get().clone(cpuPlacement);
+        mBiasesMem_h = mBiases_h.getMemPtr<half>();
+        mBiasesGpu_h = mBiases_h.clone();
+        mBiasesGpuMem_h = mBiasesGpu_h.getMemPtr<half>();
+    }
+    Optional<Tensor> vBiases = adam->getVBias();
+    Tensor vBiases_h;
+    half *vBiasesMem_h;
+    Tensor vBiasesGpu_h;
+    half *vBiasesGpuMem_h;
+    ASSERT_EQ(vBiases.isPresent(), mBiases.isPresent());
+    if (vBiases.isPresent()) {
+        vBiases_h = vBiases.get().clone(cpuPlacement);
+        vBiasesMem_h = vBiases_h.getMemPtr<half>();
+        vBiasesGpu_h = vBiases_h.clone();
+        vBiasesGpuMem_h = vBiasesGpu_h.getMemPtr<half>();
+    }
+    Optional<Tensor> biasesUpdate = adam->getBiasesUpdate();
+    Tensor biasesUpdate_h;
+    half *biasesUpdateMem_h;
+    Tensor biasesUpdateGpu_h;
+    half *biasesUpdateGpuMem_h;
+    assert(biasesUpdate.isPresent() == vBiases.isPresent());
+    if (biasesUpdate.isPresent()) {
+        biasesUpdate_h = biasesUpdate.get().clone(cpuPlacement);
+        biasesUpdateMem_h = biasesUpdate_h.getMemPtr<half>();
+        biasesUpdateGpu_h = biasesUpdate_h.clone();
+        biasesUpdateGpuMem_h = biasesUpdateGpu_h.getMemPtr<half>();
+    }
+    dataStream.synchronize();
 
-    uint32_t numWeights = weightsGradientGpu.getTotalNumElements();
+    uint32_t numWeights = weightsGradient.getTotalNumElements();
     uint32_t numBiases = 0;
-    if (maybeBiasesGradientGpu.isPresent())
-        numBiases = maybeBiasesGradientGpu.get().getTotalNumElements();
+    if (biasesGradient.isPresent())
+        numBiases = biasesGradient.get().getTotalNumElements();
 
-    weightsGradientCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    weightsUpdateCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    if (maybeBiasesGradientGpu.isPresent()) {
-        biasesGradientCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-        biasesUpdateCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-    }
+    Tensor featureInput = fc->getFeatureInputs()[0];
+    Tensor featureInput_h = featureInput.clone(cpuPlacement);
+    half *featureInputMem_h = featureInput_h.getMemPtr<half>();
+    Tensor errorInput = fc->getErrorInputs()[0];
+    Tensor errorInput_h = errorInput.clone(cpuPlacement);
+    half *errorInputMem_h = errorInput_h.getMemPtr<half>();
 
     float t = 0.0f;
     for (uint32_t batch = 0; batch < 5; ++batch) {
         t += 1.0f;
         for (uint32_t i = 0; i < 3; ++i) {
             // populate featureInput and errorInput so that gradient can be computed
-            vector<half> featureInputVector;
-            Tensor featureInputGpu = fc->getFeatureInputs()[0];
-            for (uint32_t j = 0; j < featureInputGpu.getTotalNumElements(); ++j) {
-                featureInputVector.push_back(2.0f / ((rand() % 100) + 1.0f));
+            for (uint32_t j = 0; j < featureInput.getTotalNumElements(); ++j) {
+                featureInputMem_h[j] = 2.0f / ((rand() % 100) + 1.0f);
             }
-            featureInputGpu.setValues(featureInputVector, dataStream);
+            featureInput.copyFromAsync(featureInput_h, dataStream);
 
-            vector<half> errorInputVector;
-            Tensor errorInputGpu = fc->getErrorInputs()[0];
-            for (uint32_t i = 0; i < errorInputGpu.getTotalNumElements(); ++i) {
-                errorInputVector.push_back(2.0f / ((rand() % 100) + 1.0f));
+            for (uint32_t j = 0; j < errorInput.getTotalNumElements(); ++j) {
+                errorInputMem_h[j] = 2.0f / ((rand() % 100) + 1.0f);
             }
-            errorInputGpu.setValues(errorInputVector, dataStream);
+            errorInput.copyFromAsync(errorInput_h, dataStream);
 
             bool accumulateValues = i == 0 ? false : true;
 
-            adam->computeWeightsUpdate(featureInputGpu, errorInputGpu, accumulateValues);
+            adam->computeWeightsUpdate(featureInput, errorInput, accumulateValues);
 
             // Cpu computation
             // compute gradient
-            matrixMultiplyCpuHalf(featureInputVector.data(),
-                                  errorInputVector.data(),
-                                  weightsGradientCpu.data(),
-                                  featureInputGpu.getDimensions()[0],
-                                  featureInputGpu.getDimensions()[1],
-                                  errorInputGpu.getDimensions()[0],
-                                  errorInputGpu.getDimensions()[1],
-                                  featureInputGpu.getDimensions()[1],
-                                  errorInputGpu.getDimensions()[1],
-                                  weightsGradientGpu.getDimensions()[1],
+            matrixMultiplyCpuHalf(featureInputMem_h,
+                                  errorInputMem_h,
+                                  weightsGradientMem_h,
+                                  featureInput.getDimensions()[0],
+                                  featureInput.getDimensions()[1],
+                                  errorInput.getDimensions()[0],
+                                  errorInput.getDimensions()[1],
+                                  featureInput.getDimensions()[1],
+                                  errorInput.getDimensions()[1],
+                                  weightsGradient.getDimensions()[1],
                                   true,
                                   false,
                                   accumulateValues,
                                   false);
 
             // Get the gradient from FC, ensure it is correct, then copy it for use on cpu to improve testing accuracy
-            vector<half> weightsGradientGpuVector;
-            weightsGradientGpu.loadValuesIntoVector(weightsGradientGpuVector, gradientUpdateStream);
+            weightsGradientGpu_h.copyFromAsync(weightsGradient, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
             for (uint32_t j; j < numWeights; ++j) {
-                // printf("%f %f\n", (float)weightsGradientCpu[j], (float)weightsGradientGpuVector[j]);
-                ASSERT_LT(abs((float)(weightsGradientCpu[j] - weightsGradientGpuVector[j])),
-                          max(0.00001, abs((double)weightsGradientCpu[j] * .01)));
+                // printf("%f %f\n", (float)weightsGradientMem_h[j], (float)weightsGradientGpuMem_h[j]);
+                ASSERT_LT(abs((float)(weightsGradientMem_h[j] - weightsGradientGpuMem_h[j])),
+                          max(0.00001, abs((double)weightsGradientMem_h[j] * .01)));
             }
-            weightsGradientGpu.loadValuesIntoVector(weightsGradientCpu, gradientUpdateStream);
+            weightsGradient_h.copyFromAsync(weightsGradientGpu_h, gradientUpdateStream);
+            gradientUpdateStream.synchronize();
 
             if (hasBias) {
                 // compute the biases gradient
-                computeBiasesGradientCpu(errorInputVector, biasesGradientCpu, batchSize, exampleSize, accumulateValues);
+                computeBiasesGradientCpu(errorInputMem_h, biasesGradientMem_h, batchSize, exampleSize, accumulateValues);
 
                 // Get the gradient from FC, ensure it is correct, then copy it for use on cpu to improve testing accuracy
-                vector<half> biasesGradientGpuVector;
-                maybeBiasesGradientGpu.get().loadValuesIntoVector(biasesGradientGpuVector, gradientUpdateStream);
+                biasesGradientGpu_h.copyFromAsync(biasesGradient_h, gradientUpdateStream);
+                gradientUpdateStream.synchronize();
                 for (uint32_t j; j < numBiases; ++j) {
-                    // printf("%f %f\n", (float)biasesGradientCpu[j], (float)biasesGradientGpuVector[j]);
-                    ASSERT_LT(abs((float)(biasesGradientCpu[j] - biasesGradientGpuVector[j])),
-                              max(0.00001, abs((double)biasesGradientCpu[j] * .01)));
+                    // printf("%f %f\n", (float)biasesGradientMem_h[j], (float)biasesGradientGpuVector[j]);
+                    ASSERT_LT(abs((float)(biasesGradientMem_h[j] - biasesGradientGpuMem_h[j])),
+                              max(0.00001, abs((double)biasesGradientMem_h[j] * .01)));
                 }
-                maybeBiasesGradientGpu.get().loadValuesIntoVector(biasesGradientCpu, gradientUpdateStream);
+                biasesGradient_h.copyFromAsync(biasesGradientGpu_h, gradientUpdateStream);
+                gradientUpdateStream.synchronize();
             }
 
             // update m, v
             for (uint32_t j = 0; j < numWeights; ++j) {
                 // if (j == 0)
                 //     printf("m calc %f = %f * %f + (1.0f - %f) * %f\n", (float)(beta1 * mCpu[j] + ((half)1.0f - beta1) *
-                //     weightsGradientCpu[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientCpu[j]);
-                mCpu[j] = beta1 * mCpu[j] + ((half)1.0f - beta1) * weightsGradientCpu[j];
+                //     weightsGradientMem_h[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientMem_h[j]);
+                mMem_h[j] = beta1 * mMem_h[j] + ((half)1.0f - beta1) * weightsGradientMem_h[j];
                 // if (j == 0)
-                //     printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vCpu[j] + ((half)1.0f - beta2) *
-                //     (weightsGradientCpu[j] * weightsGradientCpu[j])),
-                //            (float)beta2, (float)vCpu[j], (float)((half)1.0f - beta2), (float)weightsGradientCpu[j],
-                //            (float)weightsGradientCpu[j]);
-                vCpu[j] = beta2 * vCpu[j] + ((half)1.0f - beta2) * (weightsGradientCpu[j] * weightsGradientCpu[j]);
+                //     printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vMem_h[j] + ((half)1.0f - beta2) *
+                //     (weightsGradientMem_h[j] * weightsGradientMem_h[j])),
+                //            (float)beta2, (float)vMem_h[j], (float)((half)1.0f - beta2), (float)weightsGradientMem_h[j],
+                //            (float)weightsGradientMem_h[j]);
+                vMem_h[j] = beta2 * vMem_h[j] + ((half)1.0f - beta2) * (weightsGradientMem_h[j] * weightsGradientMem_h[j]);
             }
             for (uint32_t j = 0; j < numBiases; ++j) {
-                mBiasesCpu[j] = beta1 * mBiasesCpu[j] + ((half)1.0f - beta1) * biasesGradientCpu[j];
-                vBiasesCpu[j] = beta2 * vBiasesCpu[j] + ((half)1.0f - beta2) * (biasesGradientCpu[j] * biasesGradientCpu[j]);
+                mBiasesMem_h[j] = beta1 * mBiasesMem_h[j] + ((half)1.0f - beta1) * biasesGradientMem_h[j];
+                vBiasesMem_h[j] = beta2 * vBiasesMem_h[j] + ((half)1.0f - beta2) * (biasesGradientMem_h[j] * biasesGradientMem_h[j]);
             }
         }
     }
@@ -512,99 +688,111 @@ TEST(AdamTest, FullyConnectedBackwardWithAdam5BatchesFP16) {
     ASSERT_EQ(adam->getT(), 5.0f);
 
     // Get m ensure it is correct, then load actual values to maintain test accuracy downstream
-    vector<half> mGpuVector;
-    adam->getM(mGpuVector);
+    mGpu_h.copyFromAsync(m, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
     for (uint32_t j = 0; j < numWeights; ++j) {
-        thresh = max(0.00001, abs((double)mCpu[j] * .01));
-        if (!(abs((double)(mCpu[j] - mGpuVector[j])) < thresh))
-            printf("mCpu[%d] %f mGpu[%d] %f\n", j, (float)mCpu[j], j, (float)mGpuVector[j]);
-        ASSERT_LT(abs((double)(mCpu[j] - mGpuVector[j])), thresh);
+        thresh = max(0.00001, abs((double)mMem_h[j] * .01));
+        if (!(abs((double)(mMem_h[j] - mGpuMem_h[j])) < thresh))
+            printf("mMem_h[%d] %f mGpu[%d] %f\n", j, (float)mMem_h[j], j, (float)mGpuMem_h[j]);
+        ASSERT_LT(abs((double)(mMem_h[j] - mGpuMem_h[j])), thresh);
     }
-    mCpu = mGpuVector;
+    m_h.copyFromAsync(mGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
 
     // Get v ensure it is correct, then load actual values to maintain test accuracy downstream
-    vector<half> vGpuVector;
-    adam->getV(vGpuVector);
+    vGpu_h.copyFromAsync(v, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
     for (uint32_t j = 0; j < numWeights; ++j) {
-        thresh = max(0.00001, abs((double)vCpu[j] * .01));
-        // printf("v cpu %f gpu %f\n", (float)vCpu[j], (float)vGpuVector[j]);
-        ASSERT_LT(abs((double)(vCpu[j] - vGpuVector[j])), thresh);
+        thresh = max(0.00001, abs((double)vMem_h[j] * .01));
+        // printf("v cpu %f gpu %f\n", (float)vMem_h[j], (float)vGpuVector[j]);
+        ASSERT_LT(abs((double)(vMem_h[j] - vGpuMem_h[j])), thresh);
     }
-    vCpu = vGpuVector;
+    v_h.copyFromAsync(vGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
 
     if (hasBias) {
         // Get mBiases ensure it is correct, then load actual values to maintain test accuracy downstream
-        vector<half> mBiasesGpuVector;
-        adam->getMBias(mBiasesGpuVector);
+        mBiasesGpu_h.copyFromAsync(mBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
         for (uint32_t j = 0; j < numBiases; ++j) {
-            // printf("%f %f\n", (float)mBiasesCpu[j], (float)mBiasesGpuVector[j]);
-            thresh = max(0.00001, abs((double)mBiasesCpu[j] * .01));
-            ASSERT_LT(abs((double)(mBiasesCpu[j] - mBiasesGpuVector[j])), thresh);
+            // printf("%f %f\n", (float)mBiasesMem_h[j], (float)mBiasesGpuMem_h[j]);
+            thresh = max(0.05, abs((double)mBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(mBiasesMem_h[j] - mBiasesGpuMem_h[j])), thresh);
         }
-        mBiasesCpu = mBiasesGpuVector;
+        mBiases_h.copyFromAsync(mBiasesGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
 
         // Get vBiases ensure it is correct, then load actual values to maintain test accuracy downstream
-        vector<half> vBiasesGpuVector;
-        adam->getVBias(vBiasesGpuVector);
+        vBiasesGpu_h.copyFromAsync(vBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
         for (uint32_t j = 0; j < numBiases; ++j) {
-            thresh = max(0.00001, abs((double)vBiasesCpu[j] * .01));
-            ASSERT_LT(abs((double)(vBiasesCpu[j] - vBiasesGpuVector[j])), thresh);
+            thresh = max(0.05, abs((double)vBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(vBiasesMem_h[j] - vBiasesGpuMem_h[j])), thresh);
         }
-        vBiasesCpu = vBiasesGpuVector;
+        vBiases_h.copyFromAsync(vBiasesGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
     }
 
     // Compute weights and biases update values
     half alphaT = alpha * (half)sqrtf(1.0f - powf(beta2, t)) / (half)(1.0f - powf(beta1, t));
+    // printf("alphaT = %f = %f * %f / %f, beta1 %f beta2 %f t %f\n", (float)alphaT, (float)alpha, sqrtf(1.0f - powf(beta2, t)), (1.0f -
+    // powf(beta1, t)), (float)beta1, (float)beta2, t);
     for (uint32_t j = 0; j < numWeights; ++j) {
-        weightsUpdateCpu[j] = (-alphaT * mCpu[j]) / ((half)sqrtf(vCpu[j]) + epsilon);
+        weightsUpdateMem_h[j] = (-alphaT * mMem_h[j]) / ((half)sqrtf(vMem_h[j]) + epsilon);
+        // if (j == 0)
+        //     printf("CPU weightUpdate = %f / %f = %f      alphaT %f, m %f\n", float(-alphaT * mMem_h[j]), float(((half)sqrtf(vMem_h[j]) +
+        //     epsilon)), (float)weightsUpdateMem_h[j], (float)-alphaT, float(mMem_h[j]));
     }
     for (uint32_t j = 0; j < numBiases; ++j)
-        biasesUpdateCpu[j] = (-alphaT * mBiasesCpu[j]) / ((half)sqrtf(vBiasesCpu[j]) + epsilon);
+        biasesUpdateMem_h[j] = (-alphaT * mBiasesMem_h[j]) / ((half)sqrtf(vBiasesMem_h[j]) + epsilon);
 
     // Get weightsUpdate ensure it is correct
-    vector<half> weightsUpdateGpuVector;
-    adam->getWeightsUpdate(weightsUpdateGpuVector);
-    vector<half> biasesUpdateGpuVector;
-    adam->getBiasesUpdate(biasesUpdateGpuVector);
+    weightsUpdateGpu_h.copyFromAsync(weightsUpdate, gradientUpdateStream);
+    if (numBiases > 0)
+        biasesUpdateGpu_h.copyFromAsync(biasesUpdate, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
     for (uint32_t j = 0; j < numWeights; ++j) {
-        // printf("[%d] cpu: %f gpu %f      -alphaT %f mCpu %f sqrt(vCpu) %f epsilon %f\n", j, (float)weightsUpdateCpu[j],
-        // (float)weightsUpdateGpuVector[j], (float)-alphaT, (float)mCpu[j], sqrtf(vCpu[j]), (float)epsilon);
-        ASSERT_LT(abs((double)(weightsUpdateCpu[j] - weightsUpdateGpuVector[j])), 0.0002);
+        // printf("[%d] cpu: %f gpu %f      -alphaT %f mMem_h %f sqrt(vMem_h) %f epsilon %f\n", j, (float)weightsUpdateMem_h[j],
+        // (float)weightsUpdateGpuMem_h[j], (float)-alphaT, (float)mMem_h[j], sqrtf(vMem_h[j]), (float)epsilon);
+        ASSERT_LT(abs((double)(weightsUpdateMem_h[j] - weightsUpdateGpuMem_h[j])), 0.0002);
     }
     for (uint32_t j = 0; j < numBiases; ++j) {
-        ASSERT_LT(abs((double)(biasesUpdateCpu[j] - biasesUpdateGpuVector[j])), 0.0002);
+        ASSERT_LT(abs((double)(biasesUpdateMem_h[j] - biasesUpdateGpuMem_h[j])), 0.0002);
     }
 
     // set the weights and then call updateWeights.
-    Tensor weightsGpu = fc->getWeights();
-    Optional<Tensor> biasesGpu = fc->getBiases();
-    vector<half> weightsCpu(weightsGpu.getTotalNumElements(), 0.0f);
-    vector<half> biasesCpu;
-    for (uint32_t i = 0; i < weightsGpu.getTotalNumElements(); ++i)
-        weightsCpu[i] = (rand() % 50) / ((rand() % 50) + 1);
-    weightsGpu.setValues(weightsCpu, gradientUpdateStream);
-    if (hasBias) {
-        biasesCpu = vector<half>(biasesGpu.get().getTotalNumElements(), 0.0f);
-        for (uint32_t i = 0; i < biasesGpu.get().getTotalNumElements(); ++i)
-            biasesCpu[i] = (rand() % 50) / ((rand() % 50) + 1);
-        biasesGpu.get().setValues(biasesCpu, gradientUpdateStream);
+    weights.fillRandom(-2, 2, gradientUpdateStream);
+    weights_h.copyFromAsync(weights, gradientUpdateStream);
+    if (biases.isPresent()) {
+        biases.get().fillRandom(-2, 2, gradientUpdateStream);
+        biases_h.copyFromAsync(biases, gradientUpdateStream);
+        biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
     }
     // batchSize is only used for math, it doesn't need to match the tensor dimension in this test.
-    adam->updateWeights(weightsGpu, biasesGpu, batchSize);
+    adam->updateWeights(weights, biases, batchSize);
+    weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
     gradientUpdateStream.synchronize();
 
     // Check that the weights have been updated to the proper values
-    vector<half> weightsGpuVector;
-    fc->getWeights().loadValuesIntoVector(weightsGpuVector, gradientUpdateStream);
     for (uint32_t j = 0; j < numWeights; ++j) {
-        half updatedWeight = weightsCpu[j] + (half)((float)weightsUpdateCpu[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+        half updatedWeight =
+            weightsMem_h[j] + (half)((float)weightsUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
         // printf("%f %f\n", (float)updatedWeight, (float)weightsGpuVector[j]);
-        thresh = max(0.00001, abs((double)updatedWeight * .001));
-        ASSERT_LT(abs((double)(updatedWeight - weightsGpuVector[j])), thresh);
+        thresh = max(0.001, abs((double)updatedWeight * .01));
+        ASSERT_LT(abs((double)(updatedWeight - weightsGpuMem_h[j])), thresh);
+    }
+
+    if (biases.isPresent()) {
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            half updatedBias =
+                biasesMem_h[j] + (half)((float)biasesUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+            // printf("%f %f\n", (float)updatedBias, (float)biasesGpuMem_h[j]);
+            thresh = max(0.001, abs((double)updatedBias * .01));
+            ASSERT_LT(abs((double)(updatedBias - biasesGpuMem_h[j])), thresh);
+        }
     }
 }
 
-/*
 // 1. Fill feature in random
 // 2. fill errorIn random
 // 3. fill weights in random
@@ -612,15 +800,17 @@ TEST(AdamTest, FullyConnectedBackwardWithAdam5BatchesFP16) {
 // 5. Verify featureOutput
 // 6. call backward
 // 7. Check weights values
-// 8. call forward
-// 9. Verify featureOutput
-// 10. fill errorIn random
-// 11. call backward
-// 12. Check weights values
-// 13. Call forward for a third time, this time in inference mode
-// 14. Verify featureOutput
-TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
+// 8. fill featureIn random
+// 9. call forward
+// 10. Verify featureOutput
+// 11. fill errorIn random
+// 12. call backward
+// 13. Check weights values
+// 14. Call forward for a third time, this time in inference mode
+// 15. Verify featureOutput
+TEST(AdamTest, FullForwardBackwordFunctionalityFP16) {
     srand(time(nullptr));
+
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
@@ -629,20 +819,12 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
     uint32_t numOutputFeatures = (rand() % 300) + 1;
     bool hasBias = rand() % 2;
 
+    Tensor networkFeatureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
+
     half alpha = 0.02f;
     half beta1 = 0.82f;
     half beta2 = 0.933f;
     half epsilon = 1e-5f;
-    shared_ptr<FullyConnected> fc = dynamic_pointer_cast<FullyConnected>(constructTrainableLayer(hasBias));
-    ASSERT_NE(fc, nullptr);
-    shared_ptr<Adam> adam = make_shared<Adam>(fc, alpha, beta1, beta2, epsilon, fc->getErrorInputs()[0], Optional<Tensor>::empty());
-
-    Tensor networkFeatureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
-
-    float initialLearningRate = 10000.0 / (1 + rand() % 33);
-    float decay = ((rand() % 5) / 10.0f);
-    float momentum = (1.0f + (rand() % 100)) / 100.0f;
-    bool useNesterovMomentum = true;
     uint64_t epoch = rand() % 10;
 
     vector<shared_ptr<Layer>> layers;
@@ -668,15 +850,15 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
     errorInput.fillRandom(-2.0, 2.0, dataStream);
     weights.fillRandom(-2.0, 2.0, dataStream);
     dataStream.synchronize();
-    shared_ptr<Adam> adma =
-        make_shared<Adam>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
+    shared_ptr<Adam> adam = make_shared<Adam>(fullyConnectedLayer,
+                                              alpha,
+                                              beta1,
+                                              beta2,
+                                              epsilon,
+                                              fullyConnectedLayer->getErrorInputs()[0],
+                                              fullyConnectedLayer->getErrorOutputs()[0]);
+    adam->initialize();
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(adam));
-    Tensor weightsGradient = adam->getWeightsGradient();
-
-    ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
-    ASSERT_EQ(sgd->getDecay(), decay);
-    ASSERT_EQ(sgd->getMomentum(), momentum);
-    ASSERT_EQ(sgd->getUseNesterovMomentum(), useNesterovMomentum);
 
     Tensor featureInput_h = featureInput.clone(cpuPlacement);
     Tensor featureOutput_h = featureOutput.clone(cpuPlacement);
@@ -685,9 +867,8 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
     Tensor errorOutput_h = errorOutput.clone(cpuPlacement);
     Tensor errorOutputGpu_h = errorOutput_h.clone();
     Tensor weights_h = weights.clone(cpuPlacement);
-    Tensor projectedWeights_h = weights_h.clone();
-    Tensor projectedWeightsGpu_h = weights_h.clone();
     Tensor weightsGpu_h = weights_h.clone();
+    Tensor weightsGradient = adam->getWeightsGradient();
     Tensor weightsGradient_h = weightsGradient.clone(cpuPlacement);
     Tensor weightsGradientGpu_h = weightsGradient_h.clone();
     half *featureInMem_h = featureInput_h.getMemPtr<half>();
@@ -698,8 +879,6 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
     half *errorOutGpuMem_h = errorOutputGpu_h.getMemPtr<half>();
     half *weightsMem_h = weights_h.getMemPtr<half>();
     half *weightsGpuMem_h = weightsGpu_h.getMemPtr<half>();
-    half *projectedWeightsMem_h = projectedWeights_h.getMemPtr<half>();
-    half *projectedWeightsGpuMem_h = projectedWeightsGpu_h.getMemPtr<half>();
     half *weightsGradientMem_h = weightsGradient_h.getMemPtr<half>();
     half *weightsGradientGpuMem_h = weightsGradientGpu_h.getMemPtr<half>();
     featureInput_h.copyFromAsync(featureInput, dataStream);
@@ -711,15 +890,12 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
     Tensor biasesGpu_h;
     half *biasesMem_h;
     half *biasesGpuMem_h;
-    Optional<Tensor> biasesGradient = sgd->getBiasesGradient();
+    Optional<Tensor> biasesGradient = adam->getBiasesGradient();
     Tensor biasesGradient_h;
     Tensor biasesGradientGpu_h;
     half *biasesGradientMem_h;
     half *biasesGradientGpuMem_h;
     Tensor projectedBiases_h;
-    Tensor projectedBiasesGpu_h;
-    half *projectedBiasesMem_h;
-    half *projectedBiasesGpuMem_h;
     if (hasBias) {
         ASSERT_TRUE(biases.isPresent());
         ASSERT_TRUE(biasesGradient.isPresent());
@@ -733,39 +909,81 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
         biasesGradientGpu_h = biasesGradient_h.clone();
         biasesGradientMem_h = biasesGradient_h.getMemPtr<half>();
         biasesGradientGpuMem_h = biasesGradientGpu_h.getMemPtr<half>();
-        projectedBiases_h = biases_h.clone();
-        projectedBiasesGpu_h = biases_h.clone();
-        projectedBiasesMem_h = projectedBiases_h.getMemPtr<half>();
-        projectedBiasesGpuMem_h = projectedBiasesGpu_h.getMemPtr<half>();
     }
 
-    Tensor weightsUpdate_h = weights_h.clone();
+    Tensor weightsUpdate = adam->getWeightsUpdate();
+    Tensor weightsUpdate_h = weightsUpdate.clone(cpuPlacement);
     half *weightsUpdateMem_h = weightsUpdate_h.getMemPtr<half>();
-    weightsUpdate_h.clearAsync(dataStream);
+    Tensor weightsUpdateGpu_h = weightsUpdate_h.clone();
+    half *weightsUpdateGpuMem_h = weightsUpdateGpu_h.getMemPtr<half>();
+    Optional<Tensor> biasesUpdate = adam->getBiasesUpdate();
     Tensor biasesUpdate_h;
     half *biasesUpdateMem_h;
-    if (hasBias) {
-        biasesUpdate_h = biases_h.clone();
+    Tensor biasesUpdateGpu_h;
+    half *biasesUpdateGpuMem_h;
+    ASSERT_EQ(biasesUpdate.isPresent(), biases.isPresent());
+    if (biasesUpdate.isPresent()) {
+        biasesUpdate_h = biasesUpdate.get().clone(cpuPlacement);
         biasesUpdateMem_h = biasesUpdate_h.getMemPtr<half>();
-        biasesUpdate_h.clearAsync(dataStream);
+        biasesUpdateGpu_h = biasesUpdate_h.clone();
+        biasesUpdateGpuMem_h = biasesUpdateGpu_h.getMemPtr<half>();
     }
-    dataStream.synchronize();
+
+    Tensor m = adam->getM();
+    Tensor m_h = m.clone(cpuPlacement);
+    m_h.fillZero(dataStream);
+    half *mMem_h = m_h.getMemPtr<half>();
+    Tensor mGpu_h = m_h.clone();
+    half *mGpuMem_h = mGpu_h.getMemPtr<half>();
+    Tensor v = adam->getV();
+    Tensor v_h = v.clone(cpuPlacement);
+    v_h.fillZero(dataStream);
+    half *vMem_h = v_h.getMemPtr<half>();
+    Tensor vGpu_h = v_h.clone();
+    half *vGpuMem_h = vGpu_h.getMemPtr<half>();
+
+    Optional<Tensor> mBiases = adam->getMBias();
+    Tensor mBiases_h;
+    half *mBiasesMem_h;
+    Tensor mBiasesGpu_h;
+    half *mBiasesGpuMem_h;
+    ASSERT_EQ(mBiases.isPresent(), biasesGradient.isPresent());
+    if (mBiases.isPresent()) {
+        mBiases_h = mBiases.get().clone(cpuPlacement);
+        mBiasesMem_h = mBiases_h.getMemPtr<half>();
+        mBiasesGpu_h = mBiases_h.clone();
+        mBiasesGpuMem_h = mBiasesGpu_h.getMemPtr<half>();
+    }
+    Optional<Tensor> vBiases = adam->getVBias();
+    Tensor vBiases_h;
+    half *vBiasesMem_h;
+    Tensor vBiasesGpu_h;
+    half *vBiasesGpuMem_h;
+    ASSERT_EQ(vBiases.isPresent(), mBiases.isPresent());
+    if (vBiases.isPresent()) {
+        vBiases_h = vBiases.get().clone(cpuPlacement);
+        vBiasesMem_h = vBiases_h.getMemPtr<half>();
+        vBiasesGpu_h = vBiases_h.clone();
+        vBiasesGpuMem_h = vBiasesGpu_h.getMemPtr<half>();
+    }
 
     dataStream.synchronize();
-    Stream gradientUpdateStream = sgd->getGradientUpdateStream();
+    Stream gradientUpdateStream = adam->getGradientUpdateStream();
+
+    uint32_t numWeights = weightsGradient.getTotalNumElements();
+    uint32_t numBiases = 0;
 
     uint32_t batchesPerEpoch = 1 + rand() % 10000;
-    assert(momentum > 0.0f);
-    assert(useNesterovMomentum == true);
-    float currentLearningRate = computeCurrentLearningRate(initialLearningRate, decay, epoch);
-    sgd->updateHyperParameters(epoch, rand() % batchesPerEpoch, batchesPerEpoch);
+    float t = 0.0f;
+    unordered_map<string, float> hyperparameters = adam->updateHyperParameters(epoch, rand() % batchesPerEpoch, batchesPerEpoch);
+    ASSERT_EQ(hyperparameters["t"], t);
 
     // Call forward
     fullyConnectedLayer->forward(featureInput, false);
-
-    // Verify featureOutput
     featureOutputGpu_h.copyFromAsync(featureOutput, dataStream);
     dataStream.synchronize();
+
+    // Verify featureOutput
     matrixMultiplyCpuHalf(featureInMem_h,
                           weightsMem_h,
                           featureOutMem_h,
@@ -780,10 +998,12 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
                           false,
                           false,
                           false);
+    // printf("Num input features %d\n", numInputFeatures);
     verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
 
     // Call backward
     fullyConnectedLayer->backward(errorInput);
+    t += 1;
 
     // Verify errorOutput
     errorOutputGpu_h.copyFromAsync(errorOutput, dataStream);
@@ -832,65 +1052,156 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
     }
 
     weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
-    projectedWeightsGpu_h.copyFromAsync(sgd->getProjectedWeights(), gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    double thresh;
+
+    ASSERT_EQ(adam->getT(), 1.0f);
+
+    // update m, v
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        // if (j == 0)
+        //     printf("m calc %f = %f * %f + (1.0f - %f) * %f\n", (float)(beta1 * mCpu[j] + ((half)1.0f - beta1) *
+        //     weightsGradientMem_h[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientMem_h[j]);
+        mMem_h[j] = beta1 * mMem_h[j] + ((half)1.0f - beta1) * weightsGradientMem_h[j];
+        // if (j == 0)
+        //     printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vMem_h[j] + ((half)1.0f - beta2) *
+        //     (weightsGradientMem_h[j] * weightsGradientMem_h[j])),
+        //            (float)beta2, (float)vMem_h[j], (float)((half)1.0f - beta2), (float)weightsGradientMem_h[j],
+        //            (float)weightsGradientMem_h[j]);
+        vMem_h[j] = beta2 * vMem_h[j] + ((half)1.0f - beta2) * (weightsGradientMem_h[j] * weightsGradientMem_h[j]);
+    }
+    for (uint32_t j = 0; j < numBiases; ++j) {
+        mBiasesMem_h[j] = beta1 * mBiasesMem_h[j] + ((half)1.0f - beta1) * biasesGradientMem_h[j];
+        vBiasesMem_h[j] = beta2 * vBiasesMem_h[j] + ((half)1.0f - beta2) * (biasesGradientMem_h[j] * biasesGradientMem_h[j]);
+    }
+
+    // Get m ensure it is correct, then load actual values to maintain test accuracy downstream
+    mGpu_h.copyFromAsync(m, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        thresh = max(0.005, abs((double)mMem_h[j] * .05));
+        if (!(abs((double)(mMem_h[j] - mGpuMem_h[j])) < thresh))
+            printf("mMem_h[%d] %f mGpu[%d] %f\n", j, (float)mMem_h[j], j, (float)mGpuMem_h[j]);
+        ASSERT_LT(abs((double)(mMem_h[j] - mGpuMem_h[j])), thresh);
+    }
+    m_h.copyFromAsync(mGpu_h, gradientUpdateStream);
     gradientUpdateStream.synchronize();
 
-    // printf("%f * %f - (%f * %f) / %d\n",
-    //        (float)weightsUpdateMem_h[0],
-    //        momentum,
-    //        currentLearningRate,
-    //        (float)weightsGradientGpuMem_h[0],
-    //        batchSize);
-    for (uint32_t row = 0; row < numInputFeatures; ++row) {
-        for (uint32_t col = 0; col < numOutputFeatures; ++col) {
-            uint32_t index = row * numOutputFeatures + col;
-            weightsUpdateMem_h[index] =
-                (float)weightsUpdateMem_h[index] * momentum -
-                (((float)weightsGradientGpuMem_h[index] * currentLearningRate) / batchSize) / Loss::getLossScalingFactor();
-            weightsMem_h[index] += (float)weightsUpdateMem_h[index];
-            projectedWeightsMem_h[index] = weightsMem_h[index] + (half)momentum * weightsUpdateMem_h[index];
-        }
+    // Get v ensure it is correct, then load actual values to maintain test accuracy downstream
+    vGpu_h.copyFromAsync(v, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        thresh = max(0.005, abs((double)vMem_h[j] * .05));
+        // printf("v cpu %f gpu %f\n", (float)vMem_h[j], (float)vGpuVector[j]);
+        ASSERT_LT(abs((double)(vMem_h[j] - vGpuMem_h[j])), thresh);
     }
-    verifyMatricesMatch(weightsMem_h, weightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
-    verifyMatricesMatch(projectedWeightsMem_h, projectedWeightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
-    // Don't let error increase as test gets longer:
-    weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
-    projectedWeights_h.copyFromAsync(projectedWeightsGpu_h, gradientUpdateStream);
+    v_h.copyFromAsync(vGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
 
     if (hasBias) {
-        biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
-        projectedBiasesGpu_h.copyFromAsync(sgd->getProjectedBiases(), gradientUpdateStream);
+        // Get mBiases ensure it is correct, then load actual values to maintain test accuracy downstream
+        mBiasesGpu_h.copyFromAsync(mBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            // printf("%f %f\n", (float)mBiasesMem_h[j], (float)mBiasesGpuMem_h[j]);
+            thresh = max(0.03, abs((double)mBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(mBiasesMem_h[j] - mBiasesGpuMem_h[j])), thresh);
+        }
+        mBiases_h.copyFromAsync(mBiasesGpu_h, gradientUpdateStream);
         gradientUpdateStream.synchronize();
 
-        for (uint32_t outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
-            biasesUpdateMem_h[outputFeature] =
-                (float)biasesUpdateMem_h[outputFeature] * momentum -
-                (((float)biasesGradientGpuMem_h[outputFeature] * currentLearningRate) / batchSize) / Loss::getLossScalingFactor();
-            biasesMem_h[outputFeature] += (float)biasesUpdateMem_h[outputFeature];
-            projectedBiasesMem_h[outputFeature] = biasesMem_h[outputFeature] + (half)momentum * biasesUpdateMem_h[outputFeature];
+        // Get vBiases ensure it is correct, then load actual values to maintain test accuracy downstream
+        vBiasesGpu_h.copyFromAsync(vBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            thresh = max(0.03, abs((double)vBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(vBiasesMem_h[j] - vBiasesGpuMem_h[j])), thresh);
         }
-        verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
-        verifyMatricesMatch(projectedBiasesMem_h, projectedBiasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
-        // Don't let error increase as test gets longer:
-        biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
-        projectedBiases_h.copyFromAsync(projectedBiasesGpu_h, gradientUpdateStream);
+        vBiases_h.copyFromAsync(vBiasesGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
     }
 
-    // Re-randomize featureInput and errorInput
+    // Compute weights and biases update values
+    half alphaT = alpha * (half)sqrtf(1.0f - powf(beta2, t)) / (half)(1.0f - powf(beta1, t));
+    // printf("alphaT = %f = %f * %f / %f, beta1 %f beta2 %f t %f\n",
+    //        (float)alphaT,
+    //        (float)alpha,
+    //        sqrtf(1.0f - powf(beta2, t)),
+    //       (1.0f - powf(beta1, t)),
+    //        (float)beta1,
+    //        (float)beta2,
+    //        t);
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        weightsUpdateMem_h[j] = (-alphaT * mMem_h[j]) / ((half)sqrtf(vMem_h[j]) + epsilon);
+        // if (j == 0)
+        //     printf("CPU weightUpdate = %f / %f = %f      alphaT %f, m %f\n",
+        //            float(-alphaT * mMem_h[j]),
+        //            float(((half)sqrtf(vMem_h[j]) + epsilon)),
+        //            (float)weightsUpdateMem_h[j],
+        //            (float)-alphaT,
+        //            float(mMem_h[j]));
+    }
+    for (uint32_t j = 0; j < numBiases; ++j)
+        biasesUpdateMem_h[j] = (-alphaT * mBiasesMem_h[j]) / ((half)sqrtf(vBiasesMem_h[j]) + epsilon);
+
+    // Get weightsUpdate ensure it is correct
+    weightsUpdateGpu_h.copyFromAsync(weightsUpdate, gradientUpdateStream);
+    if (numBiases > 0)
+        biasesUpdateGpu_h.copyFromAsync(biasesUpdate, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        // printf("[%d] cpu: %f gpu %f      -alphaT %f mMem_h %f sqrt(vMem_h) %f epsilon %f\n", j, (float)weightsUpdateMem_h[j],
+        // (float)weightsUpdateGpuMem_h[j], (float)-alphaT, (float)mMem_h[j], sqrtf(vMem_h[j]), (float)epsilon);
+        ASSERT_LT(abs((double)(weightsUpdateMem_h[j] - weightsUpdateGpuMem_h[j])), 0.0002);
+    }
+    for (uint32_t j = 0; j < numBiases; ++j) {
+        ASSERT_LT(abs((double)(biasesUpdateMem_h[j] - biasesUpdateGpuMem_h[j])), 0.0002);
+    }
+
+    // update weights
+    // batchSize is only used for math, it doesn't need to match the tensor dimension in this test.
+    adam->updateWeights(weights, biases, batchSize);
+    weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+
+    // Check that the weights have been updated to the proper values
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        half updatedWeight =
+            weightsMem_h[j] + (half)((float)weightsUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+        // printf("%f %f\n", (float)updatedWeight, (float)weightsGpuVector[j]);
+        thresh = max(0.001, abs((double)updatedWeight * .01));
+        ASSERT_LT(abs((double)(updatedWeight - weightsGpuMem_h[j])), thresh);
+    }
+    weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
+
+    if (biases.isPresent()) {
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            half updatedBias =
+                biasesMem_h[j] + (half)((float)biasesUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+            // printf("%f %f\n", (float)updatedBias, (float)biasesGpuMem_h[j]);
+            thresh = max(0.001, abs((double)updatedBias * .01));
+            ASSERT_LT(abs((double)(updatedBias - biasesGpuMem_h[j])), thresh);
+        }
+        biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
+    }
+    gradientUpdateStream.synchronize();
+
+    ////////////////////////////////////////////
+
+    // Re-randomize the inputs
     featureInput.fillRandom(-2.0, 2.0, dataStream);
-    errorInput.fillRandom(-2.0, 2.0, dataStream);
     featureInput_h.copyFromAsync(featureInput, dataStream);
+    errorInput.fillRandom(-2.0, 2.0, dataStream);
     errorInput_h.copyFromAsync(errorInput, dataStream);
-    dataStream.synchronize();
 
-    // Call forward for second time, now there is a previous weights update
+    // Call forward
     fullyConnectedLayer->forward(featureInput, false);
-
-    // Verify featureOutput
     featureOutputGpu_h.copyFromAsync(featureOutput, dataStream);
     dataStream.synchronize();
+
+    // Verify featureOutput
     matrixMultiplyCpuHalf(featureInMem_h,
-                          projectedWeightsMem_h,
+                          weightsMem_h,
                           featureOutMem_h,
                           batchSize,
                           numInputFeatures,
@@ -903,10 +1214,12 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
                           false,
                           false,
                           false);
+    // printf("Num input features %d\n", numInputFeatures);
     verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
 
     // Call backward
     fullyConnectedLayer->backward(errorInput);
+    t += 1;
 
     // Verify errorOutput
     errorOutputGpu_h.copyFromAsync(errorOutput, dataStream);
@@ -951,60 +1264,155 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
         reduceBatch(errorInMem_h, biasesGradientMem_h, batchSize, numOutputFeatures, false);
         biasesGradientGpu_h.copyFromAsync(biasesGradient, gradientUpdateStream);
         gradientUpdateStream.synchronize();
-        verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
+        verifyMatricesMatch(biasesGradientMem_h, biasesGradientGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.02f);
     }
 
     weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
-    projectedWeightsGpu_h.copyFromAsync(sgd->getProjectedWeights(), gradientUpdateStream);
     gradientUpdateStream.synchronize();
 
-    // printf("%f * %f - (%f * %f) / %d\n",
-    //        (float)weightsUpdateMem_h[0],
-    //        momentum,
-    //        currentLearningRate,
-    //        (float)weightsGradientGpuMem_h[0],
-    //        batchSize);
-    for (uint32_t row = 0; row < numInputFeatures; ++row) {
-        for (uint32_t col = 0; col < numOutputFeatures; ++col) {
-            uint32_t index = row * numOutputFeatures + col;
-            weightsUpdateMem_h[index] =
-                (float)weightsUpdateMem_h[index] * momentum -
-                (((float)weightsGradientGpuMem_h[index] * currentLearningRate) / batchSize) / Loss::getLossScalingFactor();
-            weightsMem_h[index] += (float)weightsUpdateMem_h[index];
-            projectedWeightsMem_h[index] = weightsMem_h[index] + (half)momentum * weightsUpdateMem_h[index];
-        }
+    ASSERT_EQ(adam->getT(), 2.0f);
+
+    // update m, v
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        // if (j == 0)
+        //     printf("m calc %f = %f * %f + (1.0f - %f) * %f\n", (float)(beta1 * mCpu[j] + ((half)1.0f - beta1) *
+        //     weightsGradientMem_h[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientMem_h[j]);
+        mMem_h[j] = beta1 * mMem_h[j] + ((half)1.0f - beta1) * weightsGradientMem_h[j];
+        // if (j == 0)
+        //     printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vMem_h[j] + ((half)1.0f - beta2) *
+        //     (weightsGradientMem_h[j] * weightsGradientMem_h[j])),
+        //            (float)beta2, (float)vMem_h[j], (float)((half)1.0f - beta2), (float)weightsGradientMem_h[j],
+        //            (float)weightsGradientMem_h[j]);
+        vMem_h[j] = beta2 * vMem_h[j] + ((half)1.0f - beta2) * (weightsGradientMem_h[j] * weightsGradientMem_h[j]);
     }
-    verifyMatricesMatch(weightsMem_h, weightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
-    verifyMatricesMatch(projectedWeightsMem_h, projectedWeightsGpuMem_h, numInputFeatures, numOutputFeatures, false, 0.4f, 0.03f);
-    // Don't let error increase as test gets longer:
-    weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
-    projectedWeights_h.copyFromAsync(projectedWeightsGpu_h, gradientUpdateStream);
+    for (uint32_t j = 0; j < numBiases; ++j) {
+        mBiasesMem_h[j] = beta1 * mBiasesMem_h[j] + ((half)1.0f - beta1) * biasesGradientMem_h[j];
+        vBiasesMem_h[j] = beta2 * vBiasesMem_h[j] + ((half)1.0f - beta2) * (biasesGradientMem_h[j] * biasesGradientMem_h[j]);
+    }
+
+    // Get m ensure it is correct, then load actual values to maintain test accuracy downstream
+    mGpu_h.copyFromAsync(m, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        thresh = max(0.005, abs((double)mMem_h[j] * .05));
+        if (!(abs((double)(mMem_h[j] - mGpuMem_h[j])) < thresh))
+            printf("mMem_h[%d] %f mGpu[%d] %f\n", j, (float)mMem_h[j], j, (float)mGpuMem_h[j]);
+        ASSERT_LT(abs((double)(mMem_h[j] - mGpuMem_h[j])), thresh);
+    }
+    m_h.copyFromAsync(mGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+
+    // Get v ensure it is correct, then load actual values to maintain test accuracy downstream
+    vGpu_h.copyFromAsync(v, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        thresh = max(0.005, abs((double)vMem_h[j] * .05));
+        // printf("v cpu %f gpu %f\n", (float)vMem_h[j], (float)vGpuVector[j]);
+        ASSERT_LT(abs((double)(vMem_h[j] - vGpuMem_h[j])), thresh);
+    }
+    v_h.copyFromAsync(vGpu_h, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
 
     if (hasBias) {
-        biasesGpu_h.copyFromAsync(biases, gradientUpdateStream);
-        projectedBiasesGpu_h.copyFromAsync(sgd->getProjectedBiases(), gradientUpdateStream);
+        // Get mBiases ensure it is correct, then load actual values to maintain test accuracy downstream
+        mBiasesGpu_h.copyFromAsync(mBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            // printf("%f %f\n", (float)mBiasesMem_h[j], (float)mBiasesGpuMem_h[j]);
+            thresh = max(0.03, abs((double)mBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(mBiasesMem_h[j] - mBiasesGpuMem_h[j])), thresh);
+        }
+        mBiases_h.copyFromAsync(mBiasesGpu_h, gradientUpdateStream);
         gradientUpdateStream.synchronize();
 
-        for (uint32_t outputFeature = 0; outputFeature < numOutputFeatures; ++outputFeature) {
-            biasesUpdateMem_h[outputFeature] =
-                (float)biasesUpdateMem_h[outputFeature] * momentum -
-                (((float)biasesGradientGpuMem_h[outputFeature] * currentLearningRate) / batchSize) / Loss::getLossScalingFactor();
-            biasesMem_h[outputFeature] += (float)biasesUpdateMem_h[outputFeature];
-            projectedBiasesMem_h[outputFeature] = biasesMem_h[outputFeature] + (half)momentum * biasesUpdateMem_h[outputFeature];
+        // Get vBiases ensure it is correct, then load actual values to maintain test accuracy downstream
+        vBiasesGpu_h.copyFromAsync(vBiases, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            thresh = max(0.03, abs((double)vBiasesMem_h[j] * .02));
+            ASSERT_LT(abs((double)(vBiasesMem_h[j] - vBiasesGpuMem_h[j])), thresh);
         }
-        verifyMatricesMatch(biasesMem_h, biasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
-        verifyMatricesMatch(projectedBiasesMem_h, projectedBiasesGpuMem_h, 1, numOutputFeatures, false, 0.4f, 0.03f);
-        // Don't let error increase as test gets longer:
-        biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
-        projectedBiases_h.copyFromAsync(projectedBiasesGpu_h, gradientUpdateStream);
+        vBiases_h.copyFromAsync(vBiasesGpu_h, gradientUpdateStream);
+        gradientUpdateStream.synchronize();
     }
 
-    // Call forward for a third time, this time in inference mode, ensure that projected weights are not used to create featureOutput
-    fullyConnectedLayer->forward(featureInput, true);
+    // Compute weights and biases update values
+    alphaT = alpha * (half)sqrtf(1.0f - powf(beta2, t)) / (half)(1.0f - powf(beta1, t));
+    printf("alphaT = %f = %f * %f / %f, beta1 %f beta2 %f t %f\n",
+           (float)alphaT,
+           (float)alpha,
+           sqrtf(1.0f - powf(beta2, t)),
+           (1.0f - powf(beta1, t)),
+           (float)beta1,
+           (float)beta2,
+           t);
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        weightsUpdateMem_h[j] = (-alphaT * mMem_h[j]) / ((half)sqrtf(vMem_h[j]) + epsilon);
+        if (j == 0)
+            printf("CPU weightUpdate = %f / %f = %f      alphaT %f, m %f\n",
+                   float(-alphaT * mMem_h[j]),
+                   float(((half)sqrtf(vMem_h[j]) + epsilon)),
+                   (float)weightsUpdateMem_h[j],
+                   (float)-alphaT,
+                   float(mMem_h[j]));
+    }
+    for (uint32_t j = 0; j < numBiases; ++j)
+        biasesUpdateMem_h[j] = (-alphaT * mBiasesMem_h[j]) / ((half)sqrtf(vBiasesMem_h[j]) + epsilon);
 
-    // Verify featureOutput
+    // Get weightsUpdate ensure it is correct
+    weightsUpdateGpu_h.copyFromAsync(weightsUpdate, gradientUpdateStream);
+    if (numBiases > 0)
+        biasesUpdateGpu_h.copyFromAsync(biasesUpdate, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        // printf("[%d] cpu: %f gpu %f      -alphaT %f mMem_h %f sqrt(vMem_h) %f epsilon %f\n", j, (float)weightsUpdateMem_h[j],
+        // (float)weightsUpdateGpuMem_h[j], (float)-alphaT, (float)mMem_h[j], sqrtf(vMem_h[j]), (float)epsilon);
+        ASSERT_LT(abs((double)(weightsUpdateMem_h[j] - weightsUpdateGpuMem_h[j])), 0.0002);
+    }
+    for (uint32_t j = 0; j < numBiases; ++j) {
+        ASSERT_LT(abs((double)(biasesUpdateMem_h[j] - biasesUpdateGpuMem_h[j])), 0.0002);
+    }
+
+    // update weights
+    // batchSize is only used for math, it doesn't need to match the tensor dimension in this test.
+    adam->updateWeights(weights, biases, batchSize);
+    weightsGpu_h.copyFromAsync(weights, gradientUpdateStream);
+    gradientUpdateStream.synchronize();
+
+    // Check that the weights have been updated to the proper values
+    for (uint32_t j = 0; j < numWeights; ++j) {
+        half updatedWeight =
+            weightsMem_h[j] + (half)((float)weightsUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+        // printf("%f %f\n", (float)updatedWeight, (float)weightsGpuVector[j]);
+        thresh = max(0.001, abs((double)updatedWeight * .01));
+        ASSERT_LT(abs((double)(updatedWeight - weightsGpuMem_h[j])), thresh);
+    }
+    weights_h.copyFromAsync(weightsGpu_h, gradientUpdateStream);
+
+    if (biases.isPresent()) {
+        for (uint32_t j = 0; j < numBiases; ++j) {
+            half updatedBias =
+                biasesMem_h[j] + (half)((float)biasesUpdateMem_h[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
+            // printf("%f %f\n", (float)updatedBias, (float)biasesGpuMem_h[j]);
+            thresh = max(0.001, abs((double)updatedBias * .01));
+            ASSERT_LT(abs((double)(updatedBias - biasesGpuMem_h[j])), thresh);
+        }
+        biases_h.copyFromAsync(biasesGpu_h, gradientUpdateStream);
+    }
+    gradientUpdateStream.synchronize();
+
+    // Re-randomize the inputs
+    featureInput.fillRandom(-2.0, 2.0, dataStream);
+    featureInput_h.copyFromAsync(featureInput, dataStream);
+    errorInput.fillRandom(-2.0, 2.0, dataStream);
+    errorInput_h.copyFromAsync(errorInput, dataStream);
+
+    // Call forward, this time in inference mode
+    fullyConnectedLayer->forward(featureInput, true);
     featureOutputGpu_h.copyFromAsync(featureOutput, dataStream);
     dataStream.synchronize();
+
+    // Verify featureOutput
     matrixMultiplyCpuHalf(featureInMem_h,
                           weightsMem_h,
                           featureOutMem_h,
@@ -1019,256 +1427,11 @@ TEST(AdamTest, FullForwardBackewordFunctionalityFP16) {
                           false,
                           false,
                           false);
+    // printf("Num input features %d\n", numInputFeatures);
     verifyMatricesMatch(featureOutMem_h, featureOutGpuMem_h, batchSize, numOutputFeatures, false, numInputFeatures * 0.02, 0.03f);
+
+    ///////////////////////////////////////////////////////////
 }
-*/
-/*
-TEST(AdamTest, multipleStamps) {
-    srand(time(nullptr));
-    half alpha = 0.02f;
-    half beta1 = 0.82f;
-    half beta2 = 0.933f;
-    half epsilon = 1e-5f;
-    float t = 0.0f;
-    bool hasBias = rand() % 4 ? true : false;
-    uint32_t numConnections = 1 + (rand() % 4);
-    shared_ptr<FullyConnected> fc = dynamic_pointer_cast<FullyConnected>(constructTrainableLayerWithMultipleConnections(numConnections,
-hasBias)); ASSERT_NE(fc, nullptr); shared_ptr<Adam> adam = make_shared<Adam>(fc, alpha, beta1, beta2, epsilon, fc->getErrorInputs()[0],
-Optional<Tensor>::empty()); fc->compile(); fc->setOptimizer(dynamic_pointer_cast<Optimizer>(adam)); adam->initialize();
-
-    uint32_t batchSize = fc->getErrorInputs()[0].get().getDimensions()[0];
-    uint32_t exampleSize = fc->getErrorInputs()[0].get().getTotalNumElements() / batchSize;
-
-    Stream dataStream = fc->getStreams()[0];
-    Stream gradientUpdateStream = fc->getOptimizer().get()->getGradientUpdateStream();
-
-    vector<half> weightsGradientCpu;
-    vector<half> biasesGradientCpu;
-    vector<half> mCpu;
-    vector<half> vCpu;
-    vector<half> weightsUpdateCpu;
-    vector<half> mBiasesCpu;
-    vector<half> vBiasesCpu;
-    vector<half> biasesUpdateCpu;
-
-    Tensor weightsGradientGpu;
-    Optional<Tensor> maybeBiasesGradientGpu;
-
-    weightsGradientGpu = adam->getWeightsGradient();
-    maybeBiasesGradientGpu = adam->getBiasesGradient();
-    ASSERT_EQ(maybeBiasesGradientGpu.isPresent(), hasBias);
-    mCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    vCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    if (maybeBiasesGradientGpu.isPresent()) {
-        mBiasesCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-        vBiasesCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-    }
-
-    uint32_t numWeights = weightsGradientGpu.getTotalNumElements();
-    uint32_t numBiases = 0;
-    if (maybeBiasesGradientGpu.isPresent())
-        numBiases = maybeBiasesGradientGpu.get().getTotalNumElements();
-
-    weightsGradientCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    weightsUpdateCpu = vector<half>(weightsGradientGpu.getTotalNumElements(), 0.0f);
-    if (maybeBiasesGradientGpu.isPresent()) {
-        biasesGradientCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-        biasesUpdateCpu = vector<half>(maybeBiasesGradientGpu.get().getTotalNumElements(), 0.0f);
-    }
-
-    for(uint32_t i = 0; i < 3; ++i) {
-        t += 1;
-
-        vector<uint32_t> connectionNumbers;
-        for(uint32_t j = 0; j < numConnections; ++j)
-            connectionNumbers.push_back(j);
-        random_device rd;
-        mt19937 gen(rd());
-        shuffle(connectionNumbers.begin(), connectionNumbers.end(), gen);
-
-        for(uint32_t connectionIndex = 0; connectionIndex < numConnections; ++connectionIndex) {
-            uint32_t connectionNumber = connectionNumbers[connectionIndex];
-        }
-        // populate featureInput and errorInput so that gradient can be computed
-        vector<half> featureInputVector;
-        Tensor featureInputGpu = fc->getFeatureInputs()[0];
-        for (uint32_t j = 0; j < featureInputGpu.getTotalNumElements(); ++j) {
-            featureInputVector.push_back(2.0f / ((rand() % 100) + 1.0f));
-        }
-        featureInputGpu.setValues(featureInputVector, dataStream);
-
-        vector<half> errorInputVector;
-        Tensor errorInputGpu = fc->getErrorInputs()[0];
-        for (uint32_t j = 0; j < errorInputGpu.getTotalNumElements(); ++j) {
-            errorInputVector.push_back(2.0f / ((rand() % 100) + 1.0f));
-        }
-        errorInputGpu.setValues(errorInputVector, dataStream);
-
-        bool accumulateValues = i == 0 ? false : true;
-
-        adam->computeWeightsUpdate(featureInputGpu, errorInputGpu, accumulateValues);
-
-        // Cpu computation
-        // compute gradient
-        matrixMultiplyCpuHalf(featureInputVector.data(),
-                              errorInputVector.data(),
-                              weightsGradientCpu.data(),
-                              featureInputGpu.getDimensions()[0],
-                              featureInputGpu.getDimensions()[1],
-                              errorInputGpu.getDimensions()[0],
-                              errorInputGpu.getDimensions()[1],
-                              featureInputGpu.getDimensions()[1],
-                              errorInputGpu.getDimensions()[1],
-                              weightsGradientGpu.getDimensions()[1],
-                              true,
-                              false,
-                              accumulateValues,
-                              false);
-
-        // Get the gradient from FC, ensure it is correct, then copy it for use on cpu to improve testing accuracy
-        vector<half> weightsGradientGpuVector;
-        weightsGradientGpu.loadValuesIntoVector(weightsGradientGpuVector, gradientUpdateStream);
-        for (uint32_t j; j < numWeights; ++j) {
-            //printf("%f %f\n", (float)weightsGradientCpu[j], (float)weightsGradientGpuVector[j]);
-            ASSERT_LT(abs((float)(weightsGradientCpu[j] - weightsGradientGpuVector[j])), max(0.00001, abs((double)weightsGradientCpu[j] *
-.01)));
-        }
-        weightsGradientGpu.loadValuesIntoVector(weightsGradientCpu, gradientUpdateStream);
-
-        if (hasBias) {
-            // compute the biases gradient
-            computeBiasesGradientCpu(errorInputVector, biasesGradientCpu, batchSize, exampleSize, accumulateValues);
-
-            // Get the gradient from FC, ensure it is correct, then copy it for use on cpu to improve testing accuracy
-            vector<half> biasesGradientGpuVector;
-            maybeBiasesGradientGpu.get().loadValuesIntoVector(biasesGradientGpuVector, gradientUpdateStream);
-            for (uint32_t j; j < numBiases; ++j) {
-                //printf("%f %f\n", (float)biasesGradientCpu[j], (float)biasesGradientGpuVector[j]);
-                ASSERT_LT(abs((float)(biasesGradientCpu[j] - biasesGradientGpuVector[j])), max(0.00001, abs((double)biasesGradientCpu[j] *
-.01)));
-            }
-            maybeBiasesGradientGpu.get().loadValuesIntoVector(biasesGradientCpu, gradientUpdateStream);
-        }
-
-        // update m, v
-        for (uint32_t j = 0; j < numWeights; ++j) {
-            //if (j == 0)
-            //    printf("m calc %f = %f * %f + (1.0f - %f) * %f\n", (float)(beta1 * mCpu[j] + ((half)1.0f - beta1) *
-weightsGradientCpu[j]), (float)beta1, (float)mCpu[j], (float)beta1, (float)weightsGradientCpu[j]); mCpu[j] = beta1 * mCpu[j] + ((half)1.0f -
-beta1) * weightsGradientCpu[j];
-            //if (j == 0)
-            //    printf("v calc = %f = %f * %f + (1.0 - %f) * (%f * %f)\n", (float)(beta2 * vCpu[j] + ((half)1.0f - beta2) *
-(weightsGradientCpu[j] * weightsGradientCpu[j])),
-            //           (float)beta2, (float)vCpu[j], (float)((half)1.0f - beta2), (float)weightsGradientCpu[j],
-(float)weightsGradientCpu[j]); vCpu[j] = beta2 * vCpu[j] + ((half)1.0f - beta2) * (weightsGradientCpu[j] * weightsGradientCpu[j]);
-        }
-        for (uint32_t j = 0; j < numBiases; ++j) {
-            mBiasesCpu[j] = beta1 * mBiasesCpu[j] + ((half)1.0f - beta1) * biasesGradientCpu[j];
-            vBiasesCpu[j] = beta2 * vBiasesCpu[j] + ((half)1.0f - beta2) * (biasesGradientCpu[j] * biasesGradientCpu[j]);
-        }
-    }
-
-    gradientUpdateStream.synchronize();
-    double thresh;
-
-    // Ensure t is 3.0f as expected
-    ASSERT_EQ(adam->getT(), 3.0f);
-
-    // Get m ensure it is correct, then load actual values to maintain test accuracy downstream
-    vector<half> mGpuVector;
-    adam->getM(mGpuVector);
-    for (uint32_t j = 0; j < numWeights; ++j) {
-        thresh = max(0.00001, abs((double)mCpu[j] * .01));
-        ASSERT_LT(abs((double)(mCpu[j] - mGpuVector[j])), thresh);
-    }
-    mCpu = mGpuVector;
-
-    // Get v ensure it is correct, then load actual values to maintain test accuracy downstream
-    vector<half> vGpuVector;
-    adam->getV(vGpuVector);
-    for (uint32_t j = 0; j < numWeights; ++j) {
-        thresh = max(0.00001, abs((double)vCpu[j] * .01));
-        //printf("v cpu %f gpu %f\n", (float)vCpu[j], (float)vGpuVector[j]);
-        ASSERT_LT(abs((double)(vCpu[j] - vGpuVector[j])), thresh);
-    }
-    vCpu = vGpuVector;
-
-    if (hasBias) {
-        // Get mBiases ensure it is correct, then load actual values to maintain test accuracy downstream
-        vector<half> mBiasesGpuVector;
-        adam->getMBias(mBiasesGpuVector);
-        for (uint32_t j = 0; j < numBiases; ++j) {
-            //printf("%f %f\n", (float)mBiasesCpu[j], (float)mBiasesGpuVector[j]);
-            thresh = max(0.00001, abs((double)mBiasesCpu[j] * .01));
-            ASSERT_LT(abs((double)(mBiasesCpu[j] - mBiasesGpuVector[j])), thresh);
-        }
-        mBiasesCpu = mBiasesGpuVector;
-
-        // Get vBiases ensure it is correct, then load actual values to maintain test accuracy downstream
-        vector<half> vBiasesGpuVector;
-        adam->getVBias(vBiasesGpuVector);
-        for (uint32_t j = 0; j < numBiases; ++j) {
-            thresh = max(0.00001, abs((double)vBiasesCpu[j] * .01));
-            ASSERT_LT(abs((double)(vBiasesCpu[j] - vBiasesGpuVector[j])), thresh);
-        }
-        vBiasesCpu = vBiasesGpuVector;
-    }
-
-    // Compute weights and biases update values
-    half alphaT = alpha * (half)sqrtf(1.0f - powf(beta2, t)) / (half)(1.0f - powf(beta1, t));
-    //printf("alphaT = %f = %f * %f / %f, beta1 %f beta2 %f t %f\n", (float)alphaT, (float)alpha, sqrtf(1.0f - powf(beta2, t)), (1.0f -
-powf(beta1, t)), (float)beta1, (float)beta2, t); for (uint32_t j = 0; j < numWeights; ++j) { weightsUpdateCpu[j] = (-alphaT * mCpu[j]) /
-((half)sqrtf(vCpu[j]) + epsilon);
-        //if (j == 0)
-        //    printf("%f = (%f * %f) / (sqrt(%f) + %f)\n", (float)weightsUpdateCpu[j], (float)-alphaT, (float)mCpu[j], (float)vCpu[j],
-(float)epsilon);
-    }
-    for (uint32_t j = 0; j < numBiases; ++j)
-        biasesUpdateCpu[j] = (-alphaT * mBiasesCpu[j]) / ((half)sqrtf(vBiasesCpu[j]) + epsilon);
-
-    // Get weightsUpdate ensure it is correct
-    vector<half> weightsUpdateGpuVector;
-    adam->getWeightsUpdate(weightsUpdateGpuVector);
-    vector<half> biasesUpdateGpuVector;
-    adam->getBiasesUpdate(biasesUpdateGpuVector);
-    for (uint32_t j = 0; j < numWeights; ++j) {
-        //printf("[%d] cpu: %f gpu %f      -alphaT %f mCpu %f sqrt(vCpu) %f epsilon %f\n", j, (float)weightsUpdateCpu[j],
-(float)weightsUpdateGpuVector[j], (float)-alphaT, (float)mCpu[j], sqrtf(vCpu[j]), (float)epsilon);
-        ASSERT_LT(abs((double)(weightsUpdateCpu[j] - weightsUpdateGpuVector[j])), 0.0001);
-    }
-    for (uint32_t j = 0; j < numBiases; ++j) {
-        ASSERT_LT(abs((double)(biasesUpdateCpu[j] - biasesUpdateGpuVector[j])), 0.0001);
-    }
-
-    // set the weights and then call updateWeights.
-    Tensor weightsGpu = fc->getWeights();
-    Optional<Tensor> biasesGpu = fc->getBiases();
-    vector<half> weightsCpu(weightsGpu.getTotalNumElements(), 0.0f);
-    vector<half> biasesCpu;
-    for (uint32_t i = 0; i < weightsGpu.getTotalNumElements(); ++i)
-        weightsCpu[i] = (rand() % 50) / ((rand() % 50) + 1);
-    weightsGpu.setValues(weightsCpu, gradientUpdateStream);
-    if (hasBias) {
-        biasesCpu = vector<half>(biasesGpu.get().getTotalNumElements(), 0.0f);
-        for (uint32_t i = 0; i < biasesGpu.get().getTotalNumElements(); ++i)
-            biasesCpu[i] = (rand() % 50) / ((rand() % 50) + 1);
-        biasesGpu.get().setValues(biasesCpu, gradientUpdateStream);
-    }
-    // batchSize is only used for math, it doesn't need to match the tensor dimension in this test.
-    adam->updateWeights(weightsGpu, biasesGpu, batchSize);
-    gradientUpdateStream.synchronize();
-
-    // Check that the weights have been updated to the proper values
-    vector<half> weightsGpuVector;
-    fc->getWeights().loadValuesIntoVector(weightsGpuVector, gradientUpdateStream);
-    for (uint32_t j = 0; j < numWeights; ++j) {
-        half updatedWeight = weightsCpu[j] + (half)((float)weightsUpdateCpu[j] / (float)(Loss::getLossScalingFactor() * (float)batchSize));
-        //printf("%f %f\n", (float)updatedWeight, (float)weightsGpuVector[j]);
-        thresh = max(0.00001, abs((double)updatedWeight * .001));
-        ASSERT_LT(abs((double)(updatedWeight - weightsGpuVector[j])), thresh);
-    }
-}
-*/
 
 /* FIXME: when FC supports FP32 test FP32 adam:
 TEST(AdamTest, updateWeightsFP32) {

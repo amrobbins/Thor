@@ -60,3 +60,6 @@ void Optimizer::accumulateScale(Tensor C, Tensor A, const void *alpha, const voi
     }
     assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }
+
+Tensor Optimizer::getWeightsUpdate() { return weightsUpdate; }
+Optional<Tensor> Optimizer::getBiasesUpdate() { return biasesUpdate; }
