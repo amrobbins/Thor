@@ -16,6 +16,7 @@ TEST(AdamKernel, Fp32) {
     Stream stream(0);
 
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
     for (uint32_t test = 0; test < 10; ++test) {
         uint32_t numWeights = (rand() % 3000) + 1;
@@ -24,34 +25,33 @@ TEST(AdamKernel, Fp32) {
         Tensor mGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
         Tensor vGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, {numWeights}));
 
-        vector<float> gradient;
+        Tensor gradient = gradientGpu.clone(cpuPlacement);
+        Tensor mInitial = mGpu.clone(cpuPlacement);
+        Tensor vInitial = vGpu.clone(cpuPlacement);
+        float *gradientMem = gradient.getMemPtr<float>();
+        float *mInitialMem = mInitial.getMemPtr<float>();
+        float *vInitialMem = vInitial.getMemPtr<float>();
         for (uint32_t i = 0; i < numWeights; ++i) {
-            gradient.push_back(rand() % 20 / ((float)(rand() % 20) + 1));
+            gradientMem[i] = rand() % 20 / ((float)(rand() % 20) + 1);
             if (rand() % 2)
-                gradient.back() *= -1;
+                gradientMem[i] *= -1;
+            mInitialMem[i] = rand() % 20 / ((float)(rand() % 20) + 1);
+            vInitialMem[i] = rand() % 20 / ((float)(rand() % 20) + 1);
         }
-        gradientGpu.setValues(gradient, stream);
-        vector<float> mInitial;
-        for (uint32_t i = 0; i < numWeights; ++i) {
-            mInitial.push_back(rand() % 20 / ((float)(rand() % 20) + 1));
-        }
-        mGpu.setValues(mInitial, stream);
-        vector<float> vInitial;
-        for (uint32_t i = 0; i < numWeights; ++i) {
-            vInitial.push_back(rand() % 20 / ((float)(rand() % 20) + 1));
-        }
-        vGpu.setValues(vInitial, stream);
+        gradientGpu.copyFromAsync(gradient, stream);
+        mInitial.copyFromAsync(mGpu, stream);
+        vInitial.copyFromAsync(vGpu, stream);
 
-        float t = 2.0f;
-        float alpha = 0.005f;
-        float beta1 = 0.8f;
-        float beta2 = 0.777f;
+        float t = 5.0f;
+        float alpha = 0.015f;
+        float beta1 = 0.6f;
+        float beta2 = 0.85f;
         float epsilon = 0.000001f;
 
-        launchAdamStep<float>((float *)weightsUpdateGpu.getMemPtr(),
-                              (float *)gradientGpu.getMemPtr(),
-                              (float *)mGpu.getMemPtr(),
-                              (float *)vGpu.getMemPtr(),
+        launchAdamStep<float>(weightsUpdateGpu.getMemPtr<float>(),
+                              gradientGpu.getMemPtr<float>(),
+                              mGpu.getMemPtr<float>(),
+                              vGpu.getMemPtr<float>(),
                               t,
                               alpha,
                               beta1,
@@ -60,34 +60,38 @@ TEST(AdamKernel, Fp32) {
                               numWeights,
                               stream);
 
-        vector<float> m;
-        mGpu.loadValuesIntoVector(m, stream);
+        Tensor mGpu_h = mGpu.clone(cpuPlacement);
+        Tensor vGpu_h = vGpu.clone(cpuPlacement);
+        Tensor weightsUpdateGpu_h = weightsUpdateGpu.clone(cpuPlacement);
+        float *mGpuMem_h = mGpu_h.getMemPtr<float>();
+        float *vGpuMem_h = vGpu_h.getMemPtr<float>();
+        float *weightsUpdateGpuMem_h = weightsUpdateGpu_h.getMemPtr<float>();
+        mGpu_h.copyFromAsync(mGpu, stream);
+        vGpu_h.copyFromAsync(vGpu, stream);
+        weightsUpdateGpu_h.copyFromAsync(weightsUpdateGpu, stream);
+        stream.synchronize();
+
         for (uint32_t i; i < numWeights; ++i) {
-            float expected = beta1 * mInitial[i] + (1.0f - beta1) * gradient[i];
-            ASSERT_LT(abs(m[i] - expected), 0.00001);
+            float expected = beta1 * mInitialMem[i] + (1.0f - beta1) * gradientMem[i];
+            ASSERT_LT(abs(mGpuMem_h[i] - expected), 0.00001);
         }
 
-        vector<float> v;
-        vGpu.loadValuesIntoVector(v, stream);
         for (uint32_t i; i < numWeights; ++i) {
-            float expected = beta2 * vInitial[i] + (1.0f - beta2) * (gradient[i] * gradient[i]);
-            ASSERT_LT(abs(v[i] - expected), 0.00001);
+            float expected = beta2 * vInitialMem[i] + (1.0f - beta2) * (gradientMem[i] * gradientMem[i]);
+            ASSERT_LT(abs(vGpuMem_h[i] - expected), 0.00001);
         }
 
-        vector<float> weightsUpdate;
-        weightsUpdateGpu.loadValuesIntoVector(weightsUpdate, stream);
         for (uint32_t i; i < numWeights; ++i) {
             float alphaT = (float)alpha * sqrtf(1.0f - powf(beta2, t)) / (1.0f - powf(beta1, t));
-            float expected = (-alphaT * m[i]) / (sqrtf(v[i]) + epsilon);
-            // printf("%f %f %f %f %f %f %f\n", weightsUpdate[i], expected, gradient[i], mInitial[i], vInitial[i], m[i], v[i]);
-            ASSERT_LT(abs(weightsUpdate[i] - expected), 0.00001);
+            float expected = (-alphaT * mGpuMem_h[i]) / (sqrtf(vGpuMem_h[i]) + epsilon);
+            ASSERT_LT(abs(weightsUpdateGpuMem_h[i] - expected), 0.00001);
         }
 
         for (uint32_t i; i < numWeights; ++i) {
-            assert(isfinite(weightsUpdate[i]));
-            assert(isfinite(gradient[i]));
-            assert(isfinite(m[i]));
-            assert(isfinite(v[i]));
+            assert(isfinite(weightsUpdateGpuMem_h[i]));
+            assert(isfinite(gradientMem[i]));
+            assert(isfinite(mGpuMem_h[i]));
+            assert(isfinite(vGpuMem_h[i]));
         }
     }
 }
@@ -97,6 +101,7 @@ TEST(AdamKernel, Fp16) {
     Stream stream(0);
 
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
 
     for (uint32_t test = 0; test < 10; ++test) {
         uint32_t numWeights = (rand() % 3000) + 1;
@@ -105,23 +110,22 @@ TEST(AdamKernel, Fp16) {
         Tensor mGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numWeights}));
         Tensor vGpu(gpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {numWeights}));
 
-        vector<half> gradient;
+        Tensor gradient = gradientGpu.clone(cpuPlacement);
+        Tensor mInitial = mGpu.clone(cpuPlacement);
+        Tensor vInitial = vGpu.clone(cpuPlacement);
+        half *gradientMem = gradient.getMemPtr<half>();
+        half *mInitialMem = mInitial.getMemPtr<half>();
+        half *vInitialMem = vInitial.getMemPtr<half>();
         for (uint32_t i = 0; i < numWeights; ++i) {
-            gradient.push_back(rand() % 20 / ((float)(rand() % 20) + 1));
+            gradientMem[i] = rand() % 20 / ((float)(rand() % 20) + 1);
             if (rand() % 2)
-                gradient.back() *= -1;
+                gradientMem[i] *= -1;
+            mInitialMem[i] = rand() % 2000 / ((float)(rand() % 1000) + 1);
+            vInitialMem[i] = rand() % 2000 / ((float)(rand() % 1000) + 1);
         }
-        gradientGpu.setValues(gradient, stream);
-        vector<half> mInitial;
-        for (uint32_t i = 0; i < numWeights; ++i) {
-            mInitial.push_back(rand() % 2000 / 1000.0f);
-        }
-        mGpu.setValues(mInitial, stream);
-        vector<half> vInitial;
-        for (uint32_t i = 0; i < numWeights; ++i) {
-            vInitial.push_back(rand() % 2000 / 1000.0f);
-        }
-        vGpu.setValues(vInitial, stream);
+        gradientGpu.copyFromAsync(gradient, stream);
+        mInitial.copyFromAsync(mGpu, stream);
+        vInitial.copyFromAsync(vGpu, stream);
 
         float t = 2.0f;
         half alpha = 0.005f;
@@ -129,10 +133,10 @@ TEST(AdamKernel, Fp16) {
         half beta2 = 0.777f;
         half epsilon = 0.000001f;
 
-        launchAdamStep<half>((half *)weightsUpdateGpu.getMemPtr(),
-                             (half *)gradientGpu.getMemPtr(),
-                             (half *)mGpu.getMemPtr(),
-                             (half *)vGpu.getMemPtr(),
+        launchAdamStep<half>(weightsUpdateGpu.getMemPtr<half>(),
+                             gradientGpu.getMemPtr<half>(),
+                             mGpu.getMemPtr<half>(),
+                             vGpu.getMemPtr<half>(),
                              t,
                              alpha,
                              beta1,
@@ -141,35 +145,38 @@ TEST(AdamKernel, Fp16) {
                              numWeights,
                              stream);
 
-        vector<half> m;
-        mGpu.loadValuesIntoVector(m, stream);
+        Tensor mGpu_h = mGpu.clone(cpuPlacement);
+        Tensor vGpu_h = vGpu.clone(cpuPlacement);
+        Tensor weightsUpdateGpu_h = weightsUpdateGpu.clone(cpuPlacement);
+        half *mGpuMem_h = mGpu_h.getMemPtr<half>();
+        half *vGpuMem_h = vGpu_h.getMemPtr<half>();
+        half *weightsUpdateGpuMem_h = weightsUpdateGpu_h.getMemPtr<half>();
+        mGpu_h.copyFromAsync(mGpu, stream);
+        vGpu_h.copyFromAsync(vGpu, stream);
+        weightsUpdateGpu_h.copyFromAsync(weightsUpdateGpu, stream);
+        stream.synchronize();
+
         for (uint32_t i; i < numWeights; ++i) {
-            half expected = beta1 * mInitial[i] + ((half)1.0f - beta1) * gradient[i];
-            ASSERT_LT(abs((float)(m[i] - expected)), 0.00001);
+            half expected = beta1 * mInitialMem[i] + ((half)1.0f - beta1) * gradientMem[i];
+            ASSERT_LT(abs((float)(mGpuMem_h[i] - expected)), 0.00001);
         }
 
-        vector<half> v;
-        vGpu.loadValuesIntoVector(v, stream);
         for (uint32_t i; i < numWeights; ++i) {
-            half expected = beta2 * vInitial[i] + ((half)1.0f - beta2) * (gradient[i] * gradient[i]);
-            ASSERT_LT(abs((float)(v[i] - expected)), 0.00001);
+            half expected = beta2 * vInitialMem[i] + ((half)1.0f - beta2) * (gradientMem[i] * gradientMem[i]);
+            ASSERT_LT(abs((float)(vGpuMem_h[i] - expected)), 0.00001);
         }
 
-        vector<half> weightsUpdate;
-        weightsUpdateGpu.loadValuesIntoVector(weightsUpdate, stream);
         for (uint32_t i; i < numWeights; ++i) {
             half alphaT = alpha * (half)sqrtf(1.0f - powf(beta2, t)) / (half)(1.0f - powf(beta1, t));
-            half expected = (-alphaT * m[i]) / ((half)sqrtf(v[i]) + epsilon);
-            // printf("%f %f %f %f %f %f %f\n", (float)weightsUpdate[i], (float)expected, (float)gradient[i], (float)mInitial[i],
-            // (float)vInitial[i], (float)m[i], (float)v[i]);
-            ASSERT_LT(abs((float)(weightsUpdate[i] - expected)), 0.00001);
+            half expected = (-alphaT * mGpuMem_h[i]) / ((half)sqrtf(vGpuMem_h[i]) + epsilon);
+            ASSERT_LT(abs((float)(weightsUpdateGpuMem_h[i] - expected)), 0.00001);
         }
 
         for (uint32_t i; i < numWeights; ++i) {
-            assert(isfinite((float)weightsUpdate[i]));
-            assert(isfinite((float)gradient[i]));
-            assert(isfinite((float)m[i]));
-            assert(isfinite((float)v[i]));
+            assert(isfinite((float)weightsUpdateGpuMem_h[i]));
+            assert(isfinite((float)gradientMem[i]));
+            assert(isfinite((float)mGpuMem_h[i]));
+            assert(isfinite((float)vGpuMem_h[i]));
         }
     }
 }

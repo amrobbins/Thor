@@ -98,15 +98,6 @@ class Tensor : private ReferenceCounted {
     void fillRandom(double minValue, double maxValue, Stream stream);
     void fillZero(Stream dataStream);
 
-    // setValues is intended as a test helper to easily populate an entire tensor
-    // It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
-    // in performance critical code.
-    template <typename T>
-    void setValues(std::vector<T> values, Stream stream);
-    // loadValuesIntoVector is also only a test helper and should not be used in production code.
-    template <typename T>
-    void loadValuesIntoVector(std::vector<T> &values, Stream stream);
-
     void reshape(std::vector<unsigned long> dimensions);
     void resize(std::vector<unsigned long> dimensions);
     void concatenateFrom(std::vector<Tensor> sources);

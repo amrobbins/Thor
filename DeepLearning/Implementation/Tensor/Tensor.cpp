@@ -1035,84 +1035,6 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
 
 void Tensor::fillZero(Stream dataStream) { this->fill(0.0, dataStream); }
 
-// setValues is intended as a test helper to easily populate an entire tensor
-// It is less efficent than working with tensor memory directly since it uses non-pinned cpu memory and is not meant to be used
-// in performance critical code.
-template <typename T>
-void Tensor::setValues(vector<T> values, Stream stream) {
-    assert(values.size() == getTotalNumElements());
-    assert(!values.empty());
-
-    if (is_same<T, half>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::FP16);
-    else if (is_same<T, float>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::FP32);
-    else if (is_same<T, double>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::FP64);
-    else if (is_same<T, int8_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT8);
-    else if (is_same<T, int16_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT16);
-    else if (is_same<T, int32_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT32);
-    else if (is_same<T, int64_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT64);
-    else if (is_same<T, uint8_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
-               descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN);
-    else if (is_same<T, uint16_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT16);
-    else if (is_same<T, uint32_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT32);
-    else if (is_same<T, uint64_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT64);
-    else
-        assert(false);
-
-    Tensor tempTensor(TensorPlacement::MemDevices::CPU, descriptor, values.data());
-    this->copyFromAsync(tempTensor, stream);
-    stream.synchronize();
-}
-
-template <typename T>
-void Tensor::loadValuesIntoVector(vector<T> &values, Stream stream) {
-    if (is_same<T, half>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::FP16);
-    else if (is_same<T, float>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::FP32);
-    else if (is_same<T, double>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::FP64);
-    else if (is_same<T, int8_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT8);
-    else if (is_same<T, int16_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT16);
-    else if (is_same<T, int32_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT32);
-    else if (is_same<T, int64_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::INT64);
-    else if (is_same<T, uint8_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
-               descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN);
-    else if (is_same<T, uint16_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT16);
-    else if (is_same<T, uint32_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT32);
-    else if (is_same<T, uint64_t>::value)
-        assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT64);
-    else
-        assert(false);
-
-    values.clear();
-    Tensor tempTensor(TensorPlacement::MemDevices::CPU, descriptor);
-    tempTensor.copyFromAsync(*this, stream);
-    stream.synchronize();
-
-    T *mem = (T *)(tempTensor.getMemPtr());
-    uint64_t numElements = getTotalNumElements();
-    for (uint64_t i = 0; i < numElements; ++i)
-        values.push_back(mem[i]);
-}
-
 struct CpuFillParams : HostFunctionArgsBase {
     CpuFillParams(double value, Tensor tensor) : value(value), tensor(tensor) {}
 
@@ -1354,30 +1276,6 @@ template int32_t *Tensor::getMemPtr();
 template uint8_t *Tensor::getMemPtr();
 template uint16_t *Tensor::getMemPtr();
 template uint32_t *Tensor::getMemPtr();
-
-template void Tensor::setValues<half>(vector<half> values, Stream stream);
-template void Tensor::setValues<float>(vector<float> values, Stream stream);
-template void Tensor::setValues<double>(vector<double> values, Stream stream);
-template void Tensor::setValues<int8_t>(vector<int8_t> values, Stream stream);
-template void Tensor::setValues<int16_t>(vector<int16_t> values, Stream stream);
-template void Tensor::setValues<int32_t>(vector<int32_t> values, Stream stream);
-template void Tensor::setValues<int64_t>(vector<int64_t> values, Stream stream);
-template void Tensor::setValues<uint8_t>(vector<uint8_t> values, Stream stream);
-template void Tensor::setValues<uint16_t>(vector<uint16_t> values, Stream stream);
-template void Tensor::setValues<uint32_t>(vector<uint32_t> values, Stream stream);
-template void Tensor::setValues<uint64_t>(vector<uint64_t> values, Stream stream);
-
-template void Tensor::loadValuesIntoVector<half>(vector<half> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<float>(vector<float> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<double>(vector<double> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<int8_t>(vector<int8_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<int16_t>(vector<int16_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<int32_t>(vector<int32_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<int64_t>(vector<int64_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<uint8_t>(vector<uint8_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<uint16_t>(vector<uint16_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<uint32_t>(vector<uint32_t> &values, Stream stream);
-template void Tensor::loadValuesIntoVector<uint64_t>(vector<uint64_t> &values, Stream stream);
 
 template half Tensor::getElement(vector<unsigned long> dimensionIndex);
 template float Tensor::getElement(vector<unsigned long> dimensionIndex);

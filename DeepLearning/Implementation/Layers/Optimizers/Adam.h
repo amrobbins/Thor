@@ -39,19 +39,10 @@ class Adam : public Optimizer {
     virtual void setEpsilon(float epsilon);
 
     // For testing or research purposes:
-    // Not to be used in performance critical code, these are not high performance functions - allocates memory and causes synchronization.
-    template <typename T>
-    void getM(std::vector<T> &m);
-    template <typename T>
-    void getV(std::vector<T> &v);
-    template <typename T>
-    void getMBias(std::vector<T> &mBias);
-    template <typename T>
-    void getVBias(std::vector<T> &vBias);
-    template <typename T>
-    void getWeightsUpdate(std::vector<T> &weightsUpdate);
-    template <typename T>
-    void getBiasesUpdate(std::vector<T> &biasesUpdate);
+    virtual Tensor getM();
+    virtual Tensor getV();
+    virtual Optional<Tensor> getMBias();
+    virtual Optional<Tensor> getVBias();
 
    protected:
     float t;
