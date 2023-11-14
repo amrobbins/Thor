@@ -1,5 +1,7 @@
+<img src="ThorLogo.png" title="Thor" alt="Tensor Hyper-Parallel Optimized pRocessing" width="240" height="240">
 
-## Thor is a work in progress Machine Learning framework that I am developing.
+
+## Thor (Tensor Hyper-Parallel Optimized pRocessing) is a work in progress Machine Learning framework that I am developing.
 
 The goals of this project are:
   1. Create a optimally high performance AI suite
