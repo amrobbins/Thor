@@ -1,6 +1,8 @@
 # TODO:
-2. ADAM Optimizer - test and get working
+2. ADAM Optimizer - test and get working - done - get test to pass consistently.
+3. Alexnet parity with Tensorflow on imagenet.
 4. Save and load trained models - native save() and load() functions, also saveAsKeras() and loadFromKeras()
+   5. Use GPUDirect storage to save and load weights so that they don't need fit in CPU memory. Also for performance.
 9. Multi-Gpu support
    1. Multiple stamps with accumulation.
        1. Not that the current implementation updates the layers as they are added to the network so that their inputs and outputs remain correct after flattening multi-layers. However only single layers are added to the network and so it may be stamped as many times as desired.
@@ -28,10 +30,13 @@
 14. Kmeans clustering using GpuRtree
 15. DeepDPM implementation
 15. Gaussian Mixture Model clustering using GpuRtree
+16. Multi-server support, perhaps through an api to horizontally scale but make it look like vertical scaling. So in this case memory would have a CPU affinity.
+    17. IO bandwidth would need to be better understood by the system.
+    18. This may be an enterprise only solution.
 16. NN architecture drawing export
     1. support shading units to show tensor values given a particular training example
     2. There should be options to show the tensor into and out of say the activation, batch norm, etc or to collapse it and only show the last one
-17. Java Bindings - likely using BridJ
+17. Java Bindings - likely using BridJ - maybe not but using some library.
 18. k-fold cross validation
 19. Feature elimination using decision trees
 20. GPU SVD support using nvidia library
