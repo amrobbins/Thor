@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <mutex>
+#include <random>
 #include <vector>
 
 /**
@@ -25,10 +26,12 @@ class FullPeriodRandom {
             return;
         }
 
-        implementationPeriod = period;
-        getFactors(period, periodFactors, periodNonFactors);
-        createBaseAMinusOne();
-        ensureThereIsRoomToRandomizeC();
+        std::random_device randomDevice;
+        std::hash<std::thread::id> hasher;
+        uint32_t seed =
+            randomDevice() + std::chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(std::this_thread::get_id());
+        generator = std::mt19937(seed);
+        distribution = std::uniform_real_distribution<double>(0, pow(2.0, 60));
 
         reseed();
     }
@@ -55,7 +58,30 @@ class FullPeriodRandom {
         return X;
     }
 
-    void reseed(Optional<uint64_t> seed = Optional<uint64_t>::empty()) {
+    // The actual period of the LCG can be bigger than the period. When a number larger than period is returned by the LCG,
+    // then it is not returned, instead the LCG is asked for a new number until the number given is within the period.
+    void reseed() {
+        uint32_t maxOvershoot;
+        if (period <= 50)
+            maxOvershoot = 10;
+        else if (period <= 100)
+            maxOvershoot = 50;
+        else if (period <= 1000)
+            maxOvershoot = 200;
+        else if (period <= 1000000)
+            maxOvershoot = 1000;
+        else
+            maxOvershoot = period / 1000;
+        implementationPeriod = period + (entropyRand() % maxOvershoot);
+
+        getFactors(implementationPeriod, periodFactors, periodNonFactors);
+        createBaseAMinusOne();
+        ensureThereIsRoomToRandomizeC();
+
+        seedParameters();
+    }
+
+    void seedParameters(Optional<uint64_t> seedValue = Optional<uint64_t>::empty()) {
         periodCount = 0;
 
         if (period == 1)
@@ -65,29 +91,29 @@ class FullPeriodRandom {
         // a - 1 is divisible by 4 if period is divisible by 4
         // a < period
         // I may multiply aMinusOne by any positive integer so long as aMinusOne + 1 < a
-        a = (baseAMinusOne * ((rand() % maxBaseAMinusOneMultiple) + 1)) + 1;
+        a = (baseAMinusOne * ((entropyRand() % maxBaseAMinusOneMultiple) + 1)) + 1;
         assert(a < implementationPeriod);
 
         // period and c share no prime factors
         // c < period
-        c = periodNonFactors[rand() % periodNonFactors.size()];
+        c = periodNonFactors[entropyRand() % periodNonFactors.size()];
         for (uint64_t i = 0; i < 3; ++i) {
-            uint64_t selectdNonFactor = periodNonFactors[rand() % periodNonFactors.size()];
+            uint64_t selectdNonFactor = periodNonFactors[entropyRand() % periodNonFactors.size()];
             if (c * selectdNonFactor < implementationPeriod)
                 c *= selectdNonFactor;
         }
-        while (rand() % 5 != 0) {
-            uint64_t selectdNonFactor = periodNonFactors[rand() % periodNonFactors.size()];
+        while (entropyRand() % 5 != 0) {
+            uint64_t selectdNonFactor = periodNonFactors[entropyRand() % periodNonFactors.size()];
             if (c * selectdNonFactor < implementationPeriod)
                 c *= selectdNonFactor;
         }
         assert(c < implementationPeriod);
 
         // Use a different seed for X compared to the seed used for c.
-        if (seed.isEmpty())
-            seed = getClockSeed();
+        if (seedValue.isEmpty())
+            seedValue = entropyRand();
 
-        X = seed;
+        X = seedValue;
     }
 
    private:
@@ -107,23 +133,6 @@ class FullPeriodRandom {
 
     const bool synchronized;
     std::mutex mtx;
-
-    uint64_t getClockSeed() {
-        std::hash<uint64_t> hashFunctor;
-        std::chrono::high_resolution_clock::time_point timePoint = std::chrono::high_resolution_clock::now();
-        std::chrono::high_resolution_clock::duration duration = timePoint.time_since_epoch();
-        uint64_t ticks = duration.count();
-
-        // Interleave the bits of the tick count since the lower bits change faster.
-        uint64_t seed = 0;
-        for (uint32_t i = 0; i < 32; ++i) {
-            setBit(seed, 2 * i, getBit(2 * ticks, i));
-            setBit(seed, 2 * i + 1, getBit(ticks, 63 - 2 * i));
-        }
-
-        seed = hashFunctor(seed);
-        return seed;
-    }
 
     void getFactors(uint64_t period, std::vector<uint64_t> &factors, std::vector<uint64_t> &nonFactors) {
         uint64_t maxPrime = period;
@@ -231,4 +240,9 @@ class FullPeriodRandom {
             assert(maxBaseAMinusOneMultiple >= 1);
         }
     }
+
+    std::mt19937 generator;
+    std::uniform_real_distribution<double> distribution;
+
+    uint64_t entropyRand() { return uint64_t(distribution(generator)); }
 };
