@@ -62,16 +62,16 @@ class FullPeriodRandom {
     // then it is not returned, instead the LCG is asked for a new number until the number given is within the period.
     void reseed() {
         uint32_t maxOvershoot;
-        if (period <= 50)
-            maxOvershoot = 10;
-        else if (period <= 100)
-            maxOvershoot = 50;
-        else if (period <= 1000)
-            maxOvershoot = 200;
-        else if (period <= 1000000)
-            maxOvershoot = 1000;
+        if (period > 10000)
+            maxOvershoot = 1000 + (period / 1000);
+        else if (period > 100)
+            maxOvershoot = period / 10;
         else
-            maxOvershoot = period / 1000;
+            maxOvershoot = 10;
+
+        if (maxOvershoot > 50000)
+            maxOvershoot = 50000;
+
         implementationPeriod = period + (entropyRand() % maxOvershoot);
 
         getFactors(implementationPeriod, periodFactors, periodNonFactors);
