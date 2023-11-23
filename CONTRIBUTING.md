@@ -6,3 +6,7 @@ help to do this from interested developers.
 
 If you are interested in contributing to this new framework, please contact Andrew Robbbins
 at AndrewRobbins@hotmail.com.
+
+Andrew Robbins is the owner and Chief Architect of Thor.
+
+There are no other maintainers or contributors yet.
