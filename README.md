@@ -32,7 +32,7 @@ Dependencies, with installation directions for Ubuntu:
   1. clang-format  - sudo apt-get install clang-format
   1. boost 1.74 (earlier and later is probably fine.) sudo apt-get install libboost-all-dev
   1. ncurses - sudo apt-get install lib64ncurses-dev.
-  1. X11 - sudo apt-get install libx11-dev 
+  1. X11 - sudo apt-get install libx11-dev
   1. GraphicsMagick
      1. Ensure you have all of the image libraries installed:
         1. sudo apt-get install libpng-dev zlib1g-dev libgs-dev libjpeg-dev libtiff-dev libxml2-dev
