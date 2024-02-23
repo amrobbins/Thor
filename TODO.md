@@ -2,6 +2,7 @@
 2. ADAM Optimizer - test and get working - done - get test to pass consistently.
 3. Alexnet parity with Tensorflow on imagenet.
 4. Save and load trained models - native save() and load() functions, also saveAsKeras() and loadFromKeras()
+5. reuse workspaces based on dependency graph, per stamp.
    5. Use GPUDirect storage to save and load weights so that they don't need fit in CPU memory. Also for performance.
 9. Multi-Gpu support
    1. Multiple stamps with accumulation.
