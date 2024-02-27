@@ -18,35 +18,38 @@ This framework is for Linux, and is currently being developed using Ubuntu 22.04
 
 Cuda of at least 12 is supported. If your machine does not have cuda12, cudnn9 and oneAPI set up, then you can do it this way:
 
+``shell
+git clone https://github.com/amrobbins/Thor.git
+``
+
 ```shell
-bash MachineSetup/install_nvidia_driver.sh
+bash Thor/MachineSetup/install_nvidia_driver.sh
 sudo reboot
 ```
 
 ```shell
-bash MachineSetup/install_cuda.sh
+bash Thor/MachineSetup/install_cuda.sh
 sudo reboot
 ```
 
 ```shell
-bash MachineSetup/install_cudnn.sh
-bash MachineSetup/install_oneAPI.sh
+bash Thor/MachineSetup/install_cudnn.sh
+bash Thor/MachineSetup/install_oneAPI.sh
 sudo reboot
 ```
 
 If you have cuda12 and cudnn9 already, but don't have oneAPI:
 
 ```shell
-bash MachineSetup/install_oneAPI.sh
+bash Thor/MachineSetup/install_oneAPI.sh
 sudo reboot
 ```
 
 Now that the machine is set up:
 
 ```shell
-bash MachineSetup/install_dependencies.sh
-bash MachineSetup/install_google_test.sh
-git clone https://github.com/amrobbins/Thor.git
+bash Thor/MachineSetup/install_dependencies.sh
 cd Thor
+bash MachineSetup/install_google_test.sh
 make -j all
 ```
