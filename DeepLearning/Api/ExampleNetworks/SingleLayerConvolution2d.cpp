@@ -104,12 +104,12 @@ Network buildSingleLayerConvolution2d() {
                                             .receivesOneHotLabels()
                                             .build();
 
-    NetworkOutput accuracy = NetworkOutput::Builder()
-                                 .network(singleLayerConvolution2d)
-                                 .name("accuracy")
-                                 .inputTensor(accuracyLayer.getMetric())
-                                 .dataType(Tensor::DataType::FP32)
-                                 .build();
+    NetworkOutput accuracyOutput = NetworkOutput::Builder()
+                                       .network(singleLayerConvolution2d)
+                                       .name("accuracy")
+                                       .inputTensor(accuracyLayer.getMetric())
+                                       .dataType(Tensor::DataType::FP32)
+                                       .build();
 
     // Return the assembled network
     return singleLayerConvolution2d;

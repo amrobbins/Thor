@@ -18,9 +18,9 @@ This framework is for Linux, and is currently being developed using Ubuntu 22.04
 
 Cuda of at least 12 is supported. If your machine does not have cuda12, cudnn9 and oneAPI set up, then you can do it this way:
 
-``shell
+```shell
 git clone https://github.com/amrobbins/Thor.git
-``
+```
 
 ```shell
 bash Thor/MachineSetup/install_nvidia_driver.sh

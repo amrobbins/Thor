@@ -12,15 +12,15 @@ int Stream::numCublasHandles = 0;
 //            the execution graph could result in deadlock.
 vector<deque<Stream>> gradientUpdateStreams;
 mutex gradientUpdateStreamMutex;
-uint32_t maxNumGradientUpdateStreams = 32;
+uint32_t maxNumGradientUpdateStreams = 16;
 
 vector<deque<Stream>> uploadStreams;
 mutex uploadStreamMutex;
-uint32_t maxNumUploadStreams = 32;
+uint32_t maxNumUploadStreams = 16;
 
 vector<deque<Stream>> downloadStreams;
 mutex downloadStreamMutex;
-uint32_t maxNumDownloadStreams = 32;
+uint32_t maxNumDownloadStreams = 16;
 
 // To allow for parallelization while limiting the amount of streams created, gradient update operations all share
 // a fixed size pool of gradientUpdateStreams

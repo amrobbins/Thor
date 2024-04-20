@@ -10,6 +10,8 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 
+class Stream;
+
 /**
  * A reference counted container for cudaEvent_t.
  *
@@ -17,102 +19,36 @@
  */
 class Event : private ReferenceCounted {
    public:
-    Event() : ReferenceCounted() {}
+    Event();
 
-    explicit Event(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne = false) {
-        construct(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
-    }
+    explicit Event(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne = false);
+    Event(const Event &event);
 
-    Event(const Event &event) {
-        // implemented using operator=
-        *this = event;
-    }
+    Event &operator=(const Event &other);
 
-    Event &operator=(const Event &other) {
-        copyFrom(other);
-        return *this;
-    }
+    virtual ~Event();
 
-    virtual ~Event() {
-        bool shouldDestroy = ReferenceCounted::removeReference();
-        if (shouldDestroy)
-            destroy();
-    }
+    void record(Stream stream);
 
-    operator cudaEvent_t() {
-        assert(!uninitialized());
-        return cudaEvent;
-    }
+    operator cudaEvent_t();
 
-    cudaEvent_t getEvent() {
-        assert(!uninitialized());
-        return cudaEvent;
-    }
+    cudaEvent_t getEvent();
 
-    int getGpuNum() const {
-        assert(!uninitialized());
-        return gpuNum;
-    }
+    int getGpuNum() const;
 
-    void synchronize() {
-        assert(!uninitialized());
+    void synchronize();
 
-        cudaError_t cudaStatus;
-        cudaStatus = cudaEventSynchronize(*this);
-        if (cudaStatus != cudaSuccess) {
-            printf("cudaStatus %d\n", cudaStatus);
-            fflush(stdout);
-        }
-        assert(cudaStatus == cudaSuccess);
-    }
+    float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent);
 
-    float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
-        assert(!uninitialized());
-
-        float milliseconds;
-
-        synchronize();
-        cudaError_t cudaStatus;
-        cudaStatus = cudaEventElapsedTime(&milliseconds, startEvent, *this);
-        assert(cudaStatus == cudaSuccess);
-        return milliseconds;
-    }
-
-    long getReferenceCountedId() { return ReferenceCounted::getReferenceCountedId(); }
+    long getReferenceCountedId();
 
    private:
     int gpuNum;
     cudaEvent_t cudaEvent;
 
-    void construct(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne) {
-        ReferenceCounted::initialize();
+    void construct(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne);
 
-        ScopedGpu scopedGpu(gpuNum);
+    void copyFrom(const Event &other);
 
-        cudaError_t cudaStatus;
-        this->gpuNum = gpuNum;
-
-        unsigned int flags = 0;
-        if (!enableTiming)
-            flags |= cudaEventDisableTiming;
-        if (expectingHostToWaitOnThisOne)
-            flags |= cudaEventBlockingSync;
-
-        cudaStatus = cudaEventCreateWithFlags(&cudaEvent, flags);
-        assert(cudaStatus == cudaSuccess);
-    }
-
-    void copyFrom(const Event &other) {
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
-
-        gpuNum = other.gpuNum;
-        cudaEvent = other.cudaEvent;
-    }
-
-    void destroy() {
-        ScopedGpu scopedGpu(gpuNum);
-        cudaError_t cudaStatus;
-        cudaStatus = cudaEventDestroy(cudaEvent);
-        assert(cudaStatus == cudaSuccess);
-    }
+    void destroy();
 };

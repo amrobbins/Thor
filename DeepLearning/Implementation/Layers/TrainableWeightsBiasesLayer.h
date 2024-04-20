@@ -46,6 +46,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         this->projectedBiases = projectedBiases;
     }
 
+    virtual Optional<Tensor> getProjectedWeightsTensor() { return projectedWeights; }
+
+    virtual Optional<Tensor> getProjectedBiasesTensor() { return projectedBiases; }
+
     virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(running);
 

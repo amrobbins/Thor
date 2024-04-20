@@ -1,5 +1,9 @@
 #pragma once
 
+// FIXME: Update this based on the ordered WorkQueue, since that has been updated.
+//        From that, remove output ready, and only acquire an input queue buffer, then wait to acquire an output
+//        queue buffer after processing.
+
 /**
  * This queue opens when open() is called and creates a threadpool of the number of threads specified.
  * This queue runs the executor (that is passed in) on the input that are passed in and stored in the input queue.
@@ -195,6 +199,9 @@ void WorkQueueUnordered<InputType, OutputType>::open(std::unique_ptr<WorkQueueEx
 
 template <class InputType, class OutputType>
 void WorkQueueUnordered<InputType, OutputType>::close() {
+    if (!queueOpen)
+        return;
+
     {
         std::unique_lock<std::mutex> lck(mtx);
         queueOpen = false;

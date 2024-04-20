@@ -1,9 +1,15 @@
 # TODO:
-2. ADAM Optimizer - test and get working - done - get test to pass consistently.
+1. ADAM Optimizer - test and get working - done - get test to pass consistently.
+2. Mux and Demux -> 1 to N controlled by input tensor / N to 1 controlled by input tensor.
 3. Alexnet parity with Tensorflow on imagenet.
+4. Determine the optimal number of stamps per GPU. Note that this may be different for training and inference,
+    There may be additional inference-only stamps. 
 4. Save and load trained models - native save() and load() functions, also saveAsKeras() and loadFromKeras()
 5. reuse workspaces based on dependency graph, per stamp.
    5. Use GPUDirect storage to save and load weights so that they don't need fit in CPU memory. Also for performance.
+   6. Tried but failed. The reason was that it was difficult to do this asynchronously via streams. Looks like they fixed this in cuda 12.2, so try again.
+   7. https://docs.nvidia.com/gpudirect-storage/design-guide/index.html
+   8. Done. Check if tests pass.
 9. Multi-Gpu support
    1. Multiple stamps with accumulation.
        1. Not that the current implementation updates the layers as they are added to the network so that their inputs and outputs remain correct after flattening multi-layers. However only single layers are added to the network and so it may be stamped as many times as desired.

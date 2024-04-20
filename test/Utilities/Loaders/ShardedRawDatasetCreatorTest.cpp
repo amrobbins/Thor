@@ -254,7 +254,8 @@ bool alexnetImagePreprocessorUint8(uint8_t *rgbPixelArray) {
     }
     return true;
 }
-
+*/
+/*
 bool alexnetImagePreprocessorHalf(half *rgbPixelArray) {
     for (uint32_t row = 0; row < 224; ++row) {
         for (uint32_t col = 0; col < 224; ++col) {
@@ -265,7 +266,8 @@ bool alexnetImagePreprocessorHalf(half *rgbPixelArray) {
     }
     return true;
 }
-
+*/
+/*
 TEST(ShardedRawDatasetCreator, createImagenet) {
     string baseFilename = "ImageNet2012";
     string testDatasetDir("/media/andrew/SSD_Storage/ImageNet_2012");
@@ -278,6 +280,22 @@ TEST(ShardedRawDatasetCreator, createImagenet) {
 
     std::vector<shared_ptr<Shard>> shards;
     ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename);
+    creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, alexnetImagePreprocessorHalf)), shards);
+}
+*/
+/*
+TEST(ShardedRawDatasetCreator, createImagenet10Classes) {
+    string baseFilename = "ImageNet2012";
+    string testDatasetDir("/media/andrew-local/SSD_Storage/ImageNet_2012");
+
+    unordered_set<string> sourceDirectories;
+    unordered_set<string> destDirectories;
+
+    sourceDirectories.insert(testDatasetDir);
+    destDirectories.insert("/PCIE_SSD/");
+
+    std::vector<shared_ptr<Shard>> shards;
+    ShardedRawDatasetCreator creator(sourceDirectories, destDirectories, baseFilename, 10);
     creator.createDataset(unique_ptr<ImageProcessor>(new ImageProcessor(0.05, 20, 224, 224, alexnetImagePreprocessorHalf)), shards);
 }
 */
@@ -331,6 +349,7 @@ TEST(ShardedRawDatasetCreator, createMnist) {
                           shards);
 }
 */
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

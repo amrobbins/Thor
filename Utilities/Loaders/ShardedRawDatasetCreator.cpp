@@ -18,7 +18,9 @@ using std::vector;
 
 ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceDirectories,
                                                    unordered_set<string> destDirectories,
-                                                   string baseDatasetFileName) {
+                                                   string baseDatasetFileName,
+                                                   uint32_t maxClasses)
+    : maxClasses(maxClasses) {
     assert(!sourceDirectories.empty());
     assert(!destDirectories.empty());
     assert(!baseDatasetFileName.empty());
@@ -35,7 +37,12 @@ ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceD
     uint64_t i = 0;
     for (auto it = destDirectories.begin(); it != destDirectories.end(); ++it) {
         path shardPath(*it);
-        shardPath /= (baseDatasetFileName + "_" + std::to_string(i + 1) + "_of_" + std::to_string(destDirectories.size())) + ".shard";
+        if (maxClasses > 0)
+            shardPath /= (baseDatasetFileName + "_" + std::to_string(maxClasses) + "_classes_" + std::to_string(i + 1) + "_of_" +
+                          std::to_string(destDirectories.size())) +
+                         ".shard";
+        else
+            shardPath /= (baseDatasetFileName + "_" + std::to_string(i + 1) + "_of_" + std::to_string(destDirectories.size())) + ".shard";
         destShardFiles.push_back(shardPath);
         ++i;
     }
@@ -141,6 +148,21 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
     for (auto it = sourceDirectories.begin(); it != sourceDirectories.end(); ++it) {
         string datasetDirectoryString = *it;
 
+        // When choosing some max number of classes, first figure out what classes will be chosen:
+        if (maxClasses != 0) {
+            path datasetDirectory = datasetDirectoryString;
+            datasetDirectory /= "train";
+            assert(is_directory(datasetDirectory));
+            for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
+                if (is_directory(classDirectory.path()) && !classDirectory.path().filename_is_dot() &&
+                    !classDirectory.path().filename_is_dot_dot()) {
+                    if (allClasses.size() == maxClasses)
+                        break;
+                    allClasses.insert(classDirectory.path().filename().native());
+                }
+            }
+        }
+
         for (int rawType = (int)ExampleType::TRAIN; rawType <= (int)ExampleType::TEST; ++rawType) {
             ExampleType type = (ExampleType)rawType;
 
@@ -168,6 +190,8 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
             for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
                 if (is_directory(classDirectory.path()) && !classDirectory.path().filename_is_dot() &&
                     !classDirectory.path().filename_is_dot_dot()) {
+                    if (maxClasses != 0 && allClasses.count(classDirectory.path().filename().native()) == 0)
+                        continue;
                     classesPerThread[thread].push_back(classDirectory.path());
                     allClasses.insert(classDirectory.path().filename().native());
                     thread = (thread + 1) % numProcessors;

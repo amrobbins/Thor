@@ -8,7 +8,10 @@
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 #include "Utilities/TensorOperations/TypeConversions/TypeConverter.h"
+#include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
+#include <fcntl.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -23,10 +26,12 @@
 #include <vector>
 
 #include <assert.h>
+#include <stdexcept>
 
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cufile.h>
 #include <omp.h>
 
 namespace ThorImplementation {
@@ -79,6 +84,12 @@ class Tensor : private ReferenceCounted {
     void copyFromAsync(Tensor source, Stream stream);
 
     void moveFromAsync(Tensor source, Stream stream);
+
+    enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
+    void attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess accessRequirement, bool createEmptyFile = false);
+    void detachFile();
+    void loadFromFile(Stream stream);
+    void dumpToFile(Stream stream);
 
     // The values are set at the end of stream
     static Tensor zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
@@ -753,6 +764,15 @@ class Tensor : private ReferenceCounted {
 
     bool usingExternallyManagedMemory;
 
+    std::string fileName;
+    int32_t fileDescriptor = 0;
+    FileAccess fileAccessRequirement;
+    CUfileHandle_t gpuDirectStorageCuFileHandle = nullptr;
+    off_t gpuDirectStorageFileOffset;
+    size_t gpuDirectStorageSize;
+    off_t gpuDirectStorageBufOffset = 0;
+    ssize_t gpuDirectStorageBytesAccessed;
+
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden;
     TensorDescriptor overriddenDescriptor;
@@ -773,6 +793,17 @@ class Tensor : private ReferenceCounted {
     void construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
     void copyObject(const Tensor &other);
     void destroy();
+};
+
+class CuFileInitializer {
+   public:
+    CuFileInitializer() {
+        // Call cuFileDriverOpen() and check for errors
+        CUfileError_t cuFileError = cuFileDriverOpen();
+        assert(cuFileError.err == CU_FILE_SUCCESS);
+    }
+
+    ~CuFileInitializer() { cuFileDriverClose(); }
 };
 
 }  // namespace ThorImplementation
