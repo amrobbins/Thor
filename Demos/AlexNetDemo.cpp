@@ -32,7 +32,7 @@ int main() {
 
     set<string> shardPaths;
 
-    constexpr uint32_t NUM_CLASSES = 10;
+    constexpr uint32_t NUM_CLASSES = 1000;
     const string datasetPath("/PCIE_SSD/ImageNet2012_10_classes_1_of_1.shard");
     assert(boost::filesystem::exists(datasetPath));
     shardPaths.insert(datasetPath);

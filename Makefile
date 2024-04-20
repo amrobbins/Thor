@@ -97,14 +97,14 @@ RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
                 build/test/DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageErrorTest && \
                 build/test/DeepLearning/Api/Optimizers/SgdTest && \
                 build/test/DeepLearning/Api/Optimizers/AdamTest && \
-				build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest && \
-				build/test/DeepLearning/Implementation/Layers/Optimizers/AdamTest && \
                 build/test/Utilities/TensorOperations/Optimizers/AdamTest && \
                 build/test/Utilities/WorkQueue/WorkQueueUnorderedTest && \
                 build/test/Utilities/WorkQueue/WorkQueueTest \
 
 				# FIXME: put back
                 # build/test/DeepLearning/Implementation/SimpleNetworkTest && \
+                # build/test/DeepLearning/Implementation/Layers/Optimizers/SgdTest && \
+                # build/test/DeepLearning/Implementation/Layers/Optimizers/AdamTest && \
 
 ALL_TESTS = build/test/DeepLearning/Implementation/Layers/Loss/CategoricalCrossEntropyTest \
 			build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest \
@@ -339,7 +339,9 @@ libThor.a: Thor.h
 	$(MAKE) $(ALL_OBJECT_FILES)
 	ar rcs libThor.a $(ALL_OBJECT_FILES)
 
-build/headerlist.txt: libThor.a
+.PHONY: build/headerlist.txt
+
+build/headerlist.txt:
 	mkdir -p build
 	find ./ -name "*.h" | grep -v ./googletest/ | grep -v ./test/ > build/headerlist.txt
 

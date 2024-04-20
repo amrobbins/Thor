@@ -7,6 +7,49 @@ static CuFileInitializer cufile_global_initializer;
 
 atomic<unsigned long> Tensor::nextInstanceId(1);
 
+uint32_t murmurHash(const void* key, int32_t len, uint32_t seed) {
+    const uint32_t m = 0x5bd1e995;
+    const int32_t r = 24;
+    uint32_t h = seed ^ len;
+    const uint8_t *data = (const uint8_t*)key;
+
+    while (len >= 4) {
+        uint32_t k = *(uint32_t*)data;
+        k *= m;
+        k ^= k >> r;
+        k *= m;
+
+        h *= m;
+        h ^= k;
+        data += 4;
+        len -= 4;
+    }
+
+    switch (len) {
+        case 3:
+            h ^= data[2] << 16;
+            //fallthrough
+        case 2:
+            h ^= data[1] << 8;
+            //fallthrough
+        case 1:
+            h ^= data[0];
+            h *= m;
+            //fallthrough
+    }
+
+    h ^= h >> 13;
+    h *= m;
+    h ^= h >> 15;
+
+    return h;
+}
+
+uint32_t getThreadIdHash() {
+    thread::id threadId = this_thread::get_id();
+    return murmurHash(&threadId, sizeof(threadId), 0);
+}
+
 Tensor::Tensor() : ReferenceCounted() { usingExternallyManagedMemory = false; }
 
 Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) { construct(placement, descriptor, nullptr); }
@@ -881,8 +924,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -893,8 +935,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -908,8 +949,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -920,8 +960,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -935,10 +974,9 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
-                uniform_int_distribution<int16_t> dis(minValue, maxValue + 1);
+                uniform_int_distribution<int16_t> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -947,10 +985,9 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
-            uniform_int_distribution<int16_t> dis(minValue, maxValue + 1);
+            uniform_int_distribution<int16_t> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (int8_t)dis(gen);
@@ -962,10 +999,9 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
-                uniform_int_distribution<int32_t> dis(minValue, maxValue + 1);
+                uniform_int_distribution<int32_t> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -974,10 +1010,9 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
-            uniform_int_distribution<int32_t> dis(minValue, maxValue + 1);
+            uniform_int_distribution<int32_t> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (int16_t)dis(gen);
@@ -989,10 +1024,9 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
-                uniform_int_distribution<int64_t> dis(minValue, maxValue + 1);
+                uniform_int_distribution<int64_t> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -1001,10 +1035,9 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
-            uniform_int_distribution<int64_t> dis(minValue, maxValue + 1);
+            uniform_int_distribution<int64_t> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (int32_t)dis(gen);
@@ -1016,10 +1049,9 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
-                uniform_int_distribution<uint16_t> dis(minValue, maxValue + 1);
+                uniform_int_distribution<uint16_t> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -1028,10 +1060,9 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
-            uniform_int_distribution<uint16_t> dis(minValue, maxValue + 1);
+            uniform_int_distribution<uint16_t> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint8_t)dis(gen);
@@ -1043,10 +1074,9 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
-                uniform_int_distribution<uint32_t> dis(minValue, maxValue + 1);
+                uniform_int_distribution<uint32_t> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -1055,10 +1085,9 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
-            uniform_int_distribution<uint32_t> dis(minValue, maxValue + 1);
+            uniform_int_distribution<uint32_t> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint16_t)dis(gen);
@@ -1070,10 +1099,9 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
-                uniform_int_distribution<uint64_t> dis(minValue, maxValue + 1);
+                uniform_int_distribution<uint64_t> dis(minValue, maxValue);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -1082,10 +1110,9 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
-            uniform_int_distribution<uint64_t> dis(minValue, maxValue + 1);
+            uniform_int_distribution<uint64_t> dis(minValue, maxValue);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint32_t)dis(gen);
@@ -1097,8 +1124,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
                 uniform_int_distribution<uint8_t> dis(0, 2);
 
@@ -1109,8 +1135,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
             uniform_int_distribution<uint8_t> dis(0, 2);
 
@@ -1128,8 +1153,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
                 mt19937 gen(seed);
                 uniform_int_distribution<uint16_t> dis(0, 256);
 
@@ -1140,8 +1164,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + getThreadIdHash();
             mt19937 gen(seed);
             uniform_int_distribution<uint16_t> dis(0, 256);
 
