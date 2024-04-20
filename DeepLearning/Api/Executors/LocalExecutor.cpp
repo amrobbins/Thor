@@ -214,6 +214,9 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
                                                                                     bufferStampTensorsParams->batchletOutput,
                                                                                     outputReadyEvents[nextStampToProcess],
                                                                                     validationPass);
+            // FIXME: TEMP FOR DEBUG. GET RID OF SYNCHRONIZE!!!
+            //Stream::deviceSynchronize(0);
+
             // FIXME: use to distribute batchlets:
             // batchletTimingEvents[nextStampToProcess].emplace_back(startBatchletEvent, doneBatchletEvent);
 

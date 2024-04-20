@@ -26,7 +26,7 @@ Network buildSingleLayerFullyConnected() {
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
-                             .activationBuilder(Tanh::Builder())
+                             .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {128};

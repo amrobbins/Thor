@@ -1,5 +1,5 @@
 CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include
-CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -L /usr/lib/x86_64-linux-gnu -l cudnn -l boost_filesystem -lX11
+CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -l cufile -L /usr/lib/x86_64-linux-gnu -l cudnn -l boost_filesystem -lX11
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
 # https://en.wikipedia.org/wiki/CUDA#GPUs_supported
 COMPUTE_CAPABILITIES_MOBILE_DEVICES = -gencode=arch=compute_62,code=compute_62 -gencode=arch=compute_62,code=sm_62 \
@@ -36,16 +36,16 @@ LIBS_TEST = -lgtest -lgtest_main -pthread
 TEST_COMPILE_DEPENDENCIES = $(INCLUDE_DIRS_TEST) $(LIB_DIRS_TEST) $(LIBS_TEST) $(CUDA)
 
 DEBUG = -ggdb -O0
-NVCC_DEBUG = -g
+NVCC_DEBUG = -g -Xptxas -O0
 
 RELEASE = false
 
 ifeq ($(RELEASE),true)
-	Gpp = g++ -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed -DTHOR_RELEASE
-	Nvcc = nvcc -O3
+	Gpp = g++ -fPIC -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed -DTHOR_RELEASE -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
+	Nvcc = nvcc --Werror all-warnings -O3 -Xptxas -O3,-v -Xcompiler -fPIC -DTHOR_RELEASE -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 else
-	Gpp = g++ -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed -DTHOR_DEBUG
-	Nvcc = nvcc -D_GLIBCXX_DEBUG -g
+	Gpp = g++ -fPIC -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
+	Nvcc = nvcc --Werror all-warnings -Xcompiler -fPIC -D_GLIBCXX_DEBUG -g -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 endif
 
 RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
@@ -244,6 +244,7 @@ ALL_OBJECT_FILES = build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrix
                    build/DeepLearning/Api/Optimizers/Sgd.o \
                    build/DeepLearning/Api/Optimizers/Adam.o \
                    build/Utilities/Common/Stream.o \
+                   build/Utilities/Common/Event.o \
                    build/Utilities/Loaders/Shard.o \
                    build/Utilities/Loaders/ShardedRawDatasetCreator.o \
                    build/Utilities/Loaders/ImageLoader.o \
@@ -355,159 +356,159 @@ Thor.h: build/headerlist.txt build/buildTools/createMasterHeader
 
 build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o: Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.cu
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixTranspose
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o -c -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.cu
 
 build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o: Utilities/TensorOperations/TypeConversions/TypeConverter.h Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o -c -std=c++11 $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
 
 build/DeepLearning/Implementation/Tensor/TensorArithmeticKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorArithmeticKernels.cu
 	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorArithmeticKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorArithmeticKernels.cu
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorArithmeticKernels.o -c -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorArithmeticKernels.cu
 
 build/DeepLearning/Implementation/Tensor/TensorMathKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorMathKernels.cu
 	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorMathKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorMathKernels.cu
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorMathKernels.o -c -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorMathKernels.cu
 
 build/DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.cu
 	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.cu
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.o -c -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorTrigonometryKernels.cu
 
 build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o: DeepLearning/Implementation/Tensor/Tensor.h DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.cu
 	mkdir -p build/DeepLearning/Implementation/Tensor
-	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o -c --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.cu
+	$(Nvcc) -ccbin g++ -o build/DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.o -c -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v DeepLearning/Implementation/Tensor/TensorHyperbolicTrigonometryKernels.cu
 
 build/Utilities/TensorOperations/Activation/Tanh.o: Utilities/TensorOperations/Activation/Tanh.h Utilities/TensorOperations/Activation/Tanh.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Tanh.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Tanh.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Tanh.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Tanh.cu
 
 build/Utilities/TensorOperations/Activation/Relu.o: Utilities/TensorOperations/Activation/Relu.h Utilities/TensorOperations/Activation/Relu.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Relu.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Relu.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Relu.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Relu.cu
 
 build/Utilities/TensorOperations/Activation/Swish.o: Utilities/TensorOperations/Activation/Swish.h Utilities/TensorOperations/Activation/Swish.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Swish.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Swish.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Swish.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Swish.cu
 
 build/Utilities/TensorOperations/Activation/Selu.o: Utilities/TensorOperations/Activation/Selu.h Utilities/TensorOperations/Activation/Selu.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Selu.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Selu.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Selu.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Selu.cu
 
 build/Utilities/TensorOperations/Activation/HardSigmoid.o: Utilities/TensorOperations/Activation/HardSigmoid.h Utilities/TensorOperations/Activation/HardSigmoid.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/HardSigmoid.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/HardSigmoid.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/HardSigmoid.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/HardSigmoid.cu
 
 build/Utilities/TensorOperations/Activation/Gelu.o: Utilities/TensorOperations/Activation/Gelu.h Utilities/TensorOperations/Activation/Gelu.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Gelu.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Gelu.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Gelu.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Gelu.cu
 
 build/Utilities/TensorOperations/Activation/SoftSign.o: Utilities/TensorOperations/Activation/SoftSign.h Utilities/TensorOperations/Activation/SoftSign.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/SoftSign.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/SoftSign.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/SoftSign.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/SoftSign.cu
 
 build/Utilities/TensorOperations/Activation/SoftPlus.o: Utilities/TensorOperations/Activation/SoftPlus.h Utilities/TensorOperations/Activation/SoftPlus.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/SoftPlus.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/SoftPlus.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/SoftPlus.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/SoftPlus.cu
 
 build/Utilities/TensorOperations/Activation/Exponential.o: Utilities/TensorOperations/Activation/Exponential.h Utilities/TensorOperations/Activation/Exponential.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Exponential.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Exponential.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Exponential.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Exponential.cu
 
 build/Utilities/TensorOperations/Activation/Elu.o: Utilities/TensorOperations/Activation/Elu.h Utilities/TensorOperations/Activation/Elu.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Elu.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Elu.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Elu.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Elu.cu
 
 build/Utilities/TensorOperations/Activation/Sigmoid.o: Utilities/TensorOperations/Activation/Sigmoid.h Utilities/TensorOperations/Activation/Sigmoid.cu
 	mkdir -p build/Utilities/TensorOperations/Activation
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Sigmoid.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Sigmoid.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Activation/Sigmoid.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Activation/Sigmoid.cu
 
 build/Utilities/TensorOperations/Arithmetic/Average.o: Utilities/TensorOperations/Arithmetic/Average.h Utilities/TensorOperations/Arithmetic/Average.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Average.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Average.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Average.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Average.cu
 
 build/Utilities/TensorOperations/Arithmetic/Sum.o: Utilities/TensorOperations/Arithmetic/Sum.h Utilities/TensorOperations/Arithmetic/Sum.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Sum.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Sum.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Sum.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Sum.cu
 
 build/Utilities/TensorOperations/Loss/MeanSquaredError.o: Utilities/TensorOperations/Loss/MeanSquaredError.h Utilities/TensorOperations/Loss/MeanSquaredError.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanSquaredError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanSquaredError.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanSquaredError.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanSquaredError.cu
 
 build/Utilities/TensorOperations/Loss/MeanAbsoluteError.o: Utilities/TensorOperations/Loss/MeanAbsoluteError.h Utilities/TensorOperations/Loss/MeanAbsoluteError.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanAbsoluteError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanAbsoluteError.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanAbsoluteError.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanAbsoluteError.cu
 
 build/Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.o: Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.h Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/MeanAbsolutePercentageError.cu
 
 build/Utilities/TensorOperations/DeepLearning/Add1dBias.o: Utilities/TensorOperations/DeepLearning/Add1dBias.h Utilities/TensorOperations/DeepLearning/Add1dBias.cu
 	mkdir -p build/Utilities/TensorOperations/DeepLearning
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/DeepLearning/Add1dBias.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/DeepLearning/Add1dBias.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/DeepLearning/Add1dBias.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/DeepLearning/Add1dBias.cu
 
 build/Utilities/TensorOperations/Arithmetic/SumScale.o: Utilities/TensorOperations/Arithmetic/SumScale.h Utilities/TensorOperations/Arithmetic/SumScale.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SumScale.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SumScale.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SumScale.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SumScale.cu
 
 build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o: Utilities/TensorOperations/Arithmetic/SumManyToOne.h Utilities/TensorOperations/Arithmetic/SumManyToOne.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SumManyToOne.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/SumManyToOne.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/SumManyToOne.cu
 
 build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o: Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.cu
 
 build/Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.o: Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.cu
 
 build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o: Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.cu
 
 build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o: Utilities/TensorOperations/Arithmetic/MultiplyByScalar.h Utilities/TensorOperations/Arithmetic/MultiplyByScalar.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/MultiplyByScalar.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/MultiplyByScalar.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/MultiplyByScalar.cu
 
 build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o: Utilities/TensorOperations/Loss/CrossEntropyLoss.h Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/CrossEntropyLoss.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CrossEntropyLoss.cu
 
 build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o: Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.h Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/CategoricalCrossEntropyLoss.cu
 
 build/Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.o: Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.h Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.cu
 	mkdir -p build/Utilities/TensorOperations/Loss
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Loss/BinaryCrossEntropyLoss.cu
 
 build/Utilities/TensorOperations/Arithmetic/Exponentiation.o: Utilities/TensorOperations/Arithmetic/Exponentiation.h Utilities/TensorOperations/Arithmetic/Exponentiation.cu
 	mkdir -p build/Utilities/TensorOperations/Arithmetic
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Exponentiation.o -c --maxrregcount 128 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Exponentiation.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Arithmetic/Exponentiation.o -c --maxrregcount 128 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Arithmetic/Exponentiation.cu
 
 build/Utilities/TensorOperations/Misc/Map.o: Utilities/TensorOperations/Misc/Map.h Utilities/TensorOperations/Misc/Map.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Map.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Map.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Map.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Map.cu
 
 build/Utilities/TensorOperations/Misc/Split.o: Utilities/TensorOperations/Misc/Split.h Utilities/TensorOperations/Misc/Split.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Split.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Split.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Split.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Split.cu
 
 build/Utilities/TensorOperations/Misc/Pad.o: Utilities/TensorOperations/Misc/Pad.h Utilities/TensorOperations/Misc/Pad.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Pad.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Pad.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Pad.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Pad.cu
 
 build/Utilities/TensorOperations/Optimizers/Adam.o: Utilities/TensorOperations/Optimizers/Adam.h Utilities/TensorOperations/Optimizers/Adam.cu
 	mkdir -p build/Utilities/TensorOperations/Optimizers
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Optimizers/Adam.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Optimizers/Adam.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Optimizers/Adam.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Optimizers/Adam.cu
 
 build/Utilities/TensorOperations/Misc/Extract.o: Utilities/TensorOperations/Misc/Extract.h Utilities/TensorOperations/Misc/Extract.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Extract.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Extract.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Extract.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Extract.cu
 
 build/Utilities/TensorOperations/Misc/Concatenate.o: Utilities/TensorOperations/Misc/Concatenate.h Utilities/TensorOperations/Misc/Concatenate.cu
 	mkdir -p build/Utilities/TensorOperations/Misc
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Concatenate.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Concatenate.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Concatenate.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Concatenate.cu
 
 build/Utilities/TensorOperations/TypeConversions/TypeConverter.o: Utilities/TensorOperations/TypeConversions/TypeConverter.h Utilities/TensorOperations/TypeConversions/TypeConverter.cpp
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
@@ -531,7 +532,7 @@ build/Utilities/TensorOperations/GpuConvolution/GpuConvolution.o: Utilities/Tens
 
 build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o: Utilities/TensorOperations/GpuConvolution/GpuConvolution.h Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
 	mkdir -p build/Utilities/TensorOperations/GpuConvolution
-	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o -c --maxrregcount 64 --cudart static -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
+	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.o -c --maxrregcount 64 -std=c++11 $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuConvolution/GpuConvolutionKernels.cu
 
 build/DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.o: DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.cpp
 	mkdir -p build/DeepLearning/Implementation/Layers/NeuralNetwork
@@ -644,6 +645,10 @@ build/DeepLearning/Api/Optimizers/Adam.o: DeepLearning/Api/Optimizers/Adam.h Dee
 build/Utilities/Common/Stream.o: Utilities/Common/Stream.h Utilities/Common/Stream.cpp
 	mkdir -p build/Utilities/Common
 	$(Gpp) -c -std=c++11 Utilities/Common/Stream.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Stream.o
+
+build/Utilities/Common/Event.o: Utilities/Common/Event.h Utilities/Common/Event.cpp
+	mkdir -p build/Utilities/Common
+	$(Gpp) -c -std=c++11 Utilities/Common/Event.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/Common/Event.o
 
 build/Utilities/Loaders/Shard.o: Utilities/Loaders/Shard.h Utilities/Loaders/Shard.cpp
 	mkdir -p build/Utilities/Loaders
@@ -1119,56 +1124,56 @@ RunWorkQueueTests: BuildWorkQueueTests
 
 article2Vec: article2Vec.cu article2Vec.cpp article2Vec.h article2VecMonitor.cpp  extractDataSet.cpp
 	g++ extractDataSet.cpp -std=c++11 -O3 -o extractDataSet
-	nvcc --cudart static -gencode arch=compute_52,code=compute_52 -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v article2Vec.cu -o article2Vec.o
+	nvcc -gencode arch=compute_52,code=compute_52 -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v article2Vec.cu -o article2Vec.o
 	g++ article2Vec.cpp -std=c++11 -O3 -o article2Vec -fopenmp article2Vec.o -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver
 	g++ article2VecMonitor.cpp -std=c++11 -O3 -o article2VecMonitor
 
 createRTree: createRTree.cpp mappedFileObjects.h
 	g++ -I /usr/local/boost_1_69_0 -std=c++11 createRTree.cpp -O3 -pthread -o createRTree
 
-addArticleIndexMap: addArticleIndexMap.cpp 
+addArticleIndexMap: addArticleIndexMap.cpp
 	g++ -I /usr/local/boost_1_69_0 -std=c++11 addArticleIndexMap.cpp -O3 -pthread -o addArticleIndexMap
 
 cluster: cluster.cpp clusterKernels clusterTests.h cluster.h
 	g++ -I /usr/local/boost_1_69_0 -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -std=c++11 clusterKernels.o cluster.cpp -O3 -pthread -o cluster -lcusolver -lcudart
-	
+
 clusterKMeans: clusterKMeans.cpp clusterKMeans.h
 	g++ -I /usr/local/boost_1_69_0 -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -std=c++11 clusterKMeans.cpp -O3 -pthread -o clusterKMeans -lcudart
-	
+
 
 MappedFileDemo: MappedFileDemo.cpp
 	g++ -I /usr/local/boost_1_69_0 -std=c++11 -pthread MappedFileDemo.cpp -O0 -g -o MappedFileDemo
 
 clusterKernels: clusterKernels.cu clusterKernels.h
-	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v clusterKernels.cu
+	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v clusterKernels.cu
 	#g++ -o clusterKernels -std=c++11 clusterKernels.o -O3 -L/usr/local/cuda/lib64 -lcusolver -lcudart
 
 optimalMatrixMultiplyBad: optimalMatrixMultiplyBad.cpp optimalMatrixMultiplyKernels.cu makefile
-	nvcc --cudart static -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v optimalMatrixMultiplyBad.cpp
-	nvcc --cudart static -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v optimalMatrixMultiplyKernels.cu
+	nvcc -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v optimalMatrixMultiplyBad.cpp
+	nvcc -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v optimalMatrixMultiplyKernels.cu
 	g++ -o optimalMatrixMultiplyBad -std=c++11 optimalMatrixMultiplyBad.o optimalMatrixMultiplyKernels.o -O3 -L/usr/local/cuda/lib64 -lcublas -lcublasLt -lcusolver -lcudart
 
 
 cublasTest: cublasTest.cpp makefile
-	nvcc --cudart static -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v cublasTest.cpp
+	nvcc -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v cublasTest.cpp
 	g++ -o cublasTest -std=c++11 cublasTest.o -O3 -L/usr/local/cuda/lib64 -lcublas -lcublasLt -lcusolver -lcudart
 
 cublasTestDebug: cublasTest.cpp
-	nvcc --cudart static -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v cublasTest.cpp
+	nvcc -std=c++11 -gencode=arch=compute_52,code=compute_52 -gencode=arch=compute_75,code=compute_75 -g -gencode=arch=compute_52,code=sm_52 -gencode=arch=compute_75,code=sm_75 -c -I/usr/local/cuda/include -Xptxas -O3,-v cublasTest.cpp
 	g++ -o cublasTestDebug -std=c++11 cublasTest.o -O0 -L/usr/local/cuda/lib64 -lcublas -lcublasLt -ggdb -lcusolver -lcudart
 
 simpleCublasTestcase: simpleCublasTestcase.cpp
-	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v simpleCublasTestcase.cpp
+	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v simpleCublasTestcase.cpp
 	g++ -o simpleCublasTestcase -std=c++11 simpleCublasTestcase.o -O0 -L/usr/local/cuda/lib64 -lcublas -lcublasLt -ggdb -lcusolver -lcudart
 
 
 outerProduct: outerProduct.cu
-	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v outerProduct.cu
+	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v outerProduct.cu
 	g++ -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -std=c++11 outerProduct.o -O3 -pthread -o outerProduct -lcudart
 
 gpuRTreeKernels: GpuRTreeKernels.cu GpuRTreeKernels.h
-	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v GpuRTreeKernels.cu
-#	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -I/usr/local/cuda/include -Xptxas -O3,-v --device-c GpuRTreeKernels.cu -o GpuRTreeKernels.o
+	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -c -I/usr/local/cuda/include -Xptxas -O3,-v GpuRTreeKernels.cu
+#	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -I/usr/local/cuda/include -Xptxas -O3,-v --device-c GpuRTreeKernels.cu -o GpuRTreeKernels.o
 
 gpuRTree: GpuRTree.cpp GpuRTreeNode.h GpuRTreeNode.cpp GpuRTreeTests.h gpuRTreeKernels GpuRTreeTests.h NearestNeighborExecutor.h NearestNeighborExecutor.cpp makefile
 	g++ -c GpuRTree.cpp -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -std=c++11 -pthread -O3 -lcudart
@@ -1176,8 +1181,8 @@ gpuRTree: GpuRTree.cpp GpuRTreeNode.h GpuRTreeNode.cpp GpuRTreeTests.h gpuRTreeK
 	g++ -c NearestNeighborExecutor.cpp -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -std=c++11 -pthread -O3 -lcudart
 	g++ GpuRTree.o -I/usr/local/cuda/include -L/usr/local/cuda/lib64 GpuRTreeNode.o NearestNeighborExecutor.o GpuRTreeKernels.o -std=c++11 -pthread -O3 -o gpuRTree -lcudart
 #	g++ GpuRTree.cpp NearestNeighborExecutor.cpp -I/usr/local/cuda/include -L/usr/local/cuda/lib64 GpuRTreeKernels.o -std=c++11 -pthread -O3 -o gpuRTree -lcudart
-#	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -I/usr/local/cuda/include -Xptxas -O3,-v --device-c GpuRTree.cu -o gpuRTree.o
-#	nvcc --cudart static -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -I/usr/local/cuda/include -Xptxas -O3,-v  GpuRTreeKernels.o GpuRTree.o -o gpuRTree
+#	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -I/usr/local/cuda/include -Xptxas -O3,-v --device-c GpuRTree.cu -o gpuRTree.o
+#	nvcc -std=c++11 -gencode arch=compute_52,code=compute_52 -g -gencode arch=compute_52,code=sm_52 -I/usr/local/cuda/include -Xptxas -O3,-v  GpuRTreeKernels.o GpuRTree.o -o gpuRTree
 
 gpuRTreeDebug: GpuRTree.cpp GpuRTreeNode.h GpuRTreeTests.h gpuRTreeKernels GpuRTreeTests.h NearestNeighborExecutor.h NearestNeighborExecutor.cpp makefile
 	g++ -c GpuRTree.cpp -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -std=c++11 -pthread -O3 -ggdb -lcudart
@@ -1186,10 +1191,10 @@ gpuRTreeDebug: GpuRTree.cpp GpuRTreeNode.h GpuRTreeTests.h gpuRTreeKernels GpuRT
 
 buildRTree: buildRTree.cpp
 	g++ buildRTree.cpp -std=c++11 -pthread -O3 -o buildRTree
-	
+
 buildRTreeDebug: buildRTree.cpp
 	g++ buildRTree.cpp -std=c++11 -pthread -O0 -ggdb -o buildRTreeDebug
-	
+
 
 #nvcc -c -I/usr/local/cuda/include -Xptxas -O3,-v article2Vec.cu && g++ -fopenmp -o article2Vec article2Vec.o -L/usr/local/cuda/lib64 -lcudart -lcublas -lcusolver -O3
 

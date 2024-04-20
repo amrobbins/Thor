@@ -5,7 +5,7 @@
 #include "Utilities/TensorOperations/Loss/MeanAbsoluteError.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
-#include <cudnn_ops_infer.h>
+#include <cudnn_ops.h>
 
 #include <chrono>
 #include <thread>

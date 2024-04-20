@@ -166,6 +166,7 @@ Network buildAlexNet() {
 
     // FIXME: put back once divide is implemented
     // imagesInput = Divide::Builder.network(alexNet).numerator(imagesInput).denominator({255});
+    constexpr uint32_t NUM_CLASSES = 10;
 
     Tensor topPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
     Tensor bottomPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
@@ -209,7 +210,7 @@ Network buildAlexNet() {
     latestOutputTensor = FullyConnected::Builder()
                              .network(alexNet)
                              .featureInput(latestOutputTensor)
-                             .numOutputFeatures(1000)
+                             .numOutputFeatures(NUM_CLASSES)
                              .hasBias(true)
                              .weightsInitializerBuilder(glorot)
                              .biasInitializerBuilder(glorot)
@@ -217,13 +218,13 @@ Network buildAlexNet() {
                              .build()
                              .getFeatureOutput();
 
-    expectedDimensions = {1000};
+    expectedDimensions = {NUM_CLASSES};
     assert(latestOutputTensor.getDimensions() == expectedDimensions);
 
     Tensor labelsTensor = NetworkInput::Builder()
                               .network(alexNet)
                               .name("labels")
-                              .dimensions({1000})
+                              .dimensions({NUM_CLASSES})
                               .dataType(Tensor::DataType::UINT8)
                               .build()
                               .getFeatureOutput();

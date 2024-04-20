@@ -10,14 +10,17 @@
 #include <vector>
 
 /**
- *  This is a Linear congruential generator.
+ *  This is a hybrid random number generator that uses a linear congruential generator along with system entropy randomness.
  *
- *  Gets each number from 0 to period - 1 in a pseudo random sequence, where the sequence order depends on the seed value derived from the
- * clock. After sending all numbers from 0 to period - 1 exactly once, it reseeds itself using a new seed derived from the clock.
+ *  Gets each number from 0 to period - 1 in a pseudo random sequence, however the particular pseudo random sequence that is selected
+ *  to begin each period is truly random. After sending all numbers from 0 to period - 1 exactly once, FullPeriodRandom reseeds itself
+ *  using a combination of system entropy, high precision system clock time and thread id.
+ *
+ *  This means that your dataset will be exactly evenly sampled on a per-epoch basis, if you want to oversample some training examples
+ *  that should be handled by adding more than one copy of those to the dataset, then you will get oversampling resulting from that ratio.
  *
  *  If a FullPeriodRandom object will be accessed by multiple threads, its constructor parameter synchronized must be set to true.
  */
-
 class FullPeriodRandom {
    public:
     FullPeriodRandom(uint64_t period, bool synchronized = false) : period(period), periodCount(0), synchronized(synchronized) {
@@ -29,7 +32,7 @@ class FullPeriodRandom {
         std::random_device randomDevice;
         std::hash<std::thread::id> hasher;
         uint32_t seed =
-            randomDevice() + std::chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(std::this_thread::get_id());
+            randomDevice() + std::chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(std::this_thread::get_id());
         generator = std::mt19937(seed);
         distribution = std::uniform_real_distribution<double>(0, pow(2.0, 60));
 

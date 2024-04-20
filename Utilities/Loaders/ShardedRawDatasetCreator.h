@@ -45,9 +45,12 @@ class DataProcessor : public WorkQueueExecutorBase<DataElement, DataElement> {
  */
 class ShardedRawDatasetCreator {
    public:
+    // maxClasses is intended for testing purposes and chooses any maxClasses number of classes,
+    // maxClasses == 0 means all classes present.
     ShardedRawDatasetCreator(std::unordered_set<std::string> sourceDirectories,
                              std::unordered_set<std::string> destDirectories,
-                             std::string baseDatasetFileName);
+                             std::string baseDatasetFileName,
+                             uint32_t maxClasses = 0);
 
     bool createDataset(std::unique_ptr<DataProcessor> &&dataProcessor, std::vector<std::shared_ptr<Shard>> &shards);
 
@@ -55,6 +58,7 @@ class ShardedRawDatasetCreator {
     std::unordered_set<std::string> sourceDirectories;
     std::unordered_set<std::string> destDirectories;
     std::string baseDatasetFileName;
+    const uint32_t maxClasses;
 
     uint64_t numTrainExamples;
     uint64_t numValidateExamples;

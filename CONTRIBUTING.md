@@ -9,4 +9,6 @@ at AndrewRobbins@hotmail.com.
 
 Andrew Robbins is the owner and Chief Architect of Thor.
 
+Any dependency added to this project needs to be approved by Andrew Robbins.
+
 There are no other maintainers or contributors yet.

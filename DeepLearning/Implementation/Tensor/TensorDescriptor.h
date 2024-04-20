@@ -252,28 +252,6 @@ class TensorDescriptor {
 
     void *getElementAddress(std::vector<unsigned long> leadingDimensions, void *mem) { return getChunkAddress(leadingDimensions, mem); }
 
-   private:
-    DataType dataType;
-    std::vector<unsigned long> dimensions;
-    unsigned long totalNumElements;
-    std::vector<unsigned long> stridePerDimension;
-
-    void construct() {
-        assert(!dimensions.empty());
-
-        totalNumElements = 1;
-        for (unsigned int i = 0; i < dimensions.size(); ++i)
-            totalNumElements *= dimensions[i];
-        assert(totalNumElements > 0);
-
-        for (int i = (int)dimensions.size() - 1; i >= 0; --i)
-            stridePerDimension.push_back(1);
-        for (int i = (int)dimensions.size() - 2; i >= 0; --i)
-            stridePerDimension[i] = stridePerDimension[i + 1] * dimensions[i + 1];
-    }
-
-    int getElementSizeInBytes() { return getElementSizeInBytes(dataType); }
-
     static int getElementSizeInBytes(DataType dataType) {
         switch (dataType) {
             case DataType::BOOLEAN:
@@ -300,6 +278,28 @@ class TensorDescriptor {
         }
         return 0;
     }
+
+   private:
+    DataType dataType;
+    std::vector<unsigned long> dimensions;
+    unsigned long totalNumElements;
+    std::vector<unsigned long> stridePerDimension;
+
+    void construct() {
+        assert(!dimensions.empty());
+
+        totalNumElements = 1;
+        for (unsigned int i = 0; i < dimensions.size(); ++i)
+            totalNumElements *= dimensions[i];
+        assert(totalNumElements > 0);
+
+        for (int i = (int)dimensions.size() - 1; i >= 0; --i)
+            stridePerDimension.push_back(1);
+        for (int i = (int)dimensions.size() - 2; i >= 0; --i)
+            stridePerDimension[i] = stridePerDimension[i + 1] * dimensions[i + 1];
+    }
+
+    int getElementSizeInBytes() { return getElementSizeInBytes(dataType); }
 };
 
 }  // namespace ThorImplementation

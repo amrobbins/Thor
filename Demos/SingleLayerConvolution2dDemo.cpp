@@ -21,16 +21,9 @@ using namespace Thor;
 using namespace std;
 
 int main() {
-    Network singleLayerConvolution2d = buildSingleLayerConvolution2d();
-
-    cudaDeviceReset();
-
     set<string> shardPaths;
 
-    // home/andrew/mnist/raw
-    // test_images.bin  test_labels.bin  train_images.bin  train_labels.bin
-    // These are raw 1 byte pixels of 28x28 images and raw 1 byte labels
-    // These have been put into a shard
+    Network singleLayerConvolution2d = buildSingleLayerConvolution2d();
 
     assert(boost::filesystem::exists("/PCIE_SSD/Mnist_1_of_1.shard"));
     shardPaths.insert("/PCIE_SSD/Mnist_1_of_1.shard");
@@ -40,7 +33,8 @@ int main() {
     std::shared_ptr<LocalBatchLoader> batchLoader = make_shared<LocalBatchLoader>(shardPaths, exampleDescriptor, labelDescriptor, 48);
     batchLoader->setDatasetName("MNIST");
 
-    std::shared_ptr<Sgd> sgd = Sgd::Builder().network(singleLayerConvolution2d).initialLearningRate(0.1).decay(0.4).momentum(0.0).build();
+    std::shared_ptr<Optimizer> sgd =
+        Sgd::Builder().network(singleLayerConvolution2d).initialLearningRate(0.1).decay(0.4).momentum(0.0).build();
 
     shared_ptr<Thor::LocalExecutor> executor = LocalExecutor::Builder()
                                                    .network(singleLayerConvolution2d)

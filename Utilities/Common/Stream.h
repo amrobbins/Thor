@@ -77,8 +77,7 @@ class Stream : private ReferenceCounted {
         ScopedGpu scopedGpu(gpuNum);
 
         Event event(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
-        cudaError_t cudaStatus = cudaEventRecord(event.getEvent(), cudaStream);
-        assert(cudaStatus == cudaSuccess);
+        event.record(*this);
 
         return event;
     }
@@ -116,11 +115,6 @@ class Stream : private ReferenceCounted {
         launchCleanUpHostFunctionArgs(std::move(args));
     }
 
-    cudaStream_t getStream() {
-        assert(!uninitialized());
-        return cudaStream;
-    }
-
     cudnnHandle_t getCudnnHandle() {
         assert(!uninitialized());
         mtx->lock();
@@ -145,6 +139,11 @@ class Stream : private ReferenceCounted {
         }
         mtx->unlock();
         return *cudnnHandle;
+    }
+
+    cudaStream_t getStream() {
+        assert(!uninitialized());
+        return cudaStream;
     }
 
     cublasHandle_t getCublasHandle() {

@@ -3,6 +3,8 @@
 using namespace ThorImplementation;
 using namespace std;
 
+static CuFileInitializer cufile_global_initializer;
+
 atomic<unsigned long> Tensor::nextInstanceId(1);
 
 Tensor::Tensor() : ReferenceCounted() { usingExternallyManagedMemory = false; }
@@ -104,6 +106,62 @@ void Tensor::allocateMemory() {
     }
 }
 
+void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess fileAccessRequirement, bool createEmptyFile) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    if (!this->fileName.empty())
+        detachFile();
+    assert(this->fileName.empty());
+    this->fileName = fileName;
+
+    this->fileAccessRequirement = fileAccessRequirement;
+
+    int32_t o_flags = O_LARGEFILE;
+    if (fileAccessRequirement == FileAccess::READ_ONLY)
+        o_flags |= O_RDONLY;
+    else if (fileAccessRequirement == FileAccess::WRITE_ONLY)
+        o_flags |= O_WRONLY;
+    else
+        o_flags |= O_RDWR;
+    if (createEmptyFile)
+        o_flags |= O_CREAT | O_TRUNC;
+
+    // Get a handle to the file with the necessary flags
+    fileDescriptor = open(fileName.c_str(), o_flags);
+    if (fileDescriptor < 0) {
+        printf("Error opening file %s\n", fileName.c_str());
+        fflush(stdout);
+        assert(fileDescriptor > 0);
+    }
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        CUfileDescr_t cuFileDescriptor;
+        CUfileError_t cuFileError;
+        cuFileDescriptor.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
+        cuFileDescriptor.handle.fd = fileDescriptor;
+        cuFileError = cuFileHandleRegister(&gpuDirectStorageCuFileHandle, &cuFileDescriptor);
+        assert(cuFileError.err == CU_FILE_SUCCESS);
+    }
+
+    // GpuDirect Storage takes pointers to its parameters:
+    this->gpuDirectStorageFileOffset = fileOffset;
+    this->gpuDirectStorageSize = getArraySizeInBytes();
+}
+
+void Tensor::detachFile() {
+    if (fileName.empty()) {
+        return;
+    }
+
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        cuFileHandleDeregister(gpuDirectStorageCuFileHandle);
+    }
+
+    close(fileDescriptor);
+
+    fileName.clear();
+}
+
 void Tensor::copyObject(const Tensor &other) {
     *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
 
@@ -117,6 +175,8 @@ void Tensor::copyObject(const Tensor &other) {
 }
 
 void Tensor::destroy() {
+    detachFile();  // detachFile is a NOP when there is no attached file
+
     if (usingExternallyManagedMemory) {
         // NOP
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
@@ -126,10 +186,11 @@ void Tensor::destroy() {
             printf("cuda status %d\n", cudaStatus);
             fflush(stdout);
         }
-
         assert(cudaStatus == cudaSuccess);
+
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(placement.getDeviceNum());
+        ScopedGpu scopedGpu(getPlacement().getDeviceNum());
+
         cudaError_t cudaStatus = cudaFree(mem);
         assert(cudaStatus == cudaSuccess);
     } else {
@@ -305,6 +366,10 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
 // Otherwise stream may be on either device
 void Tensor::moveFromAsync(Tensor source, Stream stream) {
     assert(!uninitialized());
+    assert(getPlacement() == TensorPlacement::MemDevices::CPU || getPlacement() == TensorPlacement::MemDevices::GPU);
+    assert(!fileName.empty());
+    assert(fileAccessRequirement != FileAccess::READ_ONLY);
+
     vector<int> devicesInvolved;
     if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
         devicesInvolved.push_back(source.getPlacement().getDeviceNum());
@@ -313,6 +378,172 @@ void Tensor::moveFromAsync(Tensor source, Stream stream) {
     if (!devicesInvolved.empty())
         assert(stream.getGpuNum() == devicesInvolved[0] || (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsync(source, stream, false);
+}
+
+struct CheckIoBytesParams : HostFunctionArgsBase {
+    CheckIoBytesParams(const ssize_t expectedBytes, const ssize_t *actualBytes) : expectedBytes(expectedBytes), actualBytes(actualBytes) {}
+    const ssize_t expectedBytes;
+    const ssize_t *actualBytes;
+};
+
+void checkBytesIoOp(void *params) {
+    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
+    assert(baseParams != nullptr);
+    CheckIoBytesParams *checkIoBytesParams = dynamic_cast<CheckIoBytesParams *>(baseParams);
+    assert(checkIoBytesParams != nullptr);
+
+    if (*(checkIoBytesParams->actualBytes) != checkIoBytesParams->expectedBytes) {
+        string errorString;
+        errorString = "GpuDirect Storage transfer initiated to tranfer " + to_string(checkIoBytesParams->expectedBytes) +
+                      " bytes, but gpuDirectStorage reported that it transferred " + to_string(*(checkIoBytesParams->actualBytes)) +
+                      " bytes.";
+        // FIXME: This is thrown by a worker thread. Does it need to put the exception into a sync queue for the main thread?
+        throw runtime_error(errorString.c_str());
+    }
+}
+
+struct PerformReadParams : HostFunctionArgsBase {
+    PerformReadParams(void *memPtr, size_t totalBytesToRead, const string &fileName, const off_t fileOffset, const int32_t fileDescriptor)
+        : memPtr(memPtr), totalBytesToRead(totalBytesToRead), fileName(fileName), fileOffset(fileOffset), fileDescriptor(fileDescriptor) {}
+    const void *memPtr;
+    const size_t totalBytesToRead;
+    const string fileName;
+    const off_t fileOffset;
+    const int32_t fileDescriptor;
+};
+
+void performRead(void *params) {
+    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
+    assert(baseParams != nullptr);
+    PerformReadParams *performReadParams = dynamic_cast<PerformReadParams *>(baseParams);
+    assert(performReadParams != nullptr);
+
+    const void *memPtr = performReadParams->memPtr;
+    const size_t totalBytesToRead = performReadParams->totalBytesToRead;
+    const string fileName = performReadParams->fileName;
+    const off_t fileOffset = performReadParams->fileOffset;
+    const int32_t fileDescriptor = performReadParams->fileDescriptor;
+
+    ssize_t bytesRead = 0;
+    size_t bytesLeftToRead = totalBytesToRead;
+    if (lseek(fileDescriptor, fileOffset, SEEK_SET) < 0) {
+        string errorString = "Error seeking to " + to_string(fileOffset) + " in file " + fileName;
+        throw runtime_error(errorString);
+    }
+
+    uint8_t *runningMemPtr = (uint8_t *)memPtr;
+    while (bytesLeftToRead > 0) {
+        bytesRead = read(fileDescriptor, runningMemPtr, bytesLeftToRead);
+
+        if (bytesRead <= 0 || (size_t)bytesRead > bytesLeftToRead) {
+            close(fileDescriptor);
+            string errorString = "read failed for file " + fileName + ", requesting " + to_string(bytesLeftToRead) + " bytes at offset " +
+                                 to_string(totalBytesToRead - bytesLeftToRead) + ".  bytesRead value " + to_string(bytesRead);
+            throw runtime_error(errorString);
+        }
+
+        bytesLeftToRead -= bytesRead;
+        runningMemPtr += bytesRead;
+    }
+}
+
+struct PerformWriteParams : HostFunctionArgsBase {
+    PerformWriteParams(void *memPtr, size_t totalBytesToWrite, const string &fileName, const off_t fileOffset, const int32_t fileDescriptor)
+        : memPtr(memPtr),
+          totalBytesToWrite(totalBytesToWrite),
+          fileName(fileName),
+          fileOffset(fileOffset),
+          fileDescriptor(fileDescriptor) {}
+    const void *memPtr;
+    const size_t totalBytesToWrite;
+    const string fileName;
+    const off_t fileOffset;
+    const int32_t fileDescriptor;
+};
+
+void performWrite(void *params) {
+    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
+    assert(baseParams != nullptr);
+    PerformWriteParams *performWriteParams = dynamic_cast<PerformWriteParams *>(baseParams);
+    assert(performWriteParams != nullptr);
+
+    const void *memPtr = performWriteParams->memPtr;
+    const size_t totalBytesToWrite = performWriteParams->totalBytesToWrite;
+    const string fileName = performWriteParams->fileName;
+    const off_t fileOffset = performWriteParams->fileOffset;
+    const int32_t fileDescriptor = performWriteParams->fileDescriptor;
+
+    ssize_t bytesWritten = 0;
+    size_t bytesLeftToWrite = totalBytesToWrite;
+    if (lseek(fileDescriptor, fileOffset, SEEK_SET) < 0) {
+        string errorString = "Error seeking to " + to_string(fileOffset) + " in file " + fileName;
+        throw runtime_error(errorString);
+    }
+
+    uint8_t *runningMemPtr = (uint8_t *)memPtr;
+    while (bytesLeftToWrite > 0) {
+        bytesWritten = write(fileDescriptor, runningMemPtr, bytesLeftToWrite);
+
+        if (bytesWritten <= 0 || (size_t)bytesWritten > bytesLeftToWrite) {
+            close(fileDescriptor);
+            string errorString = "write failed for file " + fileName + ", requesting " + to_string(bytesLeftToWrite) + " bytes at offset " +
+                                 to_string(totalBytesToWrite - bytesLeftToWrite) + ".  bytesWritten value " + to_string(bytesWritten);
+            throw runtime_error(errorString);
+        }
+
+        bytesLeftToWrite -= bytesWritten;
+        runningMemPtr += bytesWritten;
+    }
+}
+
+void Tensor::loadFromFile(Stream stream) {
+    assert(!uninitialized());
+    assert(getPlacement() == TensorPlacement::MemDevices::CPU || getPlacement() == TensorPlacement::MemDevices::GPU);
+    assert(!fileName.empty());
+    assert(fileAccessRequirement != FileAccess::WRITE_ONLY);
+
+    if (getPlacement() == TensorPlacement::MemDevices::GPU) {
+        CUfileError_t cuFileError;
+        cuFileError = cuFileReadAsync(gpuDirectStorageCuFileHandle,
+                                      getMemPtr(),
+                                      &gpuDirectStorageSize,
+                                      &gpuDirectStorageFileOffset,
+                                      &gpuDirectStorageBufOffset,
+                                      &gpuDirectStorageBytesAccessed,
+                                      stream);
+        assert(cuFileError.err == CU_FILE_SUCCESS);
+        std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
+        stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
+    } else {
+        std::unique_ptr<HostFunctionArgsBase> args(
+            new PerformReadParams(getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor));
+        stream.enqueueHostFunction(performRead, std::move(args));
+    }
+}
+
+void Tensor::dumpToFile(Stream stream) {
+    assert(!uninitialized());
+    assert(getPlacement() == TensorPlacement::MemDevices::CPU || getPlacement() == TensorPlacement::MemDevices::GPU);
+    assert(!fileName.empty());
+    assert(fileAccessRequirement != FileAccess::READ_ONLY);
+
+    if (getPlacement() == TensorPlacement::MemDevices::GPU) {
+        CUfileError_t cuFileError;
+        cuFileError = cuFileWriteAsync(gpuDirectStorageCuFileHandle,
+                                       getMemPtr(),
+                                       &gpuDirectStorageSize,
+                                       &gpuDirectStorageFileOffset,
+                                       &gpuDirectStorageBufOffset,
+                                       &gpuDirectStorageBytesAccessed,
+                                       stream);
+        assert(cuFileError.err == CU_FILE_SUCCESS);
+        std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
+        stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
+    } else {
+        std::unique_ptr<HostFunctionArgsBase> args(
+            new PerformWriteParams(getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor));
+        stream.enqueueHostFunction(performWrite, std::move(args));
+    }
 }
 
 TensorDescriptor Tensor::getDescriptor() {
@@ -651,7 +882,7 @@ void fillCpuRandom(void *data) {
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -663,7 +894,7 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -678,7 +909,7 @@ void fillCpuRandom(void *data) {
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -690,7 +921,7 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -700,24 +931,14 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::INT8) {
         int8_t *mem = tensor.getMemPtr<int8_t>();
-        if (maxValue > 0) {
-            // integer rounding (truncation) rounds away from maxValue in this case
-            if (maxValue == int32_t(maxValue))
-                maxValue += 0.9999999;
-        }
-        if (minValue < 0) {
-            // integer rounding (truncation) rounds away from minValue in this case
-            if (minValue == int32_t(minValue))
-                minValue -= 0.9999999;
-        }
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<int16_t> dis(minValue, maxValue + 1);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -727,9 +948,9 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<int16_t> dis(minValue, maxValue + 1);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (int8_t)dis(gen);
@@ -737,24 +958,14 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::INT16) {
         int16_t *mem = tensor.getMemPtr<int16_t>();
-        if (maxValue > 0) {
-            // integer rounding (truncation) rounds away from maxValue in this case
-            if (maxValue == int32_t(maxValue))
-                maxValue += 0.9999999;
-        }
-        if (minValue < 0) {
-            // integer rounding (truncation) rounds away from minValue in this case
-            if (minValue == int32_t(minValue))
-                minValue -= 0.9999999;
-        }
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<int32_t> dis(minValue, maxValue + 1);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -764,9 +975,9 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<int32_t> dis(minValue, maxValue + 1);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (int16_t)dis(gen);
@@ -774,24 +985,14 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::INT32) {
         int32_t *mem = tensor.getMemPtr<int32_t>();
-        if (maxValue > 0) {
-            // integer rounding (truncation) rounds away from maxValue in this case
-            if (maxValue == int32_t(maxValue))
-                maxValue += 0.9999999;
-        }
-        if (minValue < 0) {
-            // integer rounding (truncation) rounds away from minValue in this case
-            if (minValue == int32_t(minValue))
-                minValue -= 0.9999999;
-        }
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<int64_t> dis(minValue, maxValue + 1);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -801,9 +1002,9 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<int64_t> dis(minValue, maxValue + 1);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (int32_t)dis(gen);
@@ -811,16 +1012,14 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::UINT8) {
         uint8_t *mem = tensor.getMemPtr<uint8_t>();
-        if (maxValue == uint32_t(maxValue))
-            maxValue += 0.9999999;
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<uint16_t> dis(minValue, maxValue + 1);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -830,9 +1029,9 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<uint16_t> dis(minValue, maxValue + 1);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint8_t)dis(gen);
@@ -840,16 +1039,14 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::UINT16) {
         uint16_t *mem = tensor.getMemPtr<uint16_t>();
-        if (maxValue == uint32_t(maxValue))
-            maxValue += 0.9999999;
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<uint32_t> dis(minValue, maxValue + 1);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -859,9 +1056,9 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<uint32_t> dis(minValue, maxValue + 1);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint16_t)dis(gen);
@@ -869,16 +1066,14 @@ void fillCpuRandom(void *data) {
         }
     } else if (dataType == TensorDescriptor::DataType::UINT32) {
         uint32_t *mem = tensor.getMemPtr<uint32_t>();
-        if (maxValue == uint32_t(maxValue))
-            maxValue += 0.9999999;
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<uint64_t> dis(minValue, maxValue + 1);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -888,26 +1083,24 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<uint64_t> dis(minValue, maxValue + 1);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint32_t)dis(gen);
             }
         }
     } else if (dataType == TensorDescriptor::DataType::BOOLEAN) {
-        minValue = 0;
-        maxValue = 1.9999999;
         bool *mem = tensor.getMemPtr<bool>();
         if (numProcs > 1) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<uint8_t> dis(0, 2);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -917,17 +1110,15 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<uint8_t> dis(0, 2);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (bool)dis(gen);
             }
         }
     } else if (dataType == TensorDescriptor::DataType::PACKED_BOOLEAN) {
-        minValue = 0;
-        maxValue = 255.9999999;
         numElements = (numElements + 7) / 8;
         const uint32_t numProcs = max(min((uint64_t)omp_get_num_procs(), numElements / 500000), uint64_t(1));
         const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
@@ -938,9 +1129,9 @@ void fillCpuRandom(void *data) {
             {
                 random_device rd;
                 hash<thread::id> hasher;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
                 mt19937 gen(seed);
-                uniform_real_distribution<double> dis(minValue, maxValue);
+                uniform_int_distribution<uint16_t> dis(0, 256);
 
 #pragma omp for schedule(static, elementsPerThread)
                 for (uint64_t i = 0; i < numElements; ++i) {
@@ -950,9 +1141,9 @@ void fillCpuRandom(void *data) {
         } else {
             random_device rd;
             hash<thread::id> hasher;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + hasher(this_thread::get_id());
             mt19937 gen(seed);
-            uniform_real_distribution<double> dis(minValue, maxValue);
+            uniform_int_distribution<uint16_t> dis(0, 256);
 
             for (uint64_t i = 0; i < numElements; ++i) {
                 mem[i] = (uint8_t)dis(gen);
