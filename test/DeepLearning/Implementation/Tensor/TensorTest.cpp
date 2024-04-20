@@ -16,7 +16,6 @@
 using namespace ThorImplementation;
 using namespace std;
 
-/*
 TEST(Tensor, Copies) {
     srand(time(nullptr));
 
@@ -5328,7 +5327,6 @@ TEST(Tensor, ClearAsyncGpu) {
         }
     }
 }
-*/
 
 unsigned long long getFreeMemoryLinux() {
     std::string token;
@@ -5379,7 +5377,6 @@ TEST(Tensor, loadFromFileCpu) {
             dataType = TensorDescriptor::DataType::INT32;
         else
             dataType = TensorDescriptor::DataType::INT64;
-        printf("dt %d\n", dt);
 
         uint32_t numDimensions = (rand() % 5) + 1;
         uint64_t maxStageSize;
@@ -5439,7 +5436,7 @@ TEST(Tensor, loadFromFileCpu) {
         try {
             tensor.loadFromFile(stream);
             stream.synchronize();
-        } catch (runtime_error& err) {
+        } catch (runtime_error &err) {
             printf("runtime_error: %s\n", err.what());
             ASSERT_TRUE(false);
         }
@@ -5447,8 +5444,8 @@ TEST(Tensor, loadFromFileCpu) {
         remove(testFileName);
 
         // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t* tensorMem = (uint8_t*)tensor.getMemPtr();
-        const uint8_t* dataTensorMem = (uint8_t*)dataTensor.getMemPtr();
+        const uint8_t *tensorMem = (uint8_t *)tensor.getMemPtr();
+        const uint8_t *dataTensorMem = (uint8_t *)dataTensor.getMemPtr();
         for (uint64_t i = 0; i < dataTensor.getArraySizeInBytes(); ++i) {
             if (i + fileOffset >= dataTensor.getArraySizeInBytes()) {
                 EXPECT_EQ(suffixValue, tensorMem[i]);
@@ -5489,7 +5486,6 @@ TEST(Tensor, loadFromFileGpu) {
             dataType = TensorDescriptor::DataType::INT32;
         else
             dataType = TensorDescriptor::DataType::INT64;
-        printf("dt %d\n", dt);
 
         uint32_t numDimensions = (rand() % 5) + 1;
         uint64_t maxStageSize;
@@ -5551,7 +5547,7 @@ TEST(Tensor, loadFromFileGpu) {
             tensor.loadFromFile(stream);
             tensor_h.copyFromAsync(tensor, stream);
             stream.synchronize();
-        } catch (runtime_error& err) {
+        } catch (runtime_error &err) {
             printf("runtime_error: %s\n", err.what());
             ASSERT_TRUE(false);
         }
@@ -5559,8 +5555,8 @@ TEST(Tensor, loadFromFileGpu) {
         remove(testFileName);
 
         // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t* tensorMem = (uint8_t*)tensor_h.getMemPtr();
-        const uint8_t* dataTensorMem = (uint8_t*)dataTensor.getMemPtr();
+        const uint8_t *tensorMem = (uint8_t *)tensor_h.getMemPtr();
+        const uint8_t *dataTensorMem = (uint8_t *)dataTensor.getMemPtr();
         for (uint64_t i = 0; i < dataTensor.getArraySizeInBytes(); ++i) {
             if (i + fileOffset >= dataTensor.getArraySizeInBytes()) {
                 EXPECT_EQ(suffixValue, tensorMem[i]);
@@ -5571,7 +5567,7 @@ TEST(Tensor, loadFromFileGpu) {
     }
 }
 
-void printFileContents(const std::string& filename) {
+void printFileContents(const std::string &filename) {
     // Open the file in binary mode to read bytes
     std::ifstream file(filename, std::ios::binary);
     if (!file.is_open()) {
@@ -5582,7 +5578,7 @@ void printFileContents(const std::string& filename) {
     // Read and print each byte as an unsigned integer
     uint8_t byte;
     size_t index = 0;
-    while (file.read(reinterpret_cast<char*>(&byte), sizeof(byte))) {
+    while (file.read(reinterpret_cast<char *>(&byte), sizeof(byte))) {
         printf("%zu: %u ", index++, static_cast<unsigned int>(byte));
     }
     printf("\n");
@@ -5591,7 +5587,7 @@ void printFileContents(const std::string& filename) {
 }
 
 void printTensorContents(Tensor tensor) {
-    uint8_t* mem = (uint8_t*)tensor.getMemPtr();
+    uint8_t *mem = (uint8_t *)tensor.getMemPtr();
     uint64_t numBytes = tensor.getArraySizeInBytes();
     for (uint64_t i = 0; i < numBytes; ++i)
         printf("%zu: %u ", i, mem[i]);
@@ -5627,7 +5623,6 @@ TEST(Tensor, writeToFileCpu) {
             dataType = TensorDescriptor::DataType::INT32;
         else
             dataType = TensorDescriptor::DataType::INT64;
-        printf("dt %d\n", dt);
 
         uint32_t numDimensions = (rand() % 5) + 1;
         uint64_t maxStageSize;
@@ -5681,7 +5676,7 @@ TEST(Tensor, writeToFileCpu) {
             tensor.dumpToFile(stream);
             fileTensor.loadFromFile(stream);
             stream.synchronize();
-        } catch (runtime_error& err) {
+        } catch (runtime_error &err) {
             printf("runtime_error: %s\n", err.what());
             ASSERT_TRUE(false);
         }
@@ -5689,8 +5684,8 @@ TEST(Tensor, writeToFileCpu) {
         remove(testFileName);
 
         // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t* tensorMem = (uint8_t*)tensor.getMemPtr();
-        const uint8_t* fileTensorMem = (uint8_t*)fileTensor.getMemPtr();
+        const uint8_t *tensorMem = (uint8_t *)tensor.getMemPtr();
+        const uint8_t *fileTensorMem = (uint8_t *)fileTensor.getMemPtr();
         for (uint64_t i = 0; i < tensor.getArraySizeInBytes(); ++i) {
             if (fileTensorMem[i] != tensorMem[i])
                 printf("%ld\n", i);
@@ -5729,7 +5724,6 @@ TEST(Tensor, writeToFileGpu) {
             dataType = TensorDescriptor::DataType::INT32;
         else
             dataType = TensorDescriptor::DataType::INT64;
-        printf("dt %d\n", dt);
 
         uint32_t numDimensions = (rand() % 5) + 1;
         uint64_t maxStageSize;
@@ -5785,7 +5779,7 @@ TEST(Tensor, writeToFileGpu) {
             tensor.dumpToFile(stream);
             fileTensor.loadFromFile(stream);
             stream.synchronize();
-        } catch (runtime_error& err) {
+        } catch (runtime_error &err) {
             printf("runtime_error: %s\n", err.what());
             ASSERT_TRUE(false);
         }
@@ -5793,8 +5787,8 @@ TEST(Tensor, writeToFileGpu) {
         remove(testFileName);
 
         // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t* tensorMem = (uint8_t*)tensor_h.getMemPtr();
-        const uint8_t* fileTensorMem = (uint8_t*)fileTensor.getMemPtr();
+        const uint8_t *tensorMem = (uint8_t *)tensor_h.getMemPtr();
+        const uint8_t *fileTensorMem = (uint8_t *)fileTensor.getMemPtr();
         for (uint64_t i = 0; i < tensor.getArraySizeInBytes(); ++i) {
             if (fileTensorMem[i] != tensorMem[i])
                 printf("%ld\n", i);
@@ -5803,7 +5797,7 @@ TEST(Tensor, writeToFileGpu) {
     }
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
 }

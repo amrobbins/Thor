@@ -45,7 +45,7 @@ class WorkQueue {
     bool tryPop(OutputType &output);
     bool tryPeek(OutputType &output);
     bool tryPushAll(std::deque<InputType> &input);
-    bool tryPopAll(std::vector<OutputType> &output);
+    bool tryPopAll(std::vector<OutputType> &output, uint32_t maxToPop = 0);
 
     // Nonblocking
     bool isFull();         // true when tryPush will fail
@@ -408,19 +408,25 @@ bool WorkQueue<InputType, OutputType>::tryPop(OutputType &output) {
 }
 
 template <class InputType, class OutputType>
-bool WorkQueue<InputType, OutputType>::tryPopAll(std::vector<OutputType> &output) {
+bool WorkQueue<InputType, OutputType>::tryPopAll(std::vector<OutputType> &output, uint32_t maxToPop) {
     std::unique_lock<std::mutex> lck(mtx);
 
     if (!queueOpen)
         return false;
 
     uint32_t numNotifications = 0;
+    uint32_t numPops = 0;
     while (!outputEmpty && outputReady[outputHead]) {
         output.push_back(outputStorage[outputHead]);
         popOutputQueue();
         if (numThreadsWaitingForOutputQueueNonFull > numNotifications) {
             outputNotFull.notify_one();
             numNotifications += 1;
+        }
+        if (maxToPop != 0) {
+            numPops += 1;
+            if (numPops == maxToPop)
+                break;
         }
     }
     return true;

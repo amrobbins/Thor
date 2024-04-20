@@ -166,7 +166,7 @@ Network buildAlexNet() {
 
     // FIXME: put back once divide is implemented
     // imagesInput = Divide::Builder.network(alexNet).numerator(imagesInput).denominator({255});
-    constexpr uint32_t NUM_CLASSES = 10;
+    constexpr uint32_t NUM_CLASSES = 1000;
 
     Tensor topPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
     Tensor bottomPathTensor = buildAlexnetConvolutionalPath(alexNet, imagesInput);
