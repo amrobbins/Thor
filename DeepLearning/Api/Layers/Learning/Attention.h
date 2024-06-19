@@ -1,22 +1,61 @@
+/* WIP
 #pragma once
 
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "Utilities/TensorOperations/DeepLearning/Add1dBias.h"
-#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
-#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include <memory>
 
 namespace ThorImplementation {
 
-class FullyConnected : public TrainableWeightsBiasesLayer {
+class Attention : public TrainableWeightsBiasesLayer {
    public:
-    virtual ~FullyConnected() {}
+    enum class QUERY_MAPPING { ONE_TO_ONE = 57, ALL_TO_ONE = 58 };
 
-    FullyConnected(const uint32_t numOutputFeatures, const bool hasBias, int64_t stampedId = -1)
-        : TrainableWeightsBiasesLayer(hasBias, stampedId), numOutputFeatures(numOutputFeatures) {}
+    virtual ~Attention() {}
 
-    FullyConnected(SharedWeightsPackage sharedWeightsPackage, int64_t stampedId = -1)
+    Attention(const uint32_t numHeads,
+              const bool hasBias,
+              const int32_t qSize,
+              const int32_t kSize,
+              const int32_t vSize,
+              const int32_t qProjSize,
+              const int32_t kProjSize,
+              const int32_t vProjSize,
+              const int32_t oProjSize,
+              const int32_t qoMaxSeqLength,
+              const int32_t kvMaxSeqLength,
+              const int32_t maxBatchSize,
+              const int32_t maxBeamSize,
+              const QUERY_MAPPING queryMapping = QUERY_MAPPING::ONE_TO_ONE,
+              const bool useAttentionDropOut = false,
+              const float attentionDropOutProbability = 0.0f,
+              const bool usePostAttentionDropOut = false,
+              const float postAttentionDropOutProbability = 0.0f,
+              const int64_t stampedId = -1)
+        : TrainableWeightsBiasesLayer(hasBias, stampedId), numOutputFeatures(numOutputFeatures) {
+        this->numHeads = numHeads;
+        this->hasBias = hasBias;
+        this->qSize = qSize;
+        this->kSize = kSize;
+        this->vSize = vSize;
+        this->qProjSize = qProjSize;
+        this->kProjSize = kProjSize;
+        this->vProjSize = vProjSize;
+        this->oProjSize = oProjSize;
+        this->qoMaxSeqLength = qoMaxSeqLength;
+        this->kvMaxSeqLength = kvMaxSeqLength;
+        this->maxBatchSize = maxBatchSize;
+        this->maxBeamSize = maxBeamSize;
+        this->queryMapping = queryMapping;
+        this->useAttentionDropOut = useAttentionDropOut;
+        this->attentionDropOutProbability = attentionDropOutProbability;
+        this->usePostAttentionDropOut = usePostAttentionDropOut;
+        this->postAttentionDropOutProbability = postAttentionDropOutProbability;
+    }
+
+    Attention(SharedWeightsPackage sharedWeightsPackage, int64_t stampedId = -1)
         : TrainableWeightsBiasesLayer(sharedWeightsPackage, stampedId),
           numOutputFeatures(sharedWeightsPackage.weights.getDescriptor().getDimensions()[1]) {}
 
@@ -55,53 +94,89 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
         ScopedGpu scopedGpu(gpuNum);
 
+        cudnnStatus_t cudnnStatus;
         batchSize = featureInputs[0].get().getDescriptor().getDimensions()[0];
         numInputFeatures = featureInputs[0].get().getDescriptor().getDimensions()[1];
 
-        CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-            gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
+        // FIXME: member objects:
+        cudnnAttnDescriptor_t cudnnAttentionDescriptor;
+        cudnnDropoutDescriptor_t attentionDropOutDescriptor;
+        cudnnDropoutDescriptor_t postAttentionDropOutDescriptor,
 
-        // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
-        // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
-        bool kernelWillRunOnGpu;
-        uint64_t workspaceForwardSizeInBytes =
-            CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
-                                                                                   batchSize,
-                                                                                   numInputFeatures,
-                                                                                   numInputFeatures,
-                                                                                   numOutputFeatures,
-                                                                                   false,
-                                                                                   false,
-                                                                                   TensorDescriptor::DataType::FP16,
-                                                                                   kernelWillRunOnGpu);
-        assert(kernelWillRunOnGpu);
-        if (workspaceForwardSizeInBytes > 0) {
-            std::vector<unsigned long> workspaceDimensions;
-            workspaceDimensions.push_back(workspaceForwardSizeInBytes);
-            TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, workspaceDimensions);
-            workspaceForward = Tensor(featureInputs.front().get().getPlacement(), workspaceDescriptor);
+            cudnnStatus = cudnnCreateAttnDescriptor(&cudnnAttentionDescriptor);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        uint32_t attentionMode = 0;
+        if (this->queryMapping = QUERY_MAPPING::ALL_TO_ONE)
+            attentionMode |= CUDNN_ATTN_QUERYMAP_ALL_TO_ONE;
+        else
+            attentionMode |= CUDNN_ATTN_QUERYMAP_ONE_TO_ONE;
+        if (hasBias)
+            attentionMode |= CUDNN_ATTN_ENABLE_PROJ_BIASES;
+        else
+            attentionMode |= CUDNN_ATTN_DISABLE_PROJ_BIASES;
+        random_device rd;
+        if (useAttentionDropOut) {
+            cudnnStatus = cudnnCreateDropoutDescriptor(&attentionDropOutDescriptor);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            size_t randomStateBytes = DropOut::getRandomStateSizeInBytes(streams[0].getCudnnHandle());
+            attentionRandomState =
+                Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
+
+            uint64_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000;
+            seed = Tensor::getThreadIdHash64(seed);
+            cudnnStatus = cudnnSetDropoutDescriptor(attentionDropOutDescriptor,
+                                                    streams[0].getCudnnHandle(),
+                                                    attentionDropOutProbability,
+                                                    attentionRandomState.getMemPtr(),
+                                                    randomStateBytes,
+                                                    seed);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            DropOut::getReservedSpaceSizeInBytes(featureInputs[0].get().getDimensions(), featureInputs[0].get().getDataType());
+            attentionDropOutReserveSpace =
+                Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
+        }
+        if (usePostAttentionDropOut) {
+            cudnnStatus = cudnnCreateDropoutDescriptor(&postAttentionDropOutDescriptor);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            size_t randomStateBytes = DropOut::getRandomStateSizeInBytes(streams[0].getCudnnHandle());
+            postAttentionRandomState =
+                Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {randomStateBytes}));
+
+            uint64_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000;
+            seed = Tensor::getThreadIdHash64(seed);
+            cudnnStatus = cudnnSetDropoutDescriptor(postAttentionDropOutDescriptor,
+                                                    streams[0].getCudnnHandle(),
+                                                    postAttentionDropOutProbability,
+                                                    postAttentionRandomState.getMemPtr(),
+                                                    randomStateBytes,
+                                                    seed);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            DropOut::getReservedSpaceSizeInBytes(featureInputs[0].get().getDimensions(), featureInputs[0].get().getDataType());
+            postAttentionDropOutReserveSpace =
+                Tensor(featureInputs[0].get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
         }
 
-        if (!isBackPropStub()) {
-            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
-                gpuNum, batchSize, numOutputFeatures, numInputFeatures, numOutputFeatures, false, true, TensorDescriptor::DataType::FP16);
-
-            uint64_t workspaceBackwardDataSizeInBytes =
-                CublasMatrixMultiply::instance().getMatrixMultiplyWorkspaceSizeInBytes(gpuNum,
-                                                                                       batchSize,
-                                                                                       numOutputFeatures,
-                                                                                       numInputFeatures,
-                                                                                       numOutputFeatures,
-                                                                                       false,
-                                                                                       true,
-                                                                                       TensorDescriptor::DataType::FP16,
-                                                                                       kernelWillRunOnGpu);
-            assert(kernelWillRunOnGpu);
-
-            if (workspaceBackwardDataSizeInBytes > 0)
-                workspaceBackwardData = Tensor(featureInputs.front().get().getPlacement(),
-                                               TensorDescriptor(TensorDescriptor::DataType::UINT8, {workspaceBackwardDataSizeInBytes}));
-        }
+        cudnnStatus = cudnnSetAttnDescriptor(cudnnAttentionDescriptor,
+                                             attentionMode,
+                                             numHeads,
+                                             1.0,
+                                             CUDNN_DATA_HALF,
+                                             CUDNN_DATA_HALF,
+                                             CUDNN_TENSOR_OP_MATH,
+                                             useAttentionDropOut ? attentionDropOutDescriptor : nullptr,
+                                             usePostAttentionDropOut ? postAttentionDropOutDescriptor : nullptr,
+                                             this->qSize,
+                                             this->kSize,
+                                             this->vSize,
+                                             this->qProjSize,
+                                             this->kProjSize,
+                                             this->vProjSize,
+                                             this->oProjSize,
+                                             this->qoMaxSeqLength,
+                                             this->kvMaxSeqLength,
+                                             this->maxBatchSize,
+                                             this->maxBeamSize);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         if (!isInferenceOnly()) {
             CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
@@ -126,7 +201,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
 
         if (hasBias) {
-            // The following two are both used for cudnnAddTensor
             createFeatureOutputCudnnTensorDescriptor();
             createBiasesCudnnTensorDescriptor();
         }
@@ -398,3 +472,4 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 };
 
 }  // namespace ThorImplementation
+*/

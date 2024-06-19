@@ -72,9 +72,10 @@ class TensorFanout : public MultiConnectionLayer {
             delete[] errorInputArray;
         }
 
-        // When there is only one layer that backpropagates (for example if the fanout is just to connect the tensor to a network output),
+        // When there is only one layer that back propagates (for example if the fanout is just to connect the tensor to a network output),
         // then the errorInput replaces the errorOutput so that back prop is a nop.
         // When there is no layer that back propagates, then prune the existing back prop path
+        // The third option is that there are multiple present errorInputs, in that case they will be summed together and passed as errorOut
         if (numPresentTensors(errorInputs) == 1 && numPresentTensors(errorOutputs) == 1) {
             // Fuse
             assert(previousLayers[0].isPresent());
@@ -87,7 +88,6 @@ class TensorFanout : public MultiConnectionLayer {
             previousLayers[0].get()->replaceErrorInput(errorOutputs[0], newErrorOutput);
             errorOutputs[0] = newErrorOutput;
         }
-        // The third option is that there are multiple present errorInputs, in that case they will be summed together and passed as errorOut
     }
 
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {

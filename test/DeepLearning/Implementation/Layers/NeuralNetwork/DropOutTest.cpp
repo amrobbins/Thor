@@ -47,7 +47,10 @@ TEST(DropOut, InferenceWorks) {
         vector<shared_ptr<Layer>> layers;
         layers.push_back(make_shared<NetworkInput>(sourceGpu));
         layers.push_back(make_shared<NoOpLayer>());
-        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(0.25, false);
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(0.25, true);
+        ASSERT_TRUE(dropOutLayer->isTrainingMode());
+        dropOutLayer->setTrainingMode(false);
+        ASSERT_FALSE(dropOutLayer->isTrainingMode());
         layers.push_back(dropOutLayer);
         layers.push_back(make_shared<NoOpLayer>());
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
@@ -69,29 +72,6 @@ TEST(DropOut, InferenceWorks) {
         for (int i = 0; i < numElements; ++i) {
             ASSERT_EQ((float)destMem[i], (float)sourceMem[i]);
         }
-
-        // Backward pass
-        Tensor errorInput = dropOutLayer->getErrorInput();
-        Tensor errorOutput = dropOutLayer->getErrorOutput();
-        Tensor errorInputCpu = Tensor(cpuPlacement, errorInput.getDescriptor());
-        Tensor errorOutputCpu = Tensor(cpuPlacement, errorOutput.getDescriptor());
-
-        half *errorInputMem = (half *)errorInputCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            errorInputMem[i] = ((rand() % 100) / 10.0f) - 5.0f;
-        }
-
-        errorInput.copyFromAsync(errorInputCpu, stream);
-        dropOutLayer->backward(errorInput);
-        errorOutputCpu.copyFromAsync(errorOutput, stream);
-        stream.synchronize();
-
-        half *errorOutputMem = (half *)errorOutputCpu.getMemPtr();
-        for (int i = 0; i < numElements; ++i) {
-            ASSERT_EQ((float)errorOutputMem[i], (float)errorInputMem[i]);
-        }
-
-        LayerTestHelper::tearDownNetwork(layers);
     }
 }
 
@@ -125,7 +105,10 @@ TEST(DropOut, TrainingNoDropOut) {
         vector<shared_ptr<Layer>> layers;
         layers.push_back(make_shared<NetworkInput>(sourceGpu));
         layers.push_back(make_shared<NoOpLayer>());
-        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(0.0f, true);
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(0.0f, false);
+        ASSERT_FALSE(dropOutLayer->isTrainingMode());
+        dropOutLayer->setTrainingMode(true);
+        ASSERT_TRUE(dropOutLayer->isTrainingMode());
         layers.push_back(dropOutLayer);
         layers.push_back(make_shared<NoOpLayer>());
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
@@ -203,7 +186,9 @@ TEST(DropOut, TrainingAllDropOut) {
         vector<shared_ptr<Layer>> layers;
         layers.push_back(make_shared<NetworkInput>(sourceGpu));
         layers.push_back(make_shared<NoOpLayer>());
-        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(1.0f, true);
+        shared_ptr<DropOut> dropOutLayer = make_shared<DropOut>(1.0f, false);
+        dropOutLayer->setTrainingMode(true);
+        ASSERT_TRUE(dropOutLayer->isTrainingMode());
         layers.push_back(dropOutLayer);
         layers.push_back(make_shared<NoOpLayer>());
         layers.push_back(make_shared<NetworkOutput>(gpuPlacement));

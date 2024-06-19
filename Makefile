@@ -279,6 +279,7 @@ ALL_DEMOS =	build/Demos/AlexNetDemo \
 			build/Demos/SingleLayerFullyConnectedDemo \
 			build/Demos/SingleLayerConvolution2dDemo
 
+# FIXME: .so
 ML_DEV = libThor.a Thor.h
 
 

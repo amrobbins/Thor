@@ -112,7 +112,7 @@ class FullPeriodRandom {
         }
         assert(c < implementationPeriod);
 
-        // Use a different seed for X compared to the seed used for c.
+        // Use a different randomSeed for X compared to the randomSeed used for c.
         if (seedValue.isEmpty())
             seedValue = entropyRand();
 
