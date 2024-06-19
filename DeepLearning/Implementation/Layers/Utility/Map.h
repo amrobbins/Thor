@@ -20,7 +20,7 @@ class Map : public Layer {
     //
     // Note: if more than one instance of a mapping is wanted, all instances after the first need to be called as:
     // Map(mappingOfSourceTensorIntoDestTensor, sourceDimensions, existingInstance.getReverseMapping()) {
-    // This is because creating the backward pass mapping is a very heavy weight operation that only needs to be done once.
+    // This is because creating the backward pass mapping is a very heavy-weight operation that only needs to be done once.
     Map(Tensor mappingOfSourceTensorIntoDestTensor, std::vector<unsigned long> sourceDimensions) {
         setup(mappingOfSourceTensorIntoDestTensor, sourceDimensions);
         createBackwardPassMapping(mappingOfSourceTensorIntoDestTensor);

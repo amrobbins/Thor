@@ -7,7 +7,7 @@ using namespace std;
 atomic<uint64_t> Layer::nextId(2);
 
 mutex DropOut::mtx;
-uint64_t DropOut::seed = 0ul;
+uint64_t DropOut::randomSeed = 0ul;
 
 cudnnTensorDescriptor_t Layer::createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
                                                            TensorDescriptor::DataType dataType) {

@@ -19,16 +19,19 @@ class DropOut : public Layer {
    public:
     virtual ~DropOut() {}
 
-    void setTrainingMode(bool training) {
-        assert(running == false);
-        this->training = training;
-    }
+    void setTrainingMode(bool training) { this->training = training; }
 
     DropOut(float probabilityOfDroppingOut, bool training) {
         assert(probabilityOfDroppingOut >= 0.0f);
         assert(probabilityOfDroppingOut <= 1.0f);
         this->probabilityOfDroppingOut = probabilityOfDroppingOut;
         this->training = training;
+        randomSeed = Tensor::getThreadIdHash64(std::chrono::system_clock::now().time_since_epoch().count() * 10000000);
+    }
+
+    void seed(uint64_t seed) {
+        assert(!compiled);
+        this->randomSeed = seed;
     }
 
     static size_t getReservedSpaceSizeInBytes(std::vector<unsigned long> featureInputDimensions, TensorDescriptor::DataType dataType) {
@@ -72,15 +75,8 @@ class DropOut : public Layer {
 
         mtx.lock();
 
-        uint64_t longRand = 0;
-        for (int i = 0; i < 4; ++i) {
-            longRand |= (rand() & 0xFFFF);
-            longRand <<= 16;
-        }
-        seed += longRand;
-
         cudnnStatus = cudnnSetDropoutDescriptor(
-            dropoutDescriptor, stream.getCudnnHandle(), probabilityOfDroppingOut, randomState.getMemPtr(), randomStateBytes, seed);
+            dropoutDescriptor, stream.getCudnnHandle(), probabilityOfDroppingOut, randomState.getMemPtr(), randomStateBytes, randomSeed);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         mtx.unlock();
@@ -122,34 +118,31 @@ class DropOut : public Layer {
         if (errorOut.isEmpty())
             return;
         assert(errorIn.isPresent());
+        assert(training);
 
-        if (training) {
-            assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-            ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
+        assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        ScopedGpu scopedGpu(errorIn.get().getPlacement().getDeviceNum());
 
-            cudnnStatus_t cudnnStatus;
-            cudnnStatus = cudnnDropoutBackward(stream.getCudnnHandle(),
-                                               dropoutDescriptor,
-                                               cudnnTensorDescriptor,
-                                               errorIn.get().getMemPtr(),
-                                               cudnnTensorDescriptor,
-                                               errorOut.get().getMemPtr(),
-                                               reserveSpace.getMemPtr(),
-                                               reserveSpaceBytes);
-            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        } else {
-            errorOut.get().copyFromAsync(errorIn, stream);
-        }
+        cudnnStatus_t cudnnStatus;
+        cudnnStatus = cudnnDropoutBackward(stream.getCudnnHandle(),
+                                           dropoutDescriptor,
+                                           cudnnTensorDescriptor,
+                                           errorIn.get().getMemPtr(),
+                                           cudnnTensorDescriptor,
+                                           errorOut.get().getMemPtr(),
+                                           reserveSpace.getMemPtr(),
+                                           reserveSpaceBytes);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
     }
 
-    bool getTrainingMode(bool training) { return training; }
+    bool isTrainingMode() { return training; }
 
    private:
     float probabilityOfDroppingOut;
     bool training;
 
     static std::mutex mtx;
-    static uint64_t seed;
+    static uint64_t randomSeed;
 
     Tensor randomState;
     size_t randomStateBytes;

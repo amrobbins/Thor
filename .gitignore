@@ -2,6 +2,8 @@ build/
 libThor.a
 Thor.h
 token
+.clangd
+.idea/
 
 # Compiled source #
 ###################

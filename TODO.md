@@ -1,23 +1,30 @@
 # TODO:
 1. ADAM Optimizer - test and get working - done - get test to pass consistently.
-2. Mux and Demux -> 1 to N controlled by input tensor / N to 1 controlled by input tensor.
-3. Alexnet parity with Tensorflow on imagenet.
-4. Determine the optimal number of stamps per GPU. Note that this may be different for training and inference,
-    There may be additional inference-only stamps. 
+2. Alexnet learning rate parity with Tensorflow on imagenet.
+3. Create a kanban board with current priority items
 4. Save and load trained models - native save() and load() functions, also saveAsKeras() and loadFromKeras()
-5. reuse workspaces based on dependency graph, per stamp.
-   5. Use GPUDirect storage to save and load weights so that they don't need fit in CPU memory. Also for performance.
-   6. Tried but failed. The reason was that it was difficult to do this asynchronously via streams. Looks like they fixed this in cuda 12.2, so try again.
-   7. https://docs.nvidia.com/gpudirect-storage/design-guide/index.html
-   8. Done. Check if tests pass.
+   1. Weights saved in safetensors format. model saved in json, with SHA for integrity. Encryption optional.
+      2. For python API safetensors is a native API, for c++ api, bind with python to call from c++ side.
+6. Overhaul the build system, possibly using CMake
+5. Determine the optimal number of stamps per GPU. Note that this may be different for training and inference, will depend on batch size,
+      There may be additional inference-only stamps.
 9. Multi-Gpu support
-   1. Multiple stamps with accumulation.
-       1. Not that the current implementation updates the layers as they are added to the network so that their inputs and outputs remain correct after flattening multi-layers. However only single layers are added to the network and so it may be stamped as many times as desired.
-   2. Defer kernel selection due to mem requirements of workspace until logic that determines number of stamps
+    1. Multiple stamps with accumulation.
+        1. Note that the current implementation updates the layers as they are added to the network so that their inputs and outputs remain correct after flattening multi-layers. However only single layers are added to the network and so it may be stamped as many times as desired.
+    2. Defer kernel selection due to mem requirements of workspace until logic that determines number of stamps
+6. Support to deploy inference server (python: gunicorn running uvicorn workers, c++: something else) using trained model to run inference requests from a single server 
+4. Mux and Demux -> 1 to N controlled by input tensor / N to 1 controlled by input tensor.
+5. reuse workspaces based on dependency graph, per stamp.
+   6. Meaning if I have an FC layer and it needs 100 MB workspace for forward pass and a 75 MB workspace for backward pass, I only need the 100 MB workspace.
+   7. Also if I have FC layer 1 and it needs 100 MB workspace and I have FC Layer 2 and it needs 50 MB workspace and these are connected sequentially, I only need the 100 MB workspace.  
+      1. Use GPUDirect storage to save and load weights so that they don't need fit in CPU memory. Also for performance.
+      1. Done. Check if tests pass.
 2. Additional Losses
 4. mish activation function
+5. Kernel fusing step upon compiling network.
+   6. Note that if the network is being constructed for inference purposes we don't need to maintain the ability to compute backward gradients.
 5. Improve visualizer so that logging to the console is not cleared when run finishes.
-6. Overhaul the build system, possibly using CMake
+   6. The existing one probably goes away, it didn't come out as desired.
 7. CPU support for all layers
    1. https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2023-0/cblas-gemm-001.html
    2. https://oneapi-src.github.io/oneDNN/v0/index.html
@@ -43,16 +50,15 @@
 16. NN architecture drawing export
     1. support shading units to show tensor values given a particular training example
     2. There should be options to show the tensor into and out of say the activation, batch norm, etc or to collapse it and only show the last one
-17. Java Bindings - likely using BridJ - maybe not but using some library.
+17. Feature elimination using decision trees
 18. k-fold cross validation
-19. Feature elimination using decision trees
-20. GPU SVD support using nvidia library
-21. GPU FFT support using nvidia library - including windowing i.e. Hanning window, Hamming window, etc.
-22. PCA support
-23. Streaming server support built in. Hmm, think about this, want to interface with kubernetes.
-    1. What would the framework provide?
-24. Other optimizers 
+24. Other optimizers
 24. Expand the list of supported clustering algorithms
-25. Expand the list of signal processing algorithms
-26. Audio decoding / support
-27. Video decoding / support
+
+--------------- below this line maybe not doing -------------------------
+
+1. Java Bindings - likely using BridJ - maybe not but using some library.
+1. GPU SVD support using nvidia library
+1. GPU FFT support using nvidia library - including windowing i.e. Hanning window, Hamming window, etc.
+1. PCA support
+
