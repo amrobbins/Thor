@@ -4,6 +4,9 @@
 
 #include "gtest/gtest.h"
 
+#include "json.hpp"
+using json = nlohmann::json;
+
 #include <stdio.h>
 #include <memory>
 
@@ -182,6 +185,40 @@ TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     ASSERT_FALSE(fullyConnected > *clone);
     ASSERT_FALSE(fullyConnected < *clone);
 }
+
+namespace Thor {
+
+TEST(FullyConnectedTest, SerializeProducesExpectedJson) {
+    // Arrange
+    FullyConnected layer;
+    layer.numOutputFeatures = 128;
+    layer.hasBias = true;
+    layer.dropProportion = 0.0f;
+    layer.useBatchNormalization = false;
+    layer.activation = make_shared<Relu>();
+
+    // Act
+    json j = layer.serialize();
+
+    // Assert - check basic structure
+    EXPECT_TRUE(j.contains("num_output_features"));
+    EXPECT_TRUE(j.contains("has_bias"));
+    EXPECT_TRUE(j.contains("activation"));
+    EXPECT_FALSE(j.contains("drop_out"));
+    EXPECT_FALSE(j.contains("batch_normalization"));
+
+    // Assert - check values
+    EXPECT_EQ(j["num_output_features"], 128);
+    EXPECT_EQ(j["has_bias"], true);
+
+    // Activation should not be empty
+    EXPECT_FALSE(j["activation"].empty());
+    EXPECT_EQ(j["activation"]["type"], "relu");
+
+    //printf("%s\n", j.dump(4).c_str());
+}
+
+} // namespace Thor
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

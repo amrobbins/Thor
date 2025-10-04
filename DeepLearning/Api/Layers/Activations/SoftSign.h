@@ -32,6 +32,10 @@ class SoftSign : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    virtual nlohmann::json serialize() {
+        return nlohmann::json{{"type", "soft_sign"}};
+    }
 };
 
 class SoftSign::Builder : public Activation::Builder {

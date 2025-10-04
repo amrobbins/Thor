@@ -32,6 +32,10 @@ class Exponential : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    virtual nlohmann::json serialize() {
+        return nlohmann::json{{"type", "exponential"}};
+    }
 };
 
 class Exponential::Builder : public Activation::Builder {
