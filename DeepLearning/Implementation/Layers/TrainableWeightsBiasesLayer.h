@@ -32,7 +32,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     };
 
     TrainableWeightsBiasesLayer(SharedWeightsPackage sharedWeightsPackage, int64_t stampedId = -1)
-        : hasBias(sharedWeightsPackage.biases.isPresent()), usingSharedWeights(false), stampedId(stampedId) {
+        : hasBias(sharedWeightsPackage.biases.isPresent()), usingSharedWeights(true), stampedId(stampedId) {
         weights = sharedWeightsPackage.weights;
         biases = sharedWeightsPackage.biases;
     }

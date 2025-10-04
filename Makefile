@@ -1,4 +1,4 @@
-CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include
+CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include/x86_64-linux-gnu -I /usr/include
 CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -l cufile -L /usr/lib/x86_64-linux-gnu -l cudnn -l boost_filesystem -lX11
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
 # https://en.wikipedia.org/wiki/CUDA#GPUs_supported
@@ -34,6 +34,18 @@ INCLUDE_DIRS_TEST = $(INCLUDE_DIRS) -I build/test/googletest/include
 LIB_DIRS_TEST = -L build/test/googletest
 LIBS_TEST = -lgtest -lgtest_main -pthread
 TEST_COMPILE_DEPENDENCIES = $(INCLUDE_DIRS_TEST) $(LIB_DIRS_TEST) $(LIBS_TEST) $(CUDA)
+
+# Location for the JSON header
+JSON_DIR := External/json
+JSON_HEADER := $(JSON_DIR)/json.hpp
+JSON_URL := https://github.com/nlohmann/json/releases/latest/download/json.hpp
+
+$(JSON_DIR):
+	mkdir -p $(JSON_DIR)
+
+$(JSON_HEADER): | $(JSON_DIR)
+	@echo "Fetching nlohmann/json header..."
+	curl -L -o $(JSON_HEADER) $(JSON_URL)
 
 DEBUG = -ggdb -O0
 NVCC_DEBUG = -g -Xptxas -O0
@@ -281,12 +293,10 @@ ALL_DEMOS =	build/Demos/AlexNetDemo \
 
 # FIXME: .so
 ML_DEV = libThor.a Thor.h
-
-
-
+EXTERNAL = $(JSON_HEADER)
+$(ML_DEV): $(EXTERNAL)
 
 # Overall make targets
-
 all: $(ML_DEV)
 	$(MAKE) $(ALL_TESTS)
 	$(MAKE) $(ALL_DEMOS)

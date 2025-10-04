@@ -126,7 +126,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
 
         if (hasBias) {
-            // The following two are both used for cudnnAddTensor
+            // The following two are both used for cudnnAddTensor,
+            // to add the biases to the outputs of the matrix multiply.
+            // If there is no bias, the addition operation is not done,
+            // so there is no need to create FeatureOutputCudnnTensorDescriptor.
             createFeatureOutputCudnnTensorDescriptor();
             createBiasesCudnnTensorDescriptor();
         }
