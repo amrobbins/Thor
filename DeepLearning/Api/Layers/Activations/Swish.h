@@ -32,6 +32,10 @@ class Swish : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    virtual nlohmann::json serialize() {
+        return nlohmann::json{{"type", "swish"}};
+    }
 };
 
 class Swish::Builder : public Activation::Builder {

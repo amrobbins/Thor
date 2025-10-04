@@ -17,6 +17,12 @@
 #include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
+#include "json.hpp"
+
+#ifdef THOR_TESTING
+#include <gtest/gtest_prod.h>
+#endif
+
 #include <assert.h>
 
 namespace Thor {
@@ -30,6 +36,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     virtual ~FullyConnected() {}
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
+
+    virtual nlohmann::json serialize();
 
    protected:
     virtual bool isMultiLayer() const {
@@ -147,6 +155,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     std::shared_ptr<Initializer::Builder> biasInitializerBuilder;
     std::shared_ptr<Activation::Builder> activationBuilder;
 
+    std::shared_ptr<Layer> activation;
+    DropOut dropOut;
+    BatchNormalization batchNormalization;
+
     float dropProportion;
 
     Network *network;
@@ -155,6 +167,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     Optional<double> batchNormEpsilon;
 
     friend class Network;
+
+#ifdef THOR_TESTING
+    FRIEND_TEST(FullyConnectedTest, SerializeProducesExpectedJson);
+#endif
 };
 
 // featureInput and numOutputFeatures are required, all other parameters are optional.

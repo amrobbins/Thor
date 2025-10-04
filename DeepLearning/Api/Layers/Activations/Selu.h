@@ -32,6 +32,10 @@ class Selu : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    virtual nlohmann::json serialize() {
+        return nlohmann::json{{"type", "selu"}};
+    }
 };
 
 class Selu::Builder : public Activation::Builder {

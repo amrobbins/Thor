@@ -32,6 +32,10 @@ class SoftPlus : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
+
+    virtual nlohmann::json serialize() {
+        return nlohmann::json{{"type", "soft_plus"}};
+    }
 };
 
 class SoftPlus::Builder : public Activation::Builder {

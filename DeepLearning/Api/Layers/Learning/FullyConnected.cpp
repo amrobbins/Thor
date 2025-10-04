@@ -3,6 +3,8 @@
 using namespace Thor;
 using namespace std;
 
+using json = nlohmann::json;
+
 void FullyConnected::buildSupportLayersAndAddToNetwork() {
     vector<Tensor> currentFeatureInputs;
 
@@ -40,14 +42,13 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
             batchNormBuilder.exponentialRunningAverageFactor(batchNormExponentialRunningAverageFactor);
         if (batchNormEpsilon.isPresent())
             batchNormBuilder.epsilon(batchNormEpsilon);
-        BatchNormalization batchNormalization = batchNormBuilder.network(*network).build();
+        batchNormalization = batchNormBuilder.network(*network).build();
         currentFeatureInputs = batchNormalization.getFeatureOutputs();
     }
 
     if (dropProportion > 0.0f) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            DropOut dropOut =
-                DropOut::Builder().network(*network).dropProportion(dropProportion).featureInput(currentFeatureInputs[i]).build();
+            dropOut = DropOut::Builder().network(*network).dropProportion(dropProportion).featureInput(currentFeatureInputs[i]).build();
             currentFeatureInputs[i] = dropOut.getFeatureOutput();
         }
     }
@@ -72,7 +73,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
             activationBuilderClone->network(*network);
             activationBuilderClone->featureInput(currentFeatureInputs[i]);
             // Since activation may be one of many classes, the base class is built and its virtual build function is used.
-            shared_ptr<Layer> activation = activationBuilderClone->build();
+            activation = activationBuilderClone->build();
             currentFeatureInputs[i] = activation->getFeatureOutput();
         }
     }
@@ -88,4 +89,18 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
         outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
         inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
     }
+}
+
+json FullyConnected::serialize() {
+    json j;
+    j["num_output_features"] = numOutputFeatures;
+    j["has_bias"] = hasBias;
+    if (activation)
+       j["activation"] = activation->serialize();
+    if (dropProportion > 0.0f)
+        j["drop_out"] = dropOut.serialize();
+    if (useBatchNormalization)
+        j["batch_normalization"] = batchNormalization.serialize();
+
+    return j;
 }

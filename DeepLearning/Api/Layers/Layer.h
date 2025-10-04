@@ -6,6 +6,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include "json.hpp"
+
 #include <assert.h>
 #include <atomic>
 #include <memory>
@@ -66,6 +68,10 @@ class Layer {
     static uint64_t getUnusedId() { return nextId.fetch_add(1); }
 
     virtual std::string getLayerType() const = 0;
+
+    virtual nlohmann::json serialize() {
+        return nlohmann::json {};
+    }
 
    protected:
     Optional<Tensor> featureInput;

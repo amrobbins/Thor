@@ -1,4 +1,4 @@
-CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include/x86_64-linux-gnu -I /usr/include
+CUDA_INCLUDE_DIRS = -I /usr/local/cuda/include -I /usr/include/x86_64-linux-gnu -I /usr/include -I External/json
 CUDA_LIBRARIES = -L /usr/local/cuda/lib64 -l cublas -l cublasLt -l cusolver -l cudart -l cufile -L /usr/lib/x86_64-linux-gnu -l cudnn -l boost_filesystem -lX11
 CUDA = $(CUDA_INCLUDE_DIRS) $(CUDA_LIBRARIES)
 # https://en.wikipedia.org/wiki/CUDA#GPUs_supported
@@ -28,9 +28,9 @@ GRAPHICS_MAGICK = `GraphicsMagick++-config --cppflags --cxxflags --ldflags --lib
 THOR_LIBS = $(CUDA) -I./ -L./ -lThor
 
 INCLUDE_HOME_DIR = -I ./
-INCLUDE_DIRS = $(INCLUDE_HOME_DIR) $(CUDA_INCLUDE_DIRS) $(BOOST_INCLUDE_DIR) $(GRAPHICS_MAGICK_INCLUDE_DIR)
+INCLUDE_DIRS = $(INCLUDE_HOME_DIR) $(CUDA_INCLUDE_DIRS) $(BOOST_INCLUDE_DIR) $(GRAPHICS_MAGICK_INCLUDE_DIR) -I build/test/googletest/include
 
-INCLUDE_DIRS_TEST = $(INCLUDE_DIRS) -I build/test/googletest/include
+INCLUDE_DIRS_TEST = $(INCLUDE_DIRS)
 LIB_DIRS_TEST = -L build/test/googletest
 LIBS_TEST = -lgtest -lgtest_main -pthread
 TEST_COMPILE_DEPENDENCIES = $(INCLUDE_DIRS_TEST) $(LIB_DIRS_TEST) $(LIBS_TEST) $(CUDA)
@@ -51,6 +51,7 @@ DEBUG = -ggdb -O0
 NVCC_DEBUG = -g -Xptxas -O0
 
 RELEASE = false
+BUILD_FOR_TESTING = true
 
 ifeq ($(RELEASE),true)
 	Gpp = g++ -fPIC -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed -DTHOR_RELEASE -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
@@ -58,6 +59,11 @@ ifeq ($(RELEASE),true)
 else
 	Gpp = g++ -fPIC -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 	Nvcc = nvcc --Werror all-warnings -Xcompiler -fPIC -D_GLIBCXX_DEBUG -g -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
+endif
+
+ifeq ($(BUILD_FOR_TESTING),true)
+	Gpp += -DTHOR_TESTING
+	Nvcc += -DTHOR_TESTING
 endif
 
 RUN_ALL_TESTS = build/test/DeepLearning/Api/Network/NetworkTest && \
@@ -293,7 +299,7 @@ ALL_DEMOS =	build/Demos/AlexNetDemo \
 
 # FIXME: .so
 ML_DEV = libThor.a Thor.h
-EXTERNAL = $(JSON_HEADER)
+EXTERNAL = $(JSON_HEADER) build/test/googletest/libgtest.a
 $(ML_DEV): $(EXTERNAL)
 
 # Overall make targets
