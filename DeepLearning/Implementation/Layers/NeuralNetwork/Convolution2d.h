@@ -142,7 +142,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         if (!isBackPropStub()) {
             uint64_t workspaceBackwardDataSizeInBytes =
                 GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
-            GpuConvolution::instance().getBackwardDataWorkspaceSizeInBytes(convolutionKernelRequirement);
             if (workspaceBackwardDataSizeInBytes > 0) {
                 std::vector<unsigned long> workspaceDimensions;
                 workspaceDimensions.push_back(workspaceBackwardDataSizeInBytes);
@@ -282,9 +281,23 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     }
 
     uint64_t flopsPerWeightUpdate() {
-        uint64_t flops = 2 * filterHeight * filterWidth * numInputChannels - 1;
-        return flops;
+        // dW FLOPs per example:
+        // For each output position and output channel, we do R*S*C MACs to accumulate into the filter.
+        // Using 2 FLOPs per MAC (mul+add):
+        const uint64_t macs_per_out_elem = static_cast<uint64_t>(filterHeight) * filterWidth * numInputChannels;
+        const uint64_t flops_dW = 2ULL * macs_per_out_elem * numOutputChannels * numOutputRows * numOutputColumns;
+
+        const uint64_t flops_dB = hasBias ? (numOutputChannels * numOutputRows * numOutputColumns) : 0ULL;
+
+        return flops_dW + flops_dB;
     }
+
+    //    uint64_t flopsPerWeightUpdate() {
+    //        uint64_t outputFilterHeight = (1 + numInputRows - filterHeight) / filterHorizontalStride;
+    //        uint64_t outputFilterWidth = (1 + numInputColumns - filterWidth) / filterVerticalStride;
+    //        uint64_t flops = (2 * filterHeight * filterWidth * numInputChannels - 1) * (numOutputChannels * outputFilterHeight *
+    //        outputFilterWidth); return flops;
+    //    }
 
     virtual uint64_t floatingPointOperationsPerExampleForward() {
         uint32_t connectionMultiplier = 0;
@@ -297,7 +310,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     }
 
     virtual uint64_t floatingPointOperationsPerExampleBackward() {
-        if (!isInferenceOnly())
+        if (isInferenceOnly())
             return 0;
 
         uint32_t connectionMultiplier = 0;

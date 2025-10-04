@@ -5,6 +5,8 @@
 using namespace ThorImplementation;
 using namespace std;
 
+// FIXME: get rid of in-place variants - can't free the back half of a tensor, there is no use for that and it is inefficient.
+
 // Launch out-of-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
 void launchOutOfPlaceConvertKernel(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream);

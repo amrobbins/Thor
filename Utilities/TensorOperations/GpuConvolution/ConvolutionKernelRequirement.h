@@ -69,6 +69,7 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
 
         if (*ppConvolutionDescriptor != nullptr)
             return **ppConvolutionDescriptor;
+        // FIXME: I don't think that I should new this, cudnn will allocate it. Look for any other instance and fix too.
         *ppConvolutionDescriptor = new cudnnConvolutionDescriptor_t;
 
         cudnnStatus_t cudnnStatus;
