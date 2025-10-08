@@ -11,6 +11,7 @@
 #include <assert.h>
 #include <atomic>
 #include <memory>
+#include <string>
 #include <utility>
 
 namespace Thor {
@@ -69,9 +70,7 @@ class Layer {
 
     virtual std::string getLayerType() const = 0;
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json {};
-    }
+    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{}; }
 
    protected:
     Optional<Tensor> featureInput;
@@ -99,8 +98,9 @@ class Layer {
 
     bool initialized;
 
-   private:
     uint64_t id;
+
+   private:
     static std::atomic<int64_t> nextId;
 
     friend class Network;

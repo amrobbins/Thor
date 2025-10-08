@@ -33,9 +33,7 @@ class Tanh : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json{{"type", "tanh"}};
-    }
+    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "tanh"}}; }
 };
 
 class Tanh::Builder : public Activation::Builder {

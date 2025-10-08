@@ -33,9 +33,7 @@ class HardSigmoid : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json{{"type", "hard_sigmoid"}};
-    }
+    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "hard_sigmoid"}}; }
 };
 
 class HardSigmoid::Builder : public Activation::Builder {

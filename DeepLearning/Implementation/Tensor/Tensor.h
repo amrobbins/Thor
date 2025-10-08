@@ -88,6 +88,7 @@ class Tensor : private ReferenceCounted {
     enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
     void attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess accessRequirement, bool createEmptyFile = false);
     void detachFile();
+    std::string getAttachedFilename() { return fileName; }
     void loadFromFile(Stream stream);
     void dumpToFile(Stream stream);
 

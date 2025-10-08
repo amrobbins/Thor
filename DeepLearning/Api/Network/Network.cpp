@@ -188,7 +188,7 @@ Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forc
         }
     }
 
-    // Each layer could possible be assigned its own optimizer by the user, rather than specifying a default at the network level.
+    // Each layer could possibly be assigned its own optimizer by the user, rather than specifying a default at the network level.
     if (optimizer != nullptr) {
         optimizer->attachToNetwork();
     }
@@ -669,9 +669,10 @@ void Network::stampLayer(Tensor inputTensor,
         stampedNetwork.physicalLayerToApiLayer[implementationLayer.get()] = layer->getId();
 
         if (DEBUG_STAMP) {
-            printf("stamped %s (physical layer id = %ld) driven by physical layer id = %ld\n",
+            printf("stamped %s (physical layer id = %ld, api layer id = %ld) driven by physical layer id = %ld\n",
                    layer->getLayerType().c_str(),
                    implementationLayer->getId(),
+                   layer->getId(),
                    physicalDrivingLayer->getId());
             fflush(stdout);
         }

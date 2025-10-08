@@ -33,9 +33,7 @@ class Gelu : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json{{"type", "gelu"}};
-    }
+    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "gelu"}}; }
 };
 
 class Gelu::Builder : public Activation::Builder {

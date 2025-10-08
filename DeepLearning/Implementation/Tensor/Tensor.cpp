@@ -217,22 +217,33 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
 
     this->fileAccessRequirement = fileAccessRequirement;
 
-    int32_t o_flags = O_LARGEFILE;
+    int32_t o_flags = O_DIRECT | O_CLOEXEC;
     if (fileAccessRequirement == FileAccess::READ_ONLY)
         o_flags |= O_RDONLY;
     else if (fileAccessRequirement == FileAccess::WRITE_ONLY)
         o_flags |= O_WRONLY;
     else
         o_flags |= O_RDWR;
-    if (createEmptyFile)
+    if (createEmptyFile && fileAccessRequirement != FileAccess::READ_ONLY)
         o_flags |= O_CREAT | O_TRUNC;
 
     // Get a handle to the file with the necessary flags
-    fileDescriptor = open(fileName.c_str(), o_flags);
+    if (o_flags & O_CREAT) {
+        fileDescriptor = open(fileName.c_str(), o_flags, 0644);
+    } else {
+        fileDescriptor = open(fileName.c_str(), o_flags);
+    }
     if (fileDescriptor < 0) {
-        printf("Error opening file %s\n", fileName.c_str());
+        printf("Error opening file %s  fileDescriptor %d errno %d\n", fileName.c_str(), fileDescriptor, errno);
+        printf("open(\"%s\", flags=0x%x) failed: %s (errno=%d), createEmptyFile=%d, access=%d\n",
+               fileName.c_str(),
+               o_flags,
+               strerror(errno),
+               errno,
+               (int)createEmptyFile,
+               (int)fileAccessRequirement);
         fflush(stdout);
-        assert(fileDescriptor > 0);
+        assert(fileDescriptor >= 0);
     }
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
         CUfileDescr_t cuFileDescriptor;
@@ -494,7 +505,7 @@ void checkBytesIoOp(void *params) {
 
     if (*(checkIoBytesParams->actualBytes) != checkIoBytesParams->expectedBytes) {
         string errorString;
-        errorString = "GpuDirect Storage transfer initiated to tranfer " + to_string(checkIoBytesParams->expectedBytes) +
+        errorString = "GpuDirect Storage transfer initiated to transfer " + to_string(checkIoBytesParams->expectedBytes) +
                       " bytes, but gpuDirectStorage reported that it transferred " + to_string(*(checkIoBytesParams->actualBytes)) +
                       " bytes.";
         // FIXME: This is thrown by a worker thread. Does it need to put the exception into a sync queue for the main thread?

@@ -35,9 +35,7 @@ class Sigmoid : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json{{"type", "sigmoid"}};
-    }
+    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "sigmoid"}}; }
 
     bool backwardComputedExternally;
 };
