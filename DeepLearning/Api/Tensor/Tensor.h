@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include "json.hpp"
+
 #include <assert.h>
 #include <atomic>
 #include <cmath>
@@ -146,5 +148,22 @@ class Tensor {
 
     friend class Network;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(Tensor::DataType,
+                             {
+                                 {Tensor::DataType::PACKED_BOOLEAN, "packed_boolean"},
+                                 {Tensor::DataType::BOOLEAN, "boolean"},
+                                 {Tensor::DataType::INT8, "int8"},
+                                 {Tensor::DataType::UINT8, "uint8"},
+                                 {Tensor::DataType::INT16, "int16"},
+                                 {Tensor::DataType::UINT16, "uint16"},
+                                 {Tensor::DataType::INT32, "int32"},
+                                 {Tensor::DataType::UINT32, "uint32"},
+                                 {Tensor::DataType::INT64, "int64"},
+                                 {Tensor::DataType::UINT64, "uint64"},
+                                 {Tensor::DataType::FP16, "fp16"},
+                                 {Tensor::DataType::FP32, "fp32"},
+                                 {Tensor::DataType::FP64, "fp64"},
+                             })
 
 }  // namespace Thor

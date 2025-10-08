@@ -186,39 +186,121 @@ TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     ASSERT_FALSE(fullyConnected < *clone);
 }
 
-namespace Thor {
+TEST(FullyConnected, Serializes) {
+    srand(time(nullptr));
 
-TEST(FullyConnectedTest, SerializeProducesExpectedJson) {
-    // Arrange
-    FullyConnected layer;
-    layer.numOutputFeatures = 128;
-    layer.hasBias = true;
-    layer.dropProportion = 0.0f;
-    layer.useBatchNormalization = false;
-    layer.activation = make_shared<Relu>();
+    Network network;
 
-    // Act
-    json j = layer.serialize();
+    Tensor::DataType dataType = Tensor::DataType::FP16;
 
-    // Assert - check basic structure
+    vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
+
+    uint32_t numOutputFeatures = 1 + (rand() % 1000);
+    bool hasBias = rand() % 2;
+
+    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
+
+    bool use_batch_norm = rand() % 2;
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(network).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    FullyConnected::Builder fullyConnectedBuilder = FullyConnected::Builder()
+                                                        .network(network)
+                                                        .featureInput(networkInput.getFeatureOutput())
+                                                        .numOutputFeatures(numOutputFeatures)
+                                                        .hasBias(hasBias)
+                                                        .dropOut(dropProportion);
+    if (use_batch_norm) {
+        fullyConnectedBuilder.batchNormalization();
+    }
+    FullyConnected fullyConnected = fullyConnectedBuilder.build();
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(network)
+                                      .name("testOutput")
+                                      .inputTensor(fullyConnected.getFeatureOutputs()[0])
+                                      .dataType(dataType)
+                                      .build();
+
+    ASSERT_TRUE(fullyConnected.isInitialized());
+
+    vector<uint64_t> outputDimensions = {numOutputFeatures};
+    vector<Tensor> featureInputs = fullyConnected.getFeatureInputs();
+    vector<Tensor> featureOutputs = fullyConnected.getFeatureOutputs();
+    assert(featureInputs[0] == networkInput.getFeatureOutput());
+
+    ASSERT_EQ(fullyConnected.getFeatureOutput(networkInput.getFeatureOutput()), featureOutputs[0]);
+
+    assert(fullyConnected.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), inputDimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
+
+    // Now stamp the nework and test serialization
+    uint32_t batchSize = 1 + (rand() % 16);
+    network.place(batchSize);
+    Stream stream(0);
+    json j = fullyConnected.serialize(stream);
+
     EXPECT_TRUE(j.contains("num_output_features"));
     EXPECT_TRUE(j.contains("has_bias"));
-    EXPECT_TRUE(j.contains("activation"));
+    EXPECT_FALSE(j.contains("activation"));
     EXPECT_FALSE(j.contains("drop_out"));
     EXPECT_FALSE(j.contains("batch_normalization"));
+    EXPECT_FALSE(j.contains("activation"));
+    EXPECT_EQ(j.contains("biases_tensor"), hasBias);
+    EXPECT_TRUE(j.contains("weights_tensor"));
+    EXPECT_TRUE(j.contains("inputs"));
+    EXPECT_TRUE(j.contains("outputs"));
 
-    // Assert - check values
-    EXPECT_EQ(j["num_output_features"], 128);
-    EXPECT_EQ(j["has_bias"], true);
+    ASSERT_TRUE(j.at("num_output_features").is_number_integer());
+    ASSERT_TRUE(j.at("has_bias").is_boolean());
+    ASSERT_TRUE(j.at("weights_tensor").is_string());
+    ASSERT_TRUE(j.at("inputs").is_array());
+    ASSERT_TRUE(j.at("outputs").is_array());
 
-    // Activation should not be empty
-    EXPECT_FALSE(j["activation"].empty());
-    EXPECT_EQ(j["activation"]["type"], "relu");
+    EXPECT_EQ(j.at("num_output_features").get<uint32_t>(), numOutputFeatures);
+    EXPECT_EQ(j.at("has_bias").get<bool>(), hasBias);
 
-    //printf("%s\n", j.dump(4).c_str());
+    const auto &inputs = j.at("inputs");
+    ASSERT_EQ(inputs.size(), 1U) << "Expect exactly one input";
+    const auto &in0 = inputs.at(0);
+    ASSERT_TRUE(in0.is_object());
+    ASSERT_TRUE(in0.at("data_type").is_string());
+    EXPECT_EQ(in0.at("data_type").get<std::string>(), "fp16");
+
+    ASSERT_TRUE(in0.at("dimensions").is_array());
+    ASSERT_EQ(in0.at("dimensions").size(), 1U);
+    EXPECT_TRUE(in0.at("dimensions").at(0).is_number_integer());
+    EXPECT_EQ(in0.at("dimensions").at(0).get<uint32_t>(), inputDimensions[0]);
+
+    ASSERT_TRUE(in0.at("id").is_number_integer());
+
+    const auto &outputs = j.at("outputs");
+    ASSERT_EQ(outputs.size(), 1U) << "Expect exactly one output";
+    const auto &out0 = outputs.at(0);
+    ASSERT_TRUE(out0.is_object());
+    ASSERT_TRUE(out0.at("data_type").is_string());
+    EXPECT_EQ(out0.at("data_type").get<std::string>(), "fp16");
+
+    ASSERT_TRUE(out0.at("dimensions").is_array());
+    ASSERT_EQ(out0.at("dimensions").size(), 1U);
+    EXPECT_TRUE(out0.at("dimensions").at(0).is_number_integer());
+    EXPECT_EQ(out0.at("dimensions").at(0).get<uint32_t>(), numOutputFeatures);
+
+    ASSERT_TRUE(out0.at("id").is_number_integer());
+
+    EXPECT_FALSE(j.at("weights_tensor").get<std::string>().empty());
+    if (hasBias) {
+        EXPECT_FALSE(j.at("biases_tensor").get<std::string>().empty());
+    }
+
+    // printf("%s\n", j.dump(4).c_str());
 }
-
-} // namespace Thor
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

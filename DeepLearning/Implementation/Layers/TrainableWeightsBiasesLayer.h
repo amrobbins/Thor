@@ -225,6 +225,34 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         assert(optimizer.isEmpty());
     }
 
+    void dumpWeightsToFile(std::string filename, Stream stream) {
+        if (weights.getAttachedFilename() != filename)
+            weights.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+        weights.dumpToFile(stream);
+    }
+
+    void loadWeightsFromFile(std::string filename, Stream stream) {
+        if (weights.getAttachedFilename() != filename)
+            weights.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+        weights.loadFromFile(stream);
+    }
+
+    void dumpBiasesToFile(std::string filename, Stream stream) {
+        assert(hasBias);
+        assert(biases.isPresent());
+        if (biases.get().getAttachedFilename() != filename)
+            biases.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+        biases.get().dumpToFile(stream);
+    }
+
+    void loadBiasesFromFile(std::string filename, Stream stream) {
+        assert(hasBias);
+        assert(biases.isPresent());
+        if (biases.get().getAttachedFilename() != filename)
+            biases.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+        biases.get().loadFromFile(stream);
+    }
+
    protected:
     const bool hasBias;
     const bool usingSharedWeights;

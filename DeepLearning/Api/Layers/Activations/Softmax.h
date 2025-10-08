@@ -35,9 +35,7 @@ class Softmax : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json{{"type", "softmax"}};
-    }
+    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "softmax"}}; }
 
     bool backwardComputedExternally;
 };

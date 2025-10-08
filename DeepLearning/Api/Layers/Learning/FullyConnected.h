@@ -19,9 +19,9 @@
 
 #include "json.hpp"
 
-#ifdef THOR_TESTING
-#include <gtest/gtest_prod.h>
-#endif
+//#ifdef THOR_TESTING
+//#include <gtest/gtest_prod.h>
+//#endif
 
 #include <assert.h>
 
@@ -37,7 +37,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
 
-    virtual nlohmann::json serialize();
+    virtual nlohmann::json serialize(Stream stream);
 
    protected:
     virtual bool isMultiLayer() const {
@@ -168,9 +168,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     friend class Network;
 
-#ifdef THOR_TESTING
-    FRIEND_TEST(FullyConnectedTest, SerializeProducesExpectedJson);
-#endif
+    //#ifdef THOR_TESTING
+    //    FRIEND_TEST(FullyConnectedTest, SerializeProducesExpectedJson);
+    //#endif
 };
 
 // featureInput and numOutputFeatures are required, all other parameters are optional.

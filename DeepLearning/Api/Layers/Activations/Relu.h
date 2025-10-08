@@ -33,9 +33,7 @@ class Relu : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    virtual nlohmann::json serialize() {
-        return nlohmann::json{{"type", "relu"}};
-    }
+    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "relu"}}; }
 };
 
 class Relu::Builder : public Activation::Builder {

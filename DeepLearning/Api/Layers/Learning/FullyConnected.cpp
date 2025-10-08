@@ -65,6 +65,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
     FullyConnected standAloneFullyConnected = fullyConnectedBuilder.build();
+    this->id = standAloneFullyConnected.getId();
     currentFeatureInputs = standAloneFullyConnected.getFeatureOutputs();
 
     if (activationBuilder) {
@@ -91,16 +92,50 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json FullyConnected::serialize() {
+// Note: get the physical layer from the network via the function that takes the api layer's id and returns it.
+json FullyConnected::serialize(Stream stream) {
+    // Multi-layers will only serialize the single layer, itself.
+    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
+
     json j;
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
-    if (activation)
-       j["activation"] = activation->serialize();
-    if (dropProportion > 0.0f)
-        j["drop_out"] = dropOut.serialize();
-    if (useBatchNormalization)
-        j["batch_normalization"] = batchNormalization.serialize();
+
+    // Input connections
+    json inputs = json::array();
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        inputs.push_back({{"id", featureInputs[i].getId()},
+                          {"dimensions", featureInputs[i].getDimensions()},
+                          {"data_type", json(featureInputs[i].getDataType())}});
+    }
+    j["inputs"] = inputs;
+
+    // Output connections
+    json outputs = json::array();
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        outputs.push_back({{"id", featureOutputs[i].getId()},
+                           {"dimensions", featureOutputs[i].getDimensions()},
+                           {"data_type", json(featureOutputs[i].getDataType())}});
+    }
+    j["outputs"] = outputs;
+
+    // Dump the weights to a file and record its name
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = network->getStampedNetworks();
+    assert(!stampedNetworks.empty());
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetworks[0].getPhysicalLayerFromApiLayer(getId());
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer =
+        dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+    assert(twbLayer != nullptr);
+
+    string layerName = string("layer") + to_string(getId());
+    string weightsFilename = string("/tmp/") + layerName + "_weights.gds";
+    j["weights_tensor"] = weightsFilename;
+    twbLayer->dumpWeightsToFile(weightsFilename, stream);
+    if (hasBias) {
+        string biasesFilename = string("/tmp/") + layerName + "_biases.gds";
+        j["biases_tensor"] = biasesFilename;
+        twbLayer->dumpBiasesToFile(biasesFilename, stream);
+    }
 
     return j;
 }
