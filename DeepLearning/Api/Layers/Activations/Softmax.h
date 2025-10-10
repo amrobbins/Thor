@@ -18,6 +18,8 @@ class Softmax : public Activation {
 
     virtual std::string getLayerType() const { return "Softmax"; }
 
+    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "softmax"}}; }
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -34,8 +36,6 @@ class Softmax : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
-
-    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "softmax"}}; }
 
     bool backwardComputedExternally;
 };

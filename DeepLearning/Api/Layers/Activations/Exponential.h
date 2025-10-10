@@ -16,6 +16,8 @@ class Exponential : public Activation {
 
     virtual std::string getLayerType() const { return "Exponential"; }
 
+    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "exponential"}}; }
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -32,8 +34,6 @@ class Exponential : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
-
-    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "exponential"}}; }
 };
 
 class Exponential::Builder : public Activation::Builder {

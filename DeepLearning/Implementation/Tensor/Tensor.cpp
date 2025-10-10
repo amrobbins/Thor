@@ -217,7 +217,9 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
 
     this->fileAccessRequirement = fileAccessRequirement;
 
-    int32_t o_flags = O_DIRECT | O_CLOEXEC;
+    int32_t o_flags = O_CLOEXEC;
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+        o_flags |= O_DIRECT;
     if (fileAccessRequirement == FileAccess::READ_ONLY)
         o_flags |= O_RDONLY;
     else if (fileAccessRequirement == FileAccess::WRITE_ONLY)

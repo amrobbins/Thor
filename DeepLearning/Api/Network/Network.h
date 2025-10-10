@@ -69,6 +69,9 @@ class StampedNetwork {
 
     // For testing:
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
+    std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(uint64_t apiLayerId) {
+        return apiLayerToPhysicalLayerShared[apiLayerId];
+    }
 
    protected:
     void initialize(bool initializeWeights, bool copyWeightsFromOtherStamp, StampedNetwork *otherStamp = nullptr) {
