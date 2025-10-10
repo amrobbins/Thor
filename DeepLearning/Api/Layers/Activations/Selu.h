@@ -16,6 +16,8 @@ class Selu : public Activation {
 
     virtual std::string getLayerType() const { return "Selu"; }
 
+    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "selu"}}; }
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -32,8 +34,6 @@ class Selu : public Activation {
         // feature out and error out
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
-
-    virtual nlohmann::json serialize() { return nlohmann::json{{"type", "selu"}}; }
 };
 
 class Selu::Builder : public Activation::Builder {

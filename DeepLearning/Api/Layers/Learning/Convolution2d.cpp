@@ -3,6 +3,8 @@
 using namespace Thor;
 using namespace std;
 
+using json = nlohmann::json;
+
 void Convolution2d::buildSupportLayersAndAddToNetwork() {
     Convolution2d::Builder convolution2dBuilder;
     convolution2dBuilder.network(*network)
@@ -84,4 +86,56 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
         outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
         inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
     }
+}
+
+json Convolution2d::serialize(Stream stream) {
+    json j;
+    j["version"] = "1.0.0";
+    j["data_layout"] = "NCHW";
+    j["filterWidth"] = filterWidth;
+    j["filterHeight"] = filterHeight;
+    j["horizontalStride"] = horizontalStride;
+    j["verticalStride"] = verticalStride;
+    j["horizontalPadding"] = horizontalPadding;
+    j["verticalPadding"] = verticalPadding;
+    j["numOutputChannels"] = numOutputChannels;
+    j["has_bias"] = hasBias;
+
+    // Input connections
+    json inputs = json::array();
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        inputs.push_back({{"id", featureInputs[i].getId()},
+                          {"dimensions", featureInputs[i].getDimensions()},
+                          {"data_type", json(featureInputs[i].getDataType())}});
+    }
+    j["inputs"] = inputs;
+
+    // Output connections
+    json outputs = json::array();
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        outputs.push_back({{"id", featureOutputs[i].getId()},
+                           {"dimensions", featureOutputs[i].getDimensions()},
+                           {"data_type", json(featureOutputs[i].getDataType())}});
+    }
+    j["outputs"] = outputs;
+
+    // Dump the weights to a file and record its name
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = network->getStampedNetworks();
+    assert(!stampedNetworks.empty());
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetworks[0].getPhysicalLayerFromApiLayer(getId());
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer =
+        dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+    assert(twbLayer != nullptr);
+
+    string layerName = string("layer") + to_string(getId());
+    string weightsFilename = string("/tmp/") + layerName + "_weights.gds";
+    j["weights_tensor"] = weightsFilename;
+    twbLayer->dumpWeightsToFile(weightsFilename, stream);
+    if (hasBias) {
+        string biasesFilename = string("/tmp/") + layerName + "_biases.gds";
+        j["biases_tensor"] = biasesFilename;
+        twbLayer->dumpBiasesToFile(biasesFilename, stream);
+    }
+
+    return j;
 }

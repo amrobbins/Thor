@@ -17,8 +17,6 @@
 #include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
-#include "json.hpp"
-
 //#ifdef THOR_TESTING
 //#include <gtest/gtest_prod.h>
 //#endif

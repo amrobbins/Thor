@@ -92,12 +92,12 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-// Note: get the physical layer from the network via the function that takes the api layer's id and returns it.
 json FullyConnected::serialize(Stream stream) {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
     json j;
+    j["version"] = "1.0.0";
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
 
