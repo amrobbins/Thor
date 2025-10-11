@@ -98,6 +98,7 @@ json FullyConnected::serialize(Stream stream) {
 
     json j;
     j["version"] = "1.0.0";
+    j["layer_type"] = "fully_connected";
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
 

@@ -246,6 +246,9 @@ TEST(FullyConnected, Serializes) {
     Stream stream(0);
     json j = fullyConnected.serialize(stream);
 
+    ASSERT_EQ(j["version"], "1.0.0");
+    ASSERT_EQ(j["layer_type"], "fully_connected");
+
     EXPECT_TRUE(j.contains("num_output_features"));
     EXPECT_TRUE(j.contains("has_bias"));
     EXPECT_FALSE(j.contains("activation"));
@@ -299,7 +302,7 @@ TEST(FullyConnected, Serializes) {
         EXPECT_FALSE(j.at("biases_tensor").get<std::string>().empty());
     }
 
-    // printf("%s\n", j.dump(4).c_str());
+    printf("%s\n", j.dump(4).c_str());
 }
 
 int main(int argc, char **argv) {

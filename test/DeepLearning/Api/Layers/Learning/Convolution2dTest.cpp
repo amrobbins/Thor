@@ -762,6 +762,9 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
 //     Stream stream(0);
 //     json j = fullyConnected.serialize(stream);
 //
+//     ASSERT_EQ(j["version"], "1.0.0");
+//     ASSERT_EQ(j["layer_type"], "convolution_2d");
+//
 //     EXPECT_TRUE(j.contains("num_output_features"));
 //     EXPECT_TRUE(j.contains("has_bias"));
 //     EXPECT_FALSE(j.contains("activation"));
