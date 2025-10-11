@@ -4,13 +4,13 @@
 
 #include "gtest/gtest.h"
 
-#include "json.hpp"
-using json = nlohmann::json;
+#include <nlohmann/json.hpp>
 
 #include <stdio.h>
 #include <memory>
 
 using std::shared_ptr;
+using json = nlohmann::json;
 
 using namespace Thor;
 using namespace std;

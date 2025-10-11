@@ -55,10 +55,10 @@ RELEASE = false
 BUILD_FOR_TESTING = true
 
 ifeq ($(RELEASE),true)
-	Gpp = g++ -fPIC -Wall -Werror -Wdeprecated -fopenmp -O3 -Wl,--no-as-needed -DTHOR_RELEASE -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
+	Gpp = g++ -fPIC -Wall -Werror -fopenmp -O3 -Wl,--no-as-needed -DTHOR_RELEASE -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 	Nvcc = nvcc --Werror all-warnings -O3 -Xptxas -O3,-v -Xcompiler -fPIC -DTHOR_RELEASE -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 else
-	Gpp = g++ -fPIC -Wall -Werror -Wdeprecated -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
+	Gpp = g++ -fPIC -Wall -Werror -fopenmp -D_GLIBCXX_DEBUG -ggdb -O0 -Wl,--no-as-needed -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 	Nvcc = nvcc --Werror all-warnings -Xcompiler -fPIC -D_GLIBCXX_DEBUG -g -DTHOR_DEBUG -DGDK_NVDIRECT -D_FILE_OFFSET_BITS=64
 endif
 

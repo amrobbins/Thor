@@ -22,7 +22,7 @@ int main(int argc, char *argv[]) {
     FILE *fin = fopen(argv[1], "r");
     assert(fin != NULL);
 
-    FILE *fout = fopen("Thor.h", "w");
+    FILE *fout = fopen("generated/Thor.h", "w");
     assert(fout != NULL);
 
     vector<string> initialLines = {"#pragma once", ""};
