@@ -1,0 +1,3 @@
+#pragma once
+#define THOR_VERSION "@PROJECT_VERSION@"
+#define THOR_GIT_VERSION "@GIT_VERSION@"

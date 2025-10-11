@@ -4,14 +4,14 @@
 
 #include "gtest/gtest.h"
 
-#include "json.hpp"
-using json = nlohmann::json;
+#include <nlohmann/json.hpp>
 
 #include <stdio.h>
 #include <memory>
 
 using namespace Thor;
 using namespace std;
+using json = nlohmann::json;
 
 TEST(Relu, Builds) {
     srand(time(nullptr));

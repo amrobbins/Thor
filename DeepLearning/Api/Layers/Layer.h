@@ -6,7 +6,7 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
-#include "json.hpp"
+#include <nlohmann/json.hpp>
 
 #include <assert.h>
 #include <atomic>

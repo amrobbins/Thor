@@ -1,4 +1,4 @@
-#include "WorkQueue.h"
+#include "Thor.h"
 
 #include <math.h>
 #include <chrono>
