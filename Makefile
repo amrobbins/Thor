@@ -51,7 +51,7 @@ $(JSON_HEADER): | $(JSON_DIR)
 DEBUG = -ggdb -O0
 NVCC_DEBUG = -g -Xptxas -O0
 
-RELEASE = false
+RELEASE = true
 BUILD_FOR_TESTING = true
 
 ifeq ($(RELEASE),true)

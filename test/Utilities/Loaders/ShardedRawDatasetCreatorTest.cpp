@@ -204,7 +204,7 @@ void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards, const uint32_t 
 
 TEST(ShardedRawDatasetCreator, evaluatesDataset) {
     string baseFilename = "testDataset";
-    string testDatasetDir("test/DeepLearning/DataSet");
+    string testDatasetDir = string(SOURCE_DIR) + "/test/DeepLearning/DataSet";
 
     path tempDirectoryPath = temp_directory_path();
     tempDirectoryPath /= "ThorFrameworkDatasetTest";
@@ -349,8 +349,3 @@ TEST(ShardedRawDatasetCreator, createMnist) {
                           shards);
 }
 */
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

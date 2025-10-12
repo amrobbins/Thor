@@ -14,7 +14,7 @@ using namespace std;
 
 using namespace Thor;
 
-Network buildNetwork(uint32_t numFCLayers) {
+static Network buildNetwork(uint32_t numFCLayers) {
     Network network;
     Tensor latestOutputTensor;
     UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
@@ -208,9 +208,4 @@ TEST(Adam, SettersAndGetters) {
         ASSERT_EQ(adam->getBeta2(), beta2);
         ASSERT_EQ(adam->getEpsilon(), epsilon);
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

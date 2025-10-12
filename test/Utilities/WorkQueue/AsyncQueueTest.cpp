@@ -21,8 +21,6 @@ using std::set;
 using std::string;
 using std::vector;
 
-bool PRINT = false;
-
 TEST(AsyncQueue, blockingApiWorks) {
     uint32_t numProcs = omp_get_num_procs() > 12 ? 12 : omp_get_num_procs();
     omp_set_num_threads(numProcs - 1);
@@ -123,9 +121,4 @@ TEST(AsyncQueue, nonBlockingApiWorks) {
         ASSERT_EQ(observedNumbers.size(), numIters);
         ASSERT_EQ(queue.capacity(), 100);
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

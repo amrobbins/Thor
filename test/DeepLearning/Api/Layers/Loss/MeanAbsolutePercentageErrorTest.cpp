@@ -114,8 +114,3 @@ TEST(MeanAbsolutePercentageError, Builds) {
         ASSERT_FALSE(meanAbsolutePercentageError < *clone);
     }
 }
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

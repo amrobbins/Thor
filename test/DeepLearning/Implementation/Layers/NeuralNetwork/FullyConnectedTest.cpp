@@ -21,7 +21,7 @@ using namespace ThorImplementation;
 // FIXME: make a test with accumulate
 // FIXME: make a test for multiple connections
 
-void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases, bool accumulate);
+static void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases, bool accumulate);
 
 TEST(FullyConnected, FullyConnectedWorks) {
     srand(time(NULL));
@@ -426,9 +426,4 @@ TEST(FullyConnectedInitializers, UniformRandomWorks) {
 
         LayerTestHelper::tearDownNetwork(layers);
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

@@ -41,8 +41,7 @@ __global__ void setRandomValues(DATA_TYPE *mem, uint64_t numElements, SCALE_TYPE
 template <typename DATA_TYPE>
 void Tensor::launchGpuFillRandom(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream) {
     random_device rd;
-    hash<thread::id> hasher;
-    uint64_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 1000000 + hasher(this_thread::get_id());
+    uint64_t seed = Tensor::Tensor::getThreadIdHash64(rd());
     int blockSize = 256;
     int gridSize = (numElements + (4 * blockSize) - 1) / (4 * blockSize);
 

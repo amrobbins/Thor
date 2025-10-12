@@ -490,8 +490,3 @@ TEST(Convolution2dInitializers, UniformRandomWorks) {
         LayerTestHelper::tearDownNetwork(layers);
     }
 }
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

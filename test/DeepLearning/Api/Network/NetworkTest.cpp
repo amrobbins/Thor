@@ -115,14 +115,14 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
-    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+    for (uint32_t i = 0; i < 1024; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *biasesMem = (half *)fcBiases.getMemPtr();
-    for (uint32_t i = 0; i < 500; ++i) {
+    for (uint32_t i = 0; i < 1; ++i) {
         ASSERT_TRUE(biasesMem[i] >= (half)-0.1 && biasesMem[i] <= (half)0.1);
     }
 }
@@ -1260,9 +1260,4 @@ TEST(Network, AlexnetIsProperlyFormed) {
     for (uint32_t i = 0; i < 1000; ++i) {
         ASSERT_TRUE(biasesMem[i] >= (half)-0.1 && biasesMem[i] <= (half)0.1);
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

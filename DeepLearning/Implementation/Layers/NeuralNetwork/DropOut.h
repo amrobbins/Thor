@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
 
@@ -26,7 +27,8 @@ class DropOut : public Layer {
         assert(probabilityOfDroppingOut <= 1.0f);
         this->probabilityOfDroppingOut = probabilityOfDroppingOut;
         this->training = training;
-        randomSeed = Tensor::getThreadIdHash64(std::chrono::system_clock::now().time_since_epoch().count() * 10000000);
+        std::random_device rd;
+        randomSeed = Tensor::Tensor::getThreadIdHash64(rd());
     }
 
     void seed(uint64_t seed) {

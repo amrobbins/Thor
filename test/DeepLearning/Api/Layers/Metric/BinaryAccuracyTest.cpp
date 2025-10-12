@@ -93,8 +93,3 @@ TEST(BinaryAccuracy, Builds) {
         ASSERT_FALSE(binaryAccuracy < *clone);
     }
 }
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

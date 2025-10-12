@@ -5419,8 +5419,11 @@ TEST(Tensor, loadFromFileCpu) {
         uint8_t suffixValue = rand() % 256;
         suffixDataTensor.fill(suffixValue, stream);
         stream.synchronize();
-        write(fileDescriptor, dataTensor.getMemPtr(), dataTensor.getArraySizeInBytes());
-        write(fileDescriptor, suffixDataTensor.getMemPtr(), suffixDataTensor.getArraySizeInBytes());
+        ssize_t bytes_written;
+        bytes_written = write(fileDescriptor, dataTensor.getMemPtr(), dataTensor.getArraySizeInBytes());
+        assert(bytes_written == static_cast<ssize_t>(dataTensor.getArraySizeInBytes()));
+        bytes_written = write(fileDescriptor, suffixDataTensor.getMemPtr(), suffixDataTensor.getArraySizeInBytes());
+        assert(bytes_written == static_cast<ssize_t>(suffixDataTensor.getArraySizeInBytes()));
         close(fileDescriptor);
 
         uint32_t fileOffset = 0;
@@ -5529,8 +5532,11 @@ TEST(Tensor, loadFromFileGpu) {
         uint8_t suffixValue = rand() % 256;
         suffixDataTensor.fill(suffixValue, stream);
         stream.synchronize();
-        write(fileDescriptor, dataTensor.getMemPtr(), dataTensor.getArraySizeInBytes());
-        write(fileDescriptor, suffixDataTensor.getMemPtr(), suffixDataTensor.getArraySizeInBytes());
+        ssize_t bytes_written;
+        bytes_written = write(fileDescriptor, dataTensor.getMemPtr(), dataTensor.getArraySizeInBytes());
+        assert(bytes_written == static_cast<ssize_t>(dataTensor.getArraySizeInBytes()));
+        bytes_written = write(fileDescriptor, suffixDataTensor.getMemPtr(), suffixDataTensor.getArraySizeInBytes());
+        assert(bytes_written == static_cast<ssize_t>(suffixDataTensor.getArraySizeInBytes()));
         close(fileDescriptor);
 
         uint32_t fileOffset = 0;
@@ -5795,9 +5801,4 @@ TEST(Tensor, writeToFileGpu) {
             ASSERT_EQ(fileTensorMem[i], tensorMem[i]);
         }
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

@@ -248,7 +248,8 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
         assert(fileDescriptor >= 0);
     }
     if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        CUfileDescr_t cuFileDescriptor;
+        // Note: Its critical to zero-initialize cuFileDescriptor, which is done with the {}
+        CUfileDescr_t cuFileDescriptor{};
         CUfileError_t cuFileError;
         cuFileDescriptor.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
         cuFileDescriptor.handle.fd = fileDescriptor;
@@ -994,7 +995,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -1005,7 +1006,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -1019,7 +1020,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -1030,7 +1031,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_real_distribution<double> dis(minValue, maxValue);
 
@@ -1044,7 +1045,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<int16_t> dis(minValue, maxValue);
 
@@ -1055,7 +1056,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<int16_t> dis(minValue, maxValue);
 
@@ -1069,7 +1070,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<int32_t> dis(minValue, maxValue);
 
@@ -1080,7 +1081,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<int32_t> dis(minValue, maxValue);
 
@@ -1094,7 +1095,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<int64_t> dis(minValue, maxValue);
 
@@ -1105,7 +1106,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<int64_t> dis(minValue, maxValue);
 
@@ -1119,7 +1120,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<uint16_t> dis(minValue, maxValue);
 
@@ -1130,7 +1131,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<uint16_t> dis(minValue, maxValue);
 
@@ -1144,7 +1145,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<uint32_t> dis(minValue, maxValue);
 
@@ -1155,7 +1156,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<uint32_t> dis(minValue, maxValue);
 
@@ -1169,7 +1170,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<uint64_t> dis(minValue, maxValue);
 
@@ -1180,7 +1181,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<uint64_t> dis(minValue, maxValue);
 
@@ -1194,7 +1195,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<uint8_t> dis(0, 2);
 
@@ -1205,7 +1206,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<uint8_t> dis(0, 2);
 
@@ -1223,7 +1224,7 @@ void fillCpuRandom(void *data) {
 #pragma omp parallel num_threads(numProcs)
             {
                 random_device rd;
-                uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+                uint32_t seed = Tensor::getThreadIdHash(rd());
                 mt19937 gen(seed);
                 uniform_int_distribution<uint16_t> dis(0, 256);
 
@@ -1234,7 +1235,7 @@ void fillCpuRandom(void *data) {
             }
         } else {
             random_device rd;
-            uint32_t seed = rd() + chrono::system_clock::now().time_since_epoch().count() * 10000000 + Tensor::getThreadIdHash();
+            uint32_t seed = Tensor::getThreadIdHash(rd());
             mt19937 gen(seed);
             uniform_int_distribution<uint16_t> dis(0, 256);
 

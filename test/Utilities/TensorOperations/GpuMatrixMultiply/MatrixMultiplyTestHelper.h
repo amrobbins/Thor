@@ -1,12 +1,12 @@
 #pragma once
 
-void swap(int &a, int &b) {
+inline void swap(int &a, int &b) {
     int c = a;
     a = b;
     b = c;
 }
 
-void verifyOperationIsLegal(
+inline void verifyOperationIsLegal(
     int rowsA, int colsA, int rowsB, int colsB, int ldA, int ldB, int ldC, int transposeA = false, int transposeB = false) {
     assert(ldA >= colsA);
     assert(ldB >= colsB);
@@ -21,24 +21,24 @@ void verifyOperationIsLegal(
     assert(colsA == rowsB);
 }
 
-void verifyOperationIsLegal(int rowsA,
-                            int colsA,
-                            int rowsB,
-                            int colsB,
-                            int rowsC,
-                            int colsC,
-                            int ldA,
-                            int ldB,
-                            int ldC,
-                            int ldD,
-                            bool transposeA,
-                            bool transposeB,
-                            bool transposeC,
-                            bool CDInPlace,
-                            void *C,
-                            void *D,
-                            void *C_d,
-                            void *D_d) {
+inline void verifyOperationIsLegal(int rowsA,
+                                   int colsA,
+                                   int rowsB,
+                                   int colsB,
+                                   int rowsC,
+                                   int colsC,
+                                   int ldA,
+                                   int ldB,
+                                   int ldC,
+                                   int ldD,
+                                   bool transposeA,
+                                   bool transposeB,
+                                   bool transposeC,
+                                   bool CDInPlace,
+                                   void *C,
+                                   void *D,
+                                   void *C_d,
+                                   void *D_d) {
     //    printf("rowsA %d colsA %d rowsB %d colsB %d rowsC %d colsC %d ldA %d ldB %d ldC %d ldD %d transposeA %i transposeB %i transposeC
     //    %i\n",
     //           rowsA,
@@ -81,7 +81,7 @@ void verifyOperationIsLegal(int rowsA,
     }
 }
 
-void transpose(float *A, float *A_t, int rows, int cols, int ld) {
+inline void transpose(float *A, float *A_t, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             A[j * rows + i] = A_t[i * ld + j];
@@ -89,7 +89,7 @@ void transpose(float *A, float *A_t, int rows, int cols, int ld) {
     }
 }
 
-void transposeHalf(half *A, half *A_t, int rows, int cols, int ld) {
+inline void transposeHalf(half *A, half *A_t, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             // printf("[%d,%d] = [%d,%d]\n", j, i, i, j); fflush(stdout);
@@ -98,7 +98,7 @@ void transposeHalf(half *A, half *A_t, int rows, int cols, int ld) {
     }
 }
 
-void identity(float *I, uint32_t size) {
+inline void identity(float *I, uint32_t size) {
     assert(size >= 1);
     for (uint32_t row = 0; row < size; ++row) {
         for (uint32_t col = 0; col < size; ++col) {
@@ -110,7 +110,7 @@ void identity(float *I, uint32_t size) {
     }
 }
 
-void identityHalf(half *I, uint32_t size) {
+inline void identityHalf(half *I, uint32_t size) {
     assert(size >= 1);
     for (uint32_t row = 0; row < size; ++row) {
         for (uint32_t col = 0; col < size; ++col) {
@@ -122,7 +122,7 @@ void identityHalf(half *I, uint32_t size) {
     }
 }
 
-void diagonalize(float *A, float *D, uint32_t size) {
+inline void diagonalize(float *A, float *D, uint32_t size) {
     assert(size >= 1);
     for (uint32_t row = 0; row < size; ++row) {
         for (uint32_t col = 0; col < size; ++col) {
@@ -135,20 +135,20 @@ void diagonalize(float *A, float *D, uint32_t size) {
 }
 
 // computes result = AB, where A is an mxk matrix and B is an kxn matrix. This makes result a mxn matrix.
-void matrixMultiplyCpu(float *A,
-                       float *B,
-                       float *C,
-                       int rowsA,
-                       int colsA,
-                       int rowsB,
-                       int colsB,
-                       int lda,
-                       int ldb,
-                       int ldc,
-                       bool transposeA,
-                       bool transposeB,
-                       bool accumulate,
-                       bool negate) {
+inline void matrixMultiplyCpu(float *A,
+                              float *B,
+                              float *C,
+                              int rowsA,
+                              int colsA,
+                              int rowsB,
+                              int colsB,
+                              int lda,
+                              int ldb,
+                              int ldc,
+                              bool transposeA,
+                              bool transposeB,
+                              bool accumulate,
+                              bool negate) {
     int num_threads = omp_get_num_procs() - 1;
     if (num_threads < 1)
         num_threads = 1;
@@ -203,20 +203,20 @@ void matrixMultiplyCpu(float *A,
         delete B;
 }
 
-void matrixMultiplyCpuHalf(half *A,
-                           half *B,
-                           half *C,
-                           int rowsA,
-                           int colsA,
-                           int rowsB,
-                           int colsB,
-                           int lda,
-                           int ldb,
-                           int ldc,
-                           bool transposeA,
-                           bool transposeB,
-                           bool accumulate,
-                           bool negate) {
+inline void matrixMultiplyCpuHalf(half *A,
+                                  half *B,
+                                  half *C,
+                                  int rowsA,
+                                  int colsA,
+                                  int rowsB,
+                                  int colsB,
+                                  int lda,
+                                  int ldb,
+                                  int ldc,
+                                  bool transposeA,
+                                  bool transposeB,
+                                  bool accumulate,
+                                  bool negate) {
     int num_threads = omp_get_num_procs() - 1;
     if (num_threads < 1)
         num_threads = 1;
@@ -271,7 +271,7 @@ void matrixMultiplyCpuHalf(half *A,
         delete B;
 }
 
-void matrixSubtractCpu(float *A, float *B, float *C, uint32_t rows, uint32_t cols) {
+inline void matrixSubtractCpu(float *A, float *B, float *C, uint32_t rows, uint32_t cols) {
     for (uint32_t row = 0; row < rows; ++row) {
         for (uint32_t col = 0; col < cols; ++col) {
             uint32_t index = row * cols + col;
@@ -280,7 +280,7 @@ void matrixSubtractCpu(float *A, float *B, float *C, uint32_t rows, uint32_t col
     }
 }
 
-void printMatrix(float *matrix, int rows, int cols, int ld) {
+inline void printMatrix(float *matrix, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             printf("%5.2f ", matrix[i * ld + j]);
@@ -289,7 +289,7 @@ void printMatrix(float *matrix, int rows, int cols, int ld) {
     }
 }
 
-void printMatrixWide(float *matrix, int rows, int cols, int ld) {
+inline void printMatrixWide(float *matrix, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             printf("%7.2f ", matrix[i * ld + j]);
@@ -298,7 +298,7 @@ void printMatrixWide(float *matrix, int rows, int cols, int ld) {
     }
 }
 
-void printMatrix(half *matrix, int rows, int cols, int ld) {
+inline void printMatrix(half *matrix, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             printf("%5.2f ", (float)matrix[i * ld + j]);
@@ -307,7 +307,7 @@ void printMatrix(half *matrix, int rows, int cols, int ld) {
     }
 }
 
-void printMatrixWide(half *matrix, int rows, int cols, int ld) {
+inline void printMatrixWide(half *matrix, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             printf("%7.2f ", (float)matrix[i * ld + j]);
@@ -316,7 +316,7 @@ void printMatrixWide(half *matrix, int rows, int cols, int ld) {
     }
 }
 
-void printMatrices(float *matrixCpu, float *matrixGpu, int rows, int cols, int ld) {
+inline void printMatrices(float *matrixCpu, float *matrixGpu, int rows, int cols, int ld) {
     for (int i = 0; i < rows; ++i) {
         printf("CPU: ");
         for (int j = 0; j < cols; ++j) {
@@ -326,23 +326,23 @@ void printMatrices(float *matrixCpu, float *matrixGpu, int rows, int cols, int l
     }
 }
 
-void gemmCpuFp32(float *A,
-                 float *B,
-                 float *C,
-                 float *D,
-                 int rowsA,
-                 int colsA,
-                 int rowsB,
-                 int colsB,
-                 int lda,
-                 int ldb,
-                 int ldc,
-                 int ldd,
-                 bool transposeA,
-                 bool transposeB,
-                 bool transposeC,
-                 float alpha,
-                 float beta) {
+inline void gemmCpuFp32(float *A,
+                        float *B,
+                        float *C,
+                        float *D,
+                        int rowsA,
+                        int colsA,
+                        int rowsB,
+                        int colsB,
+                        int lda,
+                        int ldb,
+                        int ldc,
+                        int ldd,
+                        bool transposeA,
+                        bool transposeB,
+                        bool transposeC,
+                        float alpha,
+                        float beta) {
     int num_threads = omp_get_num_procs() - 1;
     if (num_threads < 1)
         num_threads = 1;
@@ -405,23 +405,23 @@ void gemmCpuFp32(float *A,
         delete C;
 }
 
-void gemmCpuFp16(half *A,
-                 half *B,
-                 half *C,
-                 half *D,
-                 int rowsA,
-                 int colsA,
-                 int rowsB,
-                 int colsB,
-                 int lda,
-                 int ldb,
-                 int ldc,
-                 int ldd,
-                 bool transposeA,
-                 bool transposeB,
-                 bool transposeC,
-                 float alpha,
-                 float beta) {
+inline void gemmCpuFp16(half *A,
+                        half *B,
+                        half *C,
+                        half *D,
+                        int rowsA,
+                        int colsA,
+                        int rowsB,
+                        int colsB,
+                        int lda,
+                        int ldb,
+                        int ldc,
+                        int ldd,
+                        bool transposeA,
+                        bool transposeB,
+                        bool transposeC,
+                        float alpha,
+                        float beta) {
     int num_threads = omp_get_num_procs() - 1;
     if (num_threads < 1)
         num_threads = 1;

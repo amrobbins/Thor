@@ -17,7 +17,7 @@
 using namespace ThorImplementation;
 using namespace std;
 
-float sgn(float x) {
+static float sgn(float x) {
     if (x > 0)
         return 1.0f;
     else if (x < 0)
@@ -571,9 +571,4 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32_FP16Labels) {
 
         LayerTestHelper::tearDownNetwork(layers);
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

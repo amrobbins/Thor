@@ -15,7 +15,7 @@ struct OutputStruct {
     unsigned int num;
 };
 
-OutputStruct doWork(int size, std::string input) {
+static OutputStruct doWork(int size, std::string input) {
     OutputStruct output;
     output.id = std::this_thread::get_id();
     output.num = atoi(input.c_str());
@@ -111,9 +111,4 @@ TEST(WorkQueueTest, tryPushAllTryPopAll) {
     }
 
     workQueue.close();
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

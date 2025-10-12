@@ -18,10 +18,10 @@ using std::set;
 using std::string;
 using std::vector;
 
-bool PRINT = false;
-
 TEST(FullPeriodRandom, createsAFullPeriodCycle) {
     srand(time(nullptr));
+
+    bool PRINT = false;
 
     for (int test = 0; test < 100; ++test) {
         uint32_t period = rand() % 10000 + 1;
@@ -48,9 +48,4 @@ TEST(FullPeriodRandom, createsAFullPeriodCycle) {
             printf("------------------------\n\n");
         }
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
