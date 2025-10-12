@@ -184,7 +184,7 @@ TEST(Tanh, Works) {
  * alpha * (exp(x) - 1) when x < 0
  * where alpha is a scalar parameter that defaults to 1.0 and must be >= 0.0
  */
-float elu(float featureIn, float alpha) {
+static float elu(float featureIn, float alpha) {
     if (featureIn >= 0.0f)
         return featureIn;
     else
@@ -196,7 +196,7 @@ float elu(float featureIn, float alpha) {
  * d/dx(alpha * (exp(x) - 1)) = alpha * exp(x) when x < 0
  * where alpha is a scalar parameter that defaults to 1.0 and must be >= 0.0
  */
-float eluBackward(float featureIn, float errorIn, float alpha) {
+static float eluBackward(float featureIn, float errorIn, float alpha) {
     if (featureIn >= 0.0f)
         return errorIn;
     else
@@ -290,12 +290,12 @@ TEST(Elu, Works) {
 /**
  * softSign(x) === x * sigmoid(x) === x / (1 + exp(-x))
  */
-float swish(float featureIn) { return featureIn / (1 + exp(-featureIn)); }
+static float swish(float featureIn) { return featureIn / (1 + exp(-featureIn)); }
 
 /**
  * d/dx(x/(1 + exp(-x))) = (e^x * (x + e^x + 1))/(e^x + 1)^2
  */
-float swishBackward(float featureIn, float errorIn) {
+static float swishBackward(float featureIn, float errorIn) {
     float expX = exp(featureIn);
     return errorIn * (expX * (featureIn + expX + 1)) / ((expX + 1) * (expX + 1));
 }
@@ -467,12 +467,12 @@ TEST(Exponential, Works) {
 /**
  * softSign(x) === x / (abs(x) + 1)
  */
-float softSign(float featureIn) { return featureIn / (abs(featureIn) + 1); }
+static float softSign(float featureIn) { return featureIn / (abs(featureIn) + 1); }
 
 /**
  * d/dx(x/(abs(x) + 1)) = 1/(abs(x) + 1)^2
  */
-float softSignBackward(float featureIn, float errorIn) {
+static float softSignBackward(float featureIn, float errorIn) {
     float root = 1.0f / (abs(featureIn) + 1);
     return errorIn * (root * root);
 }
@@ -562,12 +562,12 @@ TEST(SoftSign, Works) {
 /**
  * max( min(0.2 * x + 0.5, 1.0), 0.0)
  */
-float hardSigmoid(float featureIn) { return max(min(0.2 * featureIn + 0.5, 1.0), 0.0); }
+static float hardSigmoid(float featureIn) { return max(min(0.2 * featureIn + 0.5, 1.0), 0.0); }
 
 /**
  * d/dx(x) = 0.2 when 1 < x > 0; else 0
  */
-float hardSigmoidBackward(float featureIn, float errorIn) {
+static float hardSigmoidBackward(float featureIn, float errorIn) {
     if (featureIn < 1.0f && featureIn > 0.0f)
         return errorIn * 0.2f;
     else
@@ -659,12 +659,12 @@ TEST(HardSigmoid, Works) {
 /**
  * ln(e(x) + 1)
  */
-float softPlus(float featureIn) { return log(exp(featureIn) + 1); }
+static float softPlus(float featureIn) { return log(exp(featureIn) + 1); }
 
 /**
  * d/dx(ln(exp(x) + 1)) = e^x/(e^x + 1)
  */
-float softPlusBackward(float featureIn, float errorIn) {
+static float softPlusBackward(float featureIn, float errorIn) {
     float expX = exp(featureIn);
     return errorIn * expX / (expX + 1.0f);
 }
@@ -754,12 +754,12 @@ TEST(SoftPlus, Works) {
 /**
  * sigmoid(x) = 1 / (1 + exp(-x))
  */
-float sigmoid(float featureIn) { return 1.0f / (1.0f + exp(-featureIn)); }
+static float sigmoid(float featureIn) { return 1.0f / (1.0f + exp(-featureIn)); }
 
 /**
  * d/dx(1/(1 + exp(-x))) = e^x/(e^x + 1)^2
  */
-float sigmoidBackward(float featureIn, float errorIn) {
+static float sigmoidBackward(float featureIn, float errorIn) {
     float expX = exp(featureIn);
     float expX_1 = expX + 1.0f;
     return errorIn * expX / (expX_1 * expX_1);
@@ -852,7 +852,7 @@ TEST(Sigmoid, Works) {
  * scale * alpha * (exp(x) - 1) when x < 0
  * where scale = 1.05070098 and alpha = 1.67326324 are pre-set values
  */
-float selu(float featureIn) {
+static float selu(float featureIn) {
     constexpr float scale = 1.05070098;
     constexpr float alpha = 1.67326324;
     if (featureIn >= 0)
@@ -866,7 +866,7 @@ float selu(float featureIn) {
  * d/dx(alpha * (exp(x) - 1)) = scale * alpha * exp(x) when x < 0
  * where scale = 1.05070098 and alpha = 1.67326324 are pre-set values
  */
-float seluBackward(float featureIn, float errorIn) {
+static float seluBackward(float featureIn, float errorIn) {
     constexpr float scale = 1.05070098;
     constexpr float alpha = 1.67326324;
     if (featureIn >= 0)
@@ -960,7 +960,7 @@ TEST(Selu, Works) {
 /**
  * 0.5 * x * (1 + tanh((2/π)^0.5 * (x + 0.044715 * x^3)))
  */
-float gelu(float featureIn) {
+static float gelu(float featureIn) {
     return 0.5f * featureIn * (1.0f + tanh(sqrt(2.0f / (float)M_PI) * (featureIn + 0.044715f * (featureIn * featureIn * featureIn))));
 }
 
@@ -968,7 +968,7 @@ float gelu(float featureIn) {
  * d/dx(0.5 * x * (1 + tanh((2/π)^0.5 * (x + 0.044715 * x^3))))
  *   = 0.5 * tanh(0.797885 * (x + 0.044715 * x^3)) + (0.0535161 * x^3 + 0.398942 * x) * sech^2(0.797885 * (x + 0.044715 * x^3)) + 0.5
  */
-float geluBackward(float featureIn, float errorIn) {
+static float geluBackward(float featureIn, float errorIn) {
     float xCubed = featureIn * featureIn * featureIn;
     float sechStuff = 1.0f / cosh(0.797885f * (featureIn + 0.044715f * xCubed));
     float derivative = 0.5f * tanh(0.797885f * (featureIn + 0.044715f * xCubed)) +
@@ -1061,7 +1061,7 @@ TEST(Gelu, Works) {
 /**
  *   e^xi / sum(e^xj, j = 1 to K)
  */
-float softmax(float featureIn, float sumxj, float maxX) { return exp(featureIn - maxX) / sumxj; }
+static float softmax(float featureIn, float sumxj, float maxX) { return exp(featureIn - maxX) / sumxj; }
 
 TEST(Softmax, Works) {
     srand(time(NULL));
@@ -1206,9 +1206,4 @@ TEST(Softmax, Works) {
 
         LayerTestHelper::tearDownNetwork(layers);
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

@@ -820,8 +820,3 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
 //
 //     // printf("%s\n", j.dump(4).c_str());
 // }
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

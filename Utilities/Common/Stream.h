@@ -280,7 +280,7 @@ class Stream : private ReferenceCounted {
     Optional<cudnnHandle_t> *cudnnHandle;
     Optional<cublasHandle_t> *cublasHandle;
 
-    bool isStatic;
+    bool isStatic = false;
     static std::unordered_map<uint32_t, Stream> staticDeviceStreams;
 
     static int numCudnnHandles;

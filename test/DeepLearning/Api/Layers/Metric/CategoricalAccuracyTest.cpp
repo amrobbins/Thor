@@ -87,8 +87,3 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
         ASSERT_FALSE(categoricalAccuracy < *clone);
     }
 }
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

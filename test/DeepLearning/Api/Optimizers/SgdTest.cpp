@@ -14,7 +14,7 @@ using namespace std;
 
 using namespace Thor;
 
-Network buildNetwork(uint32_t numFCLayers) {
+static Network buildNetwork(uint32_t numFCLayers) {
     Network network;
     Tensor latestOutputTensor;
     UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
@@ -356,8 +356,3 @@ TEST(ApiSgd, Update) {}
 
 // FIXME: Test stamp directly. Connect it to tensors and set its optimizer, set its weights and gradients and test backward to
 // ensure the stamped layer's SGD is numerically correct.
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

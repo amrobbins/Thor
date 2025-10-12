@@ -12,9 +12,32 @@ Design Objectives:
 4. Ease of use
 5. Full featured
 
-This framework is for Linux, and is currently being developed using Ubuntu 22.04 and Cuda 12.2, using an Nvidia GPU of compute capability >= 7.5.
+This framework is for Linux, and is currently being developed using Ubuntu 22.04 and Cuda 13.0, using an Nvidia GPU of compute capability >= 7.5.
 
-## Set up Ubuntu 22.04 machine and build:
+## Quick start using cmake
+
+#### Build
+mkdir build  
+cd build  
+
+cmake -DCMAKE_BUILD_TYPE=Release ..  
+-- or --  
+cmake -DCMAKE_BUILD_TYPE=Debug ..  
+-- or --  
+cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..  
+  
+make -j
+
+#### Run tests
+
+from Thor/build:  
+./thor_tests    
+-- or --  
+./thor_tests --gtest_filter=FullyConnectedTest.*  
+-- or --  
+./thor_tests --gtest_filter=FullyConnectedTest.SerializeProducesExpectedJson
+
+## DEPRECATED: Set up Ubuntu 22.04 machine and build:
 
 Cuda of at least 12 is supported. If your machine does not have cuda12, cudnn9 and oneAPI set up, then you can do it this way:
 

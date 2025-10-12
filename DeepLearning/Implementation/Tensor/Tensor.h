@@ -766,7 +766,7 @@ class Tensor : private ReferenceCounted {
 
     TensorDescriptor descriptor;
 
-    bool usingExternallyManagedMemory;
+    bool usingExternallyManagedMemory = false;
 
     std::string fileName;
     int32_t fileDescriptor = 0;
@@ -778,7 +778,7 @@ class Tensor : private ReferenceCounted {
     ssize_t gpuDirectStorageBytesAccessed;
 
     // FIXME: get rid of this override descriptor nonsense
-    bool descriptorOverridden;
+    bool descriptorOverridden = false;
     TensorDescriptor overriddenDescriptor;
 
     static std::atomic<unsigned long> nextInstanceId;
@@ -802,9 +802,14 @@ class Tensor : private ReferenceCounted {
 class CuFileInitializer {
    public:
     CuFileInitializer() {
-        // Call cuFileDriverOpen() and check for errors
-        CUfileError_t cuFileError = cuFileDriverOpen();
-        assert(cuFileError.err == CU_FILE_SUCCESS);
+        // First ensure cuda context has been created, via effective NOP
+        cudaError_t cudaStatus;
+        cudaStatus = cudaFree(nullptr);
+        if (cudaStatus == cudaSuccess) {
+            // Call cuFileDriverOpen() and check for errors
+            CUfileError_t cuFileError = cuFileDriverOpen();
+            assert(cuFileError.err == CU_FILE_SUCCESS);
+        }
     }
 
     ~CuFileInitializer() { cuFileDriverClose(); }

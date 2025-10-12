@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -169,7 +170,9 @@ TEST(AdamKernel, Fp16) {
         for (uint32_t i; i < numWeights; ++i) {
             half alphaT = alpha * (half)sqrtf(1.0f - powf(beta2, t)) / (half)(1.0f - powf(beta1, t));
             half expected = (-alphaT * mGpuMem_h[i]) / ((half)sqrtf(vGpuMem_h[i]) + epsilon);
-            ASSERT_LT(abs((float)(weightsUpdateGpuMem_h[i] - expected)), 0.00001);
+            half actual = weightsUpdateGpuMem_h[i];
+            printf("i=%d expected %f actual %f\n", i, (float)expected, (float)actual);
+            EXPECT_LT(abs((float)(actual - expected)), 0.00001);
         }
 
         for (uint32_t i; i < numWeights; ++i) {
@@ -179,9 +182,4 @@ TEST(AdamKernel, Fp16) {
             assert(isfinite((float)vGpuMem_h[i]));
         }
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }

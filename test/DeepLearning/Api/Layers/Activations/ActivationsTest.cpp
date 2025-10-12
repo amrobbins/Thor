@@ -743,8 +743,3 @@ TEST(Swish, Builds) {
     ASSERT_FALSE(*swish > *clone);
     ASSERT_FALSE(*swish < *clone);
 }
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

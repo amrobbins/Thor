@@ -302,10 +302,5 @@ TEST(FullyConnected, Serializes) {
         EXPECT_FALSE(j.at("biases_tensor").get<std::string>().empty());
     }
 
-    printf("%s\n", j.dump(4).c_str());
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+    // printf("%s\n", j.dump(4).c_str());
 }

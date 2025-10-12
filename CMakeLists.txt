@@ -8,14 +8,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -UNDEBUG")
+set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
 
 enable_language(CUDA)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS ON)
 set(CMAKE_CUDA_ARCHITECTURES 75)
-set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -UNDEBUG")
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE}")
 #set(CMAKE_CUDA_ARCHITECTURES 75 120)
 
 # Default to Release if not specified
@@ -23,6 +23,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+add_compile_options(-UNDEBUG)
 
 # ============================================================
 # Automatic Git versioning
@@ -51,10 +53,10 @@ configure_file(
 # Source files
 # ============================================================
 file(GLOB_RECURSE THOR_SOURCES
-        "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cpp"
-        "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cu"
         "${CMAKE_SOURCE_DIR}/Utilities/**/*.cpp"
         "${CMAKE_SOURCE_DIR}/Utilities/**/*.cu"
+        "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cpp"
+        "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cu"
         "${CMAKE_SOURCE_DIR}/Demos/**/*.cpp"
         "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
         )
@@ -121,26 +123,39 @@ target_include_directories(Thor PUBLIC
 
 
 # ============================================================
-# 📦 GraphicsMagick++ (Magick++)
+# GraphicsMagick++ (Magick++)
 # ============================================================
-find_path(GMAGICK_INCLUDE_DIR Magick++.h
-        PATHS /usr/include /usr/local/include
-        PATH_SUFFIXES GraphicsMagick
-        )
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GMAGICK REQUIRED GraphicsMagick++)
 
-find_library(GMAGICK_LIB
-        NAMES GraphicsMagick++ Magick++
-        PATHS /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
-        )
+execute_process(
+        COMMAND GraphicsMagick++-config --cppflags
+        OUTPUT_VARIABLE GM_CPPFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+execute_process(
+        COMMAND GraphicsMagick++-config --cxxflags
+        OUTPUT_VARIABLE GM_CXXFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+execute_process(
+        COMMAND GraphicsMagick++-config --ldflags --libs
+        OUTPUT_VARIABLE GM_LDFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
 
-if(NOT GMAGICK_INCLUDE_DIR OR NOT GMAGICK_LIB)
-    message(FATAL_ERROR "GraphicsMagick++ not found. Please install libgraphicsmagick++-dev.")
-endif()
+# Add include dirs from cppflags
+separate_arguments(GM_CPPFLAGS_LIST NATIVE_COMMAND "${GM_CPPFLAGS}")
+separate_arguments(GM_CXXFLAGS_LIST NATIVE_COMMAND "${GM_CXXFLAGS}")
+separate_arguments(GM_LDFLAGS_LIST NATIVE_COMMAND "${GM_LDFLAGS}")
 
-target_include_directories(Thor PUBLIC ${GMAGICK_INCLUDE_DIR})
-target_link_libraries(Thor PUBLIC ${GMAGICK_LIB})
+target_include_directories(Thor PUBLIC ${GMAGICK_INCLUDE_DIRS})
+target_compile_options(Thor PRIVATE ${GM_CPPFLAGS_LIST} ${GM_CXXFLAGS_LIST})
+target_link_libraries(Thor PRIVATE ${GM_LDFLAGS_LIST})
 
-
+# ============================================================
+# Boost filesystem
+# ============================================================
 find_package(Boost REQUIRED COMPONENTS filesystem)
 target_include_directories(Thor PRIVATE ${Boost_INCLUDE_DIRS})
 target_link_libraries(Thor PRIVATE Boost::filesystem)
@@ -150,6 +165,9 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_definitions(Thor PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64)
     target_compile_options(Thor PRIVATE -O3)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -Xptxas -O3,-v")
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    target_compile_definitions(Thor PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64)
+    target_compile_options(Thor PRIVATE -O3 -ggdb -fsanitize=undefined)
 elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(Thor PRIVATE THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG)
     target_compile_options(Thor PRIVATE -O0 -ggdb)
@@ -192,6 +210,18 @@ add_executable(thor_tests ${TEST_SOURCES})
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main)
 include(GoogleTest)
 gtest_discover_tests(thor_tests)
+
+# Per-configuration flags
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_definitions(thor_tests PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_options(thor_tests PRIVATE -O3)
+elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    target_compile_definitions(thor_tests PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_options(thor_tests PRIVATE -O3)
+elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_definitions(thor_tests PRIVATE THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_compile_options(thor_tests PRIVATE -O0 -ggdb)
+endif()
 
 # ============================================================
 # Install & Export for find_package()

@@ -9,7 +9,7 @@ using std::string;
 
 using namespace ThorImplementation;
 
-inline void checkCudaErrors(cudaError_t cudaStatus) {
+static inline void checkCudaErrors(cudaError_t cudaStatus) {
     if (cudaStatus != cudaSuccess) {
         printf("cudaStatus == %d; %s\n", cudaStatus, cudaGetErrorString(cudaStatus));
         fflush(stdout);
@@ -1674,9 +1674,4 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
             }
         }
     }
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
