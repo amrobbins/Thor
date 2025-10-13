@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
 #include <math.h>
 #include <chrono>
@@ -37,7 +37,7 @@ class Executor : public WorkQueueExecutorBase<std::string, OutputStruct> {
     int workSize;
 };
 
-void tryPushThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
+static void tryPushThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
     bool pushSuccess = false;
     for (int i = 0; i < numItems; i += pushSuccess ? 1 : 0) {
         pushSuccess = workQueue->tryPush(std::to_string(i));
@@ -46,7 +46,7 @@ void tryPushThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int
     }
 }
 
-void tryPopThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
+static void tryPopThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
     std::vector<OutputStruct> out;
     bool popSuccess = false;
     for (int i = 0; i < numItems; i += popSuccess ? 1 : 0) {
@@ -67,7 +67,7 @@ void tryPopThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int 
     assert(jobs.empty());
 }
 
-void pushThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
+static void pushThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
     for (int i = 0; i < numItems; ++i) {
         bool success = workQueue->push(std::to_string(i));
         assert(success);
@@ -75,7 +75,7 @@ void pushThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int nu
     }
 }
 
-void popThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
+static void popThread(WorkQueueUnordered<std::string, OutputStruct> *workQueue, int numItems, int workSize) {
     std::vector<OutputStruct> out;
     for (int i = 0; i < numItems; ++i) {
         OutputStruct thisOut;

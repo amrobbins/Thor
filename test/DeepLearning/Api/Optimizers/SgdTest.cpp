@@ -1,4 +1,7 @@
-#include "Thor.h"
+#include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -52,7 +55,7 @@ static Network buildNetwork(uint32_t numFCLayers) {
     return network;
 }
 
-TEST(SgdTest, SetAndGetInitialLearningRate) {
+TEST(Sgd, SetAndGetInitialLearningRate) {
     Network network = buildNetwork(3);
     shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.2f).network(network).build();
 
@@ -74,7 +77,7 @@ TEST(SgdTest, SetAndGetInitialLearningRate) {
     }
 }
 
-TEST(SgdTest, SetAndGetDecay) {
+TEST(Sgd, SetAndGetDecay) {
     Network network = buildNetwork(4);
     shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
 
@@ -96,7 +99,7 @@ TEST(SgdTest, SetAndGetDecay) {
     }
 }
 
-TEST(SgdTest, SetAndGetMomentum) {
+TEST(Sgd, SetAndGetMomentum) {
     Network network = buildNetwork(5);
     shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
 
@@ -118,7 +121,7 @@ TEST(SgdTest, SetAndGetMomentum) {
     }
 }
 
-TEST(SgdTest, SetAndGetUseNesterovMomentum) {
+TEST(Sgd, SetAndGetUseNesterovMomentum) {
     Network network = buildNetwork(6);
     shared_ptr<Sgd> sgd = Sgd::Builder().useNesterovMomentum(false).network(network).build();
 

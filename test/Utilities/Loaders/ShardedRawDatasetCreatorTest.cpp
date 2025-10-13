@@ -1,4 +1,7 @@
-#include "Thor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Loaders/BatchAssembler.h"
+#include "Utilities/Loaders/ImageProcessor.h"
+#include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 
 #include <stdio.h>
 #include "cuda.h"
@@ -34,7 +37,7 @@ class TestDataProcessor : public DataProcessor {
     virtual DataElement operator()(DataElement &input) { return input; }
 };
 
-void verifyImages(Shard &shard) {
+static void verifyImages(Shard &shard) {
     uint8_t buffer[224 * 224 * 3];
     string label;
     string filename;
@@ -82,7 +85,9 @@ void verifyImages(Shard &shard) {
     }
 }
 
-void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTensors, vector<ThorImplementation::Tensor> labelTensors) {
+static void verifyBatch(uint64_t batchSize,
+                        vector<ThorImplementation::Tensor> batchTensors,
+                        vector<ThorImplementation::Tensor> labelTensors) {
     const uint64_t NUM_CLASSES = 4;
     uint64_t numMiniBatches = batchTensors.size();
     ASSERT_GT(batchSize, 0u);
@@ -164,7 +169,7 @@ void verifyBatch(uint64_t batchSize, vector<ThorImplementation::Tensor> batchTen
     }
 }
 
-void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards, const uint32_t numClasses) {
+static void verifyBatchAssembler(std::vector<shared_ptr<Shard>> shards, const uint32_t numClasses) {
     srand(time(nullptr));
 
     uint64_t batchSize = (rand() % 3) + 1;

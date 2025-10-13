@@ -1,11 +1,14 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Layers/Loss/MeanAbsoluteError.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <unordered_set>
 #include "cuda.h"
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"

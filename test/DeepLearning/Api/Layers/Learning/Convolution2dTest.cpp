@@ -1,6 +1,7 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 
 #include "gtest/gtest.h"
 

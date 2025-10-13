@@ -1,6 +1,7 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Network/Network.h"
 
 #include "gtest/gtest.h"
 

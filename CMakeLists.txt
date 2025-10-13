@@ -161,18 +161,17 @@ target_include_directories(Thor PRIVATE ${Boost_INCLUDE_DIRS})
 target_link_libraries(Thor PRIVATE Boost::filesystem)
 
 # Per-configuration flags
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_definitions(Thor PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64)
-    target_compile_options(Thor PRIVATE -O3)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -Xptxas -O3,-v")
-elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    target_compile_definitions(Thor PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64)
-    target_compile_options(Thor PRIVATE -O3 -ggdb -fsanitize=undefined)
-elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(Thor PRIVATE THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG)
-    target_compile_options(Thor PRIVATE -O0 -ggdb)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g")
-endif()
+target_compile_options(Thor PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3 -ggdb -fsanitize=undefined>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+        )
+
+target_compile_definitions(Thor PRIVATE
+        $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
+        $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
+        $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG>
+        )
 
 # CUDA-specific extra flags
 target_compile_options(Thor PRIVATE
@@ -212,16 +211,17 @@ include(GoogleTest)
 gtest_discover_tests(thor_tests)
 
 # Per-configuration flags
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    target_compile_definitions(thor_tests PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    target_compile_options(thor_tests PRIVATE -O3)
-elseif(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-    target_compile_definitions(thor_tests PRIVATE THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    target_compile_options(thor_tests PRIVATE -O3)
-elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(thor_tests PRIVATE THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-    target_compile_options(thor_tests PRIVATE -O0 -ggdb)
-endif()
+target_compile_definitions(thor_tests PRIVATE
+        $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        )
+
+target_compile_options(thor_tests PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+        )
 
 # ============================================================
 # Install & Export for find_package()
