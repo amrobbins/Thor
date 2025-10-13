@@ -1,4 +1,7 @@
-#include "Thor.h"
+#include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Optimizers/Adam.h"
 
 #include <stdio.h>
 #include <unistd.h>

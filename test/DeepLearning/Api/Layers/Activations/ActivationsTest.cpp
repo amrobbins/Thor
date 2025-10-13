@@ -1,6 +1,17 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Api/Layers/Activations/Elu.h"
+#include "DeepLearning/Api/Layers/Activations/Exponential.h"
+#include "DeepLearning/Api/Layers/Activations/Gelu.h"
+#include "DeepLearning/Api/Layers/Activations/HardSigmoid.h"
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
+#include "DeepLearning/Api/Layers/Activations/Selu.h"
+#include "DeepLearning/Api/Layers/Activations/Sigmoid.h"
+#include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
+#include "DeepLearning/Api/Layers/Activations/SoftSign.h"
+#include "DeepLearning/Api/Layers/Activations/Softmax.h"
+#include "DeepLearning/Api/Layers/Activations/Swish.h"
+#include "DeepLearning/Api/Layers/Activations/Tanh.h"
 
 #include "gtest/gtest.h"
 

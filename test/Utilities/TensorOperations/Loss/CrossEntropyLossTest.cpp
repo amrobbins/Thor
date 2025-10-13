@@ -1,4 +1,5 @@
-#include "Thor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/Loss/CrossEntropyLoss.h"
 
 #include <math.h>
 #include <stdio.h>

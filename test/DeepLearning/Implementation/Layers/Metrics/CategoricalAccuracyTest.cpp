@@ -1,7 +1,11 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
-#include "Thor.h"
+#include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Implementation/Layers/Metric.h"
+#include "DeepLearning/Implementation/Layers/Metrics/CategoricalAccuracy.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <math.h>
 #include <stdio.h>

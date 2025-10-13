@@ -1,6 +1,15 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
+#include "DeepLearning/Api/Layers/Utility/Concatenate.h"
+#include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/Pooling.h"
+#include "DeepLearning/Api/Layers/Utility/Reshape.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
 #include "gtest/gtest.h"
 

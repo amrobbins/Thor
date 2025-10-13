@@ -1,7 +1,12 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
+#include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
+#include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+//#include ""
 
 #include <math.h>
 #include <stdio.h>

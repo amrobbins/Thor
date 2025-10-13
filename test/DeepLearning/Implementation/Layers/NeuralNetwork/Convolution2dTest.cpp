@@ -2,7 +2,11 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Initializers/UniformRandom.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -21,20 +25,20 @@ using namespace ThorImplementation;
 
 // FIXME: make a test for multiple connections and test accumulate in that test
 
-void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
-                  int numOutputElements,
-                  int numWeights,
-                  int numInputChannels,
-                  int numOutputChannels,
-                  int batchSize,
-                  Tensor featureInputCpu,
-                  Tensor weightsCpu,
-                  Optional<Tensor> biasesCpu,
-                  Stream stream,
-                  ConvolutionKernelRequirement convolutionKernelRequirement,
-                  int filterHeight,
-                  int filterWidth,
-                  bool accumulate);
+static void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
+                         int numOutputElements,
+                         int numWeights,
+                         int numInputChannels,
+                         int numOutputChannels,
+                         int batchSize,
+                         Tensor featureInputCpu,
+                         Tensor weightsCpu,
+                         Optional<Tensor> biasesCpu,
+                         Stream stream,
+                         ConvolutionKernelRequirement convolutionKernelRequirement,
+                         int filterHeight,
+                         int filterWidth,
+                         bool accumulate);
 
 TEST(Convolution2d, Convolution2dWorks) {
     srand(time(NULL));

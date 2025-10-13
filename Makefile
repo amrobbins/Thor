@@ -872,7 +872,7 @@ build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest: build/t
 	mkdir -p build/test/DeepLearning/Implementation/Layers/NeuralNetwork
 	$(Gpp) -g $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest test/DeepLearning/Implementation/Layers/NeuralNetwork/PoolingTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/Utilities/ComputeTopology/machineEvaluatorTest: build/test/googletest/libgtest.a test/Utilities/ComputeTopology/machineEvaluatorTest.cpp $(THOR)
+build/test/Utilities/ComputeTopology/machineEvaluatorTest: build/test/googletest/libgtest.a test/Utilities/ComputeTopology/MachineEvaluatorTest.cpp $(THOR)
 	mkdir -p build/test/Utilities/ComputeTopology
 	$(Gpp) $(DEBUG) -o build/test/Utilities/ComputeTopology/machineEvaluatorTest test/Utilities/ComputeTopology/machineEvaluatorTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
@@ -952,11 +952,11 @@ build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest: build
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest test/DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropyTest.cpp -O0 -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest.cpp $(THOR)
+build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metrics $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Metric
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest test/DeepLearning/Implementation/Layers/Metric/CategoricalAccuracyTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/DeepLearning/Implementation/Layers/Metric/BinaryAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metric/BinaryAccuracyTest.cpp $(THOR)
+build/test/DeepLearning/Implementation/Layers/Metric/BinaryAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Implementation/Layers/Metrics $(THOR)
 	mkdir -p build/test/DeepLearning/Implementation/Layers/Metric
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Implementation/Layers/Metric/BinaryAccuracyTest test/DeepLearning/Implementation/Layers/Metric/BinaryAccuracyTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
@@ -992,11 +992,11 @@ build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest: build/test/googl
 	mkdir -p build/test/DeepLearning/Api/Layers/Loss
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest test/DeepLearning/Api/Layers/Loss/BinaryCrossEntropyTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest.cpp $(THOR)
+build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Metrics $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Metric
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest test/DeepLearning/Api/Layers/Metric/CategoricalAccuracyTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 
-build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest.cpp $(THOR)
+build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest: build/test/googletest/libgtest.a test/DeepLearning/Api/Layers/Metrics $(THOR)
 	mkdir -p build/test/DeepLearning/Api/Layers/Metric
 	$(Gpp) $(DEBUG) -o build/test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest test/DeepLearning/Api/Layers/Metric/BinaryAccuracyTest.cpp -std=$(CPP_VERSION) -pthread $(CUDA_INCLUDE_DIRS) $(THOR_LIBS) $(TEST_COMPILE_DEPENDENCIES)
 

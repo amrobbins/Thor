@@ -1,6 +1,7 @@
 #pragma once
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 /**
  * This layer is useful in unit testing to prevent pruning dangling backwards path tensors.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
+
 #include "omp.h"
 
 namespace ThorImplementation {

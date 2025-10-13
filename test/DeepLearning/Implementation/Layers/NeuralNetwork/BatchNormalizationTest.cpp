@@ -2,7 +2,11 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Initializers/UniformRandom.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <math.h>
 #include <stdio.h>

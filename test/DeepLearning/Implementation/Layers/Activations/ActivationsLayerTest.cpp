@@ -3,7 +3,20 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuMatrixMultiply/MatrixMultiplyTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Layers/Activation/Elu.h"
+#include "DeepLearning/Implementation/Layers/Activation/Exponential.h"
+#include "DeepLearning/Implementation/Layers/Activation/Gelu.h"
+#include "DeepLearning/Implementation/Layers/Activation/HardSigmoid.h"
+#include "DeepLearning/Implementation/Layers/Activation/Relu.h"
+#include "DeepLearning/Implementation/Layers/Activation/Selu.h"
+#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
+#include "DeepLearning/Implementation/Layers/Activation/SoftPlus.h"
+#include "DeepLearning/Implementation/Layers/Activation/SoftSign.h"
+#include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
+#include "DeepLearning/Implementation/Layers/Activation/Swish.h"
+#include "DeepLearning/Implementation/Layers/Activation/Tanh.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <stdio.h>
 #include "cuda.h"

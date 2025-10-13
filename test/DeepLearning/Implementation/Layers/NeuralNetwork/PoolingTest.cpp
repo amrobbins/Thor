@@ -2,7 +2,9 @@
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -18,17 +20,17 @@ using namespace std;
 
 using namespace ThorImplementation;
 
-Tensor maxPoolingForward(Tensor featureIn,
-                         uint32_t windowHeight,
-                         uint32_t windowWidth,
-                         uint32_t verticalStride,
-                         uint32_t horizontalStride,
-                         uint32_t batchSize,
-                         uint32_t numFeatures,
-                         uint32_t inputHeight,
-                         uint32_t inputWidth,
-                         uint32_t verticalPadding,
-                         uint32_t horizontalPadding) {
+static Tensor maxPoolingForward(Tensor featureIn,
+                                uint32_t windowHeight,
+                                uint32_t windowWidth,
+                                uint32_t verticalStride,
+                                uint32_t horizontalStride,
+                                uint32_t batchSize,
+                                uint32_t numFeatures,
+                                uint32_t inputHeight,
+                                uint32_t inputWidth,
+                                uint32_t verticalPadding,
+                                uint32_t horizontalPadding) {
     vector<unsigned long> featureInDimensions = featureIn.getDescriptor().getDimensions();
     assert(featureInDimensions[0] == batchSize);
     assert(featureInDimensions[1] == numFeatures);
@@ -78,19 +80,19 @@ Tensor maxPoolingForward(Tensor featureIn,
     return featureOut;
 }
 
-Tensor maxPoolingBackward(Tensor featureIn,
-                          Tensor featureOut,
-                          Tensor errorIn,
-                          uint32_t windowHeight,
-                          uint32_t windowWidth,
-                          uint32_t verticalStride,
-                          uint32_t horizontalStride,
-                          uint32_t batchSize,
-                          uint32_t numFeatures,
-                          uint32_t inputHeight,
-                          uint32_t inputWidth,
-                          uint32_t verticalPadding,
-                          uint32_t horizontalPadding) {
+static Tensor maxPoolingBackward(Tensor featureIn,
+                                 Tensor featureOut,
+                                 Tensor errorIn,
+                                 uint32_t windowHeight,
+                                 uint32_t windowWidth,
+                                 uint32_t verticalStride,
+                                 uint32_t horizontalStride,
+                                 uint32_t batchSize,
+                                 uint32_t numFeatures,
+                                 uint32_t inputHeight,
+                                 uint32_t inputWidth,
+                                 uint32_t verticalPadding,
+                                 uint32_t horizontalPadding) {
     Tensor errorOut(TensorPlacement::MemDevices::CPU,
                     TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
     half *errorOutMem = (half *)errorOut.getMemPtr();
@@ -144,17 +146,17 @@ Tensor maxPoolingBackward(Tensor featureIn,
     return errorOut;
 }
 
-Tensor averagePoolingForward(Tensor featureIn,
-                             uint32_t windowHeight,
-                             uint32_t windowWidth,
-                             uint32_t verticalStride,
-                             uint32_t horizontalStride,
-                             uint32_t batchSize,
-                             uint32_t numFeatures,
-                             uint32_t inputHeight,
-                             uint32_t inputWidth,
-                             uint32_t verticalPadding,
-                             uint32_t horizontalPadding) {
+static Tensor averagePoolingForward(Tensor featureIn,
+                                    uint32_t windowHeight,
+                                    uint32_t windowWidth,
+                                    uint32_t verticalStride,
+                                    uint32_t horizontalStride,
+                                    uint32_t batchSize,
+                                    uint32_t numFeatures,
+                                    uint32_t inputHeight,
+                                    uint32_t inputWidth,
+                                    uint32_t verticalPadding,
+                                    uint32_t horizontalPadding) {
     vector<unsigned long> featureInDimensions = featureIn.getDescriptor().getDimensions();
     assert(featureInDimensions[0] == batchSize);
     assert(featureInDimensions[1] == numFeatures);
@@ -207,17 +209,17 @@ Tensor averagePoolingForward(Tensor featureIn,
     return featureOut;
 }
 
-Tensor averagePoolingBackward(Tensor errorIn,
-                              uint32_t windowHeight,
-                              uint32_t windowWidth,
-                              uint32_t verticalStride,
-                              uint32_t horizontalStride,
-                              uint32_t batchSize,
-                              uint32_t numFeatures,
-                              uint32_t inputHeight,
-                              uint32_t inputWidth,
-                              uint32_t verticalPadding,
-                              uint32_t horizontalPadding) {
+static Tensor averagePoolingBackward(Tensor errorIn,
+                                     uint32_t windowHeight,
+                                     uint32_t windowWidth,
+                                     uint32_t verticalStride,
+                                     uint32_t horizontalStride,
+                                     uint32_t batchSize,
+                                     uint32_t numFeatures,
+                                     uint32_t inputHeight,
+                                     uint32_t inputWidth,
+                                     uint32_t verticalPadding,
+                                     uint32_t horizontalPadding) {
     Tensor errorOut(TensorPlacement::MemDevices::CPU,
                     TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
     half *errorOutMem = (half *)errorOut.getMemPtr();

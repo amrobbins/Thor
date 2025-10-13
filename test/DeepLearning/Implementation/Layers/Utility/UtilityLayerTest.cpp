@@ -1,7 +1,19 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
 
-#include "Thor.h"
+#include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
+#include "DeepLearning/Implementation/Layers/Utility/DeviceCrossing.h"
+#include "DeepLearning/Implementation/Layers/Utility/Extract.h"
+#include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
+#include "DeepLearning/Implementation/Layers/Utility/Map.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Implementation/Layers/Utility/Pad.h"
+#include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
+#include "DeepLearning/Implementation/Layers/Utility/Split.h"
+#include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
+#include "DeepLearning/Implementation/Layers/Utility/TypeConversion.h"
 
 #include <stdio.h>
 #include "cuda.h"

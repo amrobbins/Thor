@@ -1,6 +1,6 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
-#include "Thor.h"
+#include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
 #include "gtest/gtest.h"
 
