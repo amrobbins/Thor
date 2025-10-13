@@ -1,4 +1,10 @@
-#include "Thor.h"
+#include "Utilities/TensorOperations/Arithmetic/Average.h"
+#include "Utilities/TensorOperations/Arithmetic/ElementwiseSubtract.h"
+#include "Utilities/TensorOperations/Arithmetic/Exponentiation.h"
+#include "Utilities/TensorOperations/Arithmetic/MultiplyByScalar.h"
+#include "Utilities/TensorOperations/Arithmetic/Sum.h"
+#include "Utilities/TensorOperations/Arithmetic/SumManyToOne.h"
+#include "Utilities/TensorOperations/Arithmetic/SumScale.h"
 
 #include <math.h>
 #include <stdio.h>

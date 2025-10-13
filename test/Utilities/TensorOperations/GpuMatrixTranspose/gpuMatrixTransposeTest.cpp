@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 
 #include <stdio.h>
 #include "cuda.h"
@@ -7,7 +7,7 @@
 #include "gtest/gtest.h"
 #include "omp.h"
 
-void printMatrixFp32(float *matrix, int rows, int cols) {
+static void printMatrixFp32(float *matrix, int rows, int cols) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             printf("%7.2f ", matrix[i * cols + j]);
@@ -16,7 +16,7 @@ void printMatrixFp32(float *matrix, int rows, int cols) {
     }
 }
 
-void printMatrixFp16(half *matrix, int rows, int cols) {
+static void printMatrixFp16(half *matrix, int rows, int cols) {
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
             printf("%7.2f ", __half2float(matrix[i * cols + j]));
@@ -25,7 +25,7 @@ void printMatrixFp16(half *matrix, int rows, int cols) {
     }
 }
 
-void testMatrixTransposeFp32(int rows, int cols, bool print = false, bool verify = true) {
+static void testMatrixTransposeFp32(int rows, int cols, bool print = false, bool verify = true) {
     float *matrix;
     float *matrix_gpu;
     float *matrix_d;
@@ -101,7 +101,7 @@ void testMatrixTransposeFp32(int rows, int cols, bool print = false, bool verify
     }
 }
 
-void testMatrixTransposeFp16(int rows, int cols, bool print = false, bool verify = true) {
+static void testMatrixTransposeFp16(int rows, int cols, bool print = false, bool verify = true) {
     half *matrix;
     half *matrix_gpu;
     half *matrix_d;
@@ -176,7 +176,7 @@ void testMatrixTransposeFp16(int rows, int cols, bool print = false, bool verify
     }
 }
 
-void testSquareMatrixTransposeFp32(int width, bool print = false, bool verify = true) {
+static void testSquareMatrixTransposeFp32(int width, bool print = false, bool verify = true) {
     float *matrix;
     float *matrix_gpu;
     float *matrix_d;
@@ -249,7 +249,7 @@ void testSquareMatrixTransposeFp32(int width, bool print = false, bool verify = 
     }
 }
 
-void testSquareMatrixTransposeFp16(int width, bool print = false, bool verify = true) {
+static void testSquareMatrixTransposeFp16(int width, bool print = false, bool verify = true) {
     half *matrix;
     half *matrix_gpu;
     half *matrix_d;

@@ -1,4 +1,5 @@
-#include "Thor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/Optimizers/Adam.h"
 
 #include "cuda.h"
 #include "cuda_fp16.h"

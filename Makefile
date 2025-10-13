@@ -378,7 +378,7 @@ build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o:
 	mkdir -p build/Utilities/TensorOperations/GpuMatrixTranspose
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.o -c -std=$(CPP_VERSION) $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTransposeKernels.cu
 
-build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o: Utilities/TensorOperations/TypeConversions/TypeConverter.h Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
+build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o: Utilities/TensorOperations/DataTypeConversions Utilities/TensorOperations/DataTypeConversions
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/TypeConversions/TypeConverterKernels.o -c -std=$(CPP_VERSION) $(COMPUTE_CAPABILITIES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/TypeConversions/TypeConverterKernels.cu
 
@@ -530,7 +530,7 @@ build/Utilities/TensorOperations/Misc/Concatenate.o: Utilities/TensorOperations/
 	mkdir -p build/Utilities/TensorOperations/Misc
 	$(Nvcc) -ccbin g++ -o build/Utilities/TensorOperations/Misc/Concatenate.o -c --maxrregcount 64 -std=$(CPP_VERSION) $(COMPUTE_CAPABILITIES_WITH_TENSOR_CORES) $(INCLUDE_DIRS) -Xptxas -O3,-v Utilities/TensorOperations/Misc/Concatenate.cu
 
-build/Utilities/TensorOperations/TypeConversions/TypeConverter.o: Utilities/TensorOperations/TypeConversions/TypeConverter.h Utilities/TensorOperations/TypeConversions/TypeConverter.cpp
+build/Utilities/TensorOperations/TypeConversions/TypeConverter.o: Utilities/TensorOperations/DataTypeConversions Utilities/TensorOperations/DataTypeConversions
 	mkdir -p build/Utilities/TensorOperations/TypeConversions
 	$(Gpp) -c -std=$(CPP_VERSION) Utilities/TensorOperations/TypeConversions/TypeConverter.cpp $(CUDA) $(INCLUDE_DIRS) -o build/Utilities/TensorOperations/TypeConversions/TypeConverter.o
 
