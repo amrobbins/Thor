@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
 #include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
 

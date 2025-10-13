@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h"
 
 #include <stdio.h>
 #include "cuda.h"

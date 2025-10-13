@@ -1,4 +1,5 @@
-#include "Thor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h"
 
 #include <stdio.h>
 #include "cuda.h"

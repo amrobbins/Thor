@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/Common/Optional.h"
 #include "Utilities/WorkQueue/AsyncQueue.h"
 
 #include <assert.h>

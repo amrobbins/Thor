@@ -7,7 +7,7 @@
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
-#include "Utilities/TensorOperations/TypeConversions/TypeConverter.h"
+#include "Utilities/TensorOperations/DataTypeConversions/TypeConverter.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
 #include <fcntl.h>

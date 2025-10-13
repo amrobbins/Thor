@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
 #include "gtest/gtest.h"
 

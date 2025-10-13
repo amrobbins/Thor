@@ -1,4 +1,11 @@
-#include "Thor.h"
+#include "Utilities/TensorOperations/Misc/BatchReduce.h"
+#include "Utilities/TensorOperations/Misc/ComputeBinaryAccuracy.h"
+#include "Utilities/TensorOperations/Misc/ComputeCategoricalAccuracy.h"
+#include "Utilities/TensorOperations/Misc/Concatenate.h"
+#include "Utilities/TensorOperations/Misc/Extract.h"
+#include "Utilities/TensorOperations/Misc/Map.h"
+#include "Utilities/TensorOperations/Misc/Pad.h"
+#include "Utilities/TensorOperations/Misc/Split.h"
 
 #include <stdio.h>
 #include "cuda.h"

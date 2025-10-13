@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/Random/FullPeriodRandom.h"
 
 #include <stdio.h>
 #include "cuda.h"
