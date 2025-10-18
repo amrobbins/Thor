@@ -13,7 +13,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
 
     // Flatten to 2 dimensions {batchSize, numInputFeatures} if not already a 2d tensor.
     vector<uint64_t> featureInputDimensions = featureInputs.front().getDimensions();
-    assert(featureInputDimensions.size() >= 1);
+    assert(!featureInputDimensions.empty());
     if (featureInputDimensions.size() > 1) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             Flatten flatten = Flatten::Builder().network(*network).featureInput(currentFeatureInputs[i]).numOutputDimensions(1).build();
@@ -92,7 +92,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json FullyConnected::serialize(Stream stream) {
+json FullyConnected::serialize(const string &storageDir, Stream stream) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
@@ -105,18 +105,14 @@ json FullyConnected::serialize(Stream stream) {
     // Input connections
     json inputs = json::array();
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        inputs.push_back({{"id", featureInputs[i].getId()},
-                          {"dimensions", featureInputs[i].getDimensions()},
-                          {"data_type", json(featureInputs[i].getDataType())}});
+        inputs.push_back(featureInputs[i].serialize());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
     for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-        outputs.push_back({{"id", featureOutputs[i].getId()},
-                           {"dimensions", featureOutputs[i].getDimensions()},
-                           {"data_type", json(featureOutputs[i].getDataType())}});
+        outputs.push_back(featureOutputs[i].serialize());
     }
     j["outputs"] = outputs;
 
@@ -128,15 +124,67 @@ json FullyConnected::serialize(Stream stream) {
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
     assert(twbLayer != nullptr);
 
+    filesystem::path dir(storageDir);
+    if (!filesystem::exists(dir)) {
+        throw runtime_error("Storage directory does not exist: " + dir.string());
+    }
+    if (!filesystem::is_directory(dir)) {
+        throw runtime_error("Storage path is not a directory: " + dir.string());
+    }
+
     string layerName = string("layer") + to_string(getId());
-    string weightsFilename = string("/tmp/") + layerName + "_weights.gds";
-    j["weights_tensor"] = weightsFilename;
-    twbLayer->dumpWeightsToFile(weightsFilename, stream);
+    filesystem::path weightsFile = dir / (layerName + "_weights.gds");
+    j["weights_tensor"] = weightsFile.string();
+    twbLayer->dumpWeightsToFile(weightsFile.string(), stream);
     if (hasBias) {
-        string biasesFilename = string("/tmp/") + layerName + "_biases.gds";
-        j["biases_tensor"] = biasesFilename;
-        twbLayer->dumpBiasesToFile(biasesFilename, stream);
+        filesystem::path biasesFile = dir / (layerName + "_biases.gds");
+        j["biases_tensor"] = biasesFile.string();
+        twbLayer->dumpBiasesToFile(biasesFile.string(), stream);
     }
 
     return j;
+}
+
+void FullyConnected::deserialize(const json &j, Network *network) {
+    if (j["version"] != "1.0.0")
+        throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+    if (j.at("layer_type").get<std::string>() != "fully_connected")
+        throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+
+    uint32_t numOutputFeatures = j.at("num_output_features").get<uint32_t>();
+    bool hasBias = j.at("has_bias").get<bool>();
+
+    vector<Tensor> featureInputs;
+    for (const json& input : j["inputs"]) {
+        uint64_t originalTensorId = input.at("id").get<uint64_t>();
+        Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
+        featureInputs.push_back(tensor);
+    }
+
+    vector<Tensor> featureOutputs;
+    for (const json& output : j["outputs"]) {
+        featureOutputs.push_back(Tensor::deserialize(output));
+    }
+
+    string weightsFile = j.at("weights_tensor").get<string>();
+    string biasesFile;
+    if (hasBias)
+        biasesFile = j.at("biases_tensor").get<string>();
+
+    FullyConnected fullyConnected = FullyConnected();
+    fullyConnected.numOutputFeatures = numOutputFeatures;
+    fullyConnected.hasBias = hasBias;
+    fullyConnected.featureInputs = featureInputs;
+    for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
+        fullyConnected.featureOutputs.push_back(featureOutputs[i]);
+        fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
+        fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
+    }
+    fullyConnected.weightsFile = weightsFile;
+    if (hasBias)
+        fullyConnected.biasesFile = biasesFile;
+
+    fullyConnected.initialized = true;
+
+    fullyConnected.addToNetwork(network);
 }

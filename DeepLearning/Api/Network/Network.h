@@ -31,6 +31,10 @@
 
 #include "omp.h"
 
+// FIXME: at some point, considering the desire to sorta parity with TF, each input connection to say a FC layer creates a new layer
+//        just they share weights. That way feedback back into an FC layer does not create a cycle and topological sort
+//        can still be used to stamp the graph
+
 namespace Thor {
 class Network;
 class LocalExecutor;
@@ -329,6 +333,8 @@ class Network {
 
     std::shared_ptr<Optimizer> getOptimizer();
 
+    Tensor getApiTensorByOriginalId(uint64_t originalId) {return apiTensorByOriginalId[originalId];}
+
    private:
     static const bool DEBUG_STAMP = false;
 
@@ -341,6 +347,7 @@ class Network {
     std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
 
     std::set<Tensor> allTensors;
+    std::map<uint64_t, Tensor> apiTensorByOriginalId;
     std::map<Tensor, std::vector<std::shared_ptr<Layer>>> apiTensorToApiLoadingLayers;
     std::map<Tensor, std::shared_ptr<Layer>> apiTensorToApiDrivingLayer;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiOutputTensors;

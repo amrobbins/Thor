@@ -10,9 +10,11 @@
 
 #include <assert.h>
 #include <atomic>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
+#include <stdexcept>
 
 namespace Thor {
 
@@ -70,7 +72,8 @@ class Layer {
 
     virtual std::string getLayerType() const = 0;
 
-    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
+    static void deserialize(const nlohmann::json &j, Stream stream, Network *network);
 
    protected:
     Optional<Tensor> featureInput;
@@ -85,8 +88,8 @@ class Layer {
 
     // initialize() is called for a layer after it has been stamped, the first connection that is made to the layer.
     // often layers will not need initialize() at all.
-    virtual void initialize(std::shared_ptr<ThorImplementation::Layer> layer,
-                            std::vector<std::shared_ptr<Initializer>> &initializers) const {}
+    virtual Optional<Event> initialize(std::shared_ptr<ThorImplementation::Layer> layer,
+                            std::vector<std::shared_ptr<Initializer>> &initializers) {}
 
     virtual void addToNetwork(Network *network);
 

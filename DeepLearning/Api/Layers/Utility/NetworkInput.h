@@ -26,6 +26,9 @@ class NetworkInput : public Layer {
 
     virtual std::string getLayerType() const { return "NetworkInput"; }
 
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
+
    protected:
     virtual std::shared_ptr<ThorImplementation::NetworkInput> stamp(ThorImplementation::TensorPlacement placement,
                                                                     uint32_t batchSize) const {

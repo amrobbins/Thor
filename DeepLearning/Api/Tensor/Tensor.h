@@ -21,6 +21,7 @@ class Tensor {
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, std::vector<uint64_t> dimensions)
         : id(nextId.fetch_add(1)), dataType(dataType), dimensions(dimensions), initialized(true) {
+        originalId = id;
         // When dimension[0] == 0, it means copy the batch size when it is known.
         for (uint32_t i = 1; i < dimensions.size(); ++i) {
             assert(dimensions[i] != 0);
@@ -35,6 +36,10 @@ class Tensor {
     uint64_t getId() const {
         assert(initialized);
         return id;
+    }
+    uint64_t getOriginalId() const {
+        assert(initialized);
+        return originalId;
     }
     DataType getDataType() const {
         assert(initialized);
@@ -134,17 +139,21 @@ class Tensor {
         assert(oldNumElements == newNumElements);
     }
 
+    nlohmann::json serialize() const;
+    static Tensor deserialize(const nlohmann::json &j);
+
    protected:
     void setDataType(DataType dataType) { this->dataType = dataType; }
 
    private:
     uint64_t id;
+    uint64_t originalId;
     static std::atomic<uint64_t> nextId;
 
     DataType dataType;
     std::vector<uint64_t> dimensions;
 
-    bool initialized;
+    bool initialized = false;
 
     friend class Network;
 };

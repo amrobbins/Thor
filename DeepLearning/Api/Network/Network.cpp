@@ -587,7 +587,57 @@ void Network::addToNetwork(Layer *layer) {
     addLayerToNetwork(layer);
 }
 
-void Network::addLayerToNetwork(const Layer *layer) { network.insert(layer->clone()); }
+void Network::addLayerToNetwork(const Layer *layer) {
+    network.insert(layer->clone());
+
+    auto networkInput = dynamic_cast<const NetworkInput *>(layer);
+    auto networkOutput = dynamic_cast<const NetworkOutput *>(layer);
+    auto stub = dynamic_cast<const Stub *>(layer);
+    auto loss = dynamic_cast<const Loss *>(layer);
+    auto metric = dynamic_cast<const Metric *>(layer);
+    auto multiConnectionLayer = dynamic_cast<const MultiConnectionLayer *>(layer);
+    if (networkInput) {
+        Tensor outputTensor = networkInput->getFeatureOutput();
+        apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
+    } else if (networkOutput) {
+        Tensor inputTensor = networkOutput->getFeatureInput();
+        apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
+    } else if (stub) {
+        Tensor inputTensor = stub->getFeatureInput();
+        apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
+    } else if (loss) {
+        Tensor rawPredictionsTensor = loss->getFeatureInput();
+        Tensor labelsTensor = loss->getLabels();
+        Tensor lossTensor = loss->getLoss();
+        apiTensorByOriginalId[rawPredictionsTensor.getOriginalId()] = rawPredictionsTensor;
+        apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
+        apiTensorByOriginalId[lossTensor.getOriginalId()] = lossTensor;
+    } else if (metric) {
+        Tensor inputTensor = metric->getFeatureInput();
+        Tensor labelsTensor = metric->getLabels();
+        Tensor outputTensor = metric->getFeatureOutput();
+        apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
+        apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
+        apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
+    } else if (multiConnectionLayer) {
+        vector<Tensor> inputTensors = multiConnectionLayer->getFeatureInputs();
+        vector<Tensor> outputTensors = multiConnectionLayer->getFeatureOutputs();
+        assert(!inputTensors.empty());
+        assert(!outputTensors.empty());
+        for (uint32_t i = 0; i < inputTensors.size(); ++i) {
+            apiTensorByOriginalId[inputTensors[i].getOriginalId()] = inputTensors[i];
+        }
+        for (uint32_t i = 0; i < outputTensors.size(); ++i) {
+            apiTensorByOriginalId[outputTensors[i].getOriginalId()] = outputTensors[i];
+        }
+    } else {
+        // base Layer type
+        Tensor inputTensor = layer->getFeatureInput();
+        Tensor outputTensor = layer->getFeatureOutput();
+        apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
+        apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
+    }
+}
 
 // An initializer initializes one tensor
 void Network::addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }

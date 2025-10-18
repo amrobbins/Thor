@@ -14,6 +14,8 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "Utilities/Common/Stream.h"
 #include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
@@ -35,7 +37,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
 
-    virtual nlohmann::json serialize(Stream stream);
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual bool isMultiLayer() const {
@@ -100,22 +103,68 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         return fullyConnected;
     }
 
-    virtual void initialize(std::shared_ptr<ThorImplementation::Layer> layer,
-                            std::vector<std::shared_ptr<Initializer>> &initializers) const {
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> layer,
+                                       bool isFirstStamp,
+                                       std::shared_ptr<ThorImplementation::Layer> sisterLayer,
+                                       Optional<Event> sisterLayerLoadedEvent,
+                            std::vector<std::shared_ptr<Initializer>> &initializers) {
         assert(std::dynamic_pointer_cast<ThorImplementation::FullyConnected>(layer) != nullptr);
         std::shared_ptr<ThorImplementation::FullyConnected> fullyConnected =
             std::dynamic_pointer_cast<ThorImplementation::FullyConnected>(layer);
 
-        std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
-        weightsInitializerBuilderClone->tensorToInitialize(fullyConnected->getWeights());
-        weightsInitializerBuilderClone->layerThatOwnsTensor(fullyConnected.get());
-        initializers.push_back(weightsInitializerBuilderClone->build());
+        // Weights are set right now, based on 1 of 3 methods:
+        // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+        // 2. Copy from a file - when loading a saved network
+        // 3. Run an initializer to set the weights - on an untrained network
+        if (!isFirstStamp) {
+            assert(std::dynamic_pointer_cast<ThorImplementation::FullyConnected>(sisterLayer) != nullptr);
+            std::shared_ptr<ThorImplementation::FullyConnected> sisterFullyConnected =
+                std::dynamic_pointer_cast<ThorImplementation::FullyConnected>(sisterLayer);
 
-        if (fullyConnected->getBiases().isPresent()) {
-            std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
-            biasInitializerBuilderClone->tensorToInitialize(fullyConnected->getBiases().get());
-            biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected.get());
-            initializers.push_back(biasInitializerBuilderClone->build());
+            ThorImplementation::Tensor weights = fullyConnected->getWeights();
+            Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
+            if (sisterLayerLoadedEvent.isPresent())
+                stream.waitEvent(sisterLayerLoadedEvent);
+            weights.copyFromAsync(sisterFullyConnected->getWeights(), stream);
+            return {stream.putEvent(false, true)};
+        } else if (weightsFile.isPresent()) {
+            assert (weightsInitializerBuilder.get() == nullptr);
+            assert (biasInitializerBuilder.get() == nullptr);
+            assert (fullyConnected->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+            Stream stream = Stream::getNextUploadStream(fullyConnected->getWeights().getPlacement().getDeviceNum());
+            fullyConnected->loadWeightsFromFile(weightsFile.get(), stream);
+            if (hasBias) {
+                assert (biasesFile.isPresent());
+                fullyConnected->loadWeightsFromFile(biasesFile.get(), stream);
+            }
+
+            // Can't use the file later, it may not still be there
+            weightsFile = Optional<std::string>::empty();
+            biasesFile = Optional<std::string>::empty();
+
+            return {stream.putEvent(false, true)};
+        } else {
+            Optional<Event> initDoneEvent;
+            std::vector<Event> initDoneEvents;
+
+            std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
+            weightsInitializerBuilderClone->tensorToInitialize(fullyConnected->getWeights());
+            weightsInitializerBuilderClone->layerThatOwnsTensor(fullyConnected.get());
+            initializers.push_back(weightsInitializerBuilderClone->build());
+            initDoneEvent = initializers.back()->getInitDoneEvent();
+            if (initDoneEvent.isPresent())
+                initDoneEvents.push_back(initDoneEvent);
+
+            if (fullyConnected->getBiases().isPresent()) {
+                std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
+                biasInitializerBuilderClone->tensorToInitialize(fullyConnected->getBiases().get());
+                biasInitializerBuilderClone->layerThatOwnsTensor(fullyConnected.get());
+                initializers.push_back(biasInitializerBuilderClone->build());
+                initDoneEvent = initializers.back()->getInitDoneEvent();
+                if (initDoneEvent.isPresent())
+                    initDoneEvents.push_back(initDoneEvent);
+            }
+            return initDoneEvents;
         }
     }
 
@@ -163,6 +212,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     bool useBatchNormalization;
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
+
+    Optional<std::string> weightsFile;
+    Optional<std::string> biasesFile;
 
     friend class Network;
 

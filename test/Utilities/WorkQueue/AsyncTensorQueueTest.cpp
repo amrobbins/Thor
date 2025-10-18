@@ -1,4 +1,4 @@
-#include "Thor.h"
+#include "Utilities/WorkQueue/AsyncTensorQueue.h"
 
 #include <stdio.h>
 #include "cuda.h"

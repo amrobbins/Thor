@@ -644,6 +644,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
         printf("target initial contestants %lf\n", targetCount);
     unsigned int initialContestantCount = maxl(100, targetCount);
     unsigned int finalContestantCount = minl(40, initialContestantCount / 5);
+    if (printResults)
+        printf("finalContestantCount %d\n", finalContestantCount);
+
 
     constexpr int initialRun = 5;
     constexpr int finalRun = 20;
@@ -711,6 +714,12 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
         const uint32_t reductionSupportMask = getReductionSupportMask(supportedAlgorithms[algorithmIndex]);
         int swizzleMax = getSwizzleMaxValue(supportedAlgorithms[algorithmIndex]);
         int customKernelOptionMaxValue = getCustomKernelOptionMaxValue(supportedAlgorithms[algorithmIndex]);
+
+        // FIXME: The optimization space has gotten too big. Update this logic to get the 100 or 1000 heuristic ranked
+        //        kernels and compare them against each other and pick one.
+        //        For now I am simply making the optimization space smaller to move forward.
+        if (supportedTileSizes.size() > 36)
+            supportedTileSizes.resize(36);
 
         // Probably can use computed waves to choose the right ones, experiment by seeing the actual data.
         for (int tileIndex = 0; tileIndex < (int)supportedTileSizes.size(); ++tileIndex) {
@@ -988,6 +997,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
     int kernelsToKeep = minl(finalContestantCount, kernels.size());
     std::partial_sort(kernels.begin(), kernels.begin() + kernelsToKeep, kernels.end(), CublasKernel::executionTimeComparison);
     kernels.erase(kernels.begin() + kernelsToKeep, kernels.end());
+    if (printResults)
+        printf("kernels.size() %ld\n", kernels.size());
 
     for (unsigned int kernelIndex = 0; kernelIndex < kernels.size(); ++kernelIndex) {
         startEvents[kernelIndex].clear();

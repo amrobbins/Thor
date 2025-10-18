@@ -17,7 +17,7 @@
 //
 // using namespace ThorImplementation;
 //
-// int popRandomElement(set<int> &elements) {
+// static int popRandomElement(set<int> &elements) {
 //    int numElements = elements.size();
 //    int chosenElement = rand() % numElements;
 //    auto it = elements.begin();
@@ -28,7 +28,7 @@
 //    return element;
 //}
 //
-// void createLabeledFeatures(Tensor featureIn, Tensor labelsIn, vector<set<int>> &featuresPerClass) {
+// static void createLabeledFeatures(Tensor featureIn, Tensor labelsIn, vector<set<int>> &featuresPerClass) {
 //    int numClasses = featuresPerClass.size();
 //    int batchSize = featureIn.getDescriptor().getDimensions()[0];
 //    int numFeatures = featureIn.getDescriptor().getDimensions()[1];

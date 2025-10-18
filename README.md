@@ -25,8 +25,8 @@ cmake -DCMAKE_BUILD_TYPE=Release ..
 cmake -DCMAKE_BUILD_TYPE=Debug ..  
 -- or --  
 cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..  
-  
-make -j
+
+cmake --build . -j12
 
 #### Run tests
 

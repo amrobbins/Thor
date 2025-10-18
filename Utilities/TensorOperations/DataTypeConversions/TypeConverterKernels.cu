@@ -5,7 +5,10 @@
 using namespace ThorImplementation;
 using namespace std;
 
-// FIXME: get rid of in-place variants - can't free the back half of a tensor, there is no use for that and it is inefficient.
+// FIXME: if keeping the in-place variants, make launchReadConvertSyncWriteKernel much bigger, since the algo either repeatedly doubles
+//        from its size as the starting point, or halves to its size as the ending point.
+//        so for example use 1024 threads and fill 48KB = 49152 bytes of shared
+//        perhaps just get rid of in place, it is slow relatively.
 
 // Launch out-of-place kernels:
 template <typename FROM_TYPE, typename TO_TYPE>
@@ -656,7 +659,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu(FROM_TYPE *source_d, TO
     long startingElement = chunkSize;
     availableBytes = (sizeof(FROM_TYPE) - sizeof(TO_TYPE)) * chunkSize;
 
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat untill all elements are converted.
+    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat until all elements are converted.
     while (numElementsLeft > 0) {
         chunkSize = availableBytes / sizeof(TO_TYPE);
 
@@ -690,7 +693,7 @@ void TypeConverter::convertToSmallerElementsInPlaceOnGpu_toPackedBoolean(FROM_TY
     availableBytes =
         (sizeof(FROM_TYPE) * chunkSize) - TensorDescriptor::getArraySizeInBytes(chunkSize, TensorDescriptor::DataType::PACKED_BOOLEAN);
 
-    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat untill all elements are converted.
+    // Then convert elements into the empty space, thereby freeing up more empty space, and repeat until all elements are converted.
     while (numElementsLeft > 0) {
         chunkSize = availableBytes * 8;
         if (chunkSize > numElementsLeft)

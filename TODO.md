@@ -1,3 +1,9 @@
+# FIXME:
+DeepLearning/Implementation/SimpleNetworkTest.cpp
+DeepLearning/Implementation/Layers/Optimizers/AdamTest.cpp
+DeepLearning/Implementation/Layers/Optimizers/SgdTest.cpp
+
+
 # TODO:
 1. ADAM Optimizer - test and get working - done - get test to pass consistently.
 2. Alexnet learning rate parity with Tensorflow on imagenet.

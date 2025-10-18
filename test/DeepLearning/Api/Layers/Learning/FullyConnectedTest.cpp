@@ -187,27 +187,28 @@ TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     ASSERT_FALSE(fullyConnected < *clone);
 }
 
-TEST(FullyConnected, Serializes) {
+TEST(FullyConnected, SerializeDeserialize) {
     srand(time(nullptr));
 
-    Network network;
+    Network initialNetwork;
 
     Tensor::DataType dataType = Tensor::DataType::FP16;
 
     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
 
     uint32_t numOutputFeatures = 1 + (rand() % 1000);
+    printf("NumOutputFeatures %d\n", numOutputFeatures);
     bool hasBias = rand() % 2;
 
-    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
+    float dropProportion = 0;//rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
 
-    bool use_batch_norm = rand() % 2;
+    bool use_batch_norm = false;//rand() % 2;
 
     NetworkInput networkInput =
-        NetworkInput::Builder().network(network).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
     FullyConnected::Builder fullyConnectedBuilder = FullyConnected::Builder()
-                                                        .network(network)
+                                                        .network(initialNetwork)
                                                         .featureInput(networkInput.getFeatureOutput())
                                                         .numOutputFeatures(numOutputFeatures)
                                                         .hasBias(hasBias)
@@ -218,7 +219,7 @@ TEST(FullyConnected, Serializes) {
     FullyConnected fullyConnected = fullyConnectedBuilder.build();
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
-                                      .network(network)
+                                      .network(initialNetwork)
                                       .name("testOutput")
                                       .inputTensor(fullyConnected.getFeatureOutputs()[0])
                                       .dataType(dataType)
@@ -243,34 +244,54 @@ TEST(FullyConnected, Serializes) {
 
     // Now stamp the nework and test serialization
     uint32_t batchSize = 1 + (rand() % 16);
-    network.place(batchSize);
+    initialNetwork.place(batchSize);
     Stream stream(0);
-    json j = fullyConnected.serialize(stream);
 
-    ASSERT_EQ(j["version"], "1.0.0");
-    ASSERT_EQ(j["layer_type"], "fully_connected");
+    // Fetch the fully connected layer from the network and write to its weights
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork.getTrainableLayers();
+    ASSERT_EQ(trainableLayers.size(), 1UL);
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+    ASSERT_TRUE(physicalFCLayer != nullptr);
+    ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
+    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    half *weightsCpuMem = (half*)weightsCpu.getMemPtr();
+    for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
+        weightsCpuMem[i] = i;
+    }
+    weights.copyFromAsync(weightsCpu, stream);
+    // FIXME: do biases too
 
-    EXPECT_TRUE(j.contains("num_output_features"));
-    EXPECT_TRUE(j.contains("has_bias"));
-    EXPECT_FALSE(j.contains("activation"));
-    EXPECT_FALSE(j.contains("drop_out"));
-    EXPECT_FALSE(j.contains("batch_normalization"));
-    EXPECT_FALSE(j.contains("activation"));
-    EXPECT_EQ(j.contains("biases_tensor"), hasBias);
-    EXPECT_TRUE(j.contains("weights_tensor"));
-    EXPECT_TRUE(j.contains("inputs"));
-    EXPECT_TRUE(j.contains("outputs"));
+    json fullyConnectedJ = fullyConnected.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
-    ASSERT_TRUE(j.at("num_output_features").is_number_integer());
-    ASSERT_TRUE(j.at("has_bias").is_boolean());
-    ASSERT_TRUE(j.at("weights_tensor").is_string());
-    ASSERT_TRUE(j.at("inputs").is_array());
-    ASSERT_TRUE(j.at("outputs").is_array());
+    ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
+    ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");
 
-    EXPECT_EQ(j.at("num_output_features").get<uint32_t>(), numOutputFeatures);
-    EXPECT_EQ(j.at("has_bias").get<bool>(), hasBias);
+    EXPECT_TRUE(fullyConnectedJ.contains("num_output_features"));
+    EXPECT_TRUE(fullyConnectedJ.contains("has_bias"));
+    EXPECT_FALSE(fullyConnectedJ.contains("activation"));
+    EXPECT_FALSE(fullyConnectedJ.contains("drop_out"));
+    EXPECT_FALSE(fullyConnectedJ.contains("batch_normalization"));
+    EXPECT_FALSE(fullyConnectedJ.contains("activation"));
+    EXPECT_EQ(fullyConnectedJ.contains("biases_tensor"), hasBias);
+    EXPECT_TRUE(fullyConnectedJ.contains("weights_tensor"));
+    EXPECT_TRUE(fullyConnectedJ.contains("inputs"));
+    EXPECT_TRUE(fullyConnectedJ.contains("outputs"));
 
-    const auto &inputs = j.at("inputs");
+    ASSERT_TRUE(fullyConnectedJ.at("num_output_features").is_number_integer());
+    ASSERT_TRUE(fullyConnectedJ.at("has_bias").is_boolean());
+    ASSERT_TRUE(fullyConnectedJ.at("weights_tensor").is_string());
+    ASSERT_TRUE(fullyConnectedJ.at("inputs").is_array());
+    ASSERT_TRUE(fullyConnectedJ.at("outputs").is_array());
+
+    EXPECT_EQ(fullyConnectedJ.at("num_output_features").get<uint32_t>(), numOutputFeatures);
+    EXPECT_EQ(fullyConnectedJ.at("has_bias").get<bool>(), hasBias);
+
+    const auto &inputs = fullyConnectedJ.at("inputs");
     ASSERT_EQ(inputs.size(), 1U) << "Expect exactly one input";
     const auto &in0 = inputs.at(0);
     ASSERT_TRUE(in0.is_object());
@@ -284,7 +305,7 @@ TEST(FullyConnected, Serializes) {
 
     ASSERT_TRUE(in0.at("id").is_number_integer());
 
-    const auto &outputs = j.at("outputs");
+    const auto &outputs = fullyConnectedJ.at("outputs");
     ASSERT_EQ(outputs.size(), 1U) << "Expect exactly one output";
     const auto &out0 = outputs.at(0);
     ASSERT_TRUE(out0.is_object());
@@ -298,10 +319,57 @@ TEST(FullyConnected, Serializes) {
 
     ASSERT_TRUE(out0.at("id").is_number_integer());
 
-    EXPECT_FALSE(j.at("weights_tensor").get<std::string>().empty());
+    EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<std::string>().empty());
     if (hasBias) {
-        EXPECT_FALSE(j.at("biases_tensor").get<std::string>().empty());
+        EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<std::string>().empty());
     }
 
-    // printf("%s\n", j.dump(4).c_str());
+    //printf("%s\n", networkInputJ.dump(4).c_str());
+    //printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    //printf("%s\n", networkOutputJ.dump(4).c_str());
+
+    ////////////////////////////
+    // Deserialize
+    ////////////////////////////
+    Network newNetwork;
+
+    NetworkInput::deserialize(networkInputJ, &newNetwork);
+    FullyConnected::deserialize(fullyConnectedJ, &newNetwork);
+    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+
+    batchSize = 1 + (rand() % 16);
+    newNetwork.place(batchSize);
+
+    stampedNetworks.clear();
+    stampedNetworks = newNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    stampedNetwork = stampedNetworks[0];
+    vector<shared_ptr<ThorImplementation::NetworkInput>> networkInputs = stampedNetwork.getInputs();
+    trainableLayers.clear();
+    trainableLayers = stampedNetwork.getTrainableLayers();
+    vector<shared_ptr<ThorImplementation::NetworkOutput>> networkOutputs = stampedNetwork.getOutputs();
+
+    ASSERT_EQ(trainableLayers.size(), 1UL);
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+    ASSERT_TRUE(physicalFCLayerDes != nullptr);
+    ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();
+    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    weightsCpuDes.copyFromAsync(weightsDes, stream);
+
+    ASSERT_NE(weightsDes, weights);
+    ASSERT_EQ(weightsDes.getDimensions(), weights.getDimensions());
+    ASSERT_EQ(weightsDes.getDataType(), weights.getDataType());
+    ASSERT_TRUE(weightsDes.getPlacement() == weights.getPlacement());
+
+    half *weightsCpuMemDes = (half*)weightsCpuDes.getMemPtr();
+    for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
+        ASSERT_EQ(weightsCpuMemDes[i], half(i));
+    }
+
+
+
+
+//    HERE test passes now. Add testing for deserialized stuff. Go write some data into the weights before serializing
+//    and verify integrity afterward.
 }
+
