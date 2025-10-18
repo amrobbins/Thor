@@ -6,16 +6,18 @@ namespace ThorImplementation {
 
 Initializer::~Initializer() {}
 
-void Initializer::initialize(Layer *layer, Tensor tensorToInitialize) {
+Event Initializer::initialize(Layer *layer, Tensor tensorToInitialize) {
     MultiConnectionLayer *multiConnectionLayer = dynamic_cast<MultiConnectionLayer *>(layer);
+    Event initDoneEvent;
     if (multiConnectionLayer != nullptr) {
         // the difference being whether there is 1 or potentially multiple input streams
-        initialize(layer, tensorToInitialize, multiConnectionLayer->getStreams());
+        initDoneEvent = initialize(layer, tensorToInitialize, multiConnectionLayer->getStreams());
     } else {
         vector<Stream> streams;
         streams.push_back(layer->getStream());
-        initialize(layer, tensorToInitialize, streams);
+        initDoneEvent = initialize(layer, tensorToInitialize, streams);
     }
+    return initDoneEvent;
 }
 
 shared_ptr<Initializer> Initializer::clone() { assert(false); }

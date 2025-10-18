@@ -21,7 +21,7 @@ class Initializer {
    protected:
     virtual void performCopy(Tensor buffer, Tensor tensorToInitialize, std::vector<Stream> streams);
 
-    virtual void initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams) = 0;
+    virtual Event initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams) = 0;
 };
 
 }  // namespace ThorImplementation

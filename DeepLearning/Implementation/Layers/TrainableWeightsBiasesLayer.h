@@ -225,13 +225,17 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         assert(optimizer.isEmpty());
     }
 
-    void dumpWeightsToFile(std::string filename, Stream stream) {
+    void dumpWeightsToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty())
+            stream = optimizer.get()->getGradientUpdateStream();
         if (weights.getAttachedFilename() != filename)
             weights.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
         weights.dumpToFile(stream);
     }
 
-    void loadWeightsFromFile(std::string filename, Stream stream) {
+    void loadWeightsFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty())
+            stream = optimizer.get()->getGradientUpdateStream();
         if (weights.getAttachedFilename() != filename)
             weights.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
         weights.loadFromFile(stream);

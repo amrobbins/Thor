@@ -107,7 +107,7 @@ uint64_t Tensor::getThreadIdHash64(uint64_t seed) {
     return murmurHash64(&threadId, sizeof(threadId), seed);
 }
 
-Tensor::Tensor() : ReferenceCounted() { usingExternallyManagedMemory = false; }
+Tensor::Tensor() : ReferenceCounted() {}
 
 Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) { construct(placement, descriptor, nullptr); }
 
@@ -617,6 +617,7 @@ void Tensor::loadFromFile(Stream stream) {
     assert(fileAccessRequirement != FileAccess::WRITE_ONLY);
 
     if (getPlacement() == TensorPlacement::MemDevices::GPU) {
+        gpuDirectStorageBytesAccessed = 0;
         CUfileError_t cuFileError;
         cuFileError = cuFileReadAsync(gpuDirectStorageCuFileHandle,
                                       getMemPtr(),
@@ -642,6 +643,7 @@ void Tensor::dumpToFile(Stream stream) {
     assert(fileAccessRequirement != FileAccess::READ_ONLY);
 
     if (getPlacement() == TensorPlacement::MemDevices::GPU) {
+        gpuDirectStorageBytesAccessed = 0;
         CUfileError_t cuFileError;
         cuFileError = cuFileWriteAsync(gpuDirectStorageCuFileHandle,
                                        getMemPtr(),
@@ -710,7 +712,7 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     // If the destination data type is larger than the source data type, then this is always supported.
     //      - The data is copied to the dest device and then up converted in place.
     //
-    // If the destination data type is smaller then the source data type, then this is only supported when mustPreserveSourceValue is false.
+    // If the destination data type is smaller than the source data type, then this is only supported when mustPreserveSourceValue is false.
     //      - In this case an inplace down conversion is performed in source memory and the converted mem is copied to the dest device.
     if (sourceDescriptor.getDataType() != destDescriptor.getDataType() && source.placement != placement) {
         if (sourceDescriptor.getArraySizeInBytes() <= destDescriptor.getArraySizeInBytes()) {

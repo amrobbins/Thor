@@ -27,13 +27,16 @@ class Initializer {
     virtual void initialize() {
         assert(tensorToInitialize.isPresent());
         assert(layerThatOwnsTensor != nullptr);
-        implementationInitializer->initialize(layerThatOwnsTensor, tensorToInitialize);
+        initDoneEvent = implementationInitializer->initialize(layerThatOwnsTensor, tensorToInitialize);
     }
+
+    Optional<Event> getInitDoneEvent() { return initDoneEvent; }
 
    protected:
     std::shared_ptr<ThorImplementation::Initializer> implementationInitializer;
     Optional<ThorImplementation::Tensor> tensorToInitialize;
     ThorImplementation::Layer *layerThatOwnsTensor;
+    Optional<Event> initDoneEvent;
 
     // Referring to the initializer object, not the tensor that gets initialized:
     bool initialized;

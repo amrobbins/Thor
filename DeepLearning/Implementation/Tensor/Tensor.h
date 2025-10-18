@@ -6,8 +6,8 @@
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
-#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 #include "Utilities/TensorOperations/DataTypeConversions/TypeConverter.h"
+#include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
 #include <fcntl.h>
@@ -105,6 +105,35 @@ class Tensor : private ReferenceCounted {
     void memsetAsync(Stream stream, int8_t value, uint64_t numElements = 0);
     void clear();
     void clearAsync(Stream stream);
+
+    // Convert this tensor to refer to an uninitialized tensor
+    // If this is the only reference to this tensor, its resources (memory) will be freed
+    // Freeing of resources happens immediately, so you must ensure that there are no pending
+    // accesses of the tensor's memory still enqueued on a stream, when the reference is dropped
+    // FIXME: I should handle this internally by keeping track of pending operations and host side synchronizing
+    //        with them before destroying the tensor. Consider if a tensor is allocated in a function, used to copy
+    //        data onto the GPU and then the function returns. There could be a good amount of work already enqueued
+    //        on the stream so it will be a while before the tensor memory is accessed, however the tensor is freed
+    //        when the function returns since it had the only reference.
+    //        Could I somehow make a temporary reference, perhaps in a future, where that process will wait till the operation
+    //        completes and then drops the reference.
+    //
+    //        This is the fix: push (tensor, event) onto a static WorkQueue. Upon popping work queue synchronizes on the event and then returns
+    //        So there is no concern about calling drop reference, or just references going out of scope, when there is future work associated
+    //        with a tensor. But... am I detecting all work, copies are once thing, but what if its memory is being used in a stream?
+    //        func() -> C = A + B; return C;
+    //        Ok, I just need to ensure this happens on all tensor operations.
+    //        Also I need unbounded no output work queue: unbounded loose end queue, uses a queue<pair<Tensor, Event>>.
+    //
+    // Warning! Ensure that all async work involving this tensor has been synchronized on the host before calling dropReference()!
+    //
+    // A correct pattern:
+    // Tensor tensorFp32(cpuPlacement, descriptorFp32);
+    // Tensor tensorFp16(cpuPlacement, descriptorFp16);
+    // tensorFp16.copyFromAsync(tensorFp32, stream);
+    // stream.synchronize();    <---- this is needed
+    // tensorFp32.dropReference();
+    void dropReference() {*this = Tensor();}
 
     // Note minValue and maxValue are igorned for boolean types.
     void fillRandom(double minValue, double maxValue, Stream stream);

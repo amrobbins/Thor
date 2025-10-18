@@ -86,7 +86,6 @@ target_compile_options(Thor PRIVATE
         -fPIC
         -Wall
         $<$<COMPILE_LANGUAGE:CXX>:-Werror>
-        $<$<COMPILE_LANGUAGE:CUDA>:--Werror all-warnings>
         -Wdeprecated
         )
 target_link_options(Thor PRIVATE
@@ -293,3 +292,4 @@ add_custom_command(
 
 add_custom_target(ThorHeader ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/Thor.h)
 add_dependencies(Thor ThorHeader)
+

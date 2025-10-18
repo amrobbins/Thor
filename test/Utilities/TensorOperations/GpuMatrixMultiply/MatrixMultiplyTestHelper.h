@@ -247,7 +247,7 @@ inline void matrixMultiplyCpuHalf(half *A,
 #pragma omp parallel for schedule(static, 3)
     for (int ra = 0; ra < rowsA; ra++) {
         for (int cb = 0; cb < colsB; cb++) {
-            float accum = 0.0;
+            float accum = 0.0f;
             for (int carb = 0; carb < colsA; carb++)
                 accum += (float)(A[ra * lda + carb] * B[carb * ldb + cb]);
 

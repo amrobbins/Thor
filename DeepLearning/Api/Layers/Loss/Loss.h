@@ -32,8 +32,8 @@ class Loss : public Layer {
     // If the raw predictions are transformed. i.e. by softmax before becoming predictions
     // then featureInput will be a different tensor that predictions,
     // i.e. featureInput will be the input to softmax and predictions will be the output of softmax
-    virtual Optional<Tensor> getFeatureInput() { return predictionsTensor; }
-    virtual Optional<Tensor> getFeatureOutput() { return lossTensor; }
+    virtual Optional<Tensor> getFeatureInput() const { return predictionsTensor; }
+    virtual Optional<Tensor> getFeatureOutput() const { return lossTensor; }
 
     virtual int getConnectionType(Tensor connectingTensor) const {
         if (connectingTensor == labelsTensor) {
