@@ -16,11 +16,11 @@ uint32_t maxNumGradientUpdateStreams = 16;
 
 vector<deque<Stream>> uploadStreams;
 mutex uploadStreamMutex;
-uint32_t maxNumUploadStreams = 16;
+uint32_t maxNumUploadStreams = 8;
 
 vector<deque<Stream>> downloadStreams;
 mutex downloadStreamMutex;
-uint32_t maxNumDownloadStreams = 16;
+uint32_t maxNumDownloadStreams = 8;
 
 // To allow for parallelization while limiting the amount of streams created, gradient update operations all share
 // a fixed size pool of gradientUpdateStreams

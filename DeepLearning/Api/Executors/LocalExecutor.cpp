@@ -49,7 +49,8 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     // FIXME: stamp N networks per GPU, currently just stamping 1 network on gpu 0.
     // FIXME: save known optimal kernels on disk
     Network::StatusCode statusCode;
-    statusCode = localExecutor->network->place(batchSize);
+    vector<Event> initDoneEvents;
+    statusCode = localExecutor->network->place(batchSize, initDoneEvents);
     assert(statusCode == Network::StatusCode::SUCCESS);
     assert(!localExecutor->network->getStampedNetworks().empty());
     localExecutor->stampedNetworks = localExecutor->network->getStampedNetworks();
@@ -63,6 +64,10 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     localExecutor->numBatchesDoneInEpoch = make_shared<uint64_t>(0);
     localExecutor->numBatchesInEpoch = make_shared<uint64_t>(0);
 
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        // Host sync with init is done.
+        initDoneEvents[i].synchronize();
+    }
     localExecutor->initialized = true;
 
     return localExecutor;

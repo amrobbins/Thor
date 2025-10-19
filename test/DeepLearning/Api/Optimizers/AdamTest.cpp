@@ -72,7 +72,8 @@ TEST(Adam, InitializesParametersWithOneStamp) {
     float epsilon = 1e-5f;
     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
 
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
@@ -95,7 +96,8 @@ TEST(Adam, InitializesParametersWithTwoStamps) {
     shared_ptr<Adam> adam =
         Adam::Builder().network(network).alpha(alpha).beta1(beta1).beta2(beta2).epsilon(true).build();
 
-    Network::StatusCode statusCode = network.place(32, {0}, 2);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 2);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
@@ -119,7 +121,8 @@ TEST(Adam, ReportsParameters) {
     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     unordered_map<string, float> params = adam->getAllHyperParameters(10, 3, 100);
@@ -164,7 +167,8 @@ TEST(Adam, SettersAndGetters) {
     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     unordered_map<string, float> params = adam->getAllHyperParameters(10, 3, 100);

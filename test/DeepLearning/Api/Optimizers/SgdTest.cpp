@@ -183,7 +183,8 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
@@ -208,7 +209,8 @@ TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     ThorImplementation::StampedNetwork stampedNetwork1;
-    Network::StatusCode statusCode = network.place(32, {0}, 2);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 2);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
@@ -237,7 +239,8 @@ TEST(Sgd, SgdUpdatesParameters) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     sgd->updateHyperParameters(0, 0, 10);
@@ -267,7 +270,8 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     sgd->updateHyperParameters(0, 0, 10);
@@ -298,7 +302,8 @@ TEST(Sgd, SgdReportsParameters) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    Network::StatusCode statusCode = network.place(32, {0}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     unordered_map<string, float> params = sgd->getAllHyperParameters(0, 0, 0);

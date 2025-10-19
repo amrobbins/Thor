@@ -197,12 +197,11 @@ TEST(FullyConnected, SerializeDeserialize) {
     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
 
     uint32_t numOutputFeatures = 1 + (rand() % 1000);
-    printf("NumOutputFeatures %d\n", numOutputFeatures);
     bool hasBias = rand() % 2;
 
-    float dropProportion = 0;//rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
+    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
 
-    bool use_batch_norm = false;//rand() % 2;
+    bool use_batch_norm = rand() % 2;
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
@@ -243,17 +242,26 @@ TEST(FullyConnected, SerializeDeserialize) {
     ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
 
     // Now stamp the nework and test serialization
-    uint32_t batchSize = 1 + (rand() % 16);
-    initialNetwork.place(batchSize);
     Stream stream(0);
+    uint32_t batchSize = 1 + (rand() % 16);
+    std::vector<Event> initDoneEvents;
+    initialNetwork.place(batchSize, initDoneEvents);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
 
     // Fetch the fully connected layer from the network and write to its weights
     vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
     ASSERT_EQ(stampedNetworks.size(), 1UL);
     ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
     vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork.getTrainableLayers();
-    ASSERT_EQ(trainableLayers.size(), 1UL);
+    ASSERT_EQ(trainableLayers.size(), use_batch_norm ? 2UL : 1UL );
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+    if (use_batch_norm) {
+        if (physicalFCLayer == nullptr)
+            physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[1]);
+    }
     ASSERT_TRUE(physicalFCLayer != nullptr);
     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
     ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -331,6 +339,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     ////////////////////////////
     // Deserialize
     ////////////////////////////
+    // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
     NetworkInput::deserialize(networkInputJ, &newNetwork);
@@ -338,20 +347,23 @@ TEST(FullyConnected, SerializeDeserialize) {
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
-    newNetwork.place(batchSize);
+    newNetwork.place(batchSize, initDoneEvents);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
 
     stampedNetworks.clear();
     stampedNetworks = newNetwork.getStampedNetworks();
     ASSERT_EQ(stampedNetworks.size(), 1UL);
     stampedNetwork = stampedNetworks[0];
-    vector<shared_ptr<ThorImplementation::NetworkInput>> networkInputs = stampedNetwork.getInputs();
     trainableLayers.clear();
     trainableLayers = stampedNetwork.getTrainableLayers();
-    vector<shared_ptr<ThorImplementation::NetworkOutput>> networkOutputs = stampedNetwork.getOutputs();
 
-    ASSERT_EQ(trainableLayers.size(), 1UL);
+    ASSERT_EQ(trainableLayers.size(), 1UL );
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
     ASSERT_TRUE(physicalFCLayerDes != nullptr);
+
     ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();
     ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
     weightsCpuDes.copyFromAsync(weightsDes, stream);
@@ -365,11 +377,5 @@ TEST(FullyConnected, SerializeDeserialize) {
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         ASSERT_EQ(weightsCpuMemDes[i], half(i));
     }
-
-
-
-
-//    HERE test passes now. Add testing for deserialized stuff. Go write some data into the weights before serializing
-//    and verify integrity afterward.
 }
 

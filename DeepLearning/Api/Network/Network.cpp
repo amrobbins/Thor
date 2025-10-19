@@ -53,7 +53,7 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 }
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
-Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize) {
+Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &initDoneEvents, uint32_t batchSize) {
     ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
 
@@ -104,7 +104,11 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize) {
                 continue;
             }
 
-            stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
+            vector<Event> layerEvents = stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
+            initDoneEvents.insert(
+                initDoneEvents.end(),
+                make_move_iterator(layerEvents.begin()),
+                make_move_iterator(layerEvents.end()));
         }
 
         // reorderStampedNetworkForTestability(stampedNetwork);
@@ -152,7 +156,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, uint32_t batchSize) {
     return StatusCode::SUCCESS;
 }
 
-Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
+Network::StatusCode Network::place(uint32_t batchSize, std::vector<Event> &initDoneEvents, std::vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
     // FIXME: multiple stamps, multiple gpus
     // FIXME: smart placement and stamping
     assert(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
@@ -178,7 +182,7 @@ Network::StatusCode Network::place(uint32_t batchSize, std::vector<int32_t> forc
     for (uint32_t i = 0; i < devices.size(); ++i) {
         preOptimize(devices[i], batchSize);
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
-            statusCode = stampNetwork(devices[i], batchSize);
+            statusCode = stampNetwork(devices[i], initDoneEvents, batchSize);
             if (statusCode != StatusCode::SUCCESS) {
                 return statusCode;
             }
@@ -653,7 +657,7 @@ void Network::addToNetwork(Optimizer *optimizer) {
 
 shared_ptr<Optimizer> Network::getOptimizer() { return optimizer; }
 
-void Network::stampLayer(Tensor inputTensor,
+vector<Event> Network::stampLayer(Tensor inputTensor,
                          const shared_ptr<Thor::Layer> layer,
                          uint32_t gpuNum,
                          uint32_t batchSize,
@@ -771,6 +775,8 @@ void Network::stampLayer(Tensor inputTensor,
             stampedNetwork.otherLayers.push_back(implementationLayer.get());
         }
     }
+
+    return initializationReadyEvents;
 }
 
 void Network::stampNetworkOutput(Tensor inputTensor,
