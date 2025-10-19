@@ -65,7 +65,8 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     int gpuNum = 0;
     int stampsPerGpu = 1;
     int batchSize = 32;
-    Network::StatusCode statusCode = network.place(batchSize, {gpuNum}, stampsPerGpu);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     assert(network.getStampedNetworks().size() == 1);
     stampedNetwork = network.getStampedNetworks()[0];
@@ -160,7 +161,8 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     ThorImplementation::StampedNetwork stampedNetwork;
     int gpuNum = 0;
     int batchSize = 32;
-    Network::StatusCode statusCode = network.place(batchSize, {gpuNum}, 1);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     stampedNetwork = network.getStampedNetworks().front();
 
@@ -237,7 +239,8 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     int gpuNum = 0;
     int batchSize = 32;
     uint32_t stampsPerGpu = 1;
-    Network::StatusCode statusCode = network.place(batchSize, {gpuNum}, stampsPerGpu);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     assert(network.getStampedNetworks().size() == 1);
     stampedNetwork = network.getStampedNetworks()[0];
@@ -343,7 +346,8 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     int gpuNum = 0;
     int batchSize = 32;
     uint32_t stampsPerGpu = 1;
-    Network::StatusCode statusCode = network.place(batchSize, {gpuNum}, stampsPerGpu);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     assert(network.getStampedNetworks().size() == 1);
     stampedNetwork = network.getStampedNetworks()[0];
@@ -446,7 +450,8 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     int gpuNum = 0;
     int batchSize = 32;
     uint32_t stampsPerGpu = 1;
-    Network::StatusCode statusCode = network.place(batchSize, {gpuNum}, stampsPerGpu);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     assert(network.getStampedNetworks().size() == 1);
     stampedNetwork = network.getStampedNetworks()[0];
@@ -598,7 +603,8 @@ TEST(Network, AlexnetIsProperlyFormed) {
     int gpuNum = 0;
     uint64_t batchSize = 128;
     uint32_t stampsPerGpu = 1;
-    Network::StatusCode statusCode = alexNet.place(batchSize, {gpuNum}, stampsPerGpu);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode = alexNet.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     assert(alexNet.getStampedNetworks().size() == 1);
     stampedNetwork = alexNet.getStampedNetworks()[0];

@@ -318,6 +318,7 @@ class Network {
     virtual std::string statusCodeToString(int statusCode);
 
     virtual StatusCode place(uint32_t batchSize,
+                             std::vector<Event> &initDoneEvents,
                              std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
                              uint32_t forcedNumStampsPerGpu = 0);
     virtual std::vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
@@ -364,7 +365,7 @@ class Network {
     uint64_t firstInstanceBytes;
     uint64_t nonFirstInstanceBytes;
 
-    virtual StatusCode stampNetwork(uint32_t gpuNum, uint32_t batchSize);
+    virtual StatusCode stampNetwork(uint32_t gpuNum, std::vector<Event> &initDoneEvents, uint32_t batchSize);
     virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
 
     virtual StatusCode evaluateGraph();
@@ -383,7 +384,7 @@ class Network {
                                     uint32_t gpuNum,
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual void stampLayer(Tensor inputTensor,
+    virtual std::vector<Event> stampLayer(Tensor inputTensor,
                             const std::shared_ptr<Thor::Layer> layer,
                             uint32_t gpuNum,
                             uint32_t batchSize,
