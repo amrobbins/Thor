@@ -12,15 +12,15 @@ class Glorot : public Initializer {
 
     Glorot(Mode mode = Mode::UNIFORM);
 
-    virtual void initialize(Layer *layer, Tensor tensorToInitialize);
+    virtual Event initialize(Layer *layer, Tensor tensorToInitialize);
 
     virtual std::shared_ptr<Initializer> clone();
 
    protected:
-    virtual void initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams);
+    virtual Event initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams);
 
-    virtual void initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams);
-    virtual void initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams);
+    virtual Event initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams);
+    virtual Event initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams);
 
     const Mode mode;
 };

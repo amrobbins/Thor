@@ -6,17 +6,17 @@ namespace ThorImplementation {
 
 Glorot::Glorot(Mode mode) : mode(mode) { assert(mode == Mode::UNIFORM || mode == Mode::NORMAL); }
 
-void Glorot::initialize(Layer *layer, Tensor tensorToInitialize) { Initializer::initialize(layer, tensorToInitialize); }
+Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
 
-void Glorot::initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams) {
+Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams) {
     if (mode == Mode::UNIFORM) {
-        initializeUniform(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
+        return initializeUniform(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
     } else {
-        initializeNormal(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
+        return initializeNormal(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
     }
 }
 
-void Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams) {
+Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams) {
     std::hash<int> threadNumHash;
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
@@ -46,10 +46,10 @@ void Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToI
         }
     }
 
-    performCopy(buffer, tensorToInitialize, streams);
+    return performCopy(buffer, tensorToInitialize, streams);
 }
 
-void Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams) {
+Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams) {
     std::hash<int> threadNumHash;
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
@@ -81,7 +81,7 @@ void Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToIn
         }
     }
 
-    performCopy(buffer, tensorToInitialize, streams);
+    return performCopy(buffer, tensorToInitialize, streams);
 }
 
 shared_ptr<Initializer> Glorot::clone() { return make_shared<Glorot>(*this); }

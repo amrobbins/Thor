@@ -10,9 +10,9 @@ UniformRandom::UniformRandom(double maxValue, double minValue) : maxValue(maxVal
     assert(maxValue >= minValue);
 }
 
-void UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize) { Initializer::initialize(layer, tensorToInitialize); }
+Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
 
-void UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
+Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
     std::uniform_real_distribution<float> distribution(minValue, maxValue);
@@ -41,7 +41,7 @@ void UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<S
         }
     }
 
-    performCopy(buffer, tensorToInitialize, streams);
+    return performCopy(buffer, tensorToInitialize, streams);
 }
 
 shared_ptr<Initializer> UniformRandom::clone() { return make_shared<UniformRandom>(*this); }

@@ -188,3 +188,63 @@ void FullyConnected::deserialize(const json &j, Network *network) {
 
     fullyConnected.addToNetwork(network);
 }
+
+
+vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+                                                           bool isFirstStamp,
+                                                           shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                                           Optional<Event> sisterLayerLoadedEvent,
+                                                           vector<shared_ptr<Initializer>> &initializers) {
+
+    // Weights are set right now, based on 1 of 3 methods:
+    // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+    // 2. Copy from a file - when loading a saved network
+    // 3. Run an initializer to set the weights - on an untrained network
+    if (!isFirstStamp) {
+        assert (sisterLayer != nullptr);
+        ThorImplementation::Tensor weights = layer->getWeights();
+        Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
+        if (sisterLayerLoadedEvent.isPresent())
+            stream.waitEvent(sisterLayerLoadedEvent);
+        weights.copyFromAsync(sisterLayer->getWeights(), stream);
+        return {stream.putEvent(false, true)};
+    } else if (weightsFile.isPresent()) {
+        assert (weightsInitializerBuilder.get() == nullptr);
+        assert (biasInitializerBuilder.get() == nullptr);
+        assert (layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        Stream stream = Stream::getNextUploadStream(layer->getWeights().getPlacement().getDeviceNum());
+        layer->loadWeightsFromFile(weightsFile.get(), stream);
+        if (hasBias) {
+            assert (biasesFile.isPresent());
+            layer->loadWeightsFromFile(biasesFile.get(), stream);
+        }
+
+        // Can't use the file later, it may not still be there
+        weightsFile = Optional<string>::empty();
+        biasesFile = Optional<string>::empty();
+
+        return {stream.putEvent(false, true)};
+    } else {
+        Optional<Event> initDoneEvent;
+        vector<Event> initDoneEvents;
+
+        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
+        weightsInitializerBuilderClone->tensorToInitialize(layer->getWeights());
+        weightsInitializerBuilderClone->layerThatOwnsTensor(layer.get());
+        initializers.push_back(weightsInitializerBuilderClone->build());
+        initDoneEvent = initializers.back()->getInitDoneEvent();
+        if (initDoneEvent.isPresent())
+            initDoneEvents.push_back(initDoneEvent);
+
+        if (layer->getBiases().isPresent()) {
+            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
+            biasInitializerBuilderClone->tensorToInitialize(layer->getBiases().get());
+            biasInitializerBuilderClone->layerThatOwnsTensor(layer.get());
+            initializers.push_back(biasInitializerBuilderClone->build());
+            initDoneEvent = initializers.back()->getInitDoneEvent();
+            if (initDoneEvent.isPresent())
+                initDoneEvents.push_back(initDoneEvent);
+        }
+        return initDoneEvents;
+    }
+}

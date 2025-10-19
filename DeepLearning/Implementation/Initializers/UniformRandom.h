@@ -8,7 +8,7 @@ class UniformRandom : public Initializer {
    public:
     UniformRandom(double maxValue, double minValue);
 
-    virtual void initialize(Layer *layer, Tensor tensorToInitialize);
+    virtual Event initialize(Layer *layer, Tensor tensorToInitialize);
 
     virtual std::shared_ptr<Initializer> clone();
 
@@ -16,7 +16,7 @@ class UniformRandom : public Initializer {
     const double maxValue;
     const double minValue;
 
-    virtual void initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams);
+    virtual Event initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams);
 };
 
 }  // namespace ThorImplementation

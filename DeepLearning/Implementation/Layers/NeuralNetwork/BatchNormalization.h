@@ -150,7 +150,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         weights.copyFromAsync(oneInit_h, streams[0]);
         biases.get().copyFromAsync(zeroInit_h, streams[0]);
         resultRunningMean.copyFromAsync(biases.get(), streams[0]);
-        resultRunningVariance.copyFromAsync(biases.get(), streams[0]);
+        resultRunningVariance.copyFromAsync(weights, streams[0]);
 
         if (streams.size() > 1) {
             Event initializedEvent = streams[0].putEvent();
