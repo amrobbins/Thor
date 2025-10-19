@@ -90,23 +90,12 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return convolution2d;
     }
 
-    virtual void initialize(std::shared_ptr<ThorImplementation::Layer> layer,
-                            std::vector<std::shared_ptr<Initializer>> &initializers) const {
-        assert(std::dynamic_pointer_cast<ThorImplementation::Convolution2d>(layer) != nullptr);
-        std::shared_ptr<ThorImplementation::Convolution2d> convolution2d =
-            std::dynamic_pointer_cast<ThorImplementation::Convolution2d>(layer);
-        std::shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
-        weightsInitializerBuilderClone->tensorToInitialize(convolution2d->getWeights());
-        weightsInitializerBuilderClone->layerThatOwnsTensor(convolution2d.get());
-        initializers.push_back(weightsInitializerBuilderClone->build());
 
-        if (convolution2d->getBiases().isPresent()) {
-            std::shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
-            biasInitializerBuilderClone->tensorToInitialize(convolution2d->getBiases().get());
-            biasInitializerBuilderClone->layerThatOwnsTensor(convolution2d.get());
-            initializers.push_back(biasInitializerBuilderClone->build());
-        }
-    }
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+                                  bool isFirstStamp,
+                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                  Optional<Event> sisterLayerLoadedEvent,
+                                  std::vector<std::shared_ptr<Initializer>> &initializers);
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // FIXME: workspace size?
@@ -147,6 +136,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     bool useBatchNormalization;
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
+
+    Optional<std::string> weightsFile;
+    Optional<std::string> biasesFile;
 };
 
 // featureInput, numOutputChannels, filterHeight and filterWidth are required, all other parameters are optional.

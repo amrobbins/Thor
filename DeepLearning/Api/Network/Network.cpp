@@ -702,6 +702,7 @@ void Network::stampLayer(Tensor inputTensor,
     // Stamp the layer
     // Unless it was previously stamped on a prior pass, if so just connect the tensor.
     shared_ptr<ThorImplementation::Layer> implementationLayer = nullptr;
+    vector<Event> initializationReadyEvents;
     bool layerPreviouslyStamped = (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1);
     // In case of a tensor fanout, there is no apiLayer...
     if (layerPreviouslyStamped) {
@@ -728,8 +729,30 @@ void Network::stampLayer(Tensor inputTensor,
         }
     }
     Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
-    if (!layerPreviouslyStamped)
-        layer->initialize(implementationLayer, stampedNetwork.initializersShared);
+    if (!layerPreviouslyStamped) {
+        shared_ptr<TrainableWeightsBiasesLayer> trainableLayer =
+            dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layer);
+        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
+            dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
+        if (trainableLayer != nullptr) {
+            vector<Event> layerEvents = trainableLayer->initialize(
+                implementationTrainableLayer,
+                true,
+                nullptr,
+                Optional<Event>::empty(),
+                stampedNetwork.initializersShared);
+            initializationReadyEvents.insert(
+                initializationReadyEvents.end(),
+                make_move_iterator(layerEvents.begin()),
+                make_move_iterator(layerEvents.end()));
+        } else {
+            vector<Event> layerEvents = layer->initialize(implementationLayer, stampedNetwork.initializersShared);
+            initializationReadyEvents.insert(
+                initializationReadyEvents.end(),
+                make_move_iterator(layerEvents.begin()),
+                make_move_iterator(layerEvents.end()));
+        }
+    }
 
     vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
     for (uint32_t i = 0; i < apiOutputTensors.size(); ++i) {

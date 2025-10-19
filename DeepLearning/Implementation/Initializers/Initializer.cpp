@@ -22,7 +22,7 @@ Event Initializer::initialize(Layer *layer, Tensor tensorToInitialize) {
 
 shared_ptr<Initializer> Initializer::clone() { assert(false); }
 
-void Initializer::performCopy(Tensor buffer, Tensor tensorToInitialize, vector<Stream> streams) {
+Event Initializer::performCopy(Tensor buffer, Tensor tensorToInitialize, vector<Stream> streams) {
     if (tensorToInitialize.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
         int tensorGpuNum = tensorToInitialize.getPlacement().getDeviceNum();
         for (uint32_t i = 0; i < streams.size(); ++i) {
@@ -32,13 +32,15 @@ void Initializer::performCopy(Tensor buffer, Tensor tensorToInitialize, vector<S
 
     tensorToInitialize.copyFromAsync(buffer, streams[0]);
 
+    Event tensorToInitializeUpdatedEvent = streams[0].putEvent();
     if (streams.size() > 1) {
-        // The set of streams is known to represent all of the timing dependencies
-        Event tensorToInitializeUpdatedEvent = streams[0].putEvent();
+        // The set of streams is known to represent all the timing dependencies
         for (unsigned int i = 1; i < streams.size(); ++i) {
             streams[i].waitEvent(tensorToInitializeUpdatedEvent);
         }
     }
+
+    return tensorToInitializeUpdatedEvent;
 }
 
 }  // namespace ThorImplementation
