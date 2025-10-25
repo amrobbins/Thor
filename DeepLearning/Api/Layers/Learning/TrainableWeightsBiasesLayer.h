@@ -18,7 +18,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
                                           Optional<Event> sisterLayerLoadedEvent,
-                                          std::vector<std::shared_ptr<Initializer>> &initializers) { return {}; }
+                                          std::vector<std::shared_ptr<Initializer>> &initializers) {
+        return {};
+    }
 
     // Override the network default optimizer with a different one
     void setLayerSpecificOptimizer(Optimizer *layerSpecificOptimizer) {

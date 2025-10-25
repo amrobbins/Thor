@@ -4,17 +4,14 @@ using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
 
-
 json NetworkInput::serialize(const string &storageDir, Stream stream) const {
-    return json {
-        {"version", "1.0.0"},
-        {"layer_type", "network_input"},
-        {"name", name},
-        {"dimensions", getDimensions()},
-        {"data_type", json(getDataType())},
-        {"feature_input", featureInput.get().serialize()},
-        {"feature_output", featureOutput.get().serialize()}
-    };
+    return json{{"version", "1.0.0"},
+                {"layer_type", "network_input"},
+                {"name", name},
+                {"dimensions", getDimensions()},
+                {"data_type", json(getDataType())},
+                {"feature_input", featureInput.get().serialize()},
+                {"feature_output", featureOutput.get().serialize()}};
 }
 
 void NetworkInput::deserialize(const json &j, Network *network) {

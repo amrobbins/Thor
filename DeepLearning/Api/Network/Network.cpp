@@ -105,10 +105,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
             }
 
             vector<Event> layerEvents = stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
-            initDoneEvents.insert(
-                initDoneEvents.end(),
-                make_move_iterator(layerEvents.begin()),
-                make_move_iterator(layerEvents.end()));
+            initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
         }
 
         // reorderStampedNetworkForTestability(stampedNetwork);
@@ -156,7 +153,10 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
     return StatusCode::SUCCESS;
 }
 
-Network::StatusCode Network::place(uint32_t batchSize, std::vector<Event> &initDoneEvents, std::vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
+Network::StatusCode Network::place(uint32_t batchSize,
+                                   std::vector<Event> &initDoneEvents,
+                                   std::vector<int32_t> forcedDevices,
+                                   uint32_t forcedNumStampsPerGpu) {
     // FIXME: multiple stamps, multiple gpus
     // FIXME: smart placement and stamping
     assert(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
@@ -658,10 +658,10 @@ void Network::addToNetwork(Optimizer *optimizer) {
 shared_ptr<Optimizer> Network::getOptimizer() { return optimizer; }
 
 vector<Event> Network::stampLayer(Tensor inputTensor,
-                         const shared_ptr<Thor::Layer> layer,
-                         uint32_t gpuNum,
-                         uint32_t batchSize,
-                         ThorImplementation::StampedNetwork &stampedNetwork) {
+                                  const shared_ptr<Thor::Layer> layer,
+                                  uint32_t gpuNum,
+                                  uint32_t batchSize,
+                                  ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
@@ -734,27 +734,18 @@ vector<Event> Network::stampLayer(Tensor inputTensor,
     }
     Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
     if (!layerPreviouslyStamped) {
-        shared_ptr<TrainableWeightsBiasesLayer> trainableLayer =
-            dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layer);
+        shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layer);
         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
             dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
         if (trainableLayer != nullptr) {
             vector<Event> layerEvents = trainableLayer->initialize(
-                implementationTrainableLayer,
-                true,
-                nullptr,
-                Optional<Event>::empty(),
-                stampedNetwork.initializersShared);
+                implementationTrainableLayer, true, nullptr, Optional<Event>::empty(), stampedNetwork.initializersShared);
             initializationReadyEvents.insert(
-                initializationReadyEvents.end(),
-                make_move_iterator(layerEvents.begin()),
-                make_move_iterator(layerEvents.end()));
+                initializationReadyEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
         } else {
             vector<Event> layerEvents = layer->initialize(implementationLayer, stampedNetwork.initializersShared);
             initializationReadyEvents.insert(
-                initializationReadyEvents.end(),
-                make_move_iterator(layerEvents.begin()),
-                make_move_iterator(layerEvents.end()));
+                initializationReadyEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
         }
     }
 

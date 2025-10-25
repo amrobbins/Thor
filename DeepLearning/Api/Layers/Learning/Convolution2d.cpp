@@ -141,17 +141,16 @@ json Convolution2d::serialize(Stream stream) {
 }
 
 vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
-                                         bool isFirstStamp,
-                                         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                         Optional<Event> sisterLayerLoadedEvent,
-                                         vector<shared_ptr<Initializer>> &initializers) {
-
+                                        bool isFirstStamp,
+                                        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                        Optional<Event> sisterLayerLoadedEvent,
+                                        vector<shared_ptr<Initializer>> &initializers) {
     // Weights are set right now, based on 1 of 3 methods:
     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
     // 2. Copy from a file - when loading a saved network
     // 3. Run an initializer to set the weights - on an untrained network
     if (!isFirstStamp) {
-        assert (sisterLayer != nullptr);
+        assert(sisterLayer != nullptr);
         ThorImplementation::Tensor weights = layer->getWeights();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
         if (sisterLayerLoadedEvent.isPresent())
@@ -159,13 +158,13 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         weights.copyFromAsync(sisterLayer->getWeights(), stream);
         return {stream.putEvent(false, true)};
     } else if (weightsFile.isPresent()) {
-        assert (weightsInitializerBuilder.get() == nullptr);
-        assert (biasInitializerBuilder.get() == nullptr);
-        assert (layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        assert(weightsInitializerBuilder.get() == nullptr);
+        assert(biasInitializerBuilder.get() == nullptr);
+        assert(layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(layer->getWeights().getPlacement().getDeviceNum());
         layer->loadWeightsFromFile(weightsFile.get(), stream);
         if (hasBias) {
-            assert (biasesFile.isPresent());
+            assert(biasesFile.isPresent());
             layer->loadWeightsFromFile(biasesFile.get(), stream);
         }
 

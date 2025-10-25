@@ -4,16 +4,10 @@ using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
 
-
 atomic<uint64_t> Tensor::nextId(10000);
 
 json Tensor::serialize() const {
-    return json {
-        {"version", "1.0.0"},
-        {"id", getId()},
-        {"dimensions", getDimensions()},
-        {"data_type", json(getDataType())}
-    };
+    return json{{"version", "1.0.0"}, {"id", getId()}, {"dimensions", getDimensions()}, {"data_type", json(getDataType())}};
 }
 
 Tensor Tensor::deserialize(const json &j) {

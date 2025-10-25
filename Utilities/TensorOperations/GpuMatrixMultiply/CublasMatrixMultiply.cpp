@@ -522,6 +522,168 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 }
 
+vector<cublasLtMatmulHeuristicResult_t> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t numChoices,
+                                                                                      const int32_t gpuNum,
+                                                                                      const int32_t A_rows,
+                                                                                      const int32_t A_cols,
+                                                                                      const int32_t B_rows,
+                                                                                      const int32_t B_cols,
+                                                                                      const bool transposeA,
+                                                                                      const bool transposeB,
+                                                                                      const bool transposeC,
+                                                                                      const bool CDSameTensor,
+                                                                                      const uint64_t maxWorkspaceSize,
+                                                                                      const float maxWaves,
+                                                                                      const TensorDescriptor::DataType ABCDDataType) {
+    const int32_t C_rows = (transposeA == false ? A_rows : A_cols);
+    const int32_t C_cols = (transposeB == false ? B_cols : B_rows);
+    int32_t D_rows = C_rows;
+    int32_t D_cols = C_cols;
+
+    // Remember leading dimension refers to the stride between a consecutive series in memory.
+    // In c++, each column is laid out consecutively for a row and then afterward the next row begins,
+    // so the leading dimension is the number of columns.
+    const int32_t ld_A = A_cols;
+    const int32_t ld_B = B_cols;
+    const int32_t ld_C = C_cols;
+    const int32_t ld_D = D_cols;
+
+    assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
+
+    assert(A_rows > 0);
+    assert(A_cols > 0);
+    assert(B_rows > 0);
+    assert(B_cols > 0);
+
+    ScopedGpu scopedGpu(gpuNum);
+
+    // Create the tensors
+    cublasStatus_t cublasStatus;
+    TensorPlacement gpuPlacement = TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
+    Tensor A = Tensor(gpuPlacement, TensorDescriptor(ABCDDataType, {uint64_t(A_rows), uint64_t(A_cols)}));
+    Tensor B = Tensor(gpuPlacement, TensorDescriptor(ABCDDataType, {uint64_t(B_rows), uint64_t(B_cols)}));
+    Tensor C = Tensor(gpuPlacement, TensorDescriptor(ABCDDataType, {uint64_t(C_rows), uint64_t(C_cols)}));
+    Tensor D;
+    if (CDSameTensor)
+        D = C;
+    else
+        D = Tensor(gpuPlacement, TensorDescriptor(ABCDDataType, {uint64_t(D_rows), uint64_t(D_cols)}));
+
+    cublasLtMatmulDesc_t operationDesc;
+    cublasLtMatrixLayout_t ADesc;
+    cublasLtMatrixLayout_t BDesc;
+    cublasLtMatrixLayout_t CDesc;
+    cublasLtMatrixLayout_t DDesc;
+
+    cublasStatus = cublasLtMatmulDescCreate(&operationDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    const cublasLtMatmulDescAttributes_t pointerModeAttribute = CUBLASLT_MATMUL_DESC_POINTER_MODE;
+    const cublasLtPointerMode_t hostPointerMode = CUBLASLT_POINTER_MODE_HOST;
+    cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, pointerModeAttribute, &hostPointerMode, sizeof(hostPointerMode));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    if (transposeA) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+    if (transposeB) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+    if (transposeC) {
+        cublasOperation_t transpose = CUBLAS_OP_T;
+        cublasStatus = cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSC, &transpose, sizeof(transpose));
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    }
+
+    cublasLtOrder_t rowMajorOrder = CUBLASLT_ORDER_ROW;
+    cudaDataType_t ABCDDataTypeCuda = mapToCublasDataType(ABCDDataType);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&ADesc, ABCDDataTypeCuda, A_rows, A_cols, ld_A);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    int64_t ld = ld_A;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(ADesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&BDesc, ABCDDataTypeCuda, B_rows, B_cols, ld_B);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    ld = ld_B;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(BDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&CDesc, ABCDDataTypeCuda, C_rows, C_cols, ld_C);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    ld = ld_C;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(CDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    cublasStatus = cublasLtMatrixLayoutCreate(&DDesc, ABCDDataTypeCuda, D_rows, D_cols, ld_D);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    ld = ld_D;
+    cublasStatus = cublasLtMatrixLayoutSetAttribute(DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
+                                        A_rows,
+                                        A_cols,
+                                        B_rows,
+                                        B_cols,
+                                        transposeA,
+                                        transposeB,
+                                        transposeC,
+                                        ld_A,
+                                        ld_B,
+                                        ld_C,
+                                        ld_D,
+                                        false);
+
+    OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
+    CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
+
+    // Ensure only one optimization is running at a time. This could be expanded per GPU.
+    CublasMatrixMultiply::instance().mtx.lock();
+
+    cublasLtMatmulPreference_t searchPreferences;
+    cublasStatus = cublasLtMatmulPreferenceCreate(&searchPreferences);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatmulPreferenceInit(searchPreferences);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus = cublasLtMatmulPreferenceSetAttribute(
+        searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &maxWorkspaceSize, sizeof(maxWorkspaceSize));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+    cublasStatus =
+        cublasLtMatmulPreferenceSetAttribute(searchPreferences, CUBLASLT_MATMUL_PREF_MAX_WAVES_COUNT, &maxWaves, sizeof(maxWaves));
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    int returnedAlgoCount;
+    vector<cublasLtMatmulHeuristicResult_t> results(numChoices);
+    cublasStatus = cublasLtMatmulAlgoGetHeuristic(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
+                                                  operationDesc,
+                                                  ADesc,
+                                                  BDesc,
+                                                  CDesc,
+                                                  DDesc,
+                                                  searchPreferences,
+                                                  numChoices,
+                                                  results.data(),
+                                                  &returnedAlgoCount);
+    assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+    CublasMatrixMultiply::instance().mtx.unlock();
+
+    results.resize(returnedAlgoCount);  // In case we didn't get the max we asked for, truncate it
+    return results;
+}
+
 long minl(long a, long b) { return a < b ? a : b; }
 
 long maxl(long a, long b) { return a > b ? a : b; }
@@ -646,7 +808,6 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
     unsigned int finalContestantCount = minl(40, initialContestantCount / 5);
     if (printResults)
         printf("finalContestantCount %d\n", finalContestantCount);
-
 
     constexpr int initialRun = 5;
     constexpr int finalRun = 20;

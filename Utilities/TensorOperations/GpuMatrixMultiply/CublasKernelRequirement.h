@@ -131,7 +131,7 @@ struct OperationType {
           BDataType(BDataType),
           CDataType(CDataType),
           DDataType(DDataType) {
-        // Below is exactly the bounds of current support
+        // Below is exactly the bounds of current support - well it was at one time
         assert(computeDataType == CUBLAS_COMPUTE_32F);
         assert(scaleDataType == CUDA_R_32F);
         assert(ADataType == CUDA_R_32F || ADataType == CUDA_R_16F);

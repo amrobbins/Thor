@@ -256,8 +256,9 @@ TEST(FullyConnected, SerializeDeserialize) {
     ASSERT_EQ(stampedNetworks.size(), 1UL);
     ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
     vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork.getTrainableLayers();
-    ASSERT_EQ(trainableLayers.size(), use_batch_norm ? 2UL : 1UL );
-    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+    ASSERT_EQ(trainableLayers.size(), use_batch_norm ? 2UL : 1UL);
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
     if (use_batch_norm) {
         if (physicalFCLayer == nullptr)
             physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[1]);
@@ -265,7 +266,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     ASSERT_TRUE(physicalFCLayer != nullptr);
     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
     ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    half *weightsCpuMem = (half*)weightsCpu.getMemPtr();
+    half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         weightsCpuMem[i] = i;
     }
@@ -332,9 +333,9 @@ TEST(FullyConnected, SerializeDeserialize) {
         EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<std::string>().empty());
     }
 
-    //printf("%s\n", networkInputJ.dump(4).c_str());
-    //printf("%s\n", fullyConnectedJ.dump(4).c_str());
-    //printf("%s\n", networkOutputJ.dump(4).c_str());
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    // printf("%s\n", networkOutputJ.dump(4).c_str());
 
     ////////////////////////////
     // Deserialize
@@ -360,8 +361,9 @@ TEST(FullyConnected, SerializeDeserialize) {
     trainableLayers.clear();
     trainableLayers = stampedNetwork.getTrainableLayers();
 
-    ASSERT_EQ(trainableLayers.size(), 1UL );
-    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+    ASSERT_EQ(trainableLayers.size(), 1UL);
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
     ASSERT_TRUE(physicalFCLayerDes != nullptr);
 
     ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();
@@ -373,9 +375,8 @@ TEST(FullyConnected, SerializeDeserialize) {
     ASSERT_EQ(weightsDes.getDataType(), weights.getDataType());
     ASSERT_TRUE(weightsDes.getPlacement() == weights.getPlacement());
 
-    half *weightsCpuMemDes = (half*)weightsCpuDes.getMemPtr();
+    half *weightsCpuMemDes = (half *)weightsCpuDes.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         ASSERT_EQ(weightsCpuMemDes[i], half(i));
     }
 }
-

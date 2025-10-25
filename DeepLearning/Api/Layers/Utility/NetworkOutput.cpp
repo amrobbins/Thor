@@ -29,14 +29,12 @@ void NetworkOutput::buildSupportLayersAndAddToNetwork() {
 }
 
 nlohmann::json NetworkOutput::serialize(const std::string &storageDir, Stream stream) const {
-    return nlohmann::json {
-        {"version", "1.0.0"},
-        {"layer_type", "network_output"},
-        {"name", name},
-        {"data_type", nlohmann::json(getDataType())},
-        {"feature_input", featureInput.get().serialize()},
-        {"feature_output", featureOutput.get().serialize()}
-    };
+    return nlohmann::json{{"version", "1.0.0"},
+                          {"layer_type", "network_output"},
+                          {"name", name},
+                          {"data_type", nlohmann::json(getDataType())},
+                          {"feature_input", featureInput.get().serialize()},
+                          {"feature_output", featureOutput.get().serialize()}};
 }
 
 void NetworkOutput::deserialize(const nlohmann::json &j, Network *network) {

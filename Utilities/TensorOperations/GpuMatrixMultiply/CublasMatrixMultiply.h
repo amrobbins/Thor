@@ -407,6 +407,39 @@ class CublasMatrixMultiply {
     uint32_t getReductionSupportMask(cublasLtMatmulAlgo_t algo);
     int getSwizzleMaxValue(cublasLtMatmulAlgo_t algo);
     int getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t algo);
+
+    std::vector<cublasLtMatmulHeuristicResult_t> getHeuristicGemmKernels(const int32_t numChoices,
+                                                                         const int gpuNum,
+                                                                         const int32_t A_rows,
+                                                                         const int32_t A_cols,
+                                                                         const int32_t B_rows,
+                                                                         const int32_t B_cols,
+                                                                         const bool transposeA,
+                                                                         const bool transposeB,
+                                                                         const bool transposeC,
+                                                                         const bool CDSameTensor,
+                                                                         // When set to 0, no workspace allowed:
+                                                                         const uint64_t maxWorkspaceSize,
+                                                                         // When set to 0.0f, any number of waves allowed:
+                                                                         const float maxWaves,
+                                                                         const TensorDescriptor::DataType ABCDDataType);
+
+    inline void getHeuristicMatrixMultiplyKernels(int numChoices,
+                                                  int gpuNum,
+                                                  int rowsA,
+                                                  int colsA,
+                                                  int rowsB,
+                                                  int colsB,
+                                                  bool transposeA,
+                                                  bool transposeB,
+                                                  // When set to 0, no workspace allowed:
+                                                  const uint64_t maxWorkspaceSize,
+                                                  // When set to 0.0f, any number of waves allowed:
+                                                  const float maxWaves,
+                                                  TensorDescriptor::DataType ABCDataType) {
+        getHeuristicGemmKernels(
+            numChoices, gpuNum, rowsA, colsA, rowsB, colsB, transposeA, transposeB, false, true, maxWorkspaceSize, maxWaves, ABCDataType);
+    }
 };
 
 }  // namespace ThorImplementation

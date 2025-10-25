@@ -118,12 +118,11 @@ class Tensor : private ReferenceCounted {
     //        Could I somehow make a temporary reference, perhaps in a future, where that process will wait till the operation
     //        completes and then drops the reference.
     //
-    //        This is the fix: push (tensor, event) onto a static WorkQueue. Upon popping work queue synchronizes on the event and then returns
-    //        So there is no concern about calling drop reference, or just references going out of scope, when there is future work associated
-    //        with a tensor. But... am I detecting all work, copies are once thing, but what if its memory is being used in a stream?
-    //        func() -> C = A + B; return C;
-    //        Ok, I just need to ensure this happens on all tensor operations.
-    //        Also I need unbounded no output work queue: unbounded loose end queue, uses a queue<pair<Tensor, Event>>.
+    //        This is the fix: push (tensor, event) onto a static WorkQueue. Upon popping work queue synchronizes on the event and then
+    //        returns So there is no concern about calling drop reference, or just references going out of scope, when there is future work
+    //        associated with a tensor. But... am I detecting all work, copies are once thing, but what if its memory is being used in a
+    //        stream? func() -> C = A + B; return C; Ok, I just need to ensure this happens on all tensor operations. Also I need unbounded
+    //        no output work queue: unbounded loose end queue, uses a queue<pair<Tensor, Event>>.
     //
     // Warning! Ensure that all async work involving this tensor has been synchronized on the host before calling dropReference()!
     //
@@ -133,7 +132,7 @@ class Tensor : private ReferenceCounted {
     // tensorFp16.copyFromAsync(tensorFp32, stream);
     // stream.synchronize();    <---- this is needed
     // tensorFp32.dropReference();
-    void dropReference() {*this = Tensor();}
+    void dropReference() { *this = Tensor(); }
 
     // Note minValue and maxValue are igorned for boolean types.
     void fillRandom(double minValue, double maxValue, Stream stream);
