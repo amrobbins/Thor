@@ -334,7 +334,7 @@ class Network {
 
     std::shared_ptr<Optimizer> getOptimizer();
 
-    Tensor getApiTensorByOriginalId(uint64_t originalId) {return apiTensorByOriginalId[originalId];}
+    Tensor getApiTensorByOriginalId(uint64_t originalId) { return apiTensorByOriginalId[originalId]; }
 
    private:
     static const bool DEBUG_STAMP = false;
@@ -385,10 +385,10 @@ class Network {
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork);
     virtual std::vector<Event> stampLayer(Tensor inputTensor,
-                            const std::shared_ptr<Thor::Layer> layer,
-                            uint32_t gpuNum,
-                            uint32_t batchSize,
-                            ThorImplementation::StampedNetwork &stampedNetwork);
+                                          const std::shared_ptr<Thor::Layer> layer,
+                                          uint32_t gpuNum,
+                                          uint32_t batchSize,
+                                          ThorImplementation::StampedNetwork &stampedNetwork);
 
     void createBatchDimensions(std::vector<uint64_t> &batchDimensions, std::vector<uint64_t> tensorDimensions, uint32_t batchSize);
 

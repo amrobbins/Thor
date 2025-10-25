@@ -90,7 +90,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return convolution2d;
     }
 
-
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,

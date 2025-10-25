@@ -155,14 +155,14 @@ void FullyConnected::deserialize(const json &j, Network *network) {
     bool hasBias = j.at("has_bias").get<bool>();
 
     vector<Tensor> featureInputs;
-    for (const json& input : j["inputs"]) {
+    for (const json &input : j["inputs"]) {
         uint64_t originalTensorId = input.at("id").get<uint64_t>();
         Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
         featureInputs.push_back(tensor);
     }
 
     vector<Tensor> featureOutputs;
-    for (const json& output : j["outputs"]) {
+    for (const json &output : j["outputs"]) {
         featureOutputs.push_back(Tensor::deserialize(output));
     }
 
@@ -189,19 +189,17 @@ void FullyConnected::deserialize(const json &j, Network *network) {
     fullyConnected.addToNetwork(network);
 }
 
-
 vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
-                                                           bool isFirstStamp,
-                                                           shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                                           Optional<Event> sisterLayerLoadedEvent,
-                                                           vector<shared_ptr<Initializer>> &initializers) {
-
+                                         bool isFirstStamp,
+                                         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                         Optional<Event> sisterLayerLoadedEvent,
+                                         vector<shared_ptr<Initializer>> &initializers) {
     // Weights are set right now, based on 1 of 3 methods:
     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
     // 2. Copy from a file - when loading a saved network
     // 3. Run an initializer to set the weights - on an untrained network
     if (!isFirstStamp) {
-        assert (sisterLayer != nullptr);
+        assert(sisterLayer != nullptr);
         ThorImplementation::Tensor weights = layer->getWeights();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
         if (sisterLayerLoadedEvent.isPresent())
@@ -209,13 +207,13 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         weights.copyFromAsync(sisterLayer->getWeights(), stream);
         return {stream.putEvent(false, true)};
     } else if (weightsFile.isPresent()) {
-        assert (weightsInitializerBuilder.get() == nullptr);
-        assert (biasInitializerBuilder.get() == nullptr);
-        assert (layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        assert(weightsInitializerBuilder.get() == nullptr);
+        assert(biasInitializerBuilder.get() == nullptr);
+        assert(layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(layer->getWeights().getPlacement().getDeviceNum());
         layer->loadWeightsFromFile(weightsFile.get(), stream);
         if (hasBias) {
-            assert (biasesFile.isPresent());
+            assert(biasesFile.isPresent());
             layer->loadWeightsFromFile(biasesFile.get(), stream);
         }
 
