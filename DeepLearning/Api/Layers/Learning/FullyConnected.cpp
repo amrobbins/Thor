@@ -147,9 +147,9 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
 
 void FullyConnected::deserialize(const json &j, Network *network) {
     if (j["version"] != "1.0.0")
-        throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+        throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "fully_connected")
-        throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+        throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
 
     uint32_t numOutputFeatures = j.at("num_output_features").get<uint32_t>();
     bool hasBias = j.at("has_bias").get<bool>();

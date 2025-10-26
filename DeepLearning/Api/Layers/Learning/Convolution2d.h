@@ -35,7 +35,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     virtual std::string getLayerType() const { return "Convolution2d"; }
 
-    virtual nlohmann::json serialize(Stream stream);
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream);
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual bool isMultiLayer() const {
