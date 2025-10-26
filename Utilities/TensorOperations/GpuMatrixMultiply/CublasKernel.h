@@ -267,10 +267,9 @@ class CublasKernel : private ReferenceCounted {
                                                &result);
         if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
             kernelWillRunOnGpu = false;
-            return 0;
+        } else {
+            kernelWillRunOnGpu = true;
         }
-
-        kernelWillRunOnGpu = true;
 
         return cublasKernelOptions->workspaceSizeInBytes;
     }

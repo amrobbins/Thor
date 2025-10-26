@@ -1034,10 +1034,12 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP16) {
             ldA += rand() % 10;
             ldB += rand() % 10;
             ldC += rand() % 10;
-            if (CDInPlace)
-                ldD = ldC;
-            else
-                ldD += rand() % 10;
+            // It seems that cublas does not support this for FP16, but does for FP32:
+            // if (CDInPlace)
+            //    ldD = ldC;
+            // else
+            //    ldD += rand() % 10;
+            ldD = ldC;
         }
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);

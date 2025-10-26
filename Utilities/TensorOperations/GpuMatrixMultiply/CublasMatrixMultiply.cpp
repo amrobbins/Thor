@@ -982,10 +982,6 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
             continue;
         }
         if (workspaceSizeInBytes > maxAllowedWorkspaceSizeInBytes) {
-            printf("B allow workspaces %i workspaceSizeInBytes %ld maxWorkspaceSize %ld\n",
-                   allowWorkspaces,
-                   workspaceSizeInBytes,
-                   maxAllowedWorkspaceSizeInBytes);
             continue;
         }
         if (workspaceSizeInBytes > maxWorkspaceSizeInBytes) {
