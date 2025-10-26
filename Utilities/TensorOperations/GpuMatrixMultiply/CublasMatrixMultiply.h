@@ -441,8 +441,22 @@ class CublasMatrixMultiply {
                                                                        const float maxWaves,
                                                                        TensorDescriptor::DataType ABCDataType) {
         int32_t colsC = (transposeB == false ? colsB : rowsB);
-        return getHeuristicGemmKernels(
-            numChoices, gpuNum, rowsA, colsA, rowsB, colsB, transposeA, transposeB, false, colsA, colsB, colsC, colsC, maxWorkspaceSize, maxWaves, ABCDataType);
+        return getHeuristicGemmKernels(numChoices,
+                                       gpuNum,
+                                       rowsA,
+                                       colsA,
+                                       rowsB,
+                                       colsB,
+                                       transposeA,
+                                       transposeB,
+                                       false,
+                                       colsA,
+                                       colsB,
+                                       colsC,
+                                       colsC,
+                                       maxWorkspaceSize,
+                                       maxWaves,
+                                       ABCDataType);
     }
 };
 
