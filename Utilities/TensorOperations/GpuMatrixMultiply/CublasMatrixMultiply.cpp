@@ -179,7 +179,6 @@ void CublasMatrixMultiply::gemm(Tensor A,
                    workspace.get().getDescriptor().getArraySizeInBytes());
     }
 
-    printf("Executing: %s\n", cublasKernel.toString(gpuNum).c_str());
     cublasKernel.executeKernel(A, B, C, D, ld_A, ld_B, ld_C, ld_D, workspace, alpha, beta, stream);
 }
 
@@ -552,10 +551,10 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     // Remember leading dimension refers to the stride between a consecutive series in memory.
     // In c++, each column is laid out consecutively for a row and then afterward the next row begins,
     // so the leading dimension is the number of columns.
-//    const int32_t ld_A = A_cols;
-//    const int32_t ld_B = B_cols;
-//    const int32_t ld_C = C_cols;
-//    const int32_t ld_D = D_cols;
+    //    const int32_t ld_A = A_cols;
+    //    const int32_t ld_B = B_cols;
+    //    const int32_t ld_C = C_cols;
+    //    const int32_t ld_D = D_cols;
 
     assert(transposeC == false);  // it seems cublas is not supporting this. You can use Tensor.transpose().
 
@@ -689,12 +688,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                                &rawResults[i].algo,
                                                &result);
         if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
-            // FIXME: Hmm, they always survive this one, so maybe cublasLt is doing the right thing and somehow when I check later
-            //        the inputs are different.
-            printf("ZZZZZZZZZZZZZZZZZZZZ %d\n", cublasStatus);
             continue;
-        } else {
-            printf("YYYYYYYYYYYYYYYYYYYY %d\n", cublasStatus);
         }
 
         size_t sizeWritten;
@@ -743,8 +737,18 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
             &rawResults[i].algo, CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID, &clusterShapeId, sizeof(clusterShapeId), &sizeWritten);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
-        CublasKernelOptions cublasKernelOptions(
-            algoId, static_cast<cublasLtMatmulTile_t>(tileId), splitK, reductionFlag, swizzleType, customOptionValue, stagesId, innerShapeId, clusterShapeId, rawResults[i].workspaceSize, rawResults[i].wavesCount);
+        CublasKernelOptions cublasKernelOptions(rawResults[i].algo,
+                                                algoId,
+                                                static_cast<cublasLtMatmulTile_t>(tileId),
+                                                splitK,
+                                                reductionFlag,
+                                                swizzleType,
+                                                customOptionValue,
+                                                stagesId,
+                                                innerShapeId,
+                                                clusterShapeId,
+                                                rawResults[i].workspaceSize,
+                                                rawResults[i].wavesCount);
         CublasKernel cublasKernel(cublasKernelRequirement, cublasKernelOptions, gpuType);
         results.push_back(cublasKernel);
     }
@@ -761,8 +765,6 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
     cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
     assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-
-    // FIXME: if results.empty() just iterate over the tileIndexes and supported algorithms to find some group of algos that actually run on the GPU.
 
     return results;
 }
@@ -889,9 +891,9 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     }
     if (printResults)
         printf("target initial contestants %lf\n", targetCount);
-    //unsigned int initialContestantCount = maxl(100, targetCount);
-    uint32_t initialContestantCount = 10000;
-    unsigned int finalContestantCount = minl(40, initialContestantCount / 5);
+    // unsigned int initialContestantCount = maxl(100, targetCount);
+    uint32_t initialContestantCount = 100;
+    unsigned int finalContestantCount = 100;
     if (printResults)
         printf("finalContestantCount %d\n", finalContestantCount);
 
@@ -946,7 +948,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     // Get the expected best kernels
     uint64_t maxElements = max({rowsA * colsA, rowsB * colsB, rowsC * colsC, rowsD * colsD});
-    const uint64_t maxAllowedWorkspaceSizeInBytes = allowWorkspaces ? maxElements * TensorDescriptor::getElementSizeInBytes(ABCDataType) : 0;
+    const uint64_t maxAllowedWorkspaceSizeInBytes =
+        allowWorkspaces ? maxElements * TensorDescriptor::getElementSizeInBytes(ABCDataType) : 0;
     float maxWaves = 0.0f;
     vector<CublasKernel> preCheckedKernels;
     preCheckedKernels = getHeuristicGemmKernels(initialContestantCount,
@@ -970,35 +973,32 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     vector<CublasKernel> kernels;
     uint64_t maxWorkspaceSizeInBytes = 0;
-    printf("%ld starting kernels\n", preCheckedKernels.size());
     for (uint32_t i = 0; i < preCheckedKernels.size(); ++i) {
         bool kernelWillRunOnGpu;
         CublasKernel cublasKernel = preCheckedKernels[i];
 
         unsigned long workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
         if (!kernelWillRunOnGpu) {
-            printf("A\n");
             continue;
         }
         if (workspaceSizeInBytes > maxAllowedWorkspaceSizeInBytes) {
-            printf("B allow workspaces %i workspaceSizeInBytes %ld maxWorkspaceSize %ld\n", allowWorkspaces, workspaceSizeInBytes,
+            printf("B allow workspaces %i workspaceSizeInBytes %ld maxWorkspaceSize %ld\n",
+                   allowWorkspaces,
+                   workspaceSizeInBytes,
                    maxAllowedWorkspaceSizeInBytes);
             continue;
         }
         if (workspaceSizeInBytes > maxWorkspaceSizeInBytes) {
-            printf("C\n");
             maxWorkspaceSizeInBytes = workspaceSizeInBytes;
         }
 
         // I have seen some kernel report 0 waves and causes sporadic runtime failures, so avoid that.
         if (!(cublasKernel.getWavesCount(gpuNum) > 0.0f)) {
-            printf("C\n");
             continue;
         }
 
         kernels.push_back(cublasKernel);
     }
-    printf("%ld surviving kernels\n", kernels.size()); fflush(stdout);
 
     if (printResults)
         printf("%ld selected initial contestants\n", kernels.size());

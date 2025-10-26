@@ -201,7 +201,7 @@ class CublasKernel : private ReferenceCounted {
                                       *CDesc,
                                       D.getMemPtr(),
                                       *DDesc,
-                                      &((*algorithmPerGpu)[stream.getGpuNum()]),
+                                      &cublasKernelOptions->algorithm,
                                       requiredWorkspaceSize > 0 ? workspace.get().getMemPtr() : nullptr,
                                       requiredWorkspaceSize > 0 ? workspace.get().getDescriptor().getArraySizeInBytes() : 0,
                                       stream);
@@ -263,11 +263,10 @@ class CublasKernel : private ReferenceCounted {
                                                *BDesc,
                                                *CDesc,
                                                *DDesc,
-                                               &((*algorithmPerGpu)[gpuNum]),
+                                               &cublasKernelOptions->algorithm,
                                                &result);
         if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
             kernelWillRunOnGpu = false;
-            printf("cublasStatus %d\n", cublasStatus);
             return 0;
         }
 
@@ -286,7 +285,7 @@ class CublasKernel : private ReferenceCounted {
         return *cublasKernelOptions;
     }
 
-    cublasLtMatmulAlgo_t getAlgorithm(int gpuNum) { return (*algorithmPerGpu)[gpuNum]; }
+    cublasLtMatmulAlgo_t getAlgorithm(int gpuNum) { return cublasKernelOptions->algorithm; }
 
    private:
     CublasKernelRequirement *cublasKernelRequirement;
@@ -299,8 +298,6 @@ class CublasKernel : private ReferenceCounted {
     cublasLtMatrixLayout_t *DDesc;
 
     std::string gpuType;
-
-    std::vector<cublasLtMatmulAlgo_t> *algorithmPerGpu;
 
     static std::map<cublasLtMatmulTile_t, std::string> tileEnumToString;
 
@@ -386,46 +383,6 @@ class CublasKernel : private ReferenceCounted {
         ld = cublasKernelRequirement->kernelRequirement.ldD;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-
-        for (unsigned int gpuNum = 0; gpuNum < MachineEvaluator::instance().getNumGpus(); ++gpuNum) {
-            // Instantiate an algorithm object for each gpu of the proper type
-            // Note that to initialize an algo, you must pass the per-gpu cublas handle
-            if (MachineEvaluator::instance().getGpuType(gpuNum) != gpuType)
-                continue;
-
-            //FIXME take in the algo struct directly rather than trying to recreate it, which is not working reliably
-            cublasStatus = cublasLtMatmulAlgoInit(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                                  cublasKernelRequirement->operationType.computeDataType,
-                                                  cublasKernelRequirement->operationType.scaleDataType,
-                                                  cublasKernelRequirement->operationType.ADataType,
-                                                  cublasKernelRequirement->operationType.BDataType,
-                                                  cublasKernelRequirement->operationType.CDataType,
-                                                  cublasKernelRequirement->operationType.DDataType,
-                                                  cublasKernelOptions->algorithmId,
-                                                  &((*algorithmPerGpu)[gpuNum]));
-            assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-
-            cublasLtMatmulAlgoConfigSetAttribute(&((*algorithmPerGpu)[gpuNum]),
-                                                 CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION,
-                                                 &cublasKernelOptions->customOptionValue,
-                                                 sizeof(cublasKernelOptions->customOptionValue));
-            cublasLtMatmulAlgoConfigSetAttribute(&((*algorithmPerGpu)[gpuNum]),
-                                                 CUBLASLT_ALGO_CONFIG_TILE_ID,
-                                                 &cublasKernelOptions->tileSize,
-                                                 sizeof(cublasKernelOptions->tileSize));
-            cublasLtMatmulAlgoConfigSetAttribute(&((*algorithmPerGpu)[gpuNum]),
-                                                 CUBLASLT_ALGO_CONFIG_SPLITK_NUM,
-                                                 &cublasKernelOptions->splitK,
-                                                 sizeof(cublasKernelOptions->splitK));
-            cublasLtMatmulAlgoConfigSetAttribute(&((*algorithmPerGpu)[gpuNum]),
-                                                 CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING,
-                                                 &cublasKernelOptions->swizzleType,
-                                                 sizeof(cublasKernelOptions->swizzleType));
-            cublasLtMatmulAlgoConfigSetAttribute(&((*algorithmPerGpu)[gpuNum]),
-                                                 CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
-                                                 &cublasKernelOptions->reductionFlag,
-                                                 sizeof(cublasKernelOptions->reductionFlag));
-        }
     }
 
     void construct(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
@@ -434,7 +391,6 @@ class CublasKernel : private ReferenceCounted {
         this->cublasKernelRequirement = new CublasKernelRequirement(cublasKernelRequirement);
         this->cublasKernelOptions = new CublasKernelOptions(cublasKernelOptions);
         this->gpuType = gpuType;
-        this->algorithmPerGpu = new std::vector<cublasLtMatmulAlgo_t>(MachineEvaluator::instance().getNumGpus());
 
         allocateCublasResources();
     }
@@ -449,7 +405,6 @@ class CublasKernel : private ReferenceCounted {
         BDesc = other.BDesc;
         CDesc = other.CDesc;
         DDesc = other.DDesc;
-        algorithmPerGpu = other.algorithmPerGpu;
     }
 
     void destroy() {
@@ -477,8 +432,6 @@ class CublasKernel : private ReferenceCounted {
         cublasStatus = cublasLtMatrixLayoutDestroy(*DDesc);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
         delete DDesc;
-
-        delete algorithmPerGpu;
     }
 };
 
