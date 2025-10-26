@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelOptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
 #include <cublasLt.h>
@@ -14,112 +15,6 @@
 #include <utility>
 
 namespace ThorImplementation {
-
-struct RunStats {
-    RunStats() {
-        errorFlag = false;
-        runCount = 0;
-        totalExecutionTimeMilliseconds = 0.0;
-        stashedRunCount = 0;
-        stashedExecutionTimeMilliseconds = 0.0;
-    }
-
-    RunStats(const RunStats &other) {
-        // implemented using operator=
-        *this = other;
-    }
-
-    RunStats &operator=(const RunStats &other) {
-        errorFlag = other.errorFlag;
-        runCount = other.runCount;
-        totalExecutionTimeMilliseconds = other.totalExecutionTimeMilliseconds;
-        stashedRunCount = other.stashedRunCount;
-        stashedExecutionTimeMilliseconds = other.stashedExecutionTimeMilliseconds;
-        return *this;
-    }
-
-    bool errorFlag;
-    int runCount;
-    double totalExecutionTimeMilliseconds;
-
-    int stashedRunCount;
-    double stashedExecutionTimeMilliseconds;
-
-    void recordRun(double executionTimeOfRun) {
-        mtx.lock();
-        runCount += 1;
-        totalExecutionTimeMilliseconds += executionTimeOfRun;
-        mtx.unlock();
-    }
-
-    inline double getAverageRunTimeMilliseconds() {
-        // Updates should not be concurrently ongoing when running this function.
-        assert(runCount > 0);
-        return totalExecutionTimeMilliseconds / runCount;
-    }
-
-    void stashRunStats() {
-        mtx.lock();
-        stashedRunCount += runCount;
-        stashedExecutionTimeMilliseconds += totalExecutionTimeMilliseconds;
-
-        runCount = 0;
-        totalExecutionTimeMilliseconds = 0.0;
-        mtx.unlock();
-    }
-
-    void unstashRunStats() {
-        mtx.lock();
-        runCount += stashedRunCount;
-        totalExecutionTimeMilliseconds += stashedExecutionTimeMilliseconds;
-
-        stashedRunCount = 0;
-        stashedExecutionTimeMilliseconds = 0.0;
-        mtx.unlock();
-    }
-
-    inline bool operator<(RunStats &rhs) {
-        if (errorFlag)
-            return false;
-        else if (rhs.errorFlag)
-            return true;
-        return getAverageRunTimeMilliseconds() < rhs.getAverageRunTimeMilliseconds();
-    }
-
-   private:
-    std::mutex mtx;
-};
-
-struct CublasKernelOptions {
-    CublasKernelOptions(int algorithmId,
-                        cublasLtMatmulTile_t tileSize,
-                        uint32_t splitK,
-                        uint32_t reductionFlag,
-                        uint32_t swizzleType,
-                        uint32_t customOptionValue)
-        : algorithmId(algorithmId),
-          tileSize(tileSize),
-          splitK(splitK),
-          reductionFlag(reductionFlag),
-          swizzleType(swizzleType),
-          customOptionValue(customOptionValue) {}
-
-    int algorithmId;
-    cublasLtMatmulTile_t tileSize;
-    uint32_t splitK;
-    uint32_t reductionFlag;
-    uint32_t swizzleType;
-    uint32_t customOptionValue;
-
-    RunStats runStats;
-
-    inline bool operator<(CublasKernelOptions &rhs) { return runStats < rhs.runStats; }
-
-    inline bool operator==(const CublasKernelOptions &other) const {
-        return algorithmId == other.algorithmId && splitK == other.splitK && reductionFlag == other.reductionFlag &&
-               swizzleType == other.swizzleType && customOptionValue == other.customOptionValue;
-    }
-};
 
 class CublasKernel : private ReferenceCounted {
    public:
@@ -195,20 +90,7 @@ class CublasKernel : private ReferenceCounted {
     float getWavesCount(int gpuNum) const {
         assert(!uninitialized());
 
-        cublasStatus_t cublasStatus;
-        cublasLtMatmulHeuristicResult_t result;
-
-        cublasStatus = cublasLtMatmulAlgoCheck(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
-                                               *operationDesc,
-                                               *ADesc,
-                                               *BDesc,
-                                               *CDesc,
-                                               *DDesc,
-                                               &((*algorithmPerGpu)[gpuNum]),
-                                               &result);
-        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
-
-        return result.wavesCount;
+        return cublasKernelOptions->wavesCount;
     }
 
     static inline bool executionTimeComparison(CublasKernel &lhs, CublasKernel &rhs) {
@@ -339,6 +221,9 @@ class CublasKernel : private ReferenceCounted {
         description += " reductionFlag: " + std::to_string(cublasKernelOptions->reductionFlag);
         description += " swizzleType: " + std::to_string(cublasKernelOptions->swizzleType);
         description += " customOption: " + std::to_string(cublasKernelOptions->customOptionValue);
+        description += " stagesId: " + std::to_string(cublasKernelOptions->stagesId);
+        description += " innerShapeId: " + std::to_string(cublasKernelOptions->innerShapeId);
+        description += " clusterShapeId: " + std::to_string(cublasKernelOptions->clusterShapeId);
         bool kernelWillRunOnGpu;
         int workspaceSize = getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
         description += " workspace: " + std::to_string(workspaceSize);
@@ -382,11 +267,13 @@ class CublasKernel : private ReferenceCounted {
                                                &result);
         if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
             kernelWillRunOnGpu = false;
+            printf("cublasStatus %d\n", cublasStatus);
             return 0;
         }
 
         kernelWillRunOnGpu = true;
-        return result.workspaceSize;
+
+        return cublasKernelOptions->workspaceSizeInBytes;
     }
 
     CublasKernelRequirement getCublasKernelRequirement() {
@@ -506,6 +393,7 @@ class CublasKernel : private ReferenceCounted {
             if (MachineEvaluator::instance().getGpuType(gpuNum) != gpuType)
                 continue;
 
+            //FIXME take in the algo struct directly rather than trying to recreate it, which is not working reliably
             cublasStatus = cublasLtMatmulAlgoInit(MachineEvaluator::instance().getCublasLtHandle(gpuNum),
                                                   cublasKernelRequirement->operationType.computeDataType,
                                                   cublasKernelRequirement->operationType.scaleDataType,

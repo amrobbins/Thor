@@ -33,7 +33,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 1; ++test) {
+    for (int test = 0; test < 1000; ++test) {
         uint64_t numInputFeatures = (rand() % 300) + 1;
         uint64_t numOutputFeatures = (rand() % 300) + 1;
         uint64_t batchSize = (rand() % 300) + 1;
