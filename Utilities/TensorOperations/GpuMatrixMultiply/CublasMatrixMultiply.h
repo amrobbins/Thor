@@ -260,20 +260,20 @@ class CublasMatrixMultiply {
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, printResults);
     }
 
-    void chooseOptimalGemmKernel(int gpuNum,
-                                 int rowsA,
-                                 int colsA,
-                                 int rowsB,
-                                 int colsB,
-                                 int ldA,
-                                 int ldB,
-                                 int ldC,
-                                 int ldD,
-                                 bool transposeA,
-                                 bool transposeB,
-                                 bool transposeC,
-                                 TensorDescriptor::DataType ABCDataType,
-                                 bool printResults = false);
+    void chooseOptimalGemmKernel(const int gpuNum,
+                                 const int rowsA,
+                                 const int colsA,
+                                 const int rowsB,
+                                 const int colsB,
+                                 const int ldA,
+                                 const int ldB,
+                                 const int ldC,
+                                 const int ldD,
+                                 const bool transposeA,
+                                 const bool transposeB,
+                                 const bool transposeC,
+                                 const TensorDescriptor::DataType ABCDataType,
+                                 const bool printResults = false);
 
     inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
                                                               int rowsA,
@@ -408,37 +408,41 @@ class CublasMatrixMultiply {
     int getSwizzleMaxValue(cublasLtMatmulAlgo_t algo);
     int getCustomKernelOptionMaxValue(cublasLtMatmulAlgo_t algo);
 
-    std::vector<cublasLtMatmulHeuristicResult_t> getHeuristicGemmKernels(const int32_t numChoices,
-                                                                         const int gpuNum,
-                                                                         const int32_t A_rows,
-                                                                         const int32_t A_cols,
-                                                                         const int32_t B_rows,
-                                                                         const int32_t B_cols,
-                                                                         const bool transposeA,
-                                                                         const bool transposeB,
-                                                                         const bool transposeC,
-                                                                         const bool CDSameTensor,
-                                                                         // When set to 0, no workspace allowed:
-                                                                         const uint64_t maxWorkspaceSize,
-                                                                         // When set to 0.0f, any number of waves allowed:
-                                                                         const float maxWaves,
-                                                                         const TensorDescriptor::DataType ABCDDataType);
+    std::vector<CublasKernel> getHeuristicGemmKernels(const int32_t numChoices,
+                                                      const int gpuNum,
+                                                      const int32_t A_rows,
+                                                      const int32_t A_cols,
+                                                      const int32_t B_rows,
+                                                      const int32_t B_cols,
+                                                      const bool transposeA,
+                                                      const bool transposeB,
+                                                      const bool transposeC,
+                                                      const int32_t ld_A,
+                                                      const int32_t ld_B,
+                                                      const int32_t ld_C,
+                                                      const int32_t ld_D,
+                                                      // When set to 0, no workspace allowed:
+                                                      const uint64_t maxWorkspaceSize,
+                                                      // When set to 0.0f, any number of waves allowed:
+                                                      const float maxWaves,
+                                                      const TensorDescriptor::DataType ABCDDataType);
 
-    inline void getHeuristicMatrixMultiplyKernels(int numChoices,
-                                                  int gpuNum,
-                                                  int rowsA,
-                                                  int colsA,
-                                                  int rowsB,
-                                                  int colsB,
-                                                  bool transposeA,
-                                                  bool transposeB,
-                                                  // When set to 0, no workspace allowed:
-                                                  const uint64_t maxWorkspaceSize,
-                                                  // When set to 0.0f, any number of waves allowed:
-                                                  const float maxWaves,
-                                                  TensorDescriptor::DataType ABCDataType) {
-        getHeuristicGemmKernels(
-            numChoices, gpuNum, rowsA, colsA, rowsB, colsB, transposeA, transposeB, false, true, maxWorkspaceSize, maxWaves, ABCDataType);
+    inline std::vector<CublasKernel> getHeuristicMatrixMultiplyKernels(int numChoices,
+                                                                       int gpuNum,
+                                                                       int rowsA,
+                                                                       int colsA,
+                                                                       int rowsB,
+                                                                       int colsB,
+                                                                       bool transposeA,
+                                                                       bool transposeB,
+                                                                       // When set to 0, no workspace allowed:
+                                                                       const uint64_t maxWorkspaceSize,
+                                                                       // When set to 0.0f, any number of waves allowed:
+                                                                       const float maxWaves,
+                                                                       TensorDescriptor::DataType ABCDataType) {
+        int32_t colsC = (transposeB == false ? colsB : rowsB);
+        return getHeuristicGemmKernels(
+            numChoices, gpuNum, rowsA, colsA, rowsB, colsB, transposeA, transposeB, false, colsA, colsB, colsC, colsC, maxWorkspaceSize, maxWaves, ABCDataType);
     }
 };
 
