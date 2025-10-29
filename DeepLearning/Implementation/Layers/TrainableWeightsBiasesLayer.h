@@ -234,8 +234,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     }
 
     void loadWeightsFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
-        if (stream.isEmpty())
+        if (stream.isEmpty()) {
+            assert(optimizer.isPresent());
             stream = optimizer.get()->getGradientUpdateStream();
+        }
         if (weights.getAttachedFilename() != filename)
             weights.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
         weights.loadFromFile(stream);
@@ -249,7 +251,11 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         biases.get().dumpToFile(stream);
     }
 
-    void loadBiasesFromFile(std::string filename, Stream stream) {
+    void loadBiasesFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty()) {
+            assert(optimizer.isPresent());
+            stream = optimizer.get()->getGradientUpdateStream();
+        }
         assert(hasBias);
         assert(biases.isPresent());
         if (biases.get().getAttachedFilename() != filename)

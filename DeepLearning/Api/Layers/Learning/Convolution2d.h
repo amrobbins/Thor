@@ -136,9 +136,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     bool useBatchNormalization;
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
-
-    Optional<std::string> weightsFile;
-    Optional<std::string> biasesFile;
 };
 
 // featureInput, numOutputChannels, filterHeight and filterWidth are required, all other parameters are optional.

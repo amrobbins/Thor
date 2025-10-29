@@ -154,9 +154,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
 
-    Optional<std::string> weightsFile;
-    Optional<std::string> biasesFile;
-
     friend class Network;
 
     //#ifdef THOR_TESTING
