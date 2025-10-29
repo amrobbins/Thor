@@ -5,15 +5,18 @@
 
 #include "gtest/gtest.h"
 
+#include <nlohmann/json.hpp>
+
 #include <stdio.h>
 #include <memory>
 
 using std::shared_ptr;
+using json = nlohmann::json;
 
 using namespace Thor;
 using namespace std;
 
-TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
+TEST(Convolution2d, SingleFeatureInputNoPaddingBuilds) {
     srand(time(nullptr));
 
     Network network;
@@ -114,7 +117,7 @@ TEST(Convolution2dSingleFeatureInputNoPadding, Builds) {
     ASSERT_FALSE(convolution2d < *clone);
 }
 
-TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
+TEST(Convolution2d, SingleFeatureInputSpecifiedPaddingBuilds) {
     srand(time(nullptr));
 
     Network network;
@@ -219,7 +222,7 @@ TEST(Convolution2dSingleFeatureInputSpecifiedPadding, Builds) {
     ASSERT_FALSE(convolution2d < *clone);
 }
 
-TEST(Convolution2dSingleFeatureInputSamePadding, Builds) {
+TEST(Convolution2d, SingleFeatureInputSamePaddingBuilds) {
     srand(time(nullptr));
 
     for (uint32_t test = 0; test < 25; ++test) {
@@ -327,7 +330,7 @@ TEST(Convolution2dSingleFeatureInputSamePadding, Builds) {
     }
 }
 
-TEST(Convolution2dSingleFeatureInputDefaultPadding, Builds) {
+TEST(Convolution2d, SingleFeatureInputDefaultPaddingBuilds) {
     srand(time(nullptr));
 
     for (uint32_t test = 0; test < 25; ++test) {
@@ -434,7 +437,7 @@ TEST(Convolution2dSingleFeatureInputDefaultPadding, Builds) {
     }
 }
 
-TEST(Convolution2dSingleFeatureInputSamePaddingV2, Builds) {
+TEST(Convolution2d, SingleFeatureInputSamePaddingV2Builds) {
     srand(time(nullptr));
 
     for (uint32_t test = 0; test < 25; ++test) {
@@ -543,7 +546,7 @@ TEST(Convolution2dSingleFeatureInputSamePaddingV2, Builds) {
     }
 }
 
-TEST(Convolution2dMultipleFeatureInputs, Builds) {
+TEST(Convolution2d, MultipleFeatureInputsBuilds) {
     srand(time(nullptr));
 
     Network network;
@@ -701,123 +704,267 @@ TEST(Convolution2dMultipleFeatureInputs, Builds) {
     ASSERT_FALSE(convolution2d < *clone);
 }
 
-// TEST(Convolution2d, Serializes) {
-//     FIXME this is still fully connected
-//
-//         srand(time(nullptr));
-//
-//     Network network;
-//
-//     Tensor::DataType dataType = Tensor::DataType::FP16;
-//
-//     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
-//
-//     uint32_t numOutputFeatures = 1 + (rand() % 1000);
-//     bool hasBias = rand() % 2;
-//
-//     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
-//
-//     bool use_batch_norm = rand() % 2;
-//
-//     NetworkInput networkInput =
-//         NetworkInput::Builder().network(network).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-//
-//     Convolution2d::Builder convolution2dBuilder = Convolution2d::Builder()
-//                                                       .network(network)
-//                                                       .featureInput(networkInput.getFeatureOutput())
-//                                                       .numOutputFeatures(numOutputFeatures)
-//                                                       .hasBias(hasBias)
-//                                                       .dropOut(dropProportion);
-//     if (use_batch_norm) {
-//         fullyConnectedBuilder.batchNormalization();
-//     }
-//     FullyConnected fullyConnected = fullyConnectedBuilder.build();
-//
-//     NetworkOutput networkOutput = NetworkOutput::Builder()
-//                                       .network(network)
-//                                       .name("testOutput")
-//                                       .inputTensor(fullyConnected.getFeatureOutputs()[0])
-//                                       .dataType(dataType)
-//                                       .build();
-//
-//     ASSERT_TRUE(fullyConnected.isInitialized());
-//
-//     vector<uint64_t> outputDimensions = {numOutputFeatures};
-//     vector<Tensor> featureInputs = fullyConnected.getFeatureInputs();
-//     vector<Tensor> featureOutputs = fullyConnected.getFeatureOutputs();
-//     assert(featureInputs[0] == networkInput.getFeatureOutput());
-//
-//     ASSERT_EQ(fullyConnected.getFeatureOutput(networkInput.getFeatureOutput()), featureOutputs[0]);
-//
-//     assert(fullyConnected.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
-//
-//     ASSERT_EQ(featureInputs[0].getDataType(), dataType);
-//     ASSERT_EQ(featureInputs[0].getDimensions(), inputDimensions);
-//
-//     ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
-//     ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
-//
-//     // Now stamp the nework and test serialization
-//     uint32_t batchSize = 1 + (rand() % 16);
-//     network.place(batchSize);
-//     Stream stream(0);
-//     json j = fullyConnected.serialize(stream);
-//
-//     ASSERT_EQ(j["version"], "1.0.0");
-//     ASSERT_EQ(j["layer_type"], "convolution_2d");
-//
-//     EXPECT_TRUE(j.contains("num_output_features"));
-//     EXPECT_TRUE(j.contains("has_bias"));
-//     EXPECT_FALSE(j.contains("activation"));
-//     EXPECT_FALSE(j.contains("drop_out"));
-//     EXPECT_FALSE(j.contains("batch_normalization"));
-//     EXPECT_FALSE(j.contains("activation"));
-//     EXPECT_EQ(j.contains("biases_tensor"), hasBias);
-//     EXPECT_TRUE(j.contains("weights_tensor"));
-//     EXPECT_TRUE(j.contains("inputs"));
-//     EXPECT_TRUE(j.contains("outputs"));
-//
-//     ASSERT_TRUE(j.at("num_output_features").is_number_integer());
-//     ASSERT_TRUE(j.at("has_bias").is_boolean());
-//     ASSERT_TRUE(j.at("weights_tensor").is_string());
-//     ASSERT_TRUE(j.at("inputs").is_array());
-//     ASSERT_TRUE(j.at("outputs").is_array());
-//
-//     EXPECT_EQ(j.at("num_output_features").get<uint32_t>(), numOutputFeatures);
-//     EXPECT_EQ(j.at("has_bias").get<bool>(), hasBias);
-//
-//     const auto &inputs = j.at("inputs");
-//     ASSERT_EQ(inputs.size(), 1U) << "Expect exactly one input";
-//     const auto &in0 = inputs.at(0);
-//     ASSERT_TRUE(in0.is_object());
-//     ASSERT_TRUE(in0.at("data_type").is_string());
-//     EXPECT_EQ(in0.at("data_type").get<std::string>(), "fp16");
-//
-//     ASSERT_TRUE(in0.at("dimensions").is_array());
-//     ASSERT_EQ(in0.at("dimensions").size(), 1U);
-//     EXPECT_TRUE(in0.at("dimensions").at(0).is_number_integer());
-//     EXPECT_EQ(in0.at("dimensions").at(0).get<uint32_t>(), inputDimensions[0]);
-//
-//     ASSERT_TRUE(in0.at("id").is_number_integer());
-//
-//     const auto &outputs = j.at("outputs");
-//     ASSERT_EQ(outputs.size(), 1U) << "Expect exactly one output";
-//     const auto &out0 = outputs.at(0);
-//     ASSERT_TRUE(out0.is_object());
-//     ASSERT_TRUE(out0.at("data_type").is_string());
-//     EXPECT_EQ(out0.at("data_type").get<std::string>(), "fp16");
-//
-//     ASSERT_TRUE(out0.at("dimensions").is_array());
-//     ASSERT_EQ(out0.at("dimensions").size(), 1U);
-//     EXPECT_TRUE(out0.at("dimensions").at(0).is_number_integer());
-//     EXPECT_EQ(out0.at("dimensions").at(0).get<uint32_t>(), numOutputFeatures);
-//
-//     ASSERT_TRUE(out0.at("id").is_number_integer());
-//
-//     EXPECT_FALSE(j.at("weights_tensor").get<std::string>().empty());
-//     if (hasBias) {
-//         EXPECT_FALSE(j.at("biases_tensor").get<std::string>().empty());
-//     }
-//
-//     // printf("%s\n", j.dump(4).c_str());
-// }
+TEST(Convolution2d, SerializeDeserialize) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+
+    Tensor::DataType dataType = Tensor::DataType::FP16;
+
+    vector<uint64_t> inputDimensions = {3UL + (rand() % 16), 100UL + (rand() % 16), 100UL + (rand() % 3)};
+
+    uint32_t numOutputChannels = 1 + (rand() % 10);
+    bool hasBias = rand() % 2;
+
+    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
+
+    bool use_batch_norm = rand() % 2;
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    uint32_t filterWidth = 1 + (rand() % 10);
+    uint32_t filterHeight = 1 + (rand() % 10);
+    uint32_t horizontalStride = 1 + (rand() % 2);
+    uint32_t verticalStride = 1 + (rand() % 2);
+    uint32_t horizontalPadding = rand() % filterWidth;
+    uint32_t verticalPadding = rand() % filterHeight;
+
+    Convolution2d::Builder convolution2dBuilder = Convolution2d::Builder()
+                                                      .network(initialNetwork)
+                                                      .featureInput(networkInput.getFeatureOutput())
+                                                      .numOutputChannels(numOutputChannels)
+                                                      .filterWidth(filterWidth)
+                                                      .filterHeight(filterHeight)
+                                                      .horizontalStride(horizontalStride)
+                                                      .verticalStride(verticalStride)
+                                                      .horizontalPadding(horizontalPadding)
+                                                      .verticalPadding(verticalPadding)
+                                                      .hasBias(hasBias)
+                                                      .dropOut(dropProportion);
+    if (use_batch_norm) {
+        convolution2dBuilder.batchNormalization();
+    }
+    Convolution2d convolution2d = convolution2dBuilder.build();
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("testOutput")
+                                      .inputTensor(convolution2d.getFeatureOutputs()[0])
+                                      .dataType(dataType)
+                                      .build();
+
+    ASSERT_TRUE(convolution2d.isInitialized());
+
+    vector<Tensor> featureInputs = convolution2d.getFeatureInputs();
+    vector<Tensor> featureOutputs = convolution2d.getFeatureOutputs();
+    assert(featureInputs[0] == networkInput.getFeatureOutput());
+
+    ASSERT_EQ(convolution2d.getFeatureOutput(networkInput.getFeatureOutput()), featureOutputs[0]);
+
+    assert(convolution2d.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), inputDimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+
+    // Now stamp the network and test serialization
+    Stream stream(0);
+    uint32_t batchSize = 1 + (rand() % 16);
+    vector<Event> initDoneEvents;
+    initialNetwork.place(batchSize, initDoneEvents);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    // Fetch the convolution connected layer from the network and write to its weights
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork.getTrainableLayers();
+    ASSERT_EQ(trainableLayers.size(), use_batch_norm ? 2UL : 1UL);
+    shared_ptr<ThorImplementation::Convolution2d> physicalConvLayer =
+        dynamic_pointer_cast<ThorImplementation::Convolution2d>(trainableLayers[0]);
+    if (use_batch_norm) {
+        if (physicalConvLayer == nullptr)
+            physicalConvLayer = dynamic_pointer_cast<ThorImplementation::Convolution2d>(trainableLayers[1]);
+    }
+    ASSERT_TRUE(physicalConvLayer != nullptr);
+
+    ThorImplementation::Tensor weights = physicalConvLayer->getWeights();
+    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
+    for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
+        weightsCpuMem[i] = i;
+    }
+    weights.copyFromAsync(weightsCpu, stream);
+
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesCpu;
+    if (hasBias) {
+        biases = physicalConvLayer->getBiases();
+        biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
+        for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
+            biasesCpuMem[i] = i * i + 6;
+        }
+        biases.copyFromAsync(biasesCpu, stream);
+    }
+
+    json convolution2dJ = convolution2d.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    ASSERT_EQ(convolution2dJ["version"], "1.0.0");
+    ASSERT_EQ(convolution2dJ["layer_type"], "convolution_2d");
+    ASSERT_EQ(convolution2dJ["data_layout"], "NCHW");
+
+    EXPECT_TRUE(convolution2dJ.contains("num_output_channels"));
+    EXPECT_TRUE(convolution2dJ.contains("has_bias"));
+    EXPECT_FALSE(convolution2dJ.contains("activation"));
+    EXPECT_FALSE(convolution2dJ.contains("drop_out"));
+    EXPECT_FALSE(convolution2dJ.contains("batch_normalization"));
+    EXPECT_FALSE(convolution2dJ.contains("activation"));
+    EXPECT_EQ(convolution2dJ.contains("biases_tensor"), hasBias);
+    EXPECT_TRUE(convolution2dJ.contains("weights_tensor"));
+    EXPECT_TRUE(convolution2dJ.contains("inputs"));
+    EXPECT_TRUE(convolution2dJ.contains("outputs"));
+    EXPECT_TRUE(convolution2dJ.contains("filter_width"));
+    EXPECT_TRUE(convolution2dJ.contains("filter_height"));
+    EXPECT_TRUE(convolution2dJ.contains("horizontal_stride"));
+    EXPECT_TRUE(convolution2dJ.contains("vertical_stride"));
+    EXPECT_TRUE(convolution2dJ.contains("horizontal_padding"));
+    EXPECT_TRUE(convolution2dJ.contains("vertical_padding"));
+
+    ASSERT_TRUE(convolution2dJ.at("num_output_channels").is_number_integer());
+    ASSERT_TRUE(convolution2dJ.at("has_bias").is_boolean());
+    ASSERT_TRUE(convolution2dJ.at("weights_tensor").is_string());
+    ASSERT_TRUE(convolution2dJ.at("inputs").is_array());
+    ASSERT_TRUE(convolution2dJ.at("outputs").is_array());
+    ASSERT_TRUE(convolution2dJ.at("filter_width").is_number_integer());
+    ASSERT_TRUE(convolution2dJ.at("filter_height").is_number_integer());
+    ASSERT_TRUE(convolution2dJ.at("horizontal_stride").is_number_integer());
+    ASSERT_TRUE(convolution2dJ.at("vertical_stride").is_number_integer());
+    ASSERT_TRUE(convolution2dJ.at("horizontal_padding").is_number_integer());
+    ASSERT_TRUE(convolution2dJ.at("vertical_padding").is_number_integer());
+
+    EXPECT_EQ(convolution2dJ.at("num_output_channels").get<uint32_t>(), numOutputChannels);
+    EXPECT_EQ(convolution2dJ.at("has_bias").get<bool>(), hasBias);
+    EXPECT_EQ(convolution2dJ.at("filter_width").get<uint32_t>(), filterWidth);
+    EXPECT_EQ(convolution2dJ.at("filter_height").get<uint32_t>(), filterHeight);
+    EXPECT_EQ(convolution2dJ.at("horizontal_stride").get<uint32_t>(), horizontalStride);
+    EXPECT_EQ(convolution2dJ.at("vertical_stride").get<uint32_t>(), verticalStride);
+    EXPECT_EQ(convolution2dJ.at("horizontal_padding").get<uint32_t>(), horizontalPadding);
+    EXPECT_EQ(convolution2dJ.at("vertical_padding").get<uint32_t>(), verticalPadding);
+
+    const auto &inputs = convolution2dJ.at("inputs");
+    ASSERT_EQ(inputs.size(), 1U) << "Expect exactly one input";
+    const auto &in0 = inputs.at(0);
+    ASSERT_TRUE(in0.is_object());
+    ASSERT_TRUE(in0.at("data_type").is_string());
+    EXPECT_EQ(in0.at("data_type").get<string>(), "fp16");
+
+    ASSERT_TRUE(in0.at("dimensions").is_array());
+    ASSERT_EQ(in0.at("dimensions").size(), 3U);
+    EXPECT_TRUE(in0.at("dimensions").at(0).is_number_integer());
+    EXPECT_EQ(in0.at("dimensions").at(0).get<uint32_t>(), inputDimensions[0]);
+
+    ASSERT_TRUE(in0.at("id").is_number_integer());
+
+    const auto &outputs = convolution2dJ.at("outputs");
+    ASSERT_EQ(outputs.size(), 1U) << "Expect exactly one output";
+    const auto &out0 = outputs.at(0);
+    ASSERT_TRUE(out0.is_object());
+    ASSERT_TRUE(out0.at("data_type").is_string());
+    EXPECT_EQ(out0.at("data_type").get<string>(), "fp16");
+
+    vector<uint64_t> physicalOutputDimensions = physicalConvLayer->getFeatureOutputs()[0].get().getDimensions();
+    vector<uint64_t> apiOutputDimensions;
+    // skip batch dimension
+    for (uint32_t i = 1; i < 4; ++i) {
+        apiOutputDimensions.push_back(physicalOutputDimensions[i]);
+    }
+
+    ASSERT_TRUE(out0.at("dimensions").is_array());
+    ASSERT_EQ(out0.at("dimensions").size(), 3U);
+    // EXPECT_TRUE(out0.at("dimensions").at(0).is_number_integer());
+    EXPECT_EQ(out0.at("dimensions").get<vector<uint64_t>>(), apiOutputDimensions);
+
+    ASSERT_TRUE(out0.at("id").is_number_integer());
+
+    EXPECT_FALSE(convolution2dJ.at("weights_tensor").get<string>().empty());
+    if (hasBias) {
+        EXPECT_FALSE(convolution2dJ.at("biases_tensor").get<string>().empty());
+    }
+
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", convolution2dJ.dump(4).c_str());
+    // printf("%s\n", networkOutputJ.dump(4).c_str());
+
+    ////////////////////////////
+    // Deserialize
+    ////////////////////////////
+    // Verify that the layer gets added to the network and that its weights are set to the correct values
+    Network newNetwork;
+
+    NetworkInput::deserialize(networkInputJ, &newNetwork);
+    Convolution2d::deserialize(convolution2dJ, &newNetwork);
+    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+
+    batchSize = 1 + (rand() % 16);
+    newNetwork.place(batchSize, initDoneEvents);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    stampedNetworks.clear();
+    stampedNetworks = newNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    stampedNetwork = stampedNetworks[0];
+    trainableLayers.clear();
+    trainableLayers = stampedNetwork.getTrainableLayers();
+
+    ASSERT_EQ(trainableLayers.size(), 1UL);
+    shared_ptr<ThorImplementation::Convolution2d> physicalConvLayerDes =
+        dynamic_pointer_cast<ThorImplementation::Convolution2d>(trainableLayers[0]);
+    ASSERT_TRUE(physicalConvLayerDes != nullptr);
+
+    ThorImplementation::Tensor weightsDes = physicalConvLayerDes->getWeights();
+    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    weightsCpuDes.copyFromAsync(weightsDes, stream);
+
+    ThorImplementation::Tensor biasesDes;
+    ThorImplementation::Tensor biasesCpuDes;
+    if (hasBias) {
+        biasesDes = physicalConvLayerDes->getBiases();
+        biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpuDes.copyFromAsync(biasesDes, stream);
+    }
+
+    stream.synchronize();
+
+    ASSERT_NE(weightsDes, weights);
+    ASSERT_EQ(weightsDes.getDimensions(), weights.getDimensions());
+    ASSERT_EQ(weightsDes.getDataType(), weights.getDataType());
+    ASSERT_TRUE(weightsDes.getPlacement() == weights.getPlacement());
+
+    half *weightsCpuMemDes = (half *)weightsCpuDes.getMemPtr();
+    for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
+        ASSERT_EQ(weightsCpuMemDes[i], half(i));
+    }
+
+    if (hasBias) {
+        ASSERT_NE(biasesDes, biases);
+        ASSERT_EQ(biasesDes.getDimensions(), biases.getDimensions());
+        ASSERT_EQ(biasesDes.getDataType(), biases.getDataType());
+        ASSERT_TRUE(biasesDes.getPlacement() == biases.getPlacement());
+
+        half *biasesCpuMemDes = (half *)biasesCpuDes.getMemPtr();
+        for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
+            ASSERT_EQ(biasesCpuMemDes[i], half(i * i + 6));
+        }
+    }
+}

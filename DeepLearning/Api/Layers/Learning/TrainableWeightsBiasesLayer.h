@@ -48,6 +48,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> weightsGradient;
     Optional<Tensor> biasesGradient;
     Optional<Optimizer *> layerSpecificOptimizer;
+
+    Optional<std::string> weightsFile;
+    Optional<std::string> biasesFile;
 };
 
 }  // namespace Thor

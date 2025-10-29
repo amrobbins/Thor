@@ -5,6 +5,8 @@ using namespace std;
 
 using json = nlohmann::json;
 
+// FIXME: There should be only 1 build method and it should be this one with the bit from the other one.
+//        Don't instantiate a new standaloneFullyConnected, use this one.
 void FullyConnected::buildSupportLayersAndAddToNetwork() {
     vector<Tensor> currentFeatureInputs;
 
@@ -199,14 +201,22 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
     // 2. Copy from a file - when loading a saved network
     // 3. Run an initializer to set the weights - on an untrained network
     if (!isFirstStamp) {
+        // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
         assert(sisterLayer != nullptr);
         ThorImplementation::Tensor weights = layer->getWeights();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
         if (sisterLayerLoadedEvent.isPresent())
             stream.waitEvent(sisterLayerLoadedEvent);
         weights.copyFromAsync(sisterLayer->getWeights(), stream);
+        if (hasBias) {
+            ThorImplementation::Tensor biases = layer->getBiases();
+            Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterLayer->getBiases();
+            assert(sisterLayerBiases.isPresent());
+            biases.copyFromAsync(sisterLayerBiases.get(), stream);
+        }
         return {stream.putEvent(false, true)};
     } else if (weightsFile.isPresent()) {
+        // 2. Copy from a file - when loading a saved network
         assert(weightsInitializerBuilder.get() == nullptr);
         assert(biasInitializerBuilder.get() == nullptr);
         assert(layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
@@ -214,7 +224,7 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         layer->loadWeightsFromFile(weightsFile.get(), stream);
         if (hasBias) {
             assert(biasesFile.isPresent());
-            layer->loadWeightsFromFile(biasesFile.get(), stream);
+            layer->loadBiasesFromFile(biasesFile.get(), stream);
         }
 
         // Can't use the file later, it may not still be there
@@ -223,6 +233,7 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
 
         return {stream.putEvent(false, true)};
     } else {
+        // 3. Run an initializer to set the weights - on an untrained network
         Optional<Event> initDoneEvent;
         vector<Event> initDoneEvents;
 

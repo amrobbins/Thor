@@ -241,10 +241,10 @@ TEST(FullyConnected, SerializeDeserialize) {
     ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
     ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
 
-    // Now stamp the nework and test serialization
+    // Now stamp the network and test serialization
     Stream stream(0);
     uint32_t batchSize = 1 + (rand() % 16);
-    std::vector<Event> initDoneEvents;
+    vector<Event> initDoneEvents;
     initialNetwork.place(batchSize, initDoneEvents);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
@@ -271,7 +271,18 @@ TEST(FullyConnected, SerializeDeserialize) {
         weightsCpuMem[i] = i;
     }
     weights.copyFromAsync(weightsCpu, stream);
-    // FIXME: do biases too
+
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesCpu;
+    if (hasBias) {
+        biases = physicalFCLayer->getBiases();
+        biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
+        for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
+            biasesCpuMem[i] = i * i + 6;
+        }
+        biases.copyFromAsync(biasesCpu, stream);
+    }
 
     json fullyConnectedJ = fullyConnected.serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
@@ -305,7 +316,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     const auto &in0 = inputs.at(0);
     ASSERT_TRUE(in0.is_object());
     ASSERT_TRUE(in0.at("data_type").is_string());
-    EXPECT_EQ(in0.at("data_type").get<std::string>(), "fp16");
+    EXPECT_EQ(in0.at("data_type").get<string>(), "fp16");
 
     ASSERT_TRUE(in0.at("dimensions").is_array());
     ASSERT_EQ(in0.at("dimensions").size(), 1U);
@@ -319,7 +330,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     const auto &out0 = outputs.at(0);
     ASSERT_TRUE(out0.is_object());
     ASSERT_TRUE(out0.at("data_type").is_string());
-    EXPECT_EQ(out0.at("data_type").get<std::string>(), "fp16");
+    EXPECT_EQ(out0.at("data_type").get<string>(), "fp16");
 
     ASSERT_TRUE(out0.at("dimensions").is_array());
     ASSERT_EQ(out0.at("dimensions").size(), 1U);
@@ -328,9 +339,9 @@ TEST(FullyConnected, SerializeDeserialize) {
 
     ASSERT_TRUE(out0.at("id").is_number_integer());
 
-    EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<std::string>().empty());
+    EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<string>().empty());
     if (hasBias) {
-        EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<std::string>().empty());
+        EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<string>().empty());
     }
 
     // printf("%s\n", networkInputJ.dump(4).c_str());
@@ -370,6 +381,16 @@ TEST(FullyConnected, SerializeDeserialize) {
     ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
     weightsCpuDes.copyFromAsync(weightsDes, stream);
 
+    ThorImplementation::Tensor biasesDes;
+    ThorImplementation::Tensor biasesCpuDes;
+    if (hasBias) {
+        biasesDes = physicalFCLayerDes->getBiases();
+        biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpuDes.copyFromAsync(biasesDes, stream);
+    }
+
+    stream.synchronize();
+
     ASSERT_NE(weightsDes, weights);
     ASSERT_EQ(weightsDes.getDimensions(), weights.getDimensions());
     ASSERT_EQ(weightsDes.getDataType(), weights.getDataType());
@@ -378,5 +399,17 @@ TEST(FullyConnected, SerializeDeserialize) {
     half *weightsCpuMemDes = (half *)weightsCpuDes.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         ASSERT_EQ(weightsCpuMemDes[i], half(i));
+    }
+
+    if (hasBias) {
+        ASSERT_NE(biasesDes, biases);
+        ASSERT_EQ(biasesDes.getDimensions(), biases.getDimensions());
+        ASSERT_EQ(biasesDes.getDataType(), biases.getDataType());
+        ASSERT_TRUE(biasesDes.getPlacement() == biases.getPlacement());
+
+        half *biasesCpuMemDes = (half *)biasesCpuDes.getMemPtr();
+        for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
+            ASSERT_EQ(biasesCpuMemDes[i], half(i * i + 6));
+        }
     }
 }
