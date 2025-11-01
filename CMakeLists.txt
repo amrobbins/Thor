@@ -64,8 +64,8 @@ file(GLOB_RECURSE THOR_SOURCES
 # ============================================================
 # Create shared library
 # ============================================================
-add_library(Thor STATIC ${THOR_SOURCES})
-#add_library(Thor SHARED ${THOR_SOURCES})
+#add_library(Thor STATIC ${THOR_SOURCES})
+add_library(Thor SHARED ${THOR_SOURCES})
 set_target_properties(Thor PROPERTIES
         CXX_STANDARD 20
         CUDA_STANDARD 17
@@ -120,6 +120,9 @@ target_include_directories(Thor PUBLIC
         $<BUILD_INTERFACE:${CUDAToolkit_INCLUDE_DIRS}>
         )
 
+find_package(Curses REQUIRED)
+target_include_directories(Thor PUBLIC ${CURSES_INCLUDE_DIRS})
+target_link_libraries(Thor PUBLIC ${CURSES_LIBRARIES})
 
 # ============================================================
 # GraphicsMagick++ (Magick++)
@@ -205,7 +208,21 @@ enable_testing()
 
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
-target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main)
+target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
+# Manually include cuDNN and cuFile
+target_link_directories(thor_tests PRIVATE
+        /usr/local/cuda/lib64
+        /usr/lib/x86_64-linux-gnu
+        )
+target_link_libraries(thor_tests PRIVATE
+        cudnn
+        cufile
+        )
+find_package(OpenMP REQUIRED)
+target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
+find_package(Boost REQUIRED COMPONENTS filesystem)
+target_include_directories(thor_tests PRIVATE ${Boost_INCLUDE_DIRS})
+target_link_libraries(thor_tests PRIVATE Boost::filesystem)
 include(GoogleTest)
 gtest_discover_tests(thor_tests)
 

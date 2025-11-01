@@ -203,3 +203,40 @@ TEST(Activations, EluSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 }
+
+TEST(Activations, EluRegistered) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    vector<uint64_t> inputDimensions;
+    uint32_t numDimensions = 1 + (rand() % 5);
+    for (uint32_t i = 0; i < numDimensions; ++i)
+        inputDimensions.push_back(1 + (rand() % 5));
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    float alpha = float(rand() % 200) / 100.0f;
+
+    Elu::Builder eluBuilder = Elu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput()).alpha(alpha);
+    shared_ptr<Elu> elu = dynamic_pointer_cast<Elu>(eluBuilder.build());
+
+    NetworkOutput networkOutput =
+        NetworkOutput::Builder().network(initialNetwork).name("testOutput").inputTensor(elu->getFeatureOutput()).dataType(dataType).build();
+
+    ASSERT_TRUE(elu->isInitialized());
+
+    Stream stream(0);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json eluJ = elu->serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    // Test that it is registered with Activation to deserialize
+    Network newNetwork;
+    NetworkInput::deserialize(networkInputJ, &newNetwork);
+    Activation::deserialize(eluJ, &newNetwork);
+    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+
+    // FIXME: Check the Elu layer
+}

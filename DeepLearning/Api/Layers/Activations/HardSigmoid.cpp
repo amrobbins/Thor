@@ -3,7 +3,7 @@
 using namespace Thor;
 
 namespace {
-[[maybe_unused]] static bool registered = []() {
+static bool registered = []() {
     Activation::registry["hardSigmoid"] = &HardSigmoid::deserialize;
     return true;
 }();
