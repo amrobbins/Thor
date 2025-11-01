@@ -1,5 +1,6 @@
-#include "DeepLearning/Api/Layers/Activations/Elu.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
 
 #include "gtest/gtest.h"
 
@@ -12,7 +13,7 @@ using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
 
-TEST(Activations, EluBuilds) {
+TEST(Activations, ReluBuilds) {
     srand(time(nullptr));
 
     Network network;
@@ -24,35 +25,26 @@ TEST(Activations, EluBuilds) {
 
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
 
-    bool setAlpha = rand() % 2;
-
     Tensor featureInput(dataType, dimensions);
-    Elu::Builder eluBuilder;
-    eluBuilder.network(network);
-    eluBuilder.featureInput(featureInput);
-    float alpha;
-    if (setAlpha) {
-        alpha = (rand() % 100) / (1 + (rand() % 100));
-        eluBuilder.alpha(alpha);
-    } else {
-        alpha = 1.0f;
-    }
-    shared_ptr<Elu> elu = dynamic_pointer_cast<Elu>(eluBuilder.build());
+    Relu::Builder reluBuilder;
+    reluBuilder.network(network);
+    reluBuilder.featureInput(featureInput);
+    shared_ptr<Relu> relu = dynamic_pointer_cast<Relu>(reluBuilder.build());
 
-    ASSERT_TRUE(elu->isInitialized());
+    ASSERT_TRUE(relu->isInitialized());
 
-    Optional<Tensor> actualInput = elu->getFeatureInput();
+    Optional<Tensor> actualInput = relu->getFeatureInput();
     ASSERT_TRUE(actualInput.isPresent());
     ASSERT_EQ(actualInput.get().getDataType(), dataType);
     ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
 
-    Optional<Tensor> actualOutput = elu->getFeatureOutput();
+    Optional<Tensor> actualOutput = relu->getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
     ASSERT_EQ(actualOutput.get().getDataType(), dataType);
     ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
 
-    shared_ptr<Layer> cloneLayer = elu->clone();
-    Elu *clone = dynamic_cast<Elu *>(cloneLayer.get());
+    shared_ptr<Layer> cloneLayer = relu->clone();
+    Relu *clone = dynamic_cast<Relu *>(cloneLayer.get());
     assert(clone != nullptr);
 
     ASSERT_TRUE(clone->isInitialized());
@@ -67,16 +59,16 @@ TEST(Activations, EluBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(elu->getId(), clone->getId());
-    ASSERT_GT(elu->getId(), 1u);
+    ASSERT_EQ(relu->getId(), clone->getId());
+    ASSERT_GT(relu->getId(), 1u);
 
-    ASSERT_TRUE(*elu == *clone);
-    ASSERT_FALSE(*elu != *clone);
-    ASSERT_FALSE(*elu > *clone);
-    ASSERT_FALSE(*elu < *clone);
+    ASSERT_TRUE(*relu == *clone);
+    ASSERT_FALSE(*relu != *clone);
+    ASSERT_FALSE(*relu > *clone);
+    ASSERT_FALSE(*relu < *clone);
 }
 
-TEST(Activations, EluSerializeDeserialize) {
+TEST(Activations, ReluSerializeDeserialize) {
     srand(time(nullptr));
 
     Network initialNetwork;
@@ -89,25 +81,27 @@ TEST(Activations, EluSerializeDeserialize) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    float alpha = float(rand() % 200) / 100.0f;
+    Relu::Builder reluBuilder = Relu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    shared_ptr<Relu> relu = dynamic_pointer_cast<Relu>(reluBuilder.build());
 
-    Elu::Builder eluBuilder = Elu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput()).alpha(alpha);
-    shared_ptr<Elu> elu = dynamic_pointer_cast<Elu>(eluBuilder.build());
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("testOutput")
+                                      .inputTensor(relu->getFeatureOutput())
+                                      .dataType(dataType)
+                                      .build();
 
-    NetworkOutput networkOutput =
-        NetworkOutput::Builder().network(initialNetwork).name("testOutput").inputTensor(elu->getFeatureOutput()).dataType(dataType).build();
+    ASSERT_TRUE(relu->isInitialized());
 
-    ASSERT_TRUE(elu->isInitialized());
-
-    Tensor featureInput = elu->getFeatureInput();
-    Tensor featureOutput = elu->getFeatureOutput();
+    Tensor featureInput = relu->getFeatureInput();
+    Tensor featureOutput = relu->getFeatureOutput();
     assert(featureInput == networkInput.getFeatureOutput());
 
-    ASSERT_TRUE(elu->getFeatureOutput().isPresent());
-    ASSERT_EQ(elu->getFeatureOutput().get(), featureOutput);
+    ASSERT_TRUE(relu->getFeatureOutput().isPresent());
+    ASSERT_EQ(relu->getFeatureOutput().get(), featureOutput);
 
-    ASSERT_TRUE(elu->getFeatureInput().isPresent());
-    assert(elu->getFeatureInput().get() == featureInput);
+    ASSERT_TRUE(relu->getFeatureInput().isPresent());
+    assert(relu->getFeatureInput().get() == featureInput);
 
     ASSERT_EQ(featureInput.getDataType(), dataType);
     ASSERT_EQ(featureInput.getDimensions(), inputDimensions);
@@ -132,19 +126,18 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_EQ(stampedNetworks.size(), 1UL);
     ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
 
-    json eluJ = elu->serialize("/tmp/", stream);
+    json reluJ = relu->serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
-    ASSERT_EQ(eluJ["factory"], "activation");
-    ASSERT_EQ(eluJ["version"], "1.0.0");
-    ASSERT_EQ(eluJ["layer_type"], "elu");
+    ASSERT_EQ(reluJ["factory"], "activation");
+    ASSERT_EQ(reluJ["version"], "1.0.0");
+    ASSERT_EQ(reluJ["layer_type"], "relu");
 
-    ASSERT_EQ(eluJ["alpha"], alpha);
-    EXPECT_TRUE(eluJ.contains("feature_input"));
-    EXPECT_TRUE(eluJ.contains("feature_output"));
+    EXPECT_TRUE(reluJ.contains("feature_input"));
+    EXPECT_TRUE(reluJ.contains("feature_output"));
 
-    const auto &input = eluJ.at("feature_input");
+    const auto &input = reluJ.at("feature_input");
     ASSERT_TRUE(input.is_object());
     ASSERT_TRUE(input.at("data_type").is_string());
     string dataTypeString = dataType == Tensor::DataType::FP16 ? "fp16" : "fp32";
@@ -153,7 +146,7 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_EQ(input.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
     ASSERT_TRUE(input.at("id").is_number_integer());
 
-    const auto &output = eluJ.at("feature_output");
+    const auto &output = reluJ.at("feature_output");
     ASSERT_TRUE(output.is_object());
     ASSERT_TRUE(output.at("data_type").is_string());
     EXPECT_EQ(output.at("data_type").get<string>(), dataTypeString);
@@ -162,7 +155,7 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_TRUE(output.at("id").is_number_integer());
 
     //     printf("%s\n", networkInputJ.dump(4).c_str());
-    //     printf("%s\n", eluJ.dump(4).c_str());
+    //     printf("%s\n", reluJ.dump(4).c_str());
     //     printf("%s\n", networkOutputJ.dump(4).c_str());
 
     ////////////////////////////
@@ -172,7 +165,7 @@ TEST(Activations, EluSerializeDeserialize) {
     Network newNetwork;
 
     NetworkInput::deserialize(networkInputJ, &newNetwork);
-    Elu::deserialize(eluJ, &newNetwork);
+    Relu::deserialize(reluJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
@@ -190,8 +183,8 @@ TEST(Activations, EluSerializeDeserialize) {
 
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
     ASSERT_EQ(otherLayers.size(), 1U);
-    shared_ptr<ThorImplementation::Elu> stampedElu = dynamic_pointer_cast<ThorImplementation::Elu>(otherLayers[0]);
-    ASSERT_NE(stampedElu, nullptr);
+    shared_ptr<ThorImplementation::Relu> stampedRelu = dynamic_pointer_cast<ThorImplementation::Relu>(otherLayers[0]);
+    ASSERT_NE(stampedRelu, nullptr);
 
     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
     ASSERT_EQ(inputLayers.size(), 1U);

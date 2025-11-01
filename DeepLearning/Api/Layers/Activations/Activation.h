@@ -15,6 +15,41 @@ class Activation : public Layer {
 
     Activation() {}
     virtual ~Activation() {}
+
+    virtual std::string getLayerType() const = 0;
+    virtual std::string getLayerVersion() const { return "1.0.0"; }
+
+    virtual nlohmann::json serialize(const std::string& storageDir, Stream stream) {
+        assert(initialized);
+        assert(featureInput.isPresent());
+        assert(featureOutput.isPresent());
+
+        nlohmann::json j;
+        j["factory"] = "activation";
+        j["version"] = getLayerVersion();
+        j["layer_type"] = to_snake_case(getLayerType());
+        j["feature_input"] = featureInput.get().serialize();
+        j["feature_output"] = featureOutput.get().serialize();
+        return j;
+    }
+
+   protected:
+    std::string to_snake_case(const std::string& input) {
+        std::string out;
+        out.reserve(input.size() * 2);
+
+        for (size_t i = 0; i < input.size(); ++i) {
+            char c = input[i];
+            if (std::isupper(c)) {
+                if (i > 0)
+                    out.push_back('_');
+                out.push_back(std::tolower(c));
+            } else {
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
 };
 
 class Activation::Builder {

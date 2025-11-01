@@ -22,8 +22,9 @@ class Elu : public Activation {
         assert(featureOutput.isPresent());
 
         nlohmann::json j;
-        j["version"] = "1.0.0";
-        j["layer_type"] = "elu";
+        j["factory"] = "activation";
+        j["version"] = getLayerVersion();
+        j["layer_type"] = to_snake_case(getLayerType());
         j["alpha"] = alpha;
         j["feature_input"] = featureInput.get().serialize();
         j["feature_output"] = featureOutput.get().serialize();
