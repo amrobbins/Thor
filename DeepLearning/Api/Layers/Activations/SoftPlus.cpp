@@ -3,7 +3,7 @@
 using namespace Thor;
 
 namespace {
-[[maybe_unused]] static bool registered = []() {
+static bool registered = []() {
     Activation::registry["softPlus"] = &SoftPlus::deserialize;
     return true;
 }();
