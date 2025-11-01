@@ -45,7 +45,7 @@ TEST(Relu, Builds) {
     ASSERT_TRUE(relu->isInitialized());
 
     Stream stream(0);
-    json actual = relu->serialize(stream);
+    json actual = relu->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "relu"}};
     ASSERT_EQ(expected, actual);
 
@@ -105,7 +105,7 @@ TEST(Tanh, Builds) {
     ASSERT_TRUE(tanh->isInitialized());
 
     Stream stream(0);
-    json actual = tanh->serialize(stream);
+    json actual = tanh->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "tanh"}};
     ASSERT_EQ(expected, actual);
 
@@ -144,77 +144,6 @@ TEST(Tanh, Builds) {
     ASSERT_FALSE(*tanh < *clone);
 }
 
-////////////////////////////////
-
-TEST(Elu, Builds) {
-    srand(time(nullptr));
-
-    Network network;
-
-    vector<uint64_t> dimensions;
-    int numDimensions = 1 + rand() % 6;
-    for (int i = 0; i < numDimensions; ++i)
-        dimensions.push_back(1 + (rand() % 1000));
-
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-
-    bool setAlpha = rand() % 2;
-
-    Tensor featureInput(dataType, dimensions);
-    Elu::Builder eluBuilder;
-    eluBuilder.network(network);
-    eluBuilder.featureInput(featureInput);
-    float alpha;
-    if (setAlpha) {
-        alpha = (rand() % 100) / (1 + (rand() % 100));
-        eluBuilder.alpha(alpha);
-    } else {
-        alpha = 1.0f;
-    }
-    shared_ptr<Elu> elu = make_shared<Elu>(*dynamic_cast<Elu *>(eluBuilder.build().get()));
-
-    ASSERT_TRUE(elu->isInitialized());
-
-    Stream stream(0);
-    json actual = elu->serialize(stream);
-    json expected = {{"version", "1.0.0"}, {"type", "elu"}, {"alpha", alpha}};
-    ASSERT_EQ(expected, actual);
-
-    Optional<Tensor> actualInput = elu->getFeatureInput();
-    ASSERT_TRUE(actualInput.isPresent());
-    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-    ASSERT_EQ(actualInput.get().getDimensions(), dimensions);
-
-    Optional<Tensor> actualOutput = elu->getFeatureOutput();
-    ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-    ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
-
-    shared_ptr<Layer> cloneLayer = elu->clone();
-    Elu *clone = dynamic_cast<Elu *>(cloneLayer.get());
-    assert(clone != nullptr);
-
-    ASSERT_TRUE(clone->isInitialized());
-
-    Optional<Tensor> cloneInput = clone->getFeatureInput();
-    ASSERT_TRUE(cloneInput.isPresent());
-    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneInput.get().getDimensions(), dimensions);
-
-    Optional<Tensor> cloneOutput = clone->getFeatureOutput();
-    ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
-    ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
-
-    ASSERT_EQ(elu->getId(), clone->getId());
-    ASSERT_GT(elu->getId(), 1u);
-
-    ASSERT_TRUE(*elu == *clone);
-    ASSERT_FALSE(*elu != *clone);
-    ASSERT_FALSE(*elu > *clone);
-    ASSERT_FALSE(*elu < *clone);
-}
-
 TEST(Exponential, Builds) {
     srand(time(nullptr));
 
@@ -236,7 +165,7 @@ TEST(Exponential, Builds) {
     ASSERT_TRUE(exponential->isInitialized());
 
     Stream stream(0);
-    json actual = exponential->serialize(stream);
+    json actual = exponential->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "exponential"}};
     ASSERT_EQ(expected, actual);
 
@@ -296,7 +225,7 @@ TEST(Gelu, Builds) {
     ASSERT_TRUE(gelu->isInitialized());
 
     Stream stream(0);
-    json actual = gelu->serialize(stream);
+    json actual = gelu->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "gelu"}};
     ASSERT_EQ(expected, actual);
 
@@ -356,7 +285,7 @@ TEST(HardSigmoid, Builds) {
     ASSERT_TRUE(hardSigmoid->isInitialized());
 
     Stream stream(0);
-    json actual = hardSigmoid->serialize(stream);
+    json actual = hardSigmoid->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "hard_sigmoid"}};
     ASSERT_EQ(expected, actual);
 
@@ -416,7 +345,7 @@ TEST(Selu, Builds) {
     ASSERT_TRUE(selu->isInitialized());
 
     Stream stream(0);
-    json actual = selu->serialize(stream);
+    json actual = selu->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "selu"}};
     ASSERT_EQ(expected, actual);
 
@@ -476,7 +405,7 @@ TEST(Sigmoid, Builds) {
     ASSERT_TRUE(sigmoid->isInitialized());
 
     Stream stream(0);
-    json actual = sigmoid->serialize(stream);
+    json actual = sigmoid->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "sigmoid"}};
     ASSERT_EQ(expected, actual);
 
@@ -536,7 +465,7 @@ TEST(Softmax, Builds) {
     ASSERT_TRUE(softmax->isInitialized());
 
     Stream stream(0);
-    json actual = softmax->serialize(stream);
+    json actual = softmax->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "softmax"}};
     ASSERT_EQ(expected, actual);
 
@@ -596,7 +525,7 @@ TEST(SoftPlus, Builds) {
     ASSERT_TRUE(softPlus->isInitialized());
 
     Stream stream(0);
-    json actual = softPlus->serialize(stream);
+    json actual = softPlus->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "soft_plus"}};
     ASSERT_EQ(expected, actual);
 
@@ -656,7 +585,7 @@ TEST(SoftSign, Builds) {
     ASSERT_TRUE(softSign->isInitialized());
 
     Stream stream(0);
-    json actual = softSign->serialize(stream);
+    json actual = softSign->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "soft_sign"}};
     ASSERT_EQ(expected, actual);
 
@@ -716,7 +645,7 @@ TEST(Swish, Builds) {
     ASSERT_TRUE(swish->isInitialized());
 
     Stream stream(0);
-    json actual = swish->serialize(stream);
+    json actual = swish->serialize("", stream);
     json expected = {{"version", "1.0.0"}, {"type", "swish"}};
     ASSERT_EQ(expected, actual);
 

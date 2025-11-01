@@ -147,7 +147,7 @@ json Convolution2d::serialize(const string &storageDir, Stream stream) {
 }
 
 void Convolution2d::deserialize(const json &j, Network *network) {
-    if (j["version"] != "1.0.0")
+    if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in Convolution2d::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "convolution_2d")
         throw runtime_error("Layer type mismatch in Convolution2d::deserialize: " + j.at("layer_type").get<std::string>());

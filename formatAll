@@ -2,7 +2,7 @@ if [ "$EUID" == 0 ]
   then echo "Dont run this as root, run as you. Exiting."
   exit
 fi
-find ./ -name "*.cpp" | egrep -v "./googletest/|./build/" | xargs clang-format -i
-find ./ -name "*.cu" | egrep -v "./googletest/|./build/" | xargs clang-format -i
-find ./ -name "*.h" | egrep -v "./googletest/|./build/|CImg.h" | xargs clang-format -i
+find ./ -name "*.cpp" | egrep -v "./googletest/|./build/|./cmake-build" | xargs clang-format -i
+find ./ -name "*.cu" | egrep -v "./googletest/|./build/|./cmake-build" | xargs clang-format -i
+find ./ -name "*.h" | egrep -v "./googletest/|./build/|CImg.h|./cmake-build" | xargs clang-format -i
 

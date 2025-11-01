@@ -18,7 +18,9 @@ class Sigmoid : public Activation {
 
     virtual std::string getLayerType() const { return "Sigmoid"; }
 
-    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "sigmoid"}}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
+        return nlohmann::json{{"version", "1.0.0"}, {"type", "sigmoid"}};
+    }
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -58,11 +60,14 @@ class Sigmoid::Builder : public Activation::Builder {
         return sigmoid.clone();
     }
 
-    virtual void network(Network &_network) { this->_network = &_network; }
+    virtual Sigmoid::Builder &network(Network &_network) {
+        Activation::Builder::network(_network);
+        return *this;
+    }
 
-    virtual void featureInput(Tensor _featureInput) {
-        assert(!_featureInput.getDimensions().empty());
-        this->_featureInput = _featureInput;
+    virtual Sigmoid::Builder &featureInput(Tensor _featureInput) {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
     }
 
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Sigmoid::Builder>(*this); }
