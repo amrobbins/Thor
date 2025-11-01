@@ -5,8 +5,6 @@ using namespace std;
 
 using json = nlohmann::json;
 
-// FIXME: There should be only 1 build method and it should be this one with the bit from the other one.
-//        Don't instantiate a new standaloneFullyConnected, use this one.
 void FullyConnected::buildSupportLayersAndAddToNetwork() {
     vector<Tensor> currentFeatureInputs;
 
@@ -57,6 +55,8 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
 
     vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
 
+    // I do actually need a second one because the connections of this multi-layer don't match the one that
+    // the network will use.
     FullyConnected::Builder fullyConnectedBuilder;
     fullyConnectedBuilder.network(*network)
         .numOutputFeatures(numOutputFeatures)
@@ -148,7 +148,7 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
 }
 
 void FullyConnected::deserialize(const json &j, Network *network) {
-    if (j["version"] != "1.0.0")
+    if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "fully_connected")
         throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());

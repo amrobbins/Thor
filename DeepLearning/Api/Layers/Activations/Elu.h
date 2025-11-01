@@ -16,7 +16,40 @@ class Elu : public Activation {
 
     virtual std::string getLayerType() const { return "Elu"; }
 
-    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "elu"}, {"alpha", alpha}}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
+        assert(initialized);
+        assert(featureInput.isPresent());
+        assert(featureOutput.isPresent());
+
+        nlohmann::json j;
+        j["version"] = "1.0.0";
+        j["layer_type"] = "elu";
+        j["alpha"] = alpha;
+        j["feature_input"] = featureInput.get().serialize();
+        j["feature_output"] = featureOutput.get().serialize();
+        return j;
+    }
+
+    static void deserialize(const nlohmann::json &j, Network *network) {
+        if (j.at("version").get<std::string>() != "1.0.0")
+            throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+        if (j.at("layer_type").get<std::string>() != "elu")
+            throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+        float alpha = j.at("alpha").get<float>();
+
+        nlohmann::json input = j["feature_input"].get<nlohmann::json>();
+        uint64_t originalTensorId = input.at("id").get<uint64_t>();
+        Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
+
+        Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+
+        Elu elu;
+        elu.alpha = alpha;
+        elu.featureInput = featureInput;
+        elu.featureOutput = featureOutput;
+        elu.initialized = true;
+        elu.addToNetwork(network);
+    }
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -56,28 +89,26 @@ class Elu::Builder : public Activation::Builder {
         return elu.clone();
     }
 
-    virtual void network(Network &_network) {
-        assert(!this->_network.isPresent());
-        this->_network = &_network;
+    virtual Elu::Builder &network(Network &_network) {
+        Activation::Builder::network(_network);
+        return *this;
     }
 
-    virtual void featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        assert(!_featureInput.getDimensions().empty());
-        this->_featureInput = _featureInput;
+    virtual Elu::Builder &featureInput(Tensor _featureInput) {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
     }
 
-    virtual void alpha(float _alpha) {
+    virtual Elu::Builder &alpha(float _alpha) {
         assert(!this->_alpha.isPresent());
         assert(_alpha >= 0);
         this->_alpha = _alpha;
+        return *this;
     }
 
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Elu::Builder>(*this); }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
     Optional<float> _alpha;
 };
 

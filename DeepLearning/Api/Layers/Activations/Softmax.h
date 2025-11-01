@@ -18,7 +18,9 @@ class Softmax : public Activation {
 
     virtual std::string getLayerType() const { return "Softmax"; }
 
-    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "softmax"}}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
+        return nlohmann::json{{"version", "1.0.0"}, {"type", "softmax"}};
+    }
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -58,15 +60,14 @@ class Softmax::Builder : public Activation::Builder {
         return softmax.clone();
     }
 
-    virtual void network(Network &_network) {
-        assert(!this->_network.isPresent());
-        this->_network = &_network;
+    virtual Softmax::Builder &network(Network &_network) {
+        Activation::Builder::network(_network);
+        return *this;
     }
 
-    virtual void featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        assert(!_featureInput.getDimensions().empty());
-        this->_featureInput = _featureInput;
+    virtual Softmax::Builder &featureInput(Tensor _featureInput) {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
     }
 
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Softmax::Builder>(*this); }

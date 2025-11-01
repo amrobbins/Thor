@@ -16,7 +16,9 @@ class Tanh : public Activation {
 
     virtual std::string getLayerType() const { return "Tanh"; }
 
-    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "tanh"}}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
+        return nlohmann::json{{"version", "1.0.0"}, {"type", "tanh"}};
+    }
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -50,11 +52,14 @@ class Tanh::Builder : public Activation::Builder {
         return tanh.clone();
     }
 
-    virtual void network(Network &_network) { this->_network = &_network; }
+    virtual Tanh::Builder &network(Network &_network) {
+        Activation::Builder::network(_network);
+        return *this;
+    }
 
-    virtual void featureInput(Tensor _featureInput) {
-        assert(!_featureInput.getDimensions().empty());
-        this->_featureInput = _featureInput;
+    virtual Tanh::Builder &featureInput(Tensor _featureInput) {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
     }
 
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Tanh::Builder>(*this); }

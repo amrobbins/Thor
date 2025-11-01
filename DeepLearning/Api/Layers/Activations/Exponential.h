@@ -16,7 +16,9 @@ class Exponential : public Activation {
 
     virtual std::string getLayerType() const { return "Exponential"; }
 
-    virtual nlohmann::json serialize(Stream stream) { return nlohmann::json{{"version", "1.0.0"}, {"type", "exponential"}}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
+        return nlohmann::json{{"version", "1.0.0"}, {"type", "exponential"}};
+    }
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -50,15 +52,14 @@ class Exponential::Builder : public Activation::Builder {
         return exponential.clone();
     }
 
-    virtual void network(Network &_network) {
-        assert(!this->_network.isPresent());
-        this->_network = &_network;
+    virtual Exponential::Builder &network(Network &_network) {
+        Activation::Builder::network(_network);
+        return *this;
     }
 
-    virtual void featureInput(Tensor _featureInput) {
-        assert(!this->_featureInput.isPresent());
-        assert(!_featureInput.getDimensions().empty());
-        this->_featureInput = _featureInput;
+    virtual Exponential::Builder &featureInput(Tensor _featureInput) {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
     }
 
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Exponential::Builder>(*this); }
