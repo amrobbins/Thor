@@ -33,6 +33,20 @@ class Activation : public Layer {
         return j;
     }
 
+    static void deserialize(const nlohmann::json& j, Network* network) {
+        assert(j.at("layer_type").get<std::string>() == "activation");
+        std::string type = j.at("layer_type").get<std::string>();
+
+        auto it = registry.find(type);
+        if (it == registry.end())
+            throw std::runtime_error("Unknown activation type: " + type);
+
+        auto deserializer = it->second;
+        deserializer(j, network);
+    }
+
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
+
    protected:
     std::string to_snake_case(const std::string& input) {
         std::string out;

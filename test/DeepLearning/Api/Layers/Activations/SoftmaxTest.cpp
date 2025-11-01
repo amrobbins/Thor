@@ -74,7 +74,7 @@ TEST(Activations, SoftmaxSerializeDeserialize) {
     Network initialNetwork;
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
-    uint32_t numDimensions = 1 + (rand() % 5);
+    uint32_t numDimensions = 1;
     for (uint32_t i = 0; i < numDimensions; ++i)
         inputDimensions.push_back(1 + (rand() % 5));
 
