@@ -16,8 +16,23 @@ class Gelu : public Activation {
 
     virtual std::string getLayerType() const { return "Gelu"; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
-        return nlohmann::json{{"version", "1.0.0"}, {"type", "gelu"}};
+    static void deserialize(const nlohmann::json &j, Network *network) {
+        if (j.at("version").get<std::string>() != "1.0.0")
+            throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+        if (j.at("layer_type").get<std::string>() != "gelu")
+            throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+
+        nlohmann::json input = j["feature_input"].get<nlohmann::json>();
+        uint64_t originalTensorId = input.at("id").get<uint64_t>();
+        Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
+
+        Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+
+        Gelu gelu;
+        gelu.featureInput = featureInput;
+        gelu.featureOutput = featureOutput;
+        gelu.initialized = true;
+        gelu.addToNetwork(network);
     }
 
    protected:
@@ -63,10 +78,6 @@ class Gelu::Builder : public Activation::Builder {
     }
 
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Gelu::Builder>(*this); }
-
-   private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
 };
 
 }  // namespace Thor

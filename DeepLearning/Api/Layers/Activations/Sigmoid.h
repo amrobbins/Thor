@@ -18,8 +18,23 @@ class Sigmoid : public Activation {
 
     virtual std::string getLayerType() const { return "Sigmoid"; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
-        return nlohmann::json{{"version", "1.0.0"}, {"type", "sigmoid"}};
+    static void deserialize(const nlohmann::json &j, Network *network) {
+        if (j.at("version").get<std::string>() != "1.0.0")
+            throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+        if (j.at("layer_type").get<std::string>() != "sigmoid")
+            throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+
+        nlohmann::json input = j["feature_input"].get<nlohmann::json>();
+        uint64_t originalTensorId = input.at("id").get<uint64_t>();
+        Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
+
+        Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+
+        Sigmoid sigmoid;
+        sigmoid.featureInput = featureInput;
+        sigmoid.featureOutput = featureOutput;
+        sigmoid.initialized = true;
+        sigmoid.addToNetwork(network);
     }
 
    protected:
@@ -79,8 +94,6 @@ class Sigmoid::Builder : public Activation::Builder {
     }
 
    private:
-    Optional<Network *> _network;
-    Optional<Tensor> _featureInput;
     Optional<bool> _backwardComputedExternally;
 
     friend class BinaryCrossEntropy;
