@@ -24,6 +24,7 @@
 //#endif
 
 #include <assert.h>
+#include <filesystem>
 
 namespace Thor {
 

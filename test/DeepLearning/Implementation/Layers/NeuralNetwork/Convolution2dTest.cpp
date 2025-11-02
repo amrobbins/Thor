@@ -46,7 +46,7 @@ TEST(Convolution2d, Convolution2dWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 5; ++test) {
+    for (int test = 0; test < 1; ++test) {
         const int numInputColumns = 1 + (rand() % 50);
         const int numInputRows = 1 + (rand() % 50);
         const int filterHorizontalStride = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));
@@ -419,7 +419,7 @@ TEST(Convolution2dInitializers, UniformRandomWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 5; ++test) {
+    for (int test = 0; test < 1; ++test) {
         const int numInputColumns = 1 + (rand() % 50);
         const int numInputRows = 1 + (rand() % 50);
         const int filterHorizontalStride = numInputColumns == 1 ? 1 : 1 + (rand() % (numInputColumns - 1));

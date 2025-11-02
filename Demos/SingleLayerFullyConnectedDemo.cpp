@@ -1,6 +1,7 @@
 #include "Thor.h"
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
+#include <fstream>
 
 #include <assert.h>
 #include <memory.h>
@@ -32,7 +33,7 @@ int main() {
     // These are raw 1 byte pixels of 28x28 images and raw 1 byte labels
     // Need to get these into a shard
 
-    assert(boost::filesystem::exists("/PCIE_SSD/Mnist_1_of_1.shard"));
+    assert(std::filesystem::exists("/PCIE_SSD/Mnist_1_of_1.shard"));
     shardPaths.insert("/PCIE_SSD/Mnist_1_of_1.shard");
     ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP32, {28 * 28});
     ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {10});

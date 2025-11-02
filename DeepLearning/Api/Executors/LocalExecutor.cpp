@@ -30,8 +30,8 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     localExecutor->visualizers = _visualizers;
 
     if (_outputDirectory.isEmpty()) {
-        boost::filesystem::path outputPath = boost::filesystem::absolute(boost::filesystem::path("./")).string();
-        localExecutor->outputDirectory = boost::filesystem::canonical(outputPath).string();
+        std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path("./")).string();
+        localExecutor->outputDirectory = std::filesystem::canonical(outputPath).string();
     } else {
         localExecutor->outputDirectory = _outputDirectory;
     }

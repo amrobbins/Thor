@@ -1,6 +1,7 @@
 #include "Thor.h"
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
+#include <fstream>
 
 #include <assert.h>
 #include <memory.h>
@@ -34,7 +35,7 @@ int main() {
 
     constexpr uint32_t NUM_CLASSES = 1000;
     const string datasetPath("/PCIE_SSD/ImageNet2012_10_classes_1_of_1.shard");
-    assert(boost::filesystem::exists(datasetPath));
+    assert(std::filesystem::exists(datasetPath));
     shardPaths.insert(datasetPath);
     ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {3, 224, 224});
     ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {NUM_CLASSES});

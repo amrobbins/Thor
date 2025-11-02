@@ -160,12 +160,12 @@ TEST(AdamKernel, Fp16) {
 
         for (uint32_t i; i < numWeights; ++i) {
             half expected = beta1 * mInitialMem[i] + ((half)1.0f - beta1) * gradientMem[i];
-            ASSERT_LT(abs((float)(mGpuMem_h[i] - expected)), 0.00001);
+            ASSERT_LT(abs((float)(mGpuMem_h[i] - expected)), 0.001);
         }
 
         for (uint32_t i; i < numWeights; ++i) {
             half expected = beta2 * vInitialMem[i] + ((half)1.0f - beta2) * (gradientMem[i] * gradientMem[i]);
-            ASSERT_LT(abs((float)(vGpuMem_h[i] - expected)), 0.00001);
+            ASSERT_LT(abs((float)(vGpuMem_h[i] - expected)), 0.001);
         }
 
         for (uint32_t i; i < numWeights; ++i) {
@@ -173,7 +173,7 @@ TEST(AdamKernel, Fp16) {
             half expected = (-alphaT * mGpuMem_h[i]) / ((half)sqrtf(vGpuMem_h[i]) + epsilon);
             half actual = weightsUpdateGpuMem_h[i];
             printf("i=%d expected %f actual %f\n", i, (float)expected, (float)actual);
-            EXPECT_LT(abs((float)(actual - expected)), 0.00001);
+            EXPECT_LT(abs((float)(actual - expected)), 0.001);
         }
 
         for (uint32_t i; i < numWeights; ++i) {

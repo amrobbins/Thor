@@ -67,12 +67,12 @@ class ShardedRawDatasetCreator {
 
     std::unordered_set<std::string> classes;
     // sourceDirectory -> (class -> [examplePath, examplePath, ...])
-    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<boost::filesystem::path>>> trainExamplesPerClass;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<boost::filesystem::path>>> validateExamplesPerClass;
-    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<boost::filesystem::path>>> testExamplesPerClass;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::filesystem::path>>> trainExamplesPerClass;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::filesystem::path>>> validateExamplesPerClass;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::vector<std::filesystem::path>>> testExamplesPerClass;
 
     uint32_t numOutputShards;
-    std::vector<boost::filesystem::path> destShardFiles;
+    std::vector<std::filesystem::path> destShardFiles;
 
     std::mutex mtx;
 

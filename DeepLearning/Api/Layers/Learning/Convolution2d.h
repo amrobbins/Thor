@@ -15,6 +15,8 @@
 #include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
+#include <filesystem>
+
 namespace Thor {
 
 class Convolution2d : public TrainableWeightsBiasesLayer {

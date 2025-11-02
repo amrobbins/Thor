@@ -1,6 +1,7 @@
 #include "Thor.h"
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
+#include <fstream>
 
 #include <assert.h>
 #include <memory.h>
@@ -27,7 +28,7 @@ int main() {
 
     set<string> shardPaths;
 
-    assert(boost::filesystem::exists("/PCIE_SSD/ImageNet2012_1_of_1.shard"));
+    assert(std::filesystem::exists("/PCIE_SSD/ImageNet2012_1_of_1.shard"));
     shardPaths.insert("/PCIE_SSD/ImageNet2012_1_of_1.shard");
     ThorImplementation::TensorDescriptor exampleDescriptor(ThorImplementation::TensorDescriptor::DataType::FP16, {3, 224, 224});
     ThorImplementation::TensorDescriptor labelDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {1000});
