@@ -1,81 +1,105 @@
-//#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-//
-//#include "DeepLearning/Api/Layers/Utility/Concatenate.h"
-//
-//#include "gtest/gtest.h"
-//
-//#include <stdio.h>
-//#include <memory>
-//
-//using namespace Thor;
-//using namespace std;
-//
-//TEST(UtilityApi, ConcatenateBuilds) {
-//    // FIXME THIS IS FLATTEN
-//    srand(time(nullptr));
-//
-//    Network network;
-//
-//    vector<uint64_t> inputDimensions;
-//    int numInputDimensions = 2 + rand() % 6;
-//    for (int i = 0; i < numInputDimensions; ++i)
-//        inputDimensions.push_back(1 + (rand() % 1000));
-//
-//    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-//
-//    Tensor featureInput(dataType, inputDimensions);
-//    uint32_t numOutputDimensions = (rand() % (numInputDimensions - 1)) + 1;
-//    Flatten flatten = Flatten::Builder().network(network).featureInput(featureInput).numOutputDimensions(numOutputDimensions).build();
-//
-//    ASSERT_TRUE(flatten.isInitialized());
-//
-//    Optional<Tensor> actualInput = flatten.getFeatureInput();
-//    ASSERT_TRUE(actualInput.isPresent());
-//    ASSERT_EQ(actualInput.get().getDataType(), dataType);
-//    ASSERT_EQ(actualInput.get().getDimensions(), inputDimensions);
-//
-//    Optional<Tensor> actualOutput = flatten.getFeatureOutput();
-//    ASSERT_TRUE(actualOutput.isPresent());
-//    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-//    vector<uint64_t> outputDimensions = actualOutput.get().getDimensions();
-//    ASSERT_EQ(outputDimensions.size(), numOutputDimensions);
-//    uint64_t totalInputElements = 1;
-//    for (uint32_t i = 0; i < inputDimensions.size(); ++i)
-//        totalInputElements *= inputDimensions[i];
-//    uint64_t totalOutputElements = 1;
-//    for (uint32_t i = 0; i < outputDimensions.size(); ++i)
-//        totalOutputElements *= outputDimensions[i];
-//    ASSERT_EQ(totalInputElements, totalOutputElements);
-//
-//    shared_ptr<Layer> cloneLayer = flatten.clone();
-//    Flatten *clone = dynamic_cast<Flatten *>(cloneLayer.get());
-//    assert(clone != nullptr);
-//
-//    ASSERT_TRUE(clone->isInitialized());
-//
-//    Optional<Tensor> cloneInput = clone->getFeatureInput();
-//    ASSERT_TRUE(cloneInput.isPresent());
-//    ASSERT_EQ(cloneInput.get().getDataType(), dataType);
-//    ASSERT_EQ(cloneInput.get().getDimensions(), inputDimensions);
-//
-//    ASSERT_EQ(flatten.getId(), clone->getId());
-//    ASSERT_GT(flatten.getId(), 1u);
-//
-//    actualOutput = clone->getFeatureOutput();
-//    ASSERT_TRUE(actualOutput.isPresent());
-//    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
-//    outputDimensions = actualOutput.get().getDimensions();
-//    ASSERT_EQ(outputDimensions.size(), numOutputDimensions);
-//    totalInputElements = 1;
-//    for (uint32_t i = 0; i < inputDimensions.size(); ++i)
-//        totalInputElements *= inputDimensions[i];
-//    totalOutputElements = 1;
-//    for (uint32_t i = 0; i < outputDimensions.size(); ++i)
-//        totalOutputElements *= outputDimensions[i];
-//    ASSERT_EQ(totalInputElements, totalOutputElements);
-//
-//    ASSERT_TRUE(flatten == *clone);
-//    ASSERT_FALSE(flatten != *clone);
-//    ASSERT_FALSE(flatten > *clone);
-//    ASSERT_FALSE(flatten < *clone);
-//}
+#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+
+#include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/Concatenate.h"
+
+#include "gtest/gtest.h"
+
+#include <stdio.h>
+#include <memory>
+
+using namespace Thor;
+using namespace std;
+
+TEST(UtilityApi, ConcatenateBuilds) {
+    srand(time(nullptr));
+
+    Network network;
+
+    uint32_t numDimensions = 1 + (rand() % 4);
+    uint32_t concatenationAxis = rand() % numDimensions;
+    uint32_t concatenationAxisSize = 1 + (rand() % 50);
+    vector<uint64_t> concatenatedDimensions(numDimensions, 0U);
+    uint32_t numTensors = 1 + (rand() % 5);
+
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+
+    vector<uint64_t> fixedDimensionSize;
+    for(uint32_t d = 0; d < numDimensions; ++d) {
+        fixedDimensionSize.push_back(1 + (rand() % 5));
+    }
+    concatenatedDimensions = fixedDimensionSize;
+    concatenatedDimensions[concatenationAxis] = 0;
+
+    vector<vector<uint64_t>> tensorDimensions;
+    for (uint32_t t = 0; t < numTensors; ++t) {
+        tensorDimensions.emplace_back();
+        for(uint32_t d = 0; d < numDimensions; ++d) {
+            uint64_t size;
+            if (d == concatenationAxis) {
+                size = 1 + (rand() % 5);
+                concatenatedDimensions[concatenationAxis] += size;
+            } else {
+                size = fixedDimensionSize[d];
+            }
+            tensorDimensions[t].push_back(size);
+        }
+    }
+
+    vector<Tensor> tensors;
+    for (uint32_t t = 0; t < numTensors; ++t) {
+        tensors.push_back(Tensor(dataType, tensorDimensions[t]));
+    }
+
+    Concatenate::Builder concatenateBuilder = Concatenate::Builder().network(network).concatenationAxis(concatenationAxis);
+    for (uint32_t t = 0; t < numTensors; ++t) {
+        concatenateBuilder.featureInput(tensors[t]);
+    }
+    Concatenate concatenate = concatenateBuilder.build();
+
+    ASSERT_TRUE(concatenate.isInitialized());
+
+    vector<Tensor> actualInputs = concatenate.getFeatureInputs();
+    ASSERT_EQ(actualInputs.size(), numTensors);
+    for (uint32_t t = 0; t < numTensors; ++t) {
+        ASSERT_EQ(actualInputs[t].getDataType(), dataType);
+        ASSERT_EQ(actualInputs[t].getDimensions(), tensorDimensions[t]);
+    }
+
+    vector<Tensor> actualOutputs = concatenate.getFeatureOutputs();
+    ASSERT_EQ(actualOutputs.size(), 1U);
+    ASSERT_EQ(actualOutputs[0].getDataType(), dataType);
+    vector<uint64_t> outputDimensions = actualOutputs[0].getDimensions();
+    ASSERT_EQ(outputDimensions.size(), numDimensions);
+    ASSERT_EQ(actualOutputs[0].getDimensions(), concatenatedDimensions);
+
+
+    shared_ptr<Layer> cloneLayer = concatenate.clone();
+    Concatenate *clone = dynamic_cast<Concatenate *>(cloneLayer.get());
+    assert(clone != nullptr);
+
+    ASSERT_TRUE(clone->isInitialized());
+
+    vector<Tensor> cloneInputs = clone->getFeatureInputs();
+    ASSERT_EQ(cloneInputs.size(), numTensors);
+    for (uint32_t t = 0; t < numTensors; ++t) {
+        ASSERT_EQ(cloneInputs[t].getDataType(), dataType);
+        ASSERT_EQ(cloneInputs[t].getDimensions(), tensorDimensions[t]);
+    }
+
+    ASSERT_EQ(concatenate.getId(), clone->getId());
+    ASSERT_GT(concatenate.getId(), 1u);
+
+    vector<Tensor> cloneOutputs = clone->getFeatureOutputs();
+    ASSERT_EQ(cloneOutputs.size(), 1U);
+    ASSERT_EQ(cloneOutputs[0].getDataType(), dataType);
+    outputDimensions.clear();
+    outputDimensions = cloneOutputs[0].getDimensions();
+    ASSERT_EQ(outputDimensions.size(), numDimensions);
+    ASSERT_EQ(cloneOutputs[0].getDimensions(), concatenatedDimensions);
+
+    ASSERT_TRUE(concatenate == *clone);
+    ASSERT_FALSE(concatenate != *clone);
+    ASSERT_FALSE(concatenate > *clone);
+    ASSERT_FALSE(concatenate < *clone);
+}
