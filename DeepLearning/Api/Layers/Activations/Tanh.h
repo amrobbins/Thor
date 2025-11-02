@@ -18,9 +18,9 @@ class Tanh : public Activation {
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
-            throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+            throw std::runtime_error("Unsupported version in Tanh::deserialize: " + j["version"].get<std::string>());
         if (j.at("layer_type").get<std::string>() != "tanh")
-            throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+            throw std::runtime_error("Layer type mismatch in Tanh::deserialize: " + j.at("layer_type").get<std::string>());
 
         nlohmann::json input = j["feature_input"].get<nlohmann::json>();
         uint64_t originalTensorId = input.at("id").get<uint64_t>();
