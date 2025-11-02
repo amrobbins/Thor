@@ -216,8 +216,6 @@ TEST(Activations, SeluRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    float alpha = float(rand() % 200) / 100.0f;
-
     Selu::Builder seluBuilder = Selu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Selu> selu = dynamic_pointer_cast<Selu>(seluBuilder.build());
 

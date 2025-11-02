@@ -216,8 +216,6 @@ TEST(Activations, SigmoidRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    float alpha = float(rand() % 200) / 100.0f;
-
     Sigmoid::Builder sigmoidBuilder = Sigmoid::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Sigmoid> sigmoid = dynamic_pointer_cast<Sigmoid>(sigmoidBuilder.build());
 

@@ -34,7 +34,7 @@ class Activation : public Layer {
     }
 
     static void deserialize(const nlohmann::json& j, Network* network) {
-        assert(j.at("factory").get<std::string>() == "activation");
+        assert(j.at("factory").get<std::string>() == Layer::Factory::Activation.value());
         std::string type = j.at("layer_type").get<std::string>();
 
         auto it = registry.find(type);

@@ -216,8 +216,6 @@ TEST(Activations, SoftmaxRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    float alpha = float(rand() % 200) / 100.0f;
-
     Softmax::Builder softmaxBuilder = Softmax::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Softmax> softmax = dynamic_pointer_cast<Softmax>(softmaxBuilder.build());
 

@@ -195,7 +195,7 @@ TEST(Activations, SwishSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    
+
     ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedSwish->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
@@ -215,8 +215,6 @@ TEST(Activations, SwishRegistered) {
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-
-    float alpha = float(rand() % 200) / 100.0f;
 
     Swish::Builder swishBuilder = Swish::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Swish> swish = dynamic_pointer_cast<Swish>(swishBuilder.build());

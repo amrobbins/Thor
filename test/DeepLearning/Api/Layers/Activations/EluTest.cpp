@@ -202,7 +202,7 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    
+
     ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedElu->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());

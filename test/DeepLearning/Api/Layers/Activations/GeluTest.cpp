@@ -216,8 +216,6 @@ TEST(Activations, GeluRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    float alpha = float(rand() % 200) / 100.0f;
-
     Gelu::Builder geluBuilder = Gelu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Gelu> gelu = dynamic_pointer_cast<Gelu>(geluBuilder.build());
 

@@ -73,7 +73,27 @@ class Layer {
     virtual std::string getLayerType() const = 0;
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
-    static void deserialize(const nlohmann::json &j, Stream stream, Network *network);
+    static void deserialize(const nlohmann::json &j, Network *network);
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json &, Network *)>> registry;
+
+    class Factory {
+       public:
+        static const Factory Activation;
+        static const Factory Layer;
+        static const Factory Learning;
+        static const Factory Loss;
+        static const Factory Metric;
+
+        const std::string &value() const { return v; }
+        bool operator==(const Factory &other) const { return v == other.v; }
+        bool operator!=(const Factory &other) const { return !(*this == other); }
+        bool operator==(const std::string &other) const { return v == other; }
+        bool operator!=(const std::string &other) const { return !(*this == other); }
+
+       private:
+        explicit Factory(std::string s) : v(std::move(s)) {}
+        std::string v;
+    };
 
    protected:
     Optional<Tensor> featureInput;
