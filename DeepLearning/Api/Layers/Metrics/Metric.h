@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Metric.h"
 
+#include <nlohmann/json.hpp>
+
 #include <assert.h>
 #include <atomic>
 #include <utility>
@@ -13,6 +15,10 @@ class Metric : public Layer {
    public:
     Metric() { numInputConnectionsMade = 0; }
     virtual ~Metric() {}
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
+    static void deserialize(const nlohmann::json &j, Network *network);
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
 
     // Note:  Fully connected layers may have multiple independent inputs, each of which is all that
     //        is required to drive an output. This is not the case for layers that require all inputs

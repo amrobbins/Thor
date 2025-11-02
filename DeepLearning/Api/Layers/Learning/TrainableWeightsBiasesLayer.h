@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 
+#include <nlohmann/json.hpp>
+
 namespace Thor {
 
 class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
@@ -13,6 +15,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> getBiases() const { return biases; }
     Optional<Tensor> getWeightsGradient() const { return weightsGradient; }
     Optional<Tensor> getBiasesGradient() const { return biasesGradient; }
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
+    static void deserialize(const nlohmann::json &j, Network *network);
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
 
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                           bool isFirstStamp,

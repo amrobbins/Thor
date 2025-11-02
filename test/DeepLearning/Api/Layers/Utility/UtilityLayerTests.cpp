@@ -1,7 +1,6 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
-#include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
