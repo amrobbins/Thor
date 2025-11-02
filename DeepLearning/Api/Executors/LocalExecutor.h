@@ -10,7 +10,8 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include <cuda_profiler_api.h>
-#include <boost/filesystem.hpp>
+#include <filesystem>
+#include <fstream>
 
 #include <condition_variable>
 #include <map>
@@ -127,8 +128,8 @@ class LocalExecutor::Builder {
         assert(this->_outputDirectory.isEmpty());
         if (_outputDirectory.empty())
             _outputDirectory = "./";
-        boost::filesystem::path outputPath = boost::filesystem::absolute(boost::filesystem::path(_outputDirectory));
-        this->_outputDirectory = boost::filesystem::canonical(outputPath).string();
+        std::filesystem::path outputPath = std::filesystem::absolute(std::filesystem::path(_outputDirectory));
+        this->_outputDirectory = std::filesystem::canonical(outputPath).string();
         return *this;
     }
 

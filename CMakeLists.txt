@@ -156,11 +156,10 @@ target_compile_options(Thor PRIVATE ${GM_CPPFLAGS_LIST} ${GM_CXXFLAGS_LIST})
 target_link_libraries(Thor PRIVATE ${GM_LDFLAGS_LIST})
 
 # ============================================================
-# Boost filesystem
+# Boost
 # ============================================================
-find_package(Boost REQUIRED COMPONENTS filesystem)
-target_include_directories(Thor PRIVATE ${Boost_INCLUDE_DIRS})
-target_link_libraries(Thor PRIVATE Boost::filesystem)
+find_package(Boost REQUIRED)
+target_link_libraries(Thor PRIVATE Boost::boost)
 
 # Per-configuration flags
 target_compile_options(Thor PRIVATE
@@ -220,9 +219,8 @@ target_link_libraries(thor_tests PRIVATE
         )
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
-find_package(Boost REQUIRED COMPONENTS filesystem)
-target_include_directories(thor_tests PRIVATE ${Boost_INCLUDE_DIRS})
-target_link_libraries(thor_tests PRIVATE Boost::filesystem)
+find_package(Boost REQUIRED)
+target_link_libraries(thor_tests PRIVATE Boost::boost)
 include(GoogleTest)
 gtest_discover_tests(thor_tests)
 

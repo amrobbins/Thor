@@ -1,7 +1,5 @@
 #include "Utilities/Loaders/ShardedRawDatasetCreator.h"
 
-using namespace boost::filesystem;
-
 using std::make_pair;
 using std::make_shared;
 using std::map;
@@ -15,6 +13,8 @@ using std::unique_ptr;
 using std::unordered_map;
 using std::unordered_set;
 using std::vector;
+
+using namespace std::filesystem;
 
 ShardedRawDatasetCreator::ShardedRawDatasetCreator(unordered_set<string> sourceDirectories,
                                                    unordered_set<string> destDirectories,
@@ -153,9 +153,11 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
             path datasetDirectory = datasetDirectoryString;
             datasetDirectory /= "train";
             assert(is_directory(datasetDirectory));
-            for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
-                if (is_directory(classDirectory.path()) && !classDirectory.path().filename_is_dot() &&
-                    !classDirectory.path().filename_is_dot_dot()) {
+            for (const directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
+                string filename = classDirectory.path().filename();
+                bool filename_is_dot = filename == ".";
+                bool filename_is_dot_dot = filename == "..";
+                if (is_directory(classDirectory.path()) && !filename_is_dot && !filename_is_dot_dot) {
                     if (allClasses.size() == maxClasses)
                         break;
                     allClasses.insert(classDirectory.path().filename().native());
@@ -187,9 +189,11 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
             datasetDirectory /= exampleType;
             assert(is_directory(datasetDirectory));
             uint32_t thread = 0;
-            for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
-                if (is_directory(classDirectory.path()) && !classDirectory.path().filename_is_dot() &&
-                    !classDirectory.path().filename_is_dot_dot()) {
+            for (const directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
+                string filename = classDirectory.path().filename();
+                bool filename_is_dot = filename == ".";
+                bool filename_is_dot_dot = filename == "..";
+                if (is_directory(classDirectory.path()) && !filename_is_dot && !filename_is_dot_dot) {
                     if (maxClasses != 0 && allClasses.count(classDirectory.path().filename().native()) == 0)
                         continue;
                     classesPerThread[thread].push_back(classDirectory.path());
@@ -205,7 +209,7 @@ void ShardedRawDatasetCreator::getNumExamples(uint64_t& numTrainExamples,
                 for (uint64_t i = 0; i < numClasses; ++i) {
                     path classDirectory = classesPerThread[processor][i];
                     bool addToClasses = (type == ExampleType::TRAIN);
-                    for (directory_entry& example : directory_iterator(classDirectory)) {
+                    for (const directory_entry& example : directory_iterator(classDirectory)) {
                         if (is_regular_file(example.path())) {
                             string filename = example.path().filename().native();
                             string className = classDirectory.filename().native();
@@ -266,16 +270,18 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
             datasetDirectory /= exampleType;
             assert(is_directory(datasetDirectory));
 
-            for (directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
+            for (const directory_entry& classDirectory : directory_iterator(datasetDirectory)) {
                 path classDirectoryPath = classDirectory.path();
-                if (is_directory(classDirectoryPath) && !classDirectoryPath.filename_is_dot() &&
-                    !classDirectoryPath.filename_is_dot_dot()) {
+                string filename = classDirectory.path().filename();
+                bool filename_is_dot = filename == ".";
+                bool filename_is_dot_dot = filename == "..";
+                if (is_directory(classDirectoryPath) && !filename_is_dot && !filename_is_dot_dot) {
                     string className = classDirectoryPath.filename().native();
                     std::vector<path> examples;
                     if (classes.count(className) == 0)
                         continue;
 
-                    for (directory_entry& example : directory_iterator(classDirectoryPath)) {
+                    for (const directory_entry& example : directory_iterator(classDirectoryPath)) {
                         if (is_regular_file(example.path())) {
                             path examplePath = example.path();
                             std::ifstream file(examplePath.native(), std::ios::binary | std::ios::ate);

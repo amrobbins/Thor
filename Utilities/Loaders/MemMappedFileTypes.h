@@ -1,6 +1,7 @@
 #pragma once
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
+#include <fstream>
 #include <boost/interprocess/containers/map.hpp>
 #include <boost/interprocess/containers/set.hpp>
 #include <boost/interprocess/containers/string.hpp>

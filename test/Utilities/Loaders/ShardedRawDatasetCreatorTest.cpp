@@ -17,6 +17,8 @@
 #include <vector>
 
 #include <unistd.h>
+#include <filesystem>
+#include <fstream>
 
 #include "omp.h"
 
@@ -28,7 +30,7 @@ using std::string;
 using std::unordered_set;
 using std::vector;
 
-using namespace boost::filesystem;
+using namespace std::filesystem;
 using namespace std;
 
 class TestDataProcessor : public DataProcessor {
