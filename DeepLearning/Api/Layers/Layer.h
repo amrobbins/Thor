@@ -27,6 +27,7 @@ class Layer {
     virtual ~Layer() {}
 
     uint64_t getId() const { return id; }
+    virtual std::string getLayerVersion() const { return "1.0.0"; }
 
     virtual Optional<Tensor> getFeatureOutput() const { return featureOutput; }
     virtual Optional<Tensor> getFeatureInput() const { return featureInput; }
@@ -124,6 +125,23 @@ class Layer {
     bool initialized;
 
     uint64_t id;
+
+    std::string to_snake_case(const std::string& input) {
+        std::string out;
+        out.reserve(input.size() * 2);
+
+        for (size_t i = 0; i < input.size(); ++i) {
+            char c = input[i];
+            if (std::isupper(c)) {
+                if (i > 0)
+                    out.push_back('_');
+                out.push_back(std::tolower(c));
+            } else {
+                out.push_back(c);
+            }
+        }
+        return out;
+    }
 
    private:
     static std::atomic<int64_t> nextId;

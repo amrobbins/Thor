@@ -12,9 +12,8 @@ class Concatenate : public MultiConnectionLayer {
    public:
     class Builder;
 
-    Concatenate() {}
-
-    virtual ~Concatenate() {}
+    Concatenate();
+    virtual ~Concatenate();
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Concatenate>(*this); }
 
@@ -49,6 +48,9 @@ class Concatenate : public MultiConnectionLayer {
     }
 
     virtual std::string getLayerType() const { return "Concatenate"; }
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream);
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

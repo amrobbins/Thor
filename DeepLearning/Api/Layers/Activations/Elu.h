@@ -22,7 +22,7 @@ class Elu : public Activation {
         assert(featureOutput.isPresent());
 
         nlohmann::json j;
-        j["factory"] = "activation";
+        j["factory"] = Layer::Factory::Activation.value();
         j["version"] = getLayerVersion();
         j["layer_type"] = to_snake_case(getLayerType());
         j["alpha"] = alpha;
@@ -33,9 +33,9 @@ class Elu : public Activation {
 
     static void deserialize(const nlohmann::json &j, Network *network) {
         if (j.at("version").get<std::string>() != "1.0.0")
-            throw std::runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+            throw std::runtime_error("Unsupported version in Elu::deserialize: " + j["version"].get<std::string>());
         if (j.at("layer_type").get<std::string>() != "elu")
-            throw std::runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
+            throw std::runtime_error("Layer type mismatch in Elu::deserialize: " + j.at("layer_type").get<std::string>());
         float alpha = j.at("alpha").get<float>();
 
         nlohmann::json input = j["feature_input"].get<nlohmann::json>();
