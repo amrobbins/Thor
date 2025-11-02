@@ -195,7 +195,7 @@ TEST(Activations, TanhSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    
+
     ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedTanh->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
@@ -215,8 +215,6 @@ TEST(Activations, TanhRegistered) {
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-
-    float alpha = float(rand() % 200) / 100.0f;
 
     Tanh::Builder tanhBuilder = Tanh::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Tanh> tanh = dynamic_pointer_cast<Tanh>(tanhBuilder.build());

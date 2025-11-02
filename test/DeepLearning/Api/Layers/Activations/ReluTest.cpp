@@ -216,8 +216,6 @@ TEST(Activations, ReluRegistered) {
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    float alpha = float(rand() % 200) / 100.0f;
-
     Relu::Builder reluBuilder = Relu::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<Relu> relu = dynamic_pointer_cast<Relu>(reluBuilder.build());
 

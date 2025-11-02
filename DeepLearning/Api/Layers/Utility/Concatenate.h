@@ -1,25 +1,14 @@
 #pragma once
 
-#include "DeepLearning/Api/Initializers/Initializer.h"
-#include "DeepLearning/Api/Initializers/UniformRandom.h"
-#include "DeepLearning/Api/Layers/Activations/Activation.h"
-#include "DeepLearning/Api/Layers/Activations/Relu.h"
-#include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Layer.h"
-#include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
-#include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
-#include "DeepLearning/Api/Layers/Utility/DropOut.h"
-#include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/Concatenate.h"
-#include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
-#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
-#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <assert.h>
 
 namespace Thor {
 
-class Concatenate : public TrainableWeightsBiasesLayer {
+class Concatenate : public MultiConnectionLayer {
    public:
     class Builder;
 

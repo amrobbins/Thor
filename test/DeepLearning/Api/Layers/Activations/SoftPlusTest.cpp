@@ -195,7 +195,7 @@ TEST(Activations, SoftPlusSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
-    
+
     ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedSoftPlus->getFeatureOutput().isPresent());
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
@@ -215,8 +215,6 @@ TEST(Activations, SoftPlusRegistered) {
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
-
-    float alpha = float(rand() % 200) / 100.0f;
 
     SoftPlus::Builder softPlusBuilder = SoftPlus::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
     shared_ptr<SoftPlus> softPlus = dynamic_pointer_cast<SoftPlus>(softPlusBuilder.build());
