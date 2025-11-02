@@ -195,6 +195,12 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
+    
+    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedHardSigmoid->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
+    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedHardSigmoid->getFeatureInput().get());
+    ASSERT_EQ(stampedHardSigmoid->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 }
 
 TEST(Activations, HardSigmoidRegistered) {
