@@ -4,7 +4,7 @@ using namespace Thor;
 
 namespace {
 static bool registered = []() {
-    Activation::registry["softPlus"] = &SoftPlus::deserialize;
+    Activation::registry["soft_plus"] = &SoftPlus::deserialize;
     return true;
 }();
 }

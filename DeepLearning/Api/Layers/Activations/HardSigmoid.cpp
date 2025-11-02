@@ -4,7 +4,7 @@ using namespace Thor;
 
 namespace {
 static bool registered = []() {
-    Activation::registry["hardSigmoid"] = &HardSigmoid::deserialize;
+    Activation::registry["hard_sigmoid"] = &HardSigmoid::deserialize;
     return true;
 }();
 }

@@ -43,6 +43,8 @@ class Elu : public Activation {
                           stream);
     }
 
+    float getAlpha() { return alpha; }
+
    protected:
     const float alpha;
 };
