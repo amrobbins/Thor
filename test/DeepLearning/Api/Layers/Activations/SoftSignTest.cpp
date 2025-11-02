@@ -196,3 +196,60 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 }
+
+TEST(Activations, SoftSignRegistered) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    vector<uint64_t> inputDimensions;
+    uint32_t numDimensions = 1 + (rand() % 5);
+    for (uint32_t i = 0; i < numDimensions; ++i)
+        inputDimensions.push_back(1 + (rand() % 5));
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    float alpha = float(rand() % 200) / 100.0f;
+
+    SoftSign::Builder softSignBuilder = SoftSign::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    shared_ptr<SoftSign> softSign = dynamic_pointer_cast<SoftSign>(softSignBuilder.build());
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("testOutput")
+                                      .inputTensor(softSign->getFeatureOutput())
+                                      .dataType(dataType)
+                                      .build();
+
+    ASSERT_TRUE(softSign->isInitialized());
+
+    Stream stream(0);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json softSignJ = softSign->serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    // Test that it is registered with Activation to deserialize
+    Network newNetwork;
+    NetworkInput::deserialize(networkInputJ, &newNetwork);
+    Activation::deserialize(softSignJ, &newNetwork);
+    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+
+    vector<Event> initDoneEvents;
+    uint32_t batchSize = 1 + (rand() % 16);
+    Network::StatusCode placementStatus = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    ASSERT_EQ(otherLayers.size(), 1U);
+    shared_ptr<ThorImplementation::SoftSign> stampedSoftSign = dynamic_pointer_cast<ThorImplementation::SoftSign>(otherLayers[0]);
+    ASSERT_NE(stampedSoftSign, nullptr);
+}

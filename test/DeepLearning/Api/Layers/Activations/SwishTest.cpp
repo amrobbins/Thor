@@ -196,3 +196,60 @@ TEST(Activations, SwishSerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
 }
+
+TEST(Activations, SwishRegistered) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    vector<uint64_t> inputDimensions;
+    uint32_t numDimensions = 1 + (rand() % 5);
+    for (uint32_t i = 0; i < numDimensions; ++i)
+        inputDimensions.push_back(1 + (rand() % 5));
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    float alpha = float(rand() % 200) / 100.0f;
+
+    Swish::Builder swishBuilder = Swish::Builder().network(initialNetwork).featureInput(networkInput.getFeatureOutput());
+    shared_ptr<Swish> swish = dynamic_pointer_cast<Swish>(swishBuilder.build());
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("testOutput")
+                                      .inputTensor(swish->getFeatureOutput())
+                                      .dataType(dataType)
+                                      .build();
+
+    ASSERT_TRUE(swish->isInitialized());
+
+    Stream stream(0);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json swishJ = swish->serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    // Test that it is registered with Activation to deserialize
+    Network newNetwork;
+    NetworkInput::deserialize(networkInputJ, &newNetwork);
+    Activation::deserialize(swishJ, &newNetwork);
+    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+
+    vector<Event> initDoneEvents;
+    uint32_t batchSize = 1 + (rand() % 16);
+    Network::StatusCode placementStatus = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    ASSERT_EQ(otherLayers.size(), 1U);
+    shared_ptr<ThorImplementation::Swish> stampedSwish = dynamic_pointer_cast<ThorImplementation::Swish>(otherLayers[0]);
+    ASSERT_NE(stampedSwish, nullptr);
+}

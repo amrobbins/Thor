@@ -4,7 +4,7 @@ using namespace Thor;
 
 namespace {
 static bool registered = []() {
-    Activation::registry["softSign"] = &SoftSign::deserialize;
+    Activation::registry["soft_sign"] = &SoftSign::deserialize;
     return true;
 }();
 }

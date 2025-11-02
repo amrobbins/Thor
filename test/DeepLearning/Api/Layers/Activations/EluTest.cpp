@@ -238,5 +238,22 @@ TEST(Activations, EluRegistered) {
     Activation::deserialize(eluJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);
 
-    // FIXME: Check the Elu layer
+    vector<Event> initDoneEvents;
+    uint32_t batchSize = 1 + (rand() % 16);
+    Network::StatusCode placementStatus = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    ASSERT_EQ(otherLayers.size(), 1U);
+    shared_ptr<ThorImplementation::Elu> stampedElu = dynamic_pointer_cast<ThorImplementation::Elu>(otherLayers[0]);
+    ASSERT_NE(stampedElu, nullptr);
+    ASSERT_EQ(stampedElu->getAlpha(), alpha);
 }
