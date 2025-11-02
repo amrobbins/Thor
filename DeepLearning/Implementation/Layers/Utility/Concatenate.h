@@ -1,10 +1,13 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
 
 // FIXME: Optimize concatenate to rewrite its input tensors memory locations, so that concatenate is a no op.
+//        In the case of multi gpus involved, rewriting would be on a per-gpu basis, with the destination gpu
+//        allocating the additional memory for tensors on other gpus contiguously
 
 namespace ThorImplementation {
 
