@@ -195,6 +195,12 @@ TEST(Activations, TanhSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
+    
+    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedTanh->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
+    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedTanh->getFeatureInput().get());
+    ASSERT_EQ(stampedTanh->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 }
 
 TEST(Activations, TanhRegistered) {

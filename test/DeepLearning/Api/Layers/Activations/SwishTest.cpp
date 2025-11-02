@@ -195,6 +195,12 @@ TEST(Activations, SwishSerializeDeserialize) {
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
+    
+    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedSwish->getFeatureOutput().isPresent());
+    ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
+    ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSwish->getFeatureInput().get());
+    ASSERT_EQ(stampedSwish->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 }
 
 TEST(Activations, SwishRegistered) {
