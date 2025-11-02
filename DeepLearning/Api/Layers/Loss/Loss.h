@@ -3,6 +3,8 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 
+#include <nlohmann/json.hpp>
+
 #include <assert.h>
 #include <atomic>
 #include <utility>
@@ -16,6 +18,10 @@ class Loss : public Layer {
 
     Loss() { numInputConnectionsMade = 0; }
     virtual ~Loss() {}
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
+    static void deserialize(const nlohmann::json &j, Network *network);
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
 
     virtual bool mustConnectAllInputsToDriveOutput() { return true; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {

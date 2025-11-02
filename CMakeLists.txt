@@ -57,8 +57,8 @@ file(GLOB_RECURSE THOR_SOURCES
         "${CMAKE_SOURCE_DIR}/Utilities/**/*.cu"
         "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cpp"
         "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cu"
-        "${CMAKE_SOURCE_DIR}/Demos/**/*.cpp"
-        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
+#        "${CMAKE_SOURCE_DIR}/Demos/**/*.cpp"
+#        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
         )
 
 # ============================================================
