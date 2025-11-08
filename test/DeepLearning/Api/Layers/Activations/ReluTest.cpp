@@ -130,6 +130,11 @@ TEST(Activations, ReluSerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = relu.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(reluJ, fromLayerJ);
+
     ASSERT_EQ(reluJ["factory"], "activation");
     ASSERT_EQ(reluJ["version"], "1.0.0");
     ASSERT_EQ(reluJ["layer_type"], "relu");

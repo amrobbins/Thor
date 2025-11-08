@@ -18,7 +18,7 @@ class Activation : public Layer {
 
     virtual std::string getLayerType() const = 0;
 
-    virtual nlohmann::json serialize(const std::string& storageDir, Stream stream) {
+    virtual nlohmann::json serialize(const std::string& storageDir, Stream stream) const {
         assert(initialized);
         assert(featureInput.isPresent());
         assert(featureOutput.isPresent());

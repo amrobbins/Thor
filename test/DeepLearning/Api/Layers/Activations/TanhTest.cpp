@@ -130,6 +130,11 @@ TEST(Activations, TanhSerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = tanh.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(tanhJ, fromLayerJ);
+
     ASSERT_EQ(tanhJ["factory"], "activation");
     ASSERT_EQ(tanhJ["version"], "1.0.0");
     ASSERT_EQ(tanhJ["layer_type"], "tanh");

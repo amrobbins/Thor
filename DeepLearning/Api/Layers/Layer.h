@@ -86,6 +86,9 @@ class Layer {
         static const Factory Metric;
 
         const std::string &value() const { return v; }
+
+        operator const std::string &() const { return v; }
+
         bool operator==(const Factory &other) const { return v == other.v; }
         bool operator!=(const Factory &other) const { return !(*this == other); }
         bool operator==(const std::string &other) const { return v == other; }
@@ -126,7 +129,7 @@ class Layer {
 
     uint64_t id;
 
-    std::string to_snake_case(const std::string& input) {
+    static std::string to_snake_case(const std::string &input) {
         std::string out;
         out.reserve(input.size() * 2);
 

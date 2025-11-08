@@ -130,6 +130,11 @@ TEST(Activations, ExponentialSerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = exponential.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(exponentialJ, fromLayerJ);
+
     ASSERT_EQ(exponentialJ["factory"], "activation");
     ASSERT_EQ(exponentialJ["version"], "1.0.0");
     ASSERT_EQ(exponentialJ["layer_type"], "exponential");

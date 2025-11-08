@@ -245,7 +245,9 @@ TEST(FullyConnected, SerializeDeserialize) {
     Stream stream(0);
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;
-    initialNetwork.place(batchSize, initDoneEvents);
+    Network::StatusCode statusCode;
+    statusCode = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
@@ -287,6 +289,11 @@ TEST(FullyConnected, SerializeDeserialize) {
     json fullyConnectedJ = fullyConnected.serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = &fullyConnected;
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(fullyConnectedJ, fromLayerJ);
 
     ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
     ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");
@@ -359,7 +366,8 @@ TEST(FullyConnected, SerializeDeserialize) {
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
-    newNetwork.place(batchSize, initDoneEvents);
+    statusCode = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }

@@ -130,6 +130,11 @@ TEST(Activations, SwishSerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = swish.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(swishJ, fromLayerJ);
+
     ASSERT_EQ(swishJ["factory"], "activation");
     ASSERT_EQ(swishJ["version"], "1.0.0");
     ASSERT_EQ(swishJ["layer_type"], "swish");

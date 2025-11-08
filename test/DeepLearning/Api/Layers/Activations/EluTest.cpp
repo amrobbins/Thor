@@ -136,6 +136,11 @@ TEST(Activations, EluSerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = elu.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(eluJ, fromLayerJ);
+
     ASSERT_EQ(eluJ["factory"], "activation");
     ASSERT_EQ(eluJ["version"], "1.0.0");
     ASSERT_EQ(eluJ["layer_type"], "elu");

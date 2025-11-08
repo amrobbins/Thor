@@ -18,7 +18,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
     static void deserialize(const nlohmann::json &j, Network *network);
-    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json &, Network *)>> registry;
 
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                           bool isFirstStamp,

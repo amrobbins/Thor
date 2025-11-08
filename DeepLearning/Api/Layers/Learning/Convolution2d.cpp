@@ -89,7 +89,7 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json Convolution2d::serialize(const string &storageDir, Stream stream) {
+json Convolution2d::serialize(const string &storageDir, Stream stream) const {
     json j;
     j["version"] = "1.0.0";
     j["layer_type"] = "convolution_2d";

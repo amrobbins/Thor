@@ -1,14 +1,15 @@
-#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
+#include "DeepLearning/Api/Network/Network.h"
 
-using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
+
+namespace Thor {
 
 Concatenate::Concatenate() = default;
 Concatenate::~Concatenate() = default;
 
-json Concatenate::serialize(const string &storageDir, Stream stream) {
+json Concatenate::serialize(const string &storageDir, Stream stream) const {
     assert(initialized);
     assert(featureInputs.size() > 0);
     assert(featureOutputs.size() > 0);
@@ -45,12 +46,14 @@ void Concatenate::deserialize(const json &j, Network *network) {
     uint32_t concatenationAxis = j.at("concatenation_axis").get<uint32_t>();
 
     vector<Tensor> featureInputs;
-    for (const json &input : j["inputs"]) {
+    const uint32_t numInputs = j.at("inputs").get<vector<json>>().size();
+    for (uint32_t i = 0; i < numInputs; ++i) {
+        const json &input = j["inputs"][i];
         uint64_t originalTensorId = input.at("id").get<uint64_t>();
         Tensor tensor = network->getApiTensorByOriginalId(originalTensorId);
         featureInputs.push_back(tensor);
     }
-    assert(featureInputs.size() >= 1);
+    assert(featureInputs.size() > 1);
 
     vector<Tensor> featureOutputs;
     for (const json &output : j["outputs"]) {
@@ -72,9 +75,11 @@ void Concatenate::deserialize(const json &j, Network *network) {
     concatenate.addToNetwork(network);
 }
 
+}  // namespace Thor
+
 namespace {
 static bool registered = []() {
-    Layer::registry["concatenate"] = &Concatenate::deserialize;
+    Thor::Layer::registry["concatenate"] = &Thor::Concatenate::deserialize;
     return true;
 }();
 }

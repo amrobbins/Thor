@@ -5,10 +5,6 @@
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
 #include "Utilities/TensorOperations/Misc/Split.h"
 
-// FIXME: Optimize concatenate to rewrite its input tensors memory locations, so that concatenate is a no op.
-//        In the case of multi gpus involved, rewriting would be on a per-gpu basis, with the destination gpu
-//        allocating the additional memory for tensors on other gpus contiguously
-
 namespace ThorImplementation {
 
 /**
@@ -249,7 +245,6 @@ class Concatenate : public MultiConnectionLayer {
     }
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {
-        // FIXME: Reuse MultiConnectionLayer connectToNextLayer and add any additional logic here if needed
         assert(!running);
         nextLayers.push_back(nextLayer);
         featureOutputs.emplace_back(createFeatureOutputTensor());
@@ -302,11 +297,7 @@ class Concatenate : public MultiConnectionLayer {
         }
         ensureNoDeviceCrossing();
 
-        if (errorOutputs.back().isPresent()) {
-            return errorOutputs.back();
-        } else {
-            return Tensor();
-        }
+        return errorOutputs.back();
     }
 
    private:
