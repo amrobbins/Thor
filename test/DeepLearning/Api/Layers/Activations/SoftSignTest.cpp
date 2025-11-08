@@ -134,6 +134,11 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     ASSERT_EQ(softSignJ["version"], "1.0.0");
     ASSERT_EQ(softSignJ["layer_type"], "soft_sign");
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = softSign.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(softSignJ, fromLayerJ);
+
     EXPECT_TRUE(softSignJ.contains("feature_input"));
     EXPECT_TRUE(softSignJ.contains("feature_output"));
 

@@ -3,7 +3,7 @@
 using namespace Thor;
 using namespace std;
 
-unordered_map<string, function<void(const nlohmann::json&, Network*)>> TrainableWeightsBiasesLayer::registry;
+unordered_map<string, function<void(const nlohmann::json &, Network *)>> TrainableWeightsBiasesLayer::registry;
 
 void TrainableWeightsBiasesLayer::deserialize(const nlohmann::json &j, Network *network) {
     assert(j.at("factory").get<std::string>() == Layer::Factory::Learning.value());

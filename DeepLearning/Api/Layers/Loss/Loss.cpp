@@ -3,7 +3,7 @@
 using namespace Thor;
 using namespace std;
 
-unordered_map<string, function<void(const nlohmann::json&, Network*)>> Loss::registry;
+unordered_map<string, function<void(const nlohmann::json &, Network *)>> Loss::registry;
 
 void Loss::deserialize(const nlohmann::json &j, Network *network) {
     assert(j.at("factory").get<std::string>() == Layer::Factory::Loss.value());

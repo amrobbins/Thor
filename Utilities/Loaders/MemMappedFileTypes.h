@@ -1,12 +1,12 @@
 #pragma once
 
-#include <filesystem>
-#include <fstream>
 #include <boost/interprocess/containers/map.hpp>
 #include <boost/interprocess/containers/set.hpp>
 #include <boost/interprocess/containers/string.hpp>
 #include <boost/interprocess/containers/vector.hpp>
 #include <boost/interprocess/managed_mapped_file.hpp>
+#include <filesystem>
+#include <fstream>
 
 typedef boost::interprocess::allocator<uint8_t, boost::interprocess::managed_mapped_file::segment_manager> file_vector_allocator_t;
 typedef boost::interprocess::vector<uint8_t, file_vector_allocator_t> file_vector_t;

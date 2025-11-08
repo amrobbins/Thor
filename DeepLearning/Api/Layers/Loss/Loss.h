@@ -21,7 +21,7 @@ class Loss : public Layer {
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
     static void deserialize(const nlohmann::json &j, Network *network);
-    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
+    static std::unordered_map<std::string, std::function<void(const nlohmann::json &, Network *)>> registry;
 
     virtual bool mustConnectAllInputsToDriveOutput() { return true; }
     virtual void informThatInputConnectionMade(Tensor inputTensor) {
@@ -36,7 +36,7 @@ class Loss : public Layer {
 
     // getPredictions() ia a synonym for getFeatureInput() and in losses BY DEFAULT ONLY.
     // If the raw predictions are transformed. i.e. by softmax before becoming predictions
-    // then featureInput will be a different tensor that predictions,
+    // then featureInput will be a different tensor than predictions,
     // i.e. featureInput will be the input to softmax and predictions will be the output of softmax
     virtual Optional<Tensor> getFeatureInput() const { return predictionsTensor; }
     virtual Optional<Tensor> getFeatureOutput() const { return lossTensor; }
@@ -59,7 +59,7 @@ class Loss : public Layer {
             return std::vector<Tensor>();
     }
 
-    virtual std::vector<Tensor> getAllOutputTensors() const { return {getPredictions(), getLoss()}; }
+    virtual std::vector<Tensor> getAllOutputTensors() const { return {getLoss()}; }
 
    protected:
     Tensor labelsTensor;

@@ -773,7 +773,9 @@ TEST(Convolution2d, SerializeDeserialize) {
     Stream stream(0);
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;
-    initialNetwork.place(batchSize, initDoneEvents);
+    Network::StatusCode statusCode;
+    statusCode = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
@@ -816,6 +818,11 @@ TEST(Convolution2d, SerializeDeserialize) {
     json convolution2dJ = convolution2d.serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = &convolution2d;
+    json convolution2dFromLayer = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(convolution2dJ, convolution2dFromLayer);
 
     ASSERT_EQ(convolution2dJ["version"], "1.0.0");
     ASSERT_EQ(convolution2dJ["layer_type"], "convolution_2d");
@@ -914,7 +921,8 @@ TEST(Convolution2d, SerializeDeserialize) {
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
-    newNetwork.place(batchSize, initDoneEvents);
+    statusCode = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }

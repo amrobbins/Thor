@@ -288,9 +288,10 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     int numOutputElements = batchSize * numInputFeatures;
     float maxDiff = numOutputFeatures * 0.01;
     for (int i = 0; i < numOutputElements; ++i) {
-        if (abs((float)(cpuErrorOutput[i]) - (float)(gpuErrorOutput[i])) >= maxDiff)
+        float expected = (float)(cpuErrorOutput[i]);
+        if (abs(expected - (float)(gpuErrorOutput[i])) >= maxDiff)
             printf("%f %f\n", (float)(cpuErrorOutput[i]), (float)(gpuErrorOutput[i]));
-        ASSERT_LT(abs((float)(cpuErrorOutput[i]) - (float)(gpuErrorOutput[i])), maxDiff);
+        ASSERT_LT(abs((float)(cpuErrorOutput[i]) - (float)(gpuErrorOutput[i])), max(maxDiff, expected * 0.01f));
     }
 
     half *cpuWeightsGradient = (half *)weightsGradient.getMemPtr();

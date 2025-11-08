@@ -130,6 +130,11 @@ TEST(Activations, SoftmaxSerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = softmax.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(softmaxJ, fromLayerJ);
+
     ASSERT_EQ(softmaxJ["factory"], "activation");
     ASSERT_EQ(softmaxJ["version"], "1.0.0");
     ASSERT_EQ(softmaxJ["layer_type"], "softmax");

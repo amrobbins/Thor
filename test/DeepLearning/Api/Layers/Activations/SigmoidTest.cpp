@@ -134,6 +134,11 @@ TEST(Activations, SigmoidSerializeDeserialize) {
     ASSERT_EQ(sigmoidJ["version"], "1.0.0");
     ASSERT_EQ(sigmoidJ["layer_type"], "sigmoid");
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = sigmoid.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(sigmoidJ, fromLayerJ);
+
     EXPECT_TRUE(sigmoidJ.contains("feature_input"));
     EXPECT_TRUE(sigmoidJ.contains("feature_output"));
 

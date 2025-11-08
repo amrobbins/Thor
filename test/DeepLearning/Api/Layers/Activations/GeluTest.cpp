@@ -134,6 +134,11 @@ TEST(Activations, GeluSerializeDeserialize) {
     ASSERT_EQ(geluJ["version"], "1.0.0");
     ASSERT_EQ(geluJ["layer_type"], "gelu");
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = gelu.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(geluJ, fromLayerJ);
+
     EXPECT_TRUE(geluJ.contains("feature_input"));
     EXPECT_TRUE(geluJ.contains("feature_output"));
 

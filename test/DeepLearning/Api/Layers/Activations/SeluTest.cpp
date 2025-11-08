@@ -134,6 +134,11 @@ TEST(Activations, SeluSerializeDeserialize) {
     ASSERT_EQ(seluJ["version"], "1.0.0");
     ASSERT_EQ(seluJ["layer_type"], "selu");
 
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = selu.get();
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(seluJ, fromLayerJ);
+
     EXPECT_TRUE(seluJ.contains("feature_input"));
     EXPECT_TRUE(seluJ.contains("feature_output"));
 

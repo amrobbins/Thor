@@ -345,7 +345,8 @@ class Network {
     };
 
    protected:
-    std::set<std::shared_ptr<Layer>, Network::LayerComparator> network;
+    std::set<std::shared_ptr<Layer>, Network::LayerComparator> allLayersInNetwork;
+    std::vector<std::shared_ptr<Layer>> network;
     std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;
 
     std::set<Tensor> allTensors;

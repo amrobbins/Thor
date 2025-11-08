@@ -479,7 +479,7 @@ void Network::topologicalSort() {
             Tensor outputTensor = layer->getFeatureOutput();
             vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
             for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
-                workQueue.push_back(make_pair(outputTensor, loadingLayers[i]));
+                workQueue.push_front(make_pair(outputTensor, loadingLayers[i]));
             }
 
             orderedNetwork.push_back(make_pair(Optional<Tensor>::empty(), layer));
@@ -487,20 +487,15 @@ void Network::topologicalSort() {
     }
 
     while (!workQueue.empty()) {
-        // Visit a node, connect the output tensor that corresponds to this input tensor by adding the loading layer and its input tensor to
-        // orderedNetwork
+        // Visit a node, connect the output tensor that corresponds to this input tensor by adding the loading layer
+        // and its input tensor to orderedNetwork
         // After connecting an output tensor to its loading layer, add that loading layer and its input tensor to the work queue.
         pair<Optional<Tensor>, shared_ptr<Layer>> workNode = workQueue.back();
         workQueue.pop_back();
         Optional<Tensor> inputTensor = workNode.first;
         shared_ptr<Layer> layer = workNode.second;
 
-        // FIXME: TEMP
         // printf("connecting tensor %ld into layer id %ld\n", inputTensor.get().getId(), layer->getId());
-        vector<Tensor> outputTensorsT = layer->getOutputsFromInput(inputTensor);
-        for (uint32_t t = 0; t < outputTensorsT.size(); ++t) {
-            Tensor outputTensor = outputTensorsT[t];
-        }
 
         // For layers, such as concatenate, that need all inputs to be connected before creating the output
         layer->informThatInputConnectionMade(inputTensor);
@@ -510,7 +505,7 @@ void Network::topologicalSort() {
             Tensor outputTensor = outputTensors[t];
             vector<shared_ptr<Layer>> loadingLayers = apiTensorToApiLoadingLayers[outputTensor];
             for (uint32_t i = 0; i < loadingLayers.size(); ++i) {
-                workQueue.push_back(make_pair(outputTensor, loadingLayers[i]));
+                workQueue.push_front(make_pair(outputTensor, loadingLayers[i]));
             }
         }
 
@@ -592,7 +587,12 @@ void Network::addToNetwork(Layer *layer) {
 }
 
 void Network::addLayerToNetwork(const Layer *layer) {
-    network.insert(layer->clone());
+    // Ensure every layer can be added just once
+    shared_ptr<Layer> layerClone = layer->clone();
+    if (allLayersInNetwork.count(layerClone) == 1)
+        return;
+    allLayersInNetwork.insert(layerClone);
+    network.push_back(layer->clone());
 
     auto networkInput = dynamic_cast<const NetworkInput *>(layer);
     auto networkOutput = dynamic_cast<const NetworkOutput *>(layer);

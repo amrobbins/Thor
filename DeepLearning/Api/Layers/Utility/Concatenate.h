@@ -49,7 +49,7 @@ class Concatenate : public MultiConnectionLayer {
 
     virtual std::string getLayerType() const { return "Concatenate"; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream);
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:

@@ -16,7 +16,7 @@ class Elu : public Activation {
 
     virtual std::string getLayerType() const { return "Elu"; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) {
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const {
         assert(initialized);
         assert(featureInput.isPresent());
         assert(featureOutput.isPresent());
