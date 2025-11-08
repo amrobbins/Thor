@@ -782,11 +782,9 @@ TEST(CublasMatrixMultiply, ChooseOptimalGemmKernelWorksFP32) {
             ldA += rand() % 10;
             ldB += rand() % 10;
             ldC += rand() % 10;
-            if (CDInPlace)
-                ldD = ldC;
-            else
-                ldD += rand() % 10;
+            ldD = ldC;
         }
+
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
         TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);

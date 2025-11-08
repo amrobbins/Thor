@@ -113,6 +113,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     // mem requirements are the weights
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // FIXME: workspace? Or do I assume no workspace at first and can add one later if have extra mem?
+        // FIXME: A layer owns its outputs, not its inputs, that is being double counted here
         assert(featureInputs.size() > 0);
         assert(featureInputs[0].getDimensions().size() > 0);
         uint64_t numInputFeatures = 1;
