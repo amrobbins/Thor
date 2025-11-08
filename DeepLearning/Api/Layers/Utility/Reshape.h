@@ -9,13 +9,15 @@ namespace Thor {
 class Reshape : public Layer {
    public:
     class Builder;
-    Reshape() {}
-
-    virtual ~Reshape() {}
+    Reshape();
+    virtual ~Reshape();
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Reshape>(*this); }
 
     virtual std::string getLayerType() const { return "Reshape"; }
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

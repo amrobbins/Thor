@@ -26,6 +26,9 @@ class Pooling : public Layer {
 
     enum class Type { AVERAGE = 3, MAX };
 
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -246,5 +249,11 @@ class Pooling::Builder {
     Optional<uint32_t> _verticalPadding;
     Optional<uint32_t> _horizontalPadding;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(Pooling::Type,
+                             {
+                                 {Pooling::Type::AVERAGE, "average"},
+                                 {Pooling::Type::MAX, "max"},
+                             })
 
 }  // namespace Thor
