@@ -37,9 +37,6 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     }
 
     // mem requirements are the weights
-    virtual uint64_t getFirstInstanceFixedMemRequirementInBytes() const { return 0; }
-
-    // mem requirements are the input output tensors
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
         uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16
