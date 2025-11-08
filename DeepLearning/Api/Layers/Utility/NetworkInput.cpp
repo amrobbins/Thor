@@ -1,11 +1,13 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 
-using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
 
+namespace Thor {
+
 json NetworkInput::serialize(const string &storageDir, Stream stream) const {
-    return json{{"version", "1.0.0"},
+    return json{{"factory", Layer::Factory::Layer.value()},
+                {"version", "1.0.0"},
                 {"layer_type", "network_input"},
                 {"name", name},
                 {"dimensions", getDimensions()},
@@ -27,4 +29,13 @@ void NetworkInput::deserialize(const json &j, Network *network) {
     networkInput.featureOutput = Tensor::deserialize(j["feature_output"]);
     networkInput.initialized = true;
     networkInput.addToNetwork(network);
+}
+
+}  // namespace Thor
+
+namespace {
+static bool registered = []() {
+    Thor::Layer::registry["network_input"] = &Thor::NetworkInput::deserialize;
+    return true;
+}();
 }

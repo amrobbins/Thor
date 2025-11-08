@@ -9,13 +9,16 @@ namespace Thor {
 class TypeConverter : public Layer {
    public:
     class Builder;
-    TypeConverter() {}
+    TypeConverter();
 
-    virtual ~TypeConverter() {}
+    virtual ~TypeConverter();
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<TypeConverter>(*this); }
 
     virtual std::string getLayerType() const { return "TypeConverter"; }
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

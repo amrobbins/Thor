@@ -1,9 +1,10 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
-using namespace Thor;
-
 using namespace std;
+using json = nlohmann::json;
+
+namespace Thor {
 
 void NetworkOutput::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = featureInput.get();
@@ -28,16 +29,17 @@ void NetworkOutput::buildSupportLayersAndAddToNetwork() {
     featureOutput = currentFeatureInput;
 }
 
-nlohmann::json NetworkOutput::serialize(const std::string &storageDir, Stream stream) const {
-    return nlohmann::json{{"version", "1.0.0"},
-                          {"layer_type", "network_output"},
-                          {"name", name},
-                          {"data_type", nlohmann::json(getDataType())},
-                          {"feature_input", featureInput.get().serialize()},
-                          {"feature_output", featureOutput.get().serialize()}};
+json NetworkOutput::serialize(const std::string &storageDir, Stream stream) const {
+    return json{{"factory", Layer::Factory::Layer.value()},
+                {"version", "1.0.0"},
+                {"layer_type", "network_output"},
+                {"name", name},
+                {"data_type", json(getDataType())},
+                {"feature_input", featureInput.get().serialize()},
+                {"feature_output", featureOutput.get().serialize()}};
 }
 
-void NetworkOutput::deserialize(const nlohmann::json &j, Network *network) {
+void NetworkOutput::deserialize(const json &j, Network *network) {
     std::string name = j.at("name").get<std::string>();
     Tensor::DataType dataType = j.at("data_type").get<Tensor::DataType>();
 
@@ -49,4 +51,13 @@ void NetworkOutput::deserialize(const nlohmann::json &j, Network *network) {
     networkOutput.featureOutput = Tensor::deserialize(j["feature_output"]);
     networkOutput.initialized = true;
     networkOutput.addToNetwork(network);
+}
+
+}  // namespace Thor
+
+namespace {
+static bool registered = []() {
+    Thor::Layer::registry["network_output"] = &Thor::NetworkOutput::deserialize;
+    return true;
+}();
 }
