@@ -9,15 +9,17 @@ class Stub : public Layer {
    public:
     class Builder;
 
-    Stub() {}
-
-    virtual ~Stub() {}
+    Stub();
+    virtual ~Stub();
 
     virtual std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) { return std::vector<Tensor>(); }
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Stub>(*this); }
 
     virtual std::string getLayerType() const { return "Stub"; }
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement, uint32_t batchSize) const {
