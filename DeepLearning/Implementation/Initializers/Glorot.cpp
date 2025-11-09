@@ -30,19 +30,18 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
         numProcessors = maxDesiredProcessors;
     assert(numProcessors >= 1);
     omp_set_num_threads(numProcessors);
-    uint64_t tensorToInitializePerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
+    const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
 #pragma omp parallel
     {
         int threadNum = omp_get_thread_num();
+        const uint64_t start = uint64_t(threadNum) * chunk;
+        const uint64_t end   = min<uint64_t>(totalNumWeights, start + chunk);
         uniform_real_distribution<float> distribution(-1.0f, 1.0f);
         using clock = chrono::high_resolution_clock;
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
                                          clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
-        uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
-        if (totalNumWeights < threadEnd)
-            threadEnd = totalNumWeights;
-        for (uint64_t i = threadNum * tensorToInitializePerThread; i < threadEnd; ++i) {
+        for (uint64_t i = start; i < end; ++i) {
             double value = distribution(generator) * sqrt(6.0 / (fanIn + fanOut));
             bufferMem[i] = (half)value;
         }
@@ -69,19 +68,18 @@ Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToI
         numProcessors = maxDesiredProcessors;
     assert(numProcessors >= 1);
     omp_set_num_threads(numProcessors);
-    uint64_t tensorToInitializePerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
+    const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
 #pragma omp parallel
     {
         int threadNum = omp_get_thread_num();
+        const uint64_t start = uint64_t(threadNum) * chunk;
+        const uint64_t end   = min<uint64_t>(totalNumWeights, start + chunk);
         normal_distribution<float> distribution(mean, standardDeviation);
         using clock = chrono::high_resolution_clock;
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
                                          clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
-        uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
-        if (totalNumWeights < threadEnd)
-            threadEnd = totalNumWeights;
-        for (uint64_t i = threadNum * tensorToInitializePerThread; i < threadEnd; ++i) {
+        for (uint64_t i = start; i < end; ++i) {
             bufferMem[i] = (half)distribution(generator);
         }
     }
