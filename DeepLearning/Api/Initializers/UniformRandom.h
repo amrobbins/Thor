@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Initializers/UniformRandom.h"
 
 #include <assert.h>
+#include <chrono>
 
 namespace Thor {
 

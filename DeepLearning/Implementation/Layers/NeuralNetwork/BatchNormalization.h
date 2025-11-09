@@ -57,17 +57,13 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         // Cudnn forces the use of FP32 for the weights currently
         // https://docs.nvidia.com/deeplearning/cudnn/api/index.html#cudnnDeriveBNTensorDescriptor
         if (!usingSharedWeights && !weights.isInitialized()) {
-            std::vector<unsigned long> derivedBnTensorDimensions = {
-                featureInputs.front().get().getDescriptor().getDimensions()[1]};  // numChannels
-
-            weights = Tensor(featureInputs[0].get().getPlacement(),
-                             TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-            biases = Tensor(featureInputs[0].get().getPlacement(),
-                            TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-            resultRunningMean = Tensor(featureInputs[0].get().getPlacement(),
-                                       TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-            resultRunningVariance = Tensor(featureInputs[0].get().getPlacement(),
-                                           TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
+            uint64_t numChannels = featureInputs.front().get().getDescriptor().getDimensions()[1];
+            TensorPlacement placement = featureInputs[0].get().getPlacement();
+            TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, {numChannels});
+            weights = Tensor(placement, descriptor);
+            biases = Tensor(placement, descriptor);
+            resultRunningMean = Tensor(placement, descriptor);
+            resultRunningVariance = Tensor(placement, descriptor);
         }
     }
 
@@ -141,6 +137,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         Tensor zeroInit_h =
             Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
         unsigned long numElements = oneInit_h.getDescriptor().getTotalNumElements();
+        // FIXME: I cant do this during compile, I need to use an initializer, because saved weights
         float *oneInitMem = (float *)oneInit_h.getMemPtr();
         float *zeroInitMem = (float *)zeroInit_h.getMemPtr();
         for (unsigned long i = 0; i < numElements; ++i) {

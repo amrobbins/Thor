@@ -8,7 +8,7 @@ Glorot::Glorot(Mode mode) : mode(mode) { assert(mode == Mode::UNIFORM || mode ==
 
 Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
 
-Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams) {
+Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
     if (mode == Mode::UNIFORM) {
         return initializeUniform(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
     } else {
@@ -16,11 +16,9 @@ Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, std::vector<St
     }
 }
 
-Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams) {
-    std::hash<int> threadNumHash;
+Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
+    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when not fp16
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
-
-    std::uniform_real_distribution<float> distribution(-1.0f, 1.0f);
 
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
     half *bufferMem = (half *)buffer.getMemPtr();
@@ -36,7 +34,11 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
 #pragma omp parallel
     {
         int threadNum = omp_get_thread_num();
-        std::default_random_engine generator(time(NULL) * threadNumHash(threadNum));
+        uniform_real_distribution<float> distribution(-1.0f, 1.0f);
+        using clock = chrono::high_resolution_clock;
+        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
+                                         clock::now().time_since_epoch()).count();
+        default_random_engine generator(Tensor::getThreadIdHash64(nanoseconds));
         uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
         if (totalNumWeights < threadEnd)
             threadEnd = totalNumWeights;
@@ -49,14 +51,13 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
     return performCopy(buffer, tensorToInitialize, streams);
 }
 
-Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, std::vector<Stream> streams) {
-    std::hash<int> threadNumHash;
+Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
+    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when not fp16
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
     float mean = 0.0;
     double variance = 2.0 / (fanIn + fanOut);
     float standardDeviation = sqrt(variance);
-    std::normal_distribution<float> distribution(mean, standardDeviation);
 
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
     half *bufferMem = (half *)buffer.getMemPtr();
@@ -72,7 +73,11 @@ Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToI
 #pragma omp parallel
     {
         int threadNum = omp_get_thread_num();
-        std::default_random_engine generator(time(NULL) * threadNumHash(threadNum));
+        normal_distribution<float> distribution(mean, standardDeviation);
+        using clock = chrono::high_resolution_clock;
+        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
+                                         clock::now().time_since_epoch()).count();
+        default_random_engine generator(Tensor::getThreadIdHash64(nanoseconds));
         uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
         if (totalNumWeights < threadEnd)
             threadEnd = totalNumWeights;
