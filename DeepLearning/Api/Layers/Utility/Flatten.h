@@ -17,6 +17,9 @@ class Flatten : public Layer {
 
     virtual std::string getLayerType() const { return "Flatten"; }
 
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
