@@ -462,7 +462,9 @@ TEST(Convolution2dInitializers, UniformRandomWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        UniformRandom initializer(0.1, -0.1);
+        half minValue = -2.1;
+        half maxValue = -0.3;
+        UniformRandom initializer(maxValue, minValue);
         initializer.initialize(convolution2dLayer.get(), convolution2dLayer->getWeights());
         if (hasBias)
             initializer.initialize(convolution2dLayer.get(), convolution2dLayer->getBiases());
@@ -480,14 +482,16 @@ TEST(Convolution2dInitializers, UniformRandomWorks) {
         int totalNumWeights = convolution2dLayer->getWeights().getDescriptor().getTotalNumElements();
         half *weightsMem = (half *)weights.getMemPtr();
         for (int i = 0; i < totalNumWeights; ++i) {
-            ASSERT_LT(abs((float)weightsMem[i]), 0.1);
+            ASSERT_LE((float)weightsMem[i], (float)maxValue);
+            ASSERT_GE((float)weightsMem[i], (float)minValue);
         }
 
         if (hasBias) {
             int totalNumBiases = convolution2dLayer->getBiases().get().getDescriptor().getTotalNumElements();
             half *biasesMem = (half *)biases.getMemPtr();
             for (int i = 0; i < totalNumBiases; ++i) {
-                ASSERT_LT(abs((float)biasesMem[i]), 0.1);
+                ASSERT_LE((float)biasesMem[i], (float)maxValue);
+                ASSERT_GE((float)biasesMem[i], (float)minValue);
             }
         }
 

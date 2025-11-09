@@ -402,7 +402,9 @@ TEST(FullyConnectedInitializers, UniformRandomWorks) {
 
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
-        UniformRandom initializer(0.1, -0.1);
+        half minValue = 0.2f;
+        half maxValue = 0.5f;
+        UniformRandom initializer(maxValue, minValue);
         initializer.initialize(fullyConnectedLayer.get(), fullyConnectedLayer->getWeights());
         if (hasBiases) {
             initializer.initialize(fullyConnectedLayer.get(), fullyConnectedLayer->getBiases());
@@ -421,14 +423,16 @@ TEST(FullyConnectedInitializers, UniformRandomWorks) {
         int totalNumWeights = fullyConnectedLayer->getWeights().getDescriptor().getTotalNumElements();
         half *weightsMem = (half *)weights.getMemPtr();
         for (int i = 0; i < totalNumWeights; ++i) {
-            ASSERT_LT(abs((float)weightsMem[i]), 0.1);
+            ASSERT_LE((float)weightsMem[i], (float)maxValue);
+            ASSERT_GE((float)weightsMem[i], (float)minValue);
         }
 
         if (hasBiases) {
             int totalNumBiases = fullyConnectedLayer->getBiases().get().getDescriptor().getTotalNumElements();
             half *biasesMem = (half *)biases.getMemPtr();
             for (int i = 0; i < totalNumBiases; ++i) {
-                ASSERT_LT(abs((float)biasesMem[i]), 0.1);
+                ASSERT_LE((float)biasesMem[i], (float)maxValue);
+                ASSERT_GE((float)biasesMem[i], (float)minValue);
             }
         }
 

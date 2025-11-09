@@ -13,10 +13,11 @@ UniformRandom::UniformRandom(double maxValue, double minValue) : maxValue(maxVal
 Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
 
 Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
+    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when not fp16
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
-    std::uniform_real_distribution<float> distribution(minValue, maxValue);
-    std::hash<int> threadNumHash;
+    bool constant = minValue == maxValue;
+    half constantValue = half(minValue);
 
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
     half *bufferMem = (half *)buffer.getMemPtr();
@@ -32,12 +33,30 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
 #pragma omp parallel
     {
         int threadNum = omp_get_thread_num();
-        std::default_random_engine generator(time(NULL) * threadNumHash(threadNum));
+        uniform_real_distribution<float> distribution;
+        if (!constant)
+            distribution = uniform_real_distribution<float>(minValue, maxValue);
+        using clock = chrono::high_resolution_clock;
+        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
+                                clock::now().time_since_epoch()).count();
+        default_random_engine generator(Tensor::getThreadIdHash64(nanoseconds));
         uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
         if (totalNumWeights < threadEnd)
             threadEnd = totalNumWeights;
-        for (uint64_t i = threadNum * tensorToInitializePerThread; i < threadEnd; ++i) {
-            bufferMem[i] = (half)distribution(generator);
+        if (constant) {
+            // Explicitly handle constant case:
+            uint64_t start = threadNum * tensorToInitializePerThread;
+            uint64_t count = threadEnd - start;
+            if (constantValue == half(0)) {
+                // Fastest way to fill zeros:
+                memset(bufferMem + start, 0, count * sizeof(half));
+            } else {
+                fill_n(bufferMem + start, count, constantValue);
+            }
+        } else {
+            for (uint64_t i = threadNum * tensorToInitializePerThread; i < threadEnd; ++i) {
+                bufferMem[i] = (half)distribution(generator);
+            }
         }
     }
 
