@@ -781,8 +781,8 @@ class Tensor : private ReferenceCounted {
         return true;
     }
 
-    static uint32_t getThreadIdHash(uint32_t seed = 0, bool reproducible = false);
-    static uint64_t getThreadIdHash64(uint64_t seed = 0, bool reproducible = false);
+    static uint32_t getThreadIdHash(uint32_t seed = 0);
+    static uint64_t getThreadIdHash64(uint64_t seed = 0);
 
    private:
     void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);

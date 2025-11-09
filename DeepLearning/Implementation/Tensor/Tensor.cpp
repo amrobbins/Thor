@@ -97,26 +97,29 @@ uint64_t murmurHash64(const void *key, int32_t len, uint64_t seed) {
     return h;
 }
 
-uint32_t Tensor::getThreadIdHash(uint32_t seed, bool reproducible) {
-    uint64_t long_hash = getThreadIdHash64(seed, reproducible);
+uint32_t Tensor::getThreadIdHash(uint32_t seed) {
+    uint64_t long_hash = getThreadIdHash64(seed);
     return long_hash ^ (long_hash >> 31);
 }
 
-static inline uint64_t splitmix64(uint64_t x) noexcept {
+static inline uint64_t splitmixA64(uint64_t x) noexcept {
     x += 0x9e3779b97f4a7c15ULL;
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
     x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
     return x ^ (x >> 31);
 }
 
-uint64_t Tensor::getThreadIdHash64(uint64_t seed, bool reproducible) {
+static inline uint64_t splitmixB64(uint64_t x) noexcept {
+    x += 0xda942042e4dd58b5ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+uint64_t Tensor::getThreadIdHash64(uint64_t seed) {
     uint64_t threadId = omp_get_thread_num();
     uint64_t tag = threadId;
-    if (!reproducible) {
-        thread_local int tl;
-        tag ^= static_cast<uint64_t>(reinterpret_cast<uintptr_t>(&tl));
-    }
-    return splitmix64(seed) ^ splitmix64(tag);
+    return splitmixA64(seed) ^ splitmixB64(tag);
 }
 
 Tensor::Tensor() : ReferenceCounted() {}
