@@ -29,7 +29,7 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
         numProcessors = maxDesiredProcessors;
     assert(numProcessors >= 1);
     omp_set_num_threads(numProcessors);
-    uint64_t tensorToInitializePerThread = (totalNumWeights + (numProcessors - 1)) / numProcessors;
+    const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
 #pragma omp parallel
     {
         int threadNum = omp_get_thread_num();
@@ -40,13 +40,11 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
                                 clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
-        uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
-        if (totalNumWeights < threadEnd)
-            threadEnd = totalNumWeights;
+        const uint64_t start = uint64_t(threadNum) * chunk;
+        const uint64_t end   = min<uint64_t>(totalNumWeights, start + chunk);
         if (constant) {
             // Explicitly handle constant case:
-            uint64_t start = threadNum * tensorToInitializePerThread;
-            uint64_t count = threadEnd - start;
+            uint64_t count = end - start;
             if (constantValue == half(0)) {
                 // Fastest way to fill zeros:
                 memset(bufferMem + start, 0, count * sizeof(half));
@@ -54,7 +52,7 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
                 fill_n(bufferMem + start, count, constantValue);
             }
         } else {
-            for (uint64_t i = threadNum * tensorToInitializePerThread; i < threadEnd; ++i) {
+            for (uint64_t i = start; i < end; ++i) {
                 bufferMem[i] = (half)distribution(generator);
             }
         }
