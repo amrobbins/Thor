@@ -38,7 +38,7 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
         using clock = chrono::high_resolution_clock;
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
                                          clock::now().time_since_epoch()).count();
-        default_random_engine generator(Tensor::getThreadIdHash64(nanoseconds));
+        mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
         uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
         if (totalNumWeights < threadEnd)
             threadEnd = totalNumWeights;
@@ -77,7 +77,7 @@ Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToI
         using clock = chrono::high_resolution_clock;
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
                                          clock::now().time_since_epoch()).count();
-        default_random_engine generator(Tensor::getThreadIdHash64(nanoseconds));
+        mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
         uint64_t threadEnd = (threadNum + 1) * tensorToInitializePerThread;
         if (totalNumWeights < threadEnd)
             threadEnd = totalNumWeights;
