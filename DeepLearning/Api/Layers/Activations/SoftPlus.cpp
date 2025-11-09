@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/SoftPlus.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["soft_plus"] = &SoftPlus::deserialize;
+    Thor::Activation::register_layer("soft_plus", &Thor::SoftPlus::deserialize);
     return true;
 }();
 }

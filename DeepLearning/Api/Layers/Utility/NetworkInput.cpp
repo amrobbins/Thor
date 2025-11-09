@@ -35,7 +35,7 @@ void NetworkInput::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["network_input"] = &Thor::NetworkInput::deserialize;
+    Thor::Layer::register_layer("network_input", &Thor::NetworkInput::deserialize);
     return true;
 }();
 }

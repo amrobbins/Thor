@@ -45,7 +45,7 @@ void Flatten::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["flatten"] = &Thor::Flatten::deserialize;
+    Thor::Layer::register_layer("flatten", &Thor::Flatten::deserialize);
     return true;
 }();
 }

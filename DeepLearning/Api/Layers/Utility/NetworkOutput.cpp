@@ -57,7 +57,7 @@ void NetworkOutput::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["network_output"] = &Thor::NetworkOutput::deserialize;
+    Thor::Layer::register_layer("network_output", &Thor::NetworkOutput::deserialize);
     return true;
 }();
 }

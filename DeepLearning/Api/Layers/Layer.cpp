@@ -15,7 +15,12 @@ const Layer::Factory Layer::Factory::Learning{"learning"};
 const Layer::Factory Layer::Factory::Loss{"loss"};
 const Layer::Factory Layer::Factory::Metric{"metric"};
 
-unordered_map<string, function<void(const nlohmann::json&, Network*)>> Layer::registry;
+unordered_map<string, Layer::Deserializer>& Layer::get_registry() {
+    static unordered_map<string, Deserializer> registry;
+    return registry;
+}
+
+void Layer::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
 
 void Layer::addToNetwork(Network* network) {
     assert(isInitialized());
@@ -55,6 +60,7 @@ void Layer::deserialize(const nlohmann::json& j, Network* network) {
 
     std::string type = j.at("layer_type").get<std::string>();
 
+    unordered_map<string, Layer::Deserializer>& registry = get_registry();
     auto it = registry.find(type);
     if (it == registry.end())
         throw std::runtime_error("Unknown layer type: " + type);

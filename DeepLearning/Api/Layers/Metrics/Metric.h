@@ -18,7 +18,9 @@ class Metric : public Layer {
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
     static void deserialize(const nlohmann::json &j, Network *network);
-    static std::unordered_map<std::string, std::function<void(const nlohmann::json &, Network *)>> registry;
+    using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
+    static std::unordered_map<std::string, Deserializer> &get_registry();
+    static void register_layer(std::string name, Deserializer fn);
 
     // Note:  Fully connected layers may have multiple independent inputs, each of which is all that
     //        is required to drive an output. This is not the case for layers that require all inputs

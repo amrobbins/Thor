@@ -48,7 +48,7 @@ void DropOut::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["drop_out"] = &Thor::DropOut::deserialize;
+    Thor::Layer::register_layer("drop_out", &Thor::DropOut::deserialize);
     return true;
 }();
 }

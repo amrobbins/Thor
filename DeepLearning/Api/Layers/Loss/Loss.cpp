@@ -1,14 +1,22 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 
-using namespace Thor;
 using namespace std;
+using json = nlohmann::json;
 
-unordered_map<string, function<void(const nlohmann::json &, Network *)>> Loss::registry;
+namespace Thor {
+
+unordered_map<string, Loss::Deserializer> &Loss::get_registry() {
+    static unordered_map<string, Deserializer> registry;
+    return registry;
+}
+
+void Loss::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
 
 void Loss::deserialize(const nlohmann::json &j, Network *network) {
     assert(j.at("factory").get<std::string>() == Layer::Factory::Loss.value());
     std::string type = j.at("layer_type").get<std::string>();
 
+    unordered_map<string, Loss::Deserializer> &registry = get_registry();
     auto it = registry.find(type);
     if (it == registry.end())
         throw std::runtime_error("Unknown activation type: " + type);
@@ -16,3 +24,5 @@ void Loss::deserialize(const nlohmann::json &j, Network *network) {
     auto deserializer = it->second;
     deserializer(j, network);
 }
+
+}  // namespace Thor

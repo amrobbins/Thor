@@ -48,7 +48,7 @@ void Reshape::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["reshape"] = &Thor::Reshape::deserialize;
+    Thor::Layer::register_layer("reshape", &Thor::Reshape::deserialize);
     return true;
 }();
 }

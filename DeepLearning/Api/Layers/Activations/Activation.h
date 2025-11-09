@@ -18,33 +18,11 @@ class Activation : public Layer {
 
     virtual std::string getLayerType() const = 0;
 
-    virtual nlohmann::json serialize(const std::string& storageDir, Stream stream) const {
-        assert(initialized);
-        assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
-
-        nlohmann::json j;
-        j["factory"] = Layer::Factory::Activation.value();
-        j["version"] = getLayerVersion();
-        j["layer_type"] = to_snake_case(getLayerType());
-        j["feature_input"] = featureInput.get().serialize();
-        j["feature_output"] = featureOutput.get().serialize();
-        return j;
-    }
-
-    static void deserialize(const nlohmann::json& j, Network* network) {
-        assert(j.at("factory").get<std::string>() == Layer::Factory::Activation);
-        std::string type = j.at("layer_type").get<std::string>();
-
-        auto it = registry.find(type);
-        if (it == registry.end())
-            throw std::runtime_error("Unknown activation type: " + type);
-
-        auto deserializer = it->second;
-        deserializer(j, network);
-    }
-
-    static std::unordered_map<std::string, std::function<void(const nlohmann::json&, Network*)>> registry;
+    virtual nlohmann::json serialize(const std::string& storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json& j, Network* network);
+    using Deserializer = std::function<void(const nlohmann::json&, Network*)>;
+    static std::unordered_map<std::string, Deserializer>& get_registry();
+    static void register_layer(std::string name, Deserializer fn);
 };
 
 class Activation::Builder {

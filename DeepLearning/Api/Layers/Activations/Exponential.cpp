@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/Exponential.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["exponential"] = &Exponential::deserialize;
+    Thor::Activation::register_layer("exponential", &Thor::Exponential::deserialize);
     return true;
 }();
 }

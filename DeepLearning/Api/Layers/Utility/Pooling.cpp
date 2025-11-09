@@ -61,7 +61,7 @@ void Pooling::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["pooling"] = &Thor::Pooling::deserialize;
+    Thor::Layer::register_layer("pooling", &Thor::Pooling::deserialize);
     return true;
 }();
 }

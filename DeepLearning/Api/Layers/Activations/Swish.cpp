@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["swish"] = &Swish::deserialize;
+    Thor::Activation::register_layer("swish", &Thor::Swish::deserialize);
     return true;
 }();
 }

@@ -1,9 +1,9 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 
-using namespace Thor;
 using namespace std;
-
 using json = nlohmann::json;
+
+namespace Thor {
 
 void FullyConnected::buildSupportLayersAndAddToNetwork() {
     vector<Tensor> currentFeatureInputs;
@@ -99,7 +99,8 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
     json j;
-    j["version"] = "1.0.0";
+    j["factory"] = Layer::Factory::Learning.value();
+    j["version"] = getLayerVersion();
     j["layer_type"] = "fully_connected";
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
@@ -256,4 +257,13 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         }
         return initDoneEvents;
     }
+}
+
+}  // namespace Thor
+
+namespace {
+static const bool registered = [] {
+    Thor::TrainableWeightsBiasesLayer::register_layer("fully_connected", &Thor::FullyConnected::deserialize);
+    return true;
+}();
 }

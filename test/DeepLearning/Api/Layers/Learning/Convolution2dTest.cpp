@@ -916,9 +916,9 @@ TEST(Convolution2d, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    NetworkInput::deserialize(networkInputJ, &newNetwork);
-    Convolution2d::deserialize(convolution2dJ, &newNetwork);
-    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(convolution2dJ, &newNetwork);
+    Layer::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     statusCode = newNetwork.place(batchSize, initDoneEvents);

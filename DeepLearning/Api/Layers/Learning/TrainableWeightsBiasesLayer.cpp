@@ -3,16 +3,26 @@
 using namespace Thor;
 using namespace std;
 
-unordered_map<string, function<void(const nlohmann::json &, Network *)>> TrainableWeightsBiasesLayer::registry;
+namespace Thor {
+
+unordered_map<string, TrainableWeightsBiasesLayer::Deserializer> &TrainableWeightsBiasesLayer::get_registry() {
+    static unordered_map<string, Deserializer> registry;
+    return registry;
+}
+
+void TrainableWeightsBiasesLayer::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
 
 void TrainableWeightsBiasesLayer::deserialize(const nlohmann::json &j, Network *network) {
-    assert(j.at("factory").get<std::string>() == Layer::Factory::Learning.value());
-    std::string type = j.at("layer_type").get<std::string>();
+    assert(j.at("factory").get<string>() == Layer::Factory::Learning.value());
+    string type = j.at("layer_type").get<string>();
 
+    unordered_map<string, TrainableWeightsBiasesLayer::Deserializer> &registry = get_registry();
     auto it = registry.find(type);
     if (it == registry.end())
-        throw std::runtime_error("Unknown activation type: " + type);
+        throw runtime_error("Unknown trainable layer type: " + type);
 
     auto deserializer = it->second;
     deserializer(j, network);
 }
+
+}  // namespace Thor

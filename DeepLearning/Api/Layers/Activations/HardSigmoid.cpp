@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/HardSigmoid.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["hard_sigmoid"] = &HardSigmoid::deserialize;
+    Thor::Activation::register_layer("hard_sigmoid", &Thor::HardSigmoid::deserialize);
     return true;
 }();
 }

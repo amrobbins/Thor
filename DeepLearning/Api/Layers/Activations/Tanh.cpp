@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["tanh"] = &Tanh::deserialize;
+    Thor::Activation::register_layer("tanh", &Thor::Tanh::deserialize);
     return true;
 }();
 }
