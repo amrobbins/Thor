@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/Elu.h"
 
-#include <stdio.h>
+namespace Thor {}  // namespace Thor
 
 namespace {
-static bool Elu_registered = []() {
-    Thor::Activation::registry["elu"] = &Thor::Elu::deserialize;
+static bool registered = []() {
+    Thor::Activation::register_layer("elu", &Thor::Elu::deserialize);
     return true;
 }();
 }

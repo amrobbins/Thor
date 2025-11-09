@@ -75,7 +75,9 @@ class Layer {
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
     static void deserialize(const nlohmann::json &j, Network *network);
-    static std::unordered_map<std::string, std::function<void(const nlohmann::json &, Network *)>> registry;
+    using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
+    static std::unordered_map<std::string, Deserializer> &get_registry();
+    static void register_layer(std::string name, Deserializer fn);
 
     class Factory {
        public:

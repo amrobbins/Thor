@@ -1,9 +1,9 @@
 #include "DeepLearning/Api/Layers/Learning/Convolution2d.h"
 
-using namespace Thor;
 using namespace std;
-
 using json = nlohmann::json;
+
+namespace Thor {
 
 void Convolution2d::buildSupportLayersAndAddToNetwork() {
     Convolution2d::Builder convolution2dBuilder;
@@ -91,7 +91,8 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
 
 json Convolution2d::serialize(const string &storageDir, Stream stream) const {
     json j;
-    j["version"] = "1.0.0";
+    j["factory"] = Layer::Factory::Learning.value();
+    j["version"] = getLayerVersion();
     j["layer_type"] = "convolution_2d";
     j["data_layout"] = "NCHW";
     j["filter_width"] = filterWidth;
@@ -269,4 +270,13 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         }
         return initDoneEvents;
     }
+}
+
+}  // namespace Thor
+
+namespace {
+static const bool registered = [] {
+    Thor::TrainableWeightsBiasesLayer::register_layer("convolution_2d", &Thor::Convolution2d::deserialize);
+    return true;
+}();
 }

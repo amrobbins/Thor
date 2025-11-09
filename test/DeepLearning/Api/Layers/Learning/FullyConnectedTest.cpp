@@ -361,9 +361,9 @@ TEST(FullyConnected, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    NetworkInput::deserialize(networkInputJ, &newNetwork);
-    FullyConnected::deserialize(fullyConnectedJ, &newNetwork);
-    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(fullyConnectedJ, &newNetwork);
+    Layer::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     statusCode = newNetwork.place(batchSize, initDoneEvents);

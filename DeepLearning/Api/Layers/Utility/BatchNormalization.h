@@ -24,6 +24,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual void buildSupportLayersAndAddToNetwork();
 
+    // virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    // static void deserialize(const nlohmann::json &j, Network *network);
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -60,8 +63,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     }
 
    private:
-    Optional<double> exponentialRunningAverageFactor;
-    Optional<double> epsilon;
+    double exponentialRunningAverageFactor;
+    double epsilon;
 
     Network *network;
 };
@@ -74,8 +77,12 @@ class BatchNormalization::Builder {
 
         BatchNormalization batchNormalization;
         batchNormalization.featureInputs = _featureInputs;
-        batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor;
-        batchNormalization.epsilon = _epsilon;
+        batchNormalization.exponentialRunningAverageFactor = 0.05;
+        if (_exponentialRunningAverageFactor.isPresent())
+            batchNormalization.exponentialRunningAverageFactor = _exponentialRunningAverageFactor.get();
+        batchNormalization.epsilon = 0.0001;
+        if (_epsilon.isPresent())
+            batchNormalization.epsilon = _epsilon.get();
         batchNormalization.network = _network.get();
         batchNormalization.initialized = true;
         if (batchNormalization.isMultiLayer()) {

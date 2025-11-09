@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/Softmax.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["softmax"] = &Softmax::deserialize;
+    Thor::Activation::register_layer("softmax", &Thor::Softmax::deserialize);
     return true;
 }();
 }

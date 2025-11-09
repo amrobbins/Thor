@@ -158,8 +158,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                 streams[i].waitEvent(initializedEvent);
         }
 
-        // Start with the actual average until there are enough elements observed so that the running average is a larger divisor than the
-        // actual.
+        // Start with the actual average until there are enough elements observed so that the running average
+        // is a larger divisor than the actual.
         assert(exponentialRunningAverageFactor > 0.0);
         assert(exponentialRunningAverageFactor <= 1.0);
         currentExponentialRunningAverageFactor = 1.0;

@@ -1,10 +1,10 @@
 #include "DeepLearning/Api/Layers/Activations/SoftSign.h"
 
-using namespace Thor;
+namespace Thor {}  // namespace Thor
 
 namespace {
 static bool registered = []() {
-    Activation::registry["soft_sign"] = &SoftSign::deserialize;
+    Thor::Activation::register_layer("soft_sign", &Thor::SoftSign::deserialize);
     return true;
 }();
 }

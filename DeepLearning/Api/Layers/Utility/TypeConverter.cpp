@@ -48,7 +48,7 @@ void TypeConverter::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["type_converter"] = &Thor::TypeConverter::deserialize;
+    Thor::Layer::register_layer("type_converter", &Thor::TypeConverter::deserialize);
     return true;
 }();
 }

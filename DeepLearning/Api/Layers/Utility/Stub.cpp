@@ -48,7 +48,7 @@ void Stub::deserialize(const json &j, Network *network) {
 
 namespace {
 static bool registered = []() {
-    Thor::Layer::registry["stub"] = &Thor::Stub::deserialize;
+    Thor::Layer::register_layer("stub", &Thor::Stub::deserialize);
     return true;
 }();
 }
