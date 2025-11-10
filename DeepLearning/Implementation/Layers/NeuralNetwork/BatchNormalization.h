@@ -61,9 +61,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             TensorPlacement placement = featureInputs[0].get().getPlacement();
             TensorDescriptor descriptor(TensorDescriptor::DataType::FP32, {numChannels});
             weights = Tensor(placement, descriptor);
-            biases = Tensor(placement, descriptor);
-            resultRunningMean = Tensor(placement, descriptor);
-            resultRunningVariance = Tensor(placement, descriptor);
+            biases = weights.clone();
+            resultRunningMean = weights.clone();
+            resultRunningVariance = weights.clone();
         }
     }
 
@@ -123,43 +123,24 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                     inputDimensions.size() == 2 ? CUDNN_BATCHNORM_PER_ACTIVATION : CUDNN_BATCHNORM_SPATIAL);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
+        // From API Reference:
+        // The resulting dimensions will be:
+        // 1xCx1x1 for 4D and 1xCx1x1x1 for 5D for BATCHNORM_MODE_SPATIAL
+        // 1xCxHxW for 4D and 1xCxDxHxW for 5D for BATCHNORM_MODE_PER_ACTIVATION mode
+        // ---------------------------------------------------------------------------
+        // And support by this layer is spatial for 4D tensors and per activation for 2D tensors (aka 4D tensors of 1xCx1x1),
+        // so in either case the tensor dimensions is 1xCx1x1 = C
         std::vector<unsigned long> derivedBnTensorDimensions = {numChannels};
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i) {
-            resultSaveMean.push_back(Tensor(featureInputs[0].get().getPlacement(),
-                                            TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions)));
-            resultSaveInvVariance.push_back(Tensor(featureInputs[0].get().getPlacement(),
-                                                   TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions)));
+            // This needs to be done here, in compile() because at this point
+            // the number of feature inputs are known.
+            resultSaveMean.push_back(weights.clone());
+            resultSaveInvVariance.push_back(weights.clone());
         }
 
-        Tensor oneInit_h =
-            Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        Tensor zeroInit_h =
-            Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::FP32, derivedBnTensorDimensions));
-        unsigned long numElements = oneInit_h.getDescriptor().getTotalNumElements();
-        // FIXME: I cant do this during compile, I need to use an initializer, because saved weights
-        float *oneInitMem = (float *)oneInit_h.getMemPtr();
-        float *zeroInitMem = (float *)zeroInit_h.getMemPtr();
-        for (unsigned long i = 0; i < numElements; ++i) {
-            oneInitMem[i] = 1.0f;
-            zeroInitMem[i] = 0.0f;
-        }
-        weights.copyFromAsync(oneInit_h, streams[0]);
-        biases.get().copyFromAsync(zeroInit_h, streams[0]);
-        resultRunningMean.copyFromAsync(biases.get(), streams[0]);
-        resultRunningVariance.copyFromAsync(weights, streams[0]);
-
-        if (streams.size() > 1) {
-            Event initializedEvent = streams[0].putEvent();
-            for (unsigned int i = 0; i < streams.size(); ++i)
-                streams[i].waitEvent(initializedEvent);
-        }
-
-        // Start with the actual average until there are enough elements observed so that the running average
-        // is a larger divisor than the actual.
         assert(exponentialRunningAverageFactor > 0.0);
         assert(exponentialRunningAverageFactor <= 1.0);
-        currentExponentialRunningAverageFactor = 1.0;
         itemsObserved = 0;
     }
 
@@ -196,11 +177,11 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
         cudnnStatus_t cudnnStatus;
 
-        if (currentExponentialRunningAverageFactor != exponentialRunningAverageFactor) {
+        if (currentExponentialRunningAverageFactor[connectionNumber] != exponentialRunningAverageFactor) {
             ++itemsObserved;
-            currentExponentialRunningAverageFactor = 1.0 / itemsObserved;
-            if (currentExponentialRunningAverageFactor < exponentialRunningAverageFactor)
-                currentExponentialRunningAverageFactor = exponentialRunningAverageFactor;
+            currentExponentialRunningAverageFactor[connectionNumber] = 1.0 / itemsObserved;
+            if (currentExponentialRunningAverageFactor[connectionNumber] < exponentialRunningAverageFactor)
+                currentExponentialRunningAverageFactor[connectionNumber] = exponentialRunningAverageFactor;
         }
 
         if (training) {
@@ -216,7 +197,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                        derivedBnDescriptor,
                                                        weights.getMemPtr(),
                                                        biases.get().getMemPtr(),
-                                                       currentExponentialRunningAverageFactor,
+                                                       currentExponentialRunningAverageFactor[connectionNumber],
                                                        resultRunningMean.getMemPtr(),
                                                        resultRunningVariance.getMemPtr(),
                                                        epsilon,
@@ -338,7 +319,50 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             return;
         assert(featureIn.isPresent());
 
-        // This was already placed into optimer's gradient buffers, so this is a no-op
+        // This was already placed into optimizer's gradient buffers, so this is a no-op
+    }
+
+    Tensor getResultRunningMean() { return resultRunningMean; }
+    Tensor getResultRunningVariance() { return resultRunningVariance; }
+
+    void dumpResultRunningMeanToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty())
+            stream = optimizer.get()->getGradientUpdateStream();
+        if (resultRunningMean.getAttachedFilename() != filename)
+            resultRunningMean.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+        resultRunningMean.dumpToFile(stream);
+    }
+
+    void loadResultRunningMeanFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty()) {
+            assert(optimizer.isPresent());
+            stream = optimizer.get()->getGradientUpdateStream();
+        }
+        if (resultRunningMean.getAttachedFilename() != filename)
+            resultRunningMean.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+        resultRunningMean.loadFromFile(stream);
+    }
+
+    void dumpResultRunningVarianceToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty())
+            stream = optimizer.get()->getGradientUpdateStream();
+        if (resultRunningVariance.getAttachedFilename() != filename)
+            resultRunningVariance.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+        resultRunningVariance.dumpToFile(stream);
+    }
+
+    void loadResultRunningVarianceFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {
+        if (stream.isEmpty()) {
+            assert(optimizer.isPresent());
+            stream = optimizer.get()->getGradientUpdateStream();
+        }
+        if (resultRunningVariance.getAttachedFilename() != filename)
+            resultRunningVariance.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+        resultRunningVariance.loadFromFile(stream);
+    }
+
+    void setCurrentExponentialRunningAverageFactor(double value) {
+        currentExponentialRunningAverageFactor = std::vector<double>(featureInputs.size(), value);
     }
 
    private:
@@ -354,7 +378,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     bool training;
     double exponentialRunningAverageFactor;
     uint32_t itemsObserved;
-    double currentExponentialRunningAverageFactor;
+    std::vector<double> currentExponentialRunningAverageFactor;
     double epsilon;
 
     Optional<cudnnTensorDescriptor_t> featureInputDescriptor;

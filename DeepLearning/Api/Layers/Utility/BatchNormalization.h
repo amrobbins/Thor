@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
@@ -24,8 +25,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    // virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
-    // static void deserialize(const nlohmann::json &j, Network *network);
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -38,6 +39,12 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             std::make_shared<ThorImplementation::BatchNormalization>(true, getId(), exponentialRunningAverageFactor, epsilon);
         return batchNormalization;
     }
+
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+                                  bool isFirstStamp,
+                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
+                                  Optional<Event> sisterLayerLoadedEvent,
+                                  std::vector<std::shared_ptr<Initializer>> &initializers);
 
     // mem requirements are the weights
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
@@ -65,6 +72,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
    private:
     double exponentialRunningAverageFactor;
     double epsilon;
+
+    Optional<std::string> runningMeansFile;
+    Optional<std::string> runningVariancesFile;
 
     Network *network;
 };
