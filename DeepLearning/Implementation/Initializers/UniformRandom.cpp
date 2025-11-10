@@ -13,12 +13,15 @@ UniformRandom::UniformRandom(double maxValue, double minValue) : maxValue(maxVal
 Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
 
 Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
-    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when not fp16
-    Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
-
+    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when
+    // not fp16
     bool constant = minValue == maxValue;
-    half constantValue = half(minValue);
+    if (constant) {
+        tensorToInitialize.fill(minValue, streams[0]);
+        return streams[0].putEvent();
+    }
 
+    Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
     half *bufferMem = (half *)buffer.getMemPtr();
     int numProcessors = omp_get_num_procs();
@@ -37,24 +40,12 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
         if (!constant)
             distribution = uniform_real_distribution<float>(minValue, maxValue);
         using clock = chrono::high_resolution_clock;
-        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
-                                clock::now().time_since_epoch()).count();
+        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
         const uint64_t start = uint64_t(threadNum) * chunk;
-        const uint64_t end   = min<uint64_t>(totalNumWeights, start + chunk);
-        if (constant) {
-            // Explicitly handle constant case:
-            uint64_t count = end - start;
-            if (constantValue == half(0)) {
-                // Fastest way to fill zeros:
-                memset(bufferMem + start, 0, count * sizeof(half));
-            } else {
-                fill_n(bufferMem + start, count, constantValue);
-            }
-        } else {
-            for (uint64_t i = start; i < end; ++i) {
-                bufferMem[i] = (half)distribution(generator);
-            }
+        const uint64_t end = min<uint64_t>(totalNumWeights, start + chunk);
+        for (uint64_t i = start; i < end; ++i) {
+            bufferMem[i] = (half)distribution(generator);
         }
     }
 

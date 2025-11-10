@@ -17,7 +17,8 @@ Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream>
 }
 
 Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
-    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when not fp16
+    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when
+    // not fp16
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
@@ -35,11 +36,10 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
     {
         int threadNum = omp_get_thread_num();
         const uint64_t start = uint64_t(threadNum) * chunk;
-        const uint64_t end   = min<uint64_t>(totalNumWeights, start + chunk);
+        const uint64_t end = min<uint64_t>(totalNumWeights, start + chunk);
         uniform_real_distribution<float> distribution(-1.0f, 1.0f);
         using clock = chrono::high_resolution_clock;
-        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
-                                         clock::now().time_since_epoch()).count();
+        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
         for (uint64_t i = start; i < end; ++i) {
             double value = distribution(generator) * sqrt(6.0 / (fanIn + fanOut));
@@ -51,7 +51,8 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
 }
 
 Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
-    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when not fp16
+    // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when
+    // not fp16
     Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
 
     float mean = 0.0;
@@ -73,11 +74,10 @@ Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToI
     {
         int threadNum = omp_get_thread_num();
         const uint64_t start = uint64_t(threadNum) * chunk;
-        const uint64_t end   = min<uint64_t>(totalNumWeights, start + chunk);
+        const uint64_t end = min<uint64_t>(totalNumWeights, start + chunk);
         normal_distribution<float> distribution(mean, standardDeviation);
         using clock = chrono::high_resolution_clock;
-        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(
-                                         clock::now().time_since_epoch()).count();
+        const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
         for (uint64_t i = start; i < end; ++i) {
             bufferMem[i] = (half)distribution(generator);

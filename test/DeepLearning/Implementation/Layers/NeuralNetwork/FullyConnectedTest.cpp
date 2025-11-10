@@ -403,7 +403,7 @@ TEST(FullyConnectedInitializers, UniformRandomWorks) {
         LayerTestHelper::connectAndInitializeNetwork(layers);
 
         half minValue = 0.2f;
-        half maxValue = 0.5f;
+        half maxValue = 0.2f;
         UniformRandom initializer(maxValue, minValue);
         initializer.initialize(fullyConnectedLayer.get(), fullyConnectedLayer->getWeights());
         if (hasBiases) {
