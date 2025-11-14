@@ -1,5 +1,3 @@
-#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 
@@ -12,7 +10,7 @@ using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
 
-TEST(TypeConverter, Builds) {
+TEST(UtilityApiLayers, TypeConverterBuilds) {
     srand(time(nullptr));
 
     Network network;

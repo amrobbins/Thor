@@ -13,7 +13,6 @@ void BatchNormalization::buildSupportLayersAndAddToNetwork() {
 
     // Force the input tensor to this type of layer to be FP16
     if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
-        printf("converting to FP16");
         fflush(stdout);
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             TypeConverter typeConverter = TypeConverter::Builder()
@@ -23,9 +22,6 @@ void BatchNormalization::buildSupportLayersAndAddToNetwork() {
                                               .build();
             currentFeatureInputs[i] = typeConverter.getFeatureOutput();
         }
-    } else {
-        printf("not converting\n");
-        fflush(stdout);
     }
 
     BatchNormalization::Builder batchNormBuilder;
@@ -34,13 +30,14 @@ void BatchNormalization::buildSupportLayersAndAddToNetwork() {
     batchNormBuilder.exponentialRunningAverageFactor(exponentialRunningAverageFactor);
     batchNormBuilder.epsilon(epsilon);
     BatchNormalization standaloneBatchNormalization = batchNormBuilder.network(*network).build();
+    this->id = standaloneBatchNormalization.getId();
     currentFeatureInputs = standaloneBatchNormalization.getFeatureOutputs();
 
     vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
 
     // Replace the outputs on the compound layer to be the outputs of the last stage
     // i.e. tunnel the actual inputs to actual outputs of the compound layer,
-    // these are not necessarily the outputs of the stand-alone fully connected layer.
+    // these are not necessarily the outputs of the stand-alone batch normalization connected layer.
     // Network uses single layers, user uses compound layer.
     outputTensorFromInputTensor.clear();
     inputTensorFromOutputTensor.clear();
@@ -103,13 +100,13 @@ json BatchNormalization::serialize(const string &storageDir, Stream stream) cons
     j["biases_tensor"] = biasesFile.string();
     batchNorm->dumpBiasesToFile(biasesFile.string(), stream);
 
-    filesystem::path resultRunningMeanToFileFile = dir / (layerName + "_biases.gds");
-    j["means_tensor"] = resultRunningMeanToFileFile.string();
-    batchNorm->dumpResultRunningMeanToFile(biasesFile.string(), stream);
+    filesystem::path resultRunningMeanToFile = dir / (layerName + "_means.gds");
+    j["means_tensor"] = resultRunningMeanToFile.string();
+    batchNorm->dumpResultRunningMeanToFile(resultRunningMeanToFile.string(), stream);
 
-    filesystem::path resultRunningVarianceToFileFile = dir / (layerName + "_biases.gds");
-    j["variances_tensor"] = resultRunningVarianceToFileFile.string();
-    batchNorm->dumpResultRunningVarianceToFile(biasesFile.string(), stream);
+    filesystem::path resultRunningVarianceToFile = dir / (layerName + "_variances.gds");
+    j["variances_tensor"] = resultRunningVarianceToFile.string();
+    batchNorm->dumpResultRunningVarianceToFile(resultRunningVarianceToFile.string(), stream);
 
     return j;
 }
@@ -117,7 +114,7 @@ json BatchNormalization::serialize(const string &storageDir, Stream stream) cons
 void BatchNormalization::deserialize(const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in BatchNormalization::deserialize: " + j["version"].get<std::string>());
-    if (j.at("layer_type").get<std::string>() != "fully_connected")
+    if (j.at("layer_type").get<std::string>() != "batch_normalization")
         throw runtime_error("Layer type mismatch in BatchNormalization::deserialize: " + j.at("layer_type").get<std::string>());
 
     float exponentialRunningAverageFactor = j.at("exponential_running_average_factor").get<float>();
@@ -207,9 +204,9 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         assert(biasesFile.isPresent());
         layer->loadBiasesFromFile(biasesFile.get(), stream);
         assert(runningVariancesFile.isPresent());
-        batchNorm->loadResultRunningVarianceFromFile(runningVariancesFile);
+        batchNorm->loadResultRunningVarianceFromFile(runningVariancesFile, stream);
         assert(runningMeansFile.isPresent());
-        batchNorm->loadResultRunningMeanFromFile(runningVariancesFile);
+        batchNorm->loadResultRunningMeanFromFile(runningVariancesFile, stream);
 
         // Can't use the file later, it may not still be there
         weightsFile = Optional<string>::empty();

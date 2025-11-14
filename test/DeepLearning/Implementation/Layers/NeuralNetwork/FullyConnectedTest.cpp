@@ -155,7 +155,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
             }
             float expected = (float)(cpuFeatureOut[i]);
             maxDiff = max(abs((float)expected * 0.02f), maxDiff);
-            ASSERT_LT(abs(expected - (float)(gpuFeatureOut[i])), max(maxDiff, expected * 0.01f));
+            ASSERT_LT(abs(expected - (float)(gpuFeatureOut[i])), max(maxDiff, abs(expected * 0.01f)));
         }
 
         if (inferenceOnly) {
@@ -289,9 +289,9 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     float maxDiff = numOutputFeatures * 0.01;
     for (int i = 0; i < numOutputElements; ++i) {
         float expected = (float)(cpuErrorOutput[i]);
-        if (abs(expected - (float)(gpuErrorOutput[i])) >= max(maxDiff, expected * 0.01f))
+        if (abs(expected - (float)(gpuErrorOutput[i])) >= max(maxDiff, abs(expected * 0.01f)))
             printf("%f %f\n", (float)(cpuErrorOutput[i]), (float)(gpuErrorOutput[i]));
-        ASSERT_LT(abs(expected - (float)(gpuErrorOutput[i])), max(maxDiff, expected * 0.01f));
+        ASSERT_LT(abs(expected - (float)(gpuErrorOutput[i])), max(maxDiff, abs(expected * 0.01f)));
     }
 
     half *cpuWeightsGradient = (half *)weightsGradient.getMemPtr();
@@ -300,9 +300,9 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     maxDiff = batchSize * 0.01;
     for (int i = 0; i < numWeights; ++i) {
         float expected = (float)(cpuWeightsGradient[i]);
-        if (abs(expected - (float)(gpuWeightsGradient[i])) >= max(maxDiff, expected * 0.01f))
+        if (abs(expected - (float)(gpuWeightsGradient[i])) >= max(maxDiff, abs(expected * 0.01f)))
             printf("%f %f\n", (float)(cpuWeightsGradient[i]), (float)(gpuWeightsGradient[i]));
-        ASSERT_LT(abs(expected - (float)(gpuWeightsGradient[i])), max(maxDiff, expected * 0.01f));
+        ASSERT_LT(abs(expected - (float)(gpuWeightsGradient[i])), max(maxDiff, abs(expected * 0.01f)));
     }
 
     if (hasBiases) {

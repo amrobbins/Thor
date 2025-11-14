@@ -1,5 +1,3 @@
-#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Api/Network/Network.h"
 

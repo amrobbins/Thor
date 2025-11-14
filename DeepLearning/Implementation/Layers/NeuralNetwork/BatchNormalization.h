@@ -365,6 +365,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         currentExponentialRunningAverageFactor = std::vector<double>(featureInputs.size(), value);
     }
 
+    virtual std::string getType() { return "BatchNormalization"; }
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;

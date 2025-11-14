@@ -351,6 +351,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                (sums * anyErrorInput.get().getDescriptor().getTotalNumElements()) / batchSize + flopsPerGradientUpdatePerExample();
     }
 
+    virtual std::string getType() { return "FullyConnected"; }
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;

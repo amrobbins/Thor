@@ -263,6 +263,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         biases.get().loadFromFile(stream);
     }
 
+    virtual std::string getType() { return "TrainableWeightsBiases"; }
+
    protected:
     const bool hasBias;
     const bool usingSharedWeights;
