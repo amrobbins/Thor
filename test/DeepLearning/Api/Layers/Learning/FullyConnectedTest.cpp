@@ -346,9 +346,12 @@ TEST(FullyConnected, SerializeDeserialize) {
 
     ASSERT_TRUE(out0.at("id").is_number_integer());
 
+    string file_prefix = "/tmp/layer" + to_string(fullyConnected.getId());
     EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<string>().empty());
+    EXPECT_EQ(fullyConnectedJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
     if (hasBias) {
         EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<string>().empty());
+        EXPECT_EQ(fullyConnectedJ.at("biases_tensor").get<string>(), file_prefix + "_biases.gds");
     }
 
     // printf("%s\n", networkInputJ.dump(4).c_str());

@@ -12,15 +12,14 @@ Stub::~Stub() = default;
 json Stub::serialize(const string &storageDir, Stream stream) const {
     assert(initialized);
     assert(featureInput.isPresent());
-    assert(featureOutput.isPresent());
+    assert(featureOutput.isEmpty());
 
     json j;
     j["factory"] = Layer::Factory::Layer.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["feature_input"] = featureInput.get().serialize();
-    j["feature_output"] = featureOutput.get().serialize();
+    j["input_tensor"] = featureInput.get().serialize();
 
     return j;
 }
@@ -31,15 +30,12 @@ void Stub::deserialize(const json &j, Network *network) {
     if (j.at("layer_type").get<string>() != "stub")
         throw runtime_error("Layer type mismatch in Stub::deserialize: " + j.at("layer_type").get<string>());
 
-    nlohmann::json input = j["feature_input"].get<nlohmann::json>();
+    nlohmann::json input = j["input_tensor"].get<nlohmann::json>();
     uint64_t originalTensorId = input.at("id").get<uint64_t>();
     Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
 
-    Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
-
     Stub stub;
     stub.featureInput = featureInput;
-    stub.featureOutput = featureOutput;
     stub.initialized = true;
     stub.addToNetwork(network);
 }

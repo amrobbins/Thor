@@ -40,6 +40,13 @@ void Reshape::deserialize(const json &j, Network *network) {
     Reshape reshape;
     reshape.featureInput = featureInput;
     reshape.featureOutput = featureOutput;
+    reshape.newDimensions = {0U};
+    for (uint32_t i = 0; i < featureOutput.getDimensions().size(); ++i)
+        reshape.newDimensions.push_back(featureOutput.getDimensions()[i]);
+    if (reshape.featureInput.get().getTotalNumElements() != reshape.featureOutput.get().getTotalNumElements())
+        throw runtime_error("In Reshape::deserialize, input num elements " + to_string(reshape.featureInput.get().getTotalNumElements()) +
+                            ", output num elements " + to_string(reshape.featureOutput.get().getTotalNumElements()) +
+                            ". These must match.");
     reshape.initialized = true;
     reshape.addToNetwork(network);
 }

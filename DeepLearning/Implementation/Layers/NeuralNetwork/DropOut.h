@@ -139,6 +139,8 @@ class DropOut : public Layer {
 
     bool isTrainingMode() { return training; }
 
+    float getDropOutRate() const { return probabilityOfDroppingOut; }
+
    private:
     float probabilityOfDroppingOut;
     bool training;
