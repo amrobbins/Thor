@@ -365,134 +365,153 @@ TEST(UtilityApiLayers, PoolingSpecifiedPaddingBuilds) {
     ASSERT_FALSE(pooling < *clone);
 }
 
-// TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
-//     srand(time(nullptr));
-//
-//     Network initialNetwork;
-//     Stream stream(0);
-//
-//     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
-//     string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
-//     Pooling::Type poolingType = rand() % 2 ? Pooling::Type::AVERAGE : Pooling::Type::MAX;
-//     FIXME
-//     uint32_t windowHeight = 0;
-//     uint32_t windowWidth = 0;
-//     uint32_t verticalStride = 0;
-//     uint32_t horizontalStride = 0;
-//     uint32_t verticalPadding = 0;
-//     uint32_t horizontalPadding = 0;
-//
-//
-//         uint32_t numDimensions = 1 + (rand() % 4);
-//
-//     vector<uint64_t> dimensions;
-//     for (uint32_t d = 0; d < numDimensions; ++d) {
-//         dimensions.push_back(1 + (rand() % 5));
-//     }
-//
-//     NetworkInput networkInput =
-//         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(dimensions).dataType(dataType).build();
-//
-//     Pooling pooling = Pooling::Builder()
-//                           .network(initialNetwork)
-//                           .type(poolingType)
-//                           .windowHeight(windowHeight)
-//                           .windowWidth(windowWidth)
-//                           .verticalStride(verticalStride)
-//                           .horizontalStride(horizontalStride)
-//                           .verticalPadding(horizontalPadding)
-//                           .horizontalPadding(horizontalPadding)
-//                           .featureInput(networkInput.getFeatureOutput().get())
-//                           .build();
-//     ASSERT_TRUE(pooling.isInitialized());
-//
-//     NetworkOutput networkOutput = NetworkOutput::Builder()
-//                                       .network(initialNetwork)
-//                                       .name("testOutput")
-//                                       .inputTensor(pooling.getFeatureOutput().get())
-//                                       .dataType(dataType)
-//                                       .build();
-//
-//     json poolingJ = pooling.serialize("/tmp/", stream);
-//
-//     // printf("%s\n", poolingJ.dump(4).c_str());
-//
-//     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
-//     Layer *layer = &pooling;
-//     json fromLayerJ = layer->serialize("/tmp/", stream);
-//     ASSERT_EQ(poolingJ, fromLayerJ);
-//
-//     json networkInputJ = networkInput.serialize("/tmp/", stream);
-//     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
-//
-//     ASSERT_EQ(poolingJ["factory"], Layer::Factory::Layer.value());
-//     ASSERT_EQ(poolingJ["version"], "1.0.0");
-//     ASSERT_EQ(poolingJ["layer_type"], "pooling");
-//     ASSERT_EQ(poolingJ.at("drop_proportion").get<float>(), dropProportion);
-//
-//     const auto &input = poolingJ.at("feature_input");
-//     ASSERT_TRUE(input.is_object());
-//     EXPECT_EQ(input.at("data_type").get<string>(), dataTypeString);
-//     ASSERT_EQ(input.at("dimensions").get<vector<uint64_t>>(), dimensions);
-//     ASSERT_TRUE(input.at("id").is_number_integer());
-//
-//     const auto &output = poolingJ.at("feature_output");
-//     ASSERT_TRUE(output.is_object());
-//     EXPECT_EQ(output.at("data_type").get<string>(), dataTypeString);
-//     ASSERT_EQ(output.at("dimensions").get<vector<uint64_t>>(), dimensions);
-//     ASSERT_TRUE(output.at("id").is_number_integer());
-//
-//     ////////////////////////////
-//     // Deserialize
-//     ////////////////////////////
-//     Network newNetwork;
-//
-//     Layer::deserialize(networkInputJ, &newNetwork);
-//     Layer::deserialize(poolingJ, &newNetwork);
-//     Layer::deserialize(networkOutputJ, &newNetwork);
-//
-//     uint32_t batchSize = 1 + (rand() % 16);
-//     vector<Event> initDoneEvents;
-//     Network::StatusCode statusCode;
-//     statusCode = newNetwork.place(batchSize, initDoneEvents);
-//     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-//     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-//         stream.waitEvent(initDoneEvents[i]);
-//     }
-//     initDoneEvents.clear();
-//
-//     vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
-//     ASSERT_EQ(stampedNetworks.size(), 1UL);
-//     ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
-//     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-//     ASSERT_EQ(otherLayers.size(), 1U);
-//     shared_ptr<ThorImplementation::Pooling> stampedPooling = dynamic_pointer_cast<ThorImplementation::Pooling>(otherLayers[0]);
-//     ASSERT_NE(stampedPooling, nullptr);
-//
-//     vector<uint64_t> stampedDimensions = {batchSize};
-//     for (uint32_t d = 0; d < numDimensions; ++d)
-//         stampedDimensions.push_back(dimensions[d]);
-//
-//     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
-//     ASSERT_EQ(inputLayers.size(), 1U);
-//     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
-//     ASSERT_NE(stampedInput, nullptr);
-//     ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
-//     ASSERT_EQ(stampedInput->getFeatureOutput().get().getDimensions(), stampedDimensions);
-//
-//     vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
-//     ASSERT_EQ(outputLayers.size(), 1U);
-//     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput =
-//     dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]); ASSERT_NE(outputLayers[0], nullptr);
-//     ASSERT_TRUE(stampedOutput->getFeatureInput().isPresent());
-//     ASSERT_EQ(stampedOutput->getFeatureOutput().get().getDimensions(), stampedDimensions);
-//
-//     // Ensure that they are all connected
-//     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedPooling->getFeatureInput().get());
-//     ASSERT_EQ(stampedPooling->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
-//
-//     ASSERT_EQ(stampedPooling->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-//     ASSERT_EQ(stampedPooling->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-//
-//     ASSERT_EQ(stampedPooling->getPoolingRate(), dropProportion);
-// }
+TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+    Stream stream(0);
+
+    vector<uint64_t> dimensions;
+    int numDimensions = 3;
+    for (int i = 0; i < numDimensions; ++i)
+        dimensions.push_back(10 + (rand() % 100));
+    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
+    Pooling::Type poolingType = rand() % 2 ? Pooling::Type::AVERAGE : Pooling::Type::MAX;
+
+    uint32_t windowHeight = 1 + (rand() % dimensions[1]);
+    uint32_t windowWidth = 1 + (rand() % dimensions[2]);
+    uint32_t verticalStride = 1 + (rand() % 10);
+    uint32_t horizontalStride = 1 + (rand() % 10);
+    uint32_t verticalPadding = rand() % windowHeight;
+    uint32_t horizontalPadding = rand() % windowWidth;
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(dimensions).dataType(dataType).build();
+
+    Pooling pooling = Pooling::Builder()
+                          .network(initialNetwork)
+                          .type(poolingType)
+                          .windowHeight(windowHeight)
+                          .windowWidth(windowWidth)
+                          .verticalStride(verticalStride)
+                          .horizontalStride(horizontalStride)
+                          .verticalPadding(verticalPadding)
+                          .horizontalPadding(horizontalPadding)
+                          .featureInput(networkInput.getFeatureOutput().get())
+                          .build();
+    ASSERT_TRUE(pooling.isInitialized());
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("testOutput")
+                                      .inputTensor(pooling.getFeatureOutput().get())
+                                      .dataType(dataType)
+                                      .build();
+
+    json poolingJ = pooling.serialize("/tmp/", stream);
+
+    // printf("%s\n", poolingJ.dump(4).c_str());
+
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = &pooling;
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(poolingJ, fromLayerJ);
+
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    ASSERT_EQ(poolingJ["factory"], Layer::Factory::Layer.value());
+    ASSERT_EQ(poolingJ["version"], "1.0.0");
+    ASSERT_EQ(poolingJ["layer_type"], "pooling");
+    ASSERT_EQ(poolingJ.at("window_height").get<uint32_t>(), windowHeight);
+    ASSERT_EQ(poolingJ.at("window_width").get<uint32_t>(), windowWidth);
+    ASSERT_EQ(poolingJ.at("vertical_stride").get<uint32_t>(), verticalStride);
+    ASSERT_EQ(poolingJ.at("horizontal_stride").get<uint32_t>(), horizontalStride);
+    ASSERT_EQ(poolingJ.at("vertical_padding").get<uint32_t>(), verticalPadding);
+    ASSERT_EQ(poolingJ.at("horizontal_padding").get<uint32_t>(), horizontalPadding);
+
+    const auto &input = poolingJ.at("feature_input");
+    ASSERT_TRUE(input.is_object());
+    EXPECT_EQ(input.at("data_type").get<string>(), dataTypeString);
+    ASSERT_EQ(input.at("dimensions").get<vector<uint64_t>>(), dimensions);
+    ASSERT_TRUE(input.at("id").is_number_integer());
+
+    vector<uint64_t> outputDimensions;
+    uint32_t outputHeight = Pooling::Builder::computeOutputDimension(dimensions[1], verticalStride, windowHeight, verticalPadding);
+    uint32_t outputWidth = Pooling::Builder::computeOutputDimension(dimensions[2], horizontalStride, windowWidth, horizontalPadding);
+    outputDimensions.push_back(dimensions[0]);
+    outputDimensions.push_back(outputHeight);
+    outputDimensions.push_back(outputWidth);
+
+    const auto &output = poolingJ.at("feature_output");
+    ASSERT_TRUE(output.is_object());
+    EXPECT_EQ(output.at("data_type").get<string>(), dataTypeString);
+    ASSERT_EQ(output.at("dimensions").get<vector<uint64_t>>(), outputDimensions);
+    ASSERT_TRUE(output.at("id").is_number_integer());
+
+    ////////////////////////////
+    // Deserialize
+    ////////////////////////////
+    Network newNetwork;
+
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(poolingJ, &newNetwork);
+    Layer::deserialize(networkOutputJ, &newNetwork);
+
+    uint32_t batchSize = 1 + (rand() % 16);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode;
+    statusCode = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
+    ASSERT_EQ(stampedNetworks.size(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    ASSERT_EQ(otherLayers.size(), 1U);
+    shared_ptr<ThorImplementation::Pooling> stampedPooling = dynamic_pointer_cast<ThorImplementation::Pooling>(otherLayers[0]);
+    ASSERT_NE(stampedPooling, nullptr);
+
+    vector<uint64_t> stampedInputDimensions = {batchSize};
+    for (uint32_t d = 0; d < numDimensions; ++d)
+        stampedInputDimensions.push_back(dimensions[d]);
+
+    vector<uint64_t> stampedOutputDimensions = {batchSize};
+    for (uint32_t d = 0; d < numDimensions; ++d)
+        stampedOutputDimensions.push_back(outputDimensions[d]);
+
+    vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
+    ASSERT_EQ(inputLayers.size(), 1U);
+    shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
+    ASSERT_NE(stampedInput, nullptr);
+    ASSERT_TRUE(stampedInput->getFeatureOutput().isPresent());
+    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDimensions(), stampedInputDimensions);
+
+    vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
+    ASSERT_EQ(outputLayers.size(), 1U);
+    shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
+    ASSERT_NE(outputLayers[0], nullptr);
+    ASSERT_TRUE(stampedOutput->getFeatureInput().isPresent());
+    ASSERT_EQ(stampedOutput->getFeatureOutput().get().getDimensions(), stampedOutputDimensions);
+
+    // Ensure that they are all connected
+    EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedPooling->getFeatureInput().get());
+    ASSERT_EQ(stampedPooling->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    ASSERT_EQ(stampedPooling->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+    ASSERT_EQ(stampedPooling->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+
+    ASSERT_EQ(stampedPooling->getWindowHeight(), windowHeight);
+    ASSERT_EQ(stampedPooling->getWindowWidth(), windowWidth);
+    ASSERT_EQ(stampedPooling->getVerticalStride(), verticalStride);
+    ASSERT_EQ(stampedPooling->getHorizontalStride(), horizontalStride);
+    ASSERT_EQ(stampedPooling->getVerticalPadding(), verticalPadding);
+    ASSERT_EQ(stampedPooling->getHorizontalPadding(), horizontalPadding);
+    ASSERT_EQ(stampedPooling->getOutputHeight(), stampedOutputDimensions[2]);
+    ASSERT_EQ(stampedPooling->getOutputWidth(), stampedOutputDimensions[3]);
+}
