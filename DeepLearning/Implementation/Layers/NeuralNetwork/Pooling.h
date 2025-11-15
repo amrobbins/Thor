@@ -11,12 +11,12 @@ class Pooling : public Layer {
     virtual ~Pooling() {}
 
     Pooling(Type poolingType,
-            int windowHeight,
-            int windowWidth,
-            int verticalStride,
-            int horizontalStride,
-            int verticalPadding,
-            int horizontalPadding)
+            uint32_t windowHeight,
+            uint32_t windowWidth,
+            uint32_t verticalStride,
+            uint32_t horizontalStride,
+            uint32_t verticalPadding,
+            uint32_t horizontalPadding)
         : poolingType(poolingType),
           windowHeight(windowHeight),
           windowWidth(windowWidth),
@@ -194,23 +194,34 @@ class Pooling : public Layer {
         return outputSize;
     }
 
+    Type getPoolingType() { return poolingType; }
+
+    uint32_t getWindowHeight() { return windowHeight; }
+    uint32_t getWindowWidth() { return windowWidth; }
+    uint32_t getVerticalStride() { return verticalStride; }
+    uint32_t getHorizontalStride() { return horizontalStride; }
+    uint32_t getVerticalPadding() { return verticalPadding; }
+    uint32_t getHorizontalPadding() { return horizontalPadding; }
+    uint32_t getOutputHeight() { return outputHeight; }
+    uint32_t getOutputWidth() { return outputWidth; }
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float BETA_CLEAR;
 
     Type poolingType;
-    int windowHeight;
-    int windowWidth;
-    int verticalStride;
-    int horizontalStride;
-    int batchSize;
-    int numFeatures;
-    int inputHeight;
-    int inputWidth;
-    int verticalPadding;
-    int horizontalPadding;
-    int outputHeight;
-    int outputWidth;
+    uint32_t windowHeight;
+    uint32_t windowWidth;
+    uint32_t verticalStride;
+    uint32_t horizontalStride;
+    uint32_t batchSize;
+    uint32_t numFeatures;
+    uint32_t inputHeight;
+    uint32_t inputWidth;
+    uint32_t verticalPadding;
+    uint32_t horizontalPadding;
+    uint32_t outputHeight;
+    uint32_t outputWidth;
 
     Optional<cudnnPoolingDescriptor_t> poolingDescriptor;
     Optional<cudnnTensorDescriptor_t> featureOutputDescriptor;
