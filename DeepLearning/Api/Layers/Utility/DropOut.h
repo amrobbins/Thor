@@ -90,7 +90,7 @@ class DropOut::Builder {
 
     virtual DropOut::Builder &dropProportion(float _dropProportion) {
         assert(!this->_dropProportion.isPresent());
-        assert(_dropProportion > 0.0);
+        assert(_dropProportion >= 0.0);
         assert(_dropProportion <= 1.0);
         this->_dropProportion = _dropProportion;
         return *this;
