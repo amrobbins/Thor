@@ -15,5 +15,5 @@ target_link_libraries(thor PRIVATE Thor)
 target_compile_features(thor PRIVATE cxx_std_20)
 
 set_target_properties(thor PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bindings/python"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
         )
