@@ -4,6 +4,7 @@ Thor.h
 token
 .clangd
 .idea/
+.venv/
 
 # Compiled source #
 ###################
