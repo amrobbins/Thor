@@ -6,7 +6,7 @@ namespace nb = nanobind;
 void bind_version(nb::module_ &m);
 void bind_tensor(nb::module_ &m);
 void bind_activations(nb::module_ &m);
-void bind_layers(nb::module_ &m);
+void bind_layers(nb::module_ &layers);
 void bind_losses(nb::module_ &m);
 void bind_metrics(nb::module_ &m);
 void bind_optimizers(nb::module_ &m);
