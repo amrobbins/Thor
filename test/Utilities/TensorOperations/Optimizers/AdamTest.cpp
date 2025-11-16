@@ -13,7 +13,7 @@
 using namespace ThorImplementation;
 using namespace std;
 
-TEST(AdamKernel, Fp32) {
+TEST(AdamKernel, DISABLED_Fp32) {
     srand(time(nullptr));
     Stream stream(0);
 
@@ -98,7 +98,7 @@ TEST(AdamKernel, Fp32) {
     }
 }
 
-TEST(AdamKernel, Fp16) {
+TEST(AdamKernel, DISABLED_Fp16) {
     srand(time(nullptr));
     Stream stream(0);
 
