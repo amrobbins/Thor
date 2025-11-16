@@ -39,7 +39,9 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.6",
     "build>=1.2",
-    "pybind11-stubgen>=2.5.5"
+    "pybind11-stubgen>=2.5.5",
+    "nanobind>=2.9.2",
+    "nanobind-stubgen>=0.1.5",
 ]
 
 [project.urls]

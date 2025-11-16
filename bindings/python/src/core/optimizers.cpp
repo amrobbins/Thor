@@ -1,8 +1,7 @@
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
+namespace nb = nanobind;
 
-namespace py = pybind11;
-
-void bind_optimizers(py::module_ &m) {
+void bind_optimizers(nb::module_ &m) {
     m.doc() = "Thor optimizers";
 
     m.def("Sgd", []() { return "temp"; });

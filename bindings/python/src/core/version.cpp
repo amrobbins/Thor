@@ -1,9 +1,9 @@
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 #include "ThorVersion.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
-void bind_version(py::module_ &m) {
+void bind_version(nb::module_ &m) {
     // CMake-defined versions
     m.def("version", []() { return THOR_VERSION; });
 

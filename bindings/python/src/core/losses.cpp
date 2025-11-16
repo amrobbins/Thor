@@ -1,8 +1,7 @@
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
+namespace nb = nanobind;
 
-namespace py = pybind11;
-
-void bind_losses(py::module_ &m) {
+void bind_losses(nb::module_ &m) {
     m.doc() = "Thor losses";
     m.def("BinaryCrossEntropy", []() { return "temp"; });
     m.def("CategoricalCrossEntropy", []() { return "temp"; });
