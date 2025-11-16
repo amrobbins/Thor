@@ -1,17 +1,17 @@
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 // Forward declarations for per-feature binders
-void bind_version(py::module_ &m);
-void bind_tensor(py::module_ &m);
-void bind_activations(py::module_ &m);
-void bind_layers(py::module_ &m);
-void bind_losses(py::module_ &m);
-void bind_metrics(py::module_ &m);
-void bind_optimizers(py::module_ &m);
+void bind_version(nb::module_ &m);
+void bind_tensor(nb::module_ &m);
+void bind_activations(nb::module_ &m);
+void bind_layers(nb::module_ &m);
+void bind_losses(nb::module_ &m);
+void bind_metrics(nb::module_ &m);
+void bind_optimizers(nb::module_ &m);
 
-PYBIND11_MODULE(thor, m) {
+NB_MODULE(thor, m) {
     m.doc() = "Thor Python bindings";
 
     bind_version(m);

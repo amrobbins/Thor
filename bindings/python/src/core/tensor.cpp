@@ -1,8 +1,6 @@
-#include <pybind11/pybind11.h>
-#include "ThorVersion.h"
+#include <nanobind/nanobind.h>
+namespace nb = nanobind;
 
-namespace py = pybind11;
-
-void bind_tensor(py::module_ &m) {
+void bind_tensor(nb::module_ &m) {
     m.def("Tensor", []() { return "temp"; });
 }

@@ -1,8 +1,7 @@
-#include <pybind11/pybind11.h>
+#include <nanobind/nanobind.h>
+namespace nb = nanobind;
 
-namespace py = pybind11;
-
-void bind_activations(py::module_ &m) {
+void bind_activations(nb::module_ &m) {
     m.doc() = "Thor activations";
     m.def("Elu", []() { return "temp"; });
     m.def("Exponential", []() { return "temp"; });

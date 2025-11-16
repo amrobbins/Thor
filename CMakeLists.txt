@@ -346,7 +346,6 @@ option(THOR_USE_PROJECT_VENV "Prefer the project's .venv for Python" ON)
 
 if(THOR_USE_PROJECT_VENV)
     set(_thor_venv_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
-
     message(STATUS "Thor: using project venv Python at ${_thor_venv_python}")
 
     if(NOT DEFINED Python3_EXECUTABLE)
@@ -354,6 +353,16 @@ if(THOR_USE_PROJECT_VENV)
                 "Python executable to use for Thor bindings")
     endif()
 endif()
+
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+
+execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -m nanobind --cmake_dir
+        OUTPUT_VARIABLE nanobind_ROOT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+find_package(nanobind CONFIG REQUIRED)
 
 option(THOR_BUILD_PYTHON "Build Python bindings" ON)
 if(THOR_BUILD_PYTHON)
