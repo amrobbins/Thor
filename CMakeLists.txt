@@ -289,7 +289,7 @@ set_target_properties(createMasterHeader PROPERTIES
 add_custom_command(
         OUTPUT ${CMAKE_BINARY_DIR}/headerlist.txt
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMAND find . -name "*.h" | grep -v ./googletest/ | grep -v ./googlemock/ | grep -v ./_deps/ | grep -v ./build/ | grep -v ./test/ > ${CMAKE_BINARY_DIR}/headerlist.txt
+        COMMAND find . -name "*.h" | grep -v ./googletest/ | grep -v ./googlemock/ | grep -v ./_deps/ | grep -v ./build/ | grep -v ./test/ | grep -v ./.venv/ | grep -v ./bindings > ${CMAKE_BINARY_DIR}/headerlist.txt
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         DEPENDS ${THOR_SOURCES}
         COMMENT "Collecting all headers into headerlist.txt"
@@ -308,3 +308,21 @@ add_custom_command(
 add_custom_target(ThorHeader ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/Thor.h)
 add_dependencies(Thor ThorHeader)
 
+# Python bindings
+option(THOR_USE_PROJECT_VENV "Prefer the project's .venv for Python" ON)
+
+if(THOR_USE_PROJECT_VENV)
+    set(_thor_venv_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+
+    message(STATUS "Thor: using project venv Python at ${_thor_venv_python}")
+
+    if(NOT DEFINED Python3_EXECUTABLE)
+        set(Python3_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH
+                "Python executable to use for Thor bindings")
+    endif()
+endif()
+
+option(THOR_BUILD_PYTHON "Build Python bindings" ON)
+if(THOR_BUILD_PYTHON)
+    add_subdirectory(bindings/python)
+endif()

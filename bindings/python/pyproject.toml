@@ -1,0 +1,56 @@
+[build-system]
+requires = [
+    "scikit-build-core>=0.11.6",
+    "pybind11>=3.0.1",
+    "numpy>=2.3.4",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "thor"
+version = "0.0.1.dev0"
+description = "Thor deep learning framework (C++/CUDA) Python bindings"
+requires-python = ">=3.10"
+license = { file = "../../LICENSE" }
+authors = [
+    { name = "Andrew Robbins" },
+]
+dependencies = [
+    "numpy>=2.3.4",
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "mypy>=1.10",
+    "ruff>=0.6",
+    "build>=1.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/amrobbins/Thor"
+Repository = "https://github.com/amrobbins/Thor"
+"Bug Tracker" = "https://github.com/amrobbins/Thor/issues"
+
+[tool.scikit-build]
+# top-level CMake project
+cmake.source-dir = "../.."
+# Keep scikit-build’s CMake builds inside the python dir so they don’t clash with manual ./build or CLion builds.
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+THOR_BUILD_PYTHON = true

@@ -2,7 +2,8 @@ if [ "$EUID" == 0 ]
   then echo "Dont run this as root, run as you. Exiting."
   exit
 fi
-find ./ -name "*.cpp" | egrep -v "./googletest/|./build/|./cmake-build" | xargs clang-format -i
-find ./ -name "*.cu" | egrep -v "./googletest/|./build/|./cmake-build" | xargs clang-format -i
-find ./ -name "*.h" | egrep -v "./googletest/|./build/|CImg.h|./cmake-build" | xargs clang-format -i
+find ./ -name "*.cpp" | egrep -v "./googletest/|./build/|./cmake-build|./.venv" | xargs clang-format -i
+find ./ -name "*.cu" | egrep -v "./googletest/|./build/|./cmake-build|./.venv" | xargs clang-format -i
+find ./ -name "*.h" | egrep -v "./googletest/|./build/|CImg.h|./cmake-build|./.venv" | xargs clang-format -i
 
+# FIXME: it would be better to explicily visit only the directories that should be formatted.
