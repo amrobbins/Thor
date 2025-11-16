@@ -1,5 +1,38 @@
 cmake_minimum_required(VERSION 3.22)
-project(Thor VERSION 1.0 LANGUAGES CXX CUDA)
+
+# Read THOR_VERSION from ThorVersion.h.in
+file(READ "${CMAKE_SOURCE_DIR}/ThorVersion.h.in" _thor_version_header)
+
+# 1) Full version string, e.g. "0.1.1.dev0"
+string(
+        REGEX MATCH
+        "#define[ \t]+THOR_VERSION[ \t]+\"([^\"]*)\""
+        _thor_version_match
+        "${_thor_version_header}"
+)
+
+if(NOT _thor_version_match)
+    message(FATAL_ERROR "Could not find THOR_VERSION in ThorVersion.h.in")
+endif()
+
+set(THOR_VERSION_FULL "${CMAKE_MATCH_1}")  # e.g. "0.1.1.dev0"
+
+# 2) Numeric prefix for CMake project version, e.g. "0.1.1"
+string(
+        REGEX MATCH
+        "^[0-9]+(\\.[0-9]+)*"
+        _thor_version_numeric_match
+        "${THOR_VERSION_FULL}"
+)
+
+if(NOT _thor_version_numeric_match)
+    message(FATAL_ERROR "THOR_VERSION must start with numeric semver, got ${THOR_VERSION_FULL}")
+endif()
+
+set(THOR_VERSION_NUMERIC "${CMAKE_MATCH_0}")  # "0.1.1"
+
+# 3) Use numeric for CMake's project version
+project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES CXX CUDA)
 
 # ============================================================
 # Global settings

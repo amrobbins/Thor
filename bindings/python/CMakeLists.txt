@@ -20,10 +20,10 @@ file(GLOB_RECURSE THOR_PY_BIND_SOURCES CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
         )
 
-pybind11_add_module(_thor
+pybind11_add_module(thor
         ${THOR_PY_BIND_SOURCES}
         )
 
 # 5) Link to the core Thor library
-target_link_libraries(_thor PRIVATE Thor)
-target_compile_features(_thor PRIVATE cxx_std_20)
+target_link_libraries(thor PRIVATE Thor)
+target_compile_features(thor PRIVATE cxx_std_20)

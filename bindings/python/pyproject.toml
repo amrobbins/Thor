@@ -8,7 +8,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "thor"
-version = "0.0.1.dev0"
+dynamic = ["version"]
 description = "Thor deep learning framework (C++/CUDA) Python bindings"
 requires-python = ">=3.10"
 license = { file = "../../LICENSE" }
@@ -39,6 +39,7 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.6",
     "build>=1.2",
+    "pybind11-stubgen>=2.5.5"
 ]
 
 [project.urls]
@@ -54,3 +55,15 @@ build-dir = "build/{wheel_tag}"
 
 [tool.scikit-build.cmake.define]
 THOR_BUILD_PYTHON = true
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "../../ThorVersion.h.in"
+regex = '^#define\\s+THOR_VERSION\\s+"v?(?P<value>.+)"'
+result = "{value}"
+
+[tool.scikit-build.sdist]
+include = ["thor.pyi", "py.typed"]
+
+[tool.scikit-build.wheel]
+include = ["thor.pyi", "py.typed"]
