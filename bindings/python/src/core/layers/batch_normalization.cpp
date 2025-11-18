@@ -18,8 +18,8 @@ void bind_batch_normalization(nb::module_ &m) {
             [](BatchNormalization *self,
                Network &network,
                const Tensor &feature_input,
-               float exponential_running_average_factor,
-               float epsilon) {
+               float exponential_running_average_factor = 0.05,
+               float epsilon = 0.0001) {
                 BatchNormalization::Builder builder;
 
                 BatchNormalization built = builder.network(network)

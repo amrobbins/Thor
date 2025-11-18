@@ -17,17 +17,8 @@ class Elu : public Activation {
     virtual std::string getLayerType() const { return "Elu"; }
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const {
-        assert(initialized);
-        assert(featureInput.isPresent());
-        assert(featureOutput.isPresent());
-
-        nlohmann::json j;
-        j["factory"] = Layer::Factory::Activation.value();
-        j["version"] = getLayerVersion();
-        j["layer_type"] = to_snake_case(getLayerType());
+        nlohmann::json j = Activation::serialize(storageDir, stream);
         j["alpha"] = alpha;
-        j["feature_input"] = featureInput.get().serialize();
-        j["feature_output"] = featureOutput.get().serialize();
         return j;
     }
 
