@@ -16,7 +16,9 @@ class CategoricalAccuracy : public Metric {
 
     virtual std::string getLayerType() const { return "CategoricalAccuracy"; }
 
-   private:
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
+
     enum class LabelType { INDEX = 5, ONE_HOT };
 
    protected:
@@ -130,5 +132,11 @@ class CategoricalAccuracy::Builder {
     Optional<LabelType> _labelType;
     Optional<uint32_t> _numClasses;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(CategoricalAccuracy::LabelType,
+                             {
+                                 {CategoricalAccuracy::LabelType::ONE_HOT, "one_hot"},
+                                 {CategoricalAccuracy::LabelType::INDEX, "index"},
+                             })
 
 }  // namespace Thor

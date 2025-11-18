@@ -16,7 +16,7 @@ class Metric : public Layer {
     Metric() { numInputConnectionsMade = 0; }
     virtual ~Metric() {}
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
     static void deserialize(const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
@@ -32,6 +32,7 @@ class Metric : public Layer {
         assert(numInputConnectionsMade < 3);
     }
 
+    virtual Tensor getPredictions() const { return getFeatureInput(); }
     virtual Tensor getLabels() const { return labelsTensor; }
     virtual Tensor getMetric() const { return metricTensor; }
     virtual Optional<Tensor> getFeatureOutput() const { return getMetric(); }

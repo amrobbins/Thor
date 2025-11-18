@@ -25,4 +25,20 @@ void Metric::deserialize(const nlohmann::json &j, Network *network) {
     deserializer(j, network);
 }
 
+json Metric::serialize(const string &storageDir, Stream stream) const {
+    json j;
+    j["factory"] = Layer::Factory::Metric.value();
+    j["version"] = getLayerVersion();
+    j["layer_type"] = to_snake_case(getLayerType());
+
+    // Input connections
+    j["predictions"] = getPredictions().serialize();
+    j["labels"] = labelsTensor.serialize();
+
+    // Output connections
+    j["metric"] = metricTensor.serialize();
+
+    return j;
+}
+
 }  // namespace Thor
