@@ -11,6 +11,17 @@ using namespace std;
 
 void bind_drop_out(nb::module_ &m);
 void bind_batch_normalization(nb::module_ &m);
+void bind_concatenate(nb::module_ &m);
+void bind_convolution_2d(nb::module_ &m);
+void bind_flatten(nb::module_ &m);
+void bind_fully_connected(nb::module_ &m);
+void bind_inception(nb::module_ &m);
+void bind_network_input(nb::module_ &m);
+void bind_network_output(nb::module_ &m);
+void bind_pooling(nb::module_ &m);
+void bind_reshape(nb::module_ &m);
+void bind_stub(nb::module_ &m);
+void bind_type_converter(nb::module_ &m);
 
 void bind_layers(nb::module_ &layers) {
     using Thor::DropOut;
@@ -24,14 +35,13 @@ void bind_layers(nb::module_ &layers) {
 
     bind_batch_normalization(layers);
     bind_drop_out(layers);
-
-    layers.def("Concatenate", []() { return "temp"; });
+    bind_concatenate(layers);
     layers.def("Convolution2d", []() { return "temp"; });
-    layers.def("Flatten", []() { return "temp"; });
+    bind_flatten(layers);
     layers.def("FullyConnected", []() { return "temp"; });
     layers.def("Inception", []() { return "temp"; });
-    layers.def("NetworkInput", []() { return "temp"; });
-    layers.def("NetworkOutput", []() { return "temp"; });
+    bind_network_input(layers);
+    bind_network_output(layers);
     layers.def("Pooling", []() { return "temp"; });
     layers.def("Reshape", []() { return "temp"; });
     layers.def("Stub", []() { return "temp"; });
