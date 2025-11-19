@@ -231,6 +231,7 @@ class Pooling::Builder {
     // where outputSize == inputSize, so
     // padding = ((inputSize - 1) * windowStride + windowSize - inputSize) / 2
     //         = ((windowStride-1)*inputSize - windowStride + windowSize) / 2
+    // FIXME: Get rid of same padding, it is not even always possible without different sizes on each side, and I don't have that.
     static uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t windowSize) {
         // And round up.
         return (1 + (stride - 1) * inputSize - stride + windowSize) / 2;

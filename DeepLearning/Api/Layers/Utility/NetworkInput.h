@@ -93,7 +93,7 @@ class NetworkInput::Builder {
         return *this;
     }
 
-    virtual NetworkInput::Builder &name(std::string _name) {
+    virtual NetworkInput::Builder &name(const std::string &_name) {
         assert(!_name.empty());
         assert(this->_name.isEmpty());
         this->_name = _name;
@@ -101,13 +101,13 @@ class NetworkInput::Builder {
     }
 
     // Note: dimensions do not include batch size
-    virtual NetworkInput::Builder &dimensions(std::vector<uint64_t> _dimensions) {
+    virtual NetworkInput::Builder &dimensions(const std::vector<uint64_t> &_dimensions) {
         assert(!_dimensions.empty());
         this->_dimensions = _dimensions;
         return *this;
     }
 
-    virtual NetworkInput::Builder &dataType(Tensor::DataType _dataType) {
+    virtual NetworkInput::Builder &dataType(const Tensor::DataType &_dataType) {
         assert(Tensor::dataTypeValid(_dataType));
         this->_dataType = _dataType;
         return *this;

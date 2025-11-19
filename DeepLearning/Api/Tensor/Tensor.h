@@ -16,7 +16,24 @@ class Network;
 
 class Tensor {
    public:
-    enum class DataType { PACKED_BOOLEAN = 7, BOOLEAN, INT8, UINT8, INT16, UINT16, INT32, UINT32, INT64, UINT64, FP16, FP32, FP64 };
+    enum class DataType {
+        PACKED_BOOLEAN = 7,
+        BOOLEAN,
+        INT8,
+        UINT8,
+        INT16,
+        UINT16,
+        INT32,
+        UINT32,
+        INT64,
+        UINT64,
+        FP8_E4M3,
+        FP8_E5M2,
+        BF16,
+        FP16,
+        FP32,
+        FP64
+    };
 
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, std::vector<uint64_t> dimensions)

@@ -5,6 +5,8 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
+#include "bindings/python/src/core/binding_types.h"
+
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -17,24 +19,32 @@ void bind_batch_normalization(nb::module_ &m) {
             "__init__",
             [](BatchNormalization *self,
                Network &network,
-               const Tensor &feature_input,
+               TensorList feature_inputs,
                float exponential_running_average_factor = 0.05,
                float epsilon = 0.0001) {
                 BatchNormalization::Builder builder;
+                builder.network(network).exponentialRunningAverageFactor(exponential_running_average_factor).epsilon(epsilon);
 
-                BatchNormalization built = builder.network(network)
-                                               .featureInput(feature_input)
-                                               .exponentialRunningAverageFactor(exponential_running_average_factor)
-                                               .epsilon(epsilon)
-                                               .build();
+                for (nb::handle h : feature_inputs) {
+                    Tensor &t = nb::cast<Tensor &>(h);
+                    builder.featureInput(t);
+                }
 
                 // Move the batchNormalization layer into the pre-allocated but uninitialized memory at self
-                new (self) BatchNormalization(std::move(built));
+                new (self) BatchNormalization(std::move(builder.build()));
             },
             "network"_a,
             "feature_input"_a,
             "exponential_running_average_factor"_a,
             "epsilon"_a,
+
+            nb::sig("def __init__(self, "
+                    "network: thor.Network, "
+                    "feature_inputs: list[thor.Tensor], "
+                    "exponential_running_average_factor: float = 0.05, "
+                    "epsilon: float = 0.0001"
+                    ") -> None"),
+
             R"nbdoc(
             Create and attach a BatchNormalization layer to a Network.
 
@@ -49,6 +59,8 @@ void bind_batch_normalization(nb::module_ &m) {
             epsilon : float
                 FIXME.
             )nbdoc")
+        //.def("get_feature_output", &BatchNormalization::getFeatureOutput)
+        .def("get_feature_outputs", &BatchNormalization::getFeatureOutputs)
         .def("get_exponential_running_average_factor", &BatchNormalization::getExponentialRunningAverageFactor)
         .def("get_epsilon", &BatchNormalization::getEpsilon);
 }

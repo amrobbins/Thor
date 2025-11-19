@@ -62,7 +62,7 @@ class NetworkOutput::Builder {
         assert(_network.isPresent());
         assert(!_inputTensor.isEmpty());
         if (_dataType.isEmpty())
-            _dataType = Tensor::DataType::FP32;
+            _dataType = _inputTensor.get().getDataType();
 
         NetworkOutput networkOutput;
         if (_name.isPresent())
@@ -91,20 +91,20 @@ class NetworkOutput::Builder {
         return *this;
     }
 
-    virtual NetworkOutput::Builder &name(std::string _name) {
+    virtual NetworkOutput::Builder &name(const std::string &_name) {
         assert(!_name.empty());
         assert(this->_name.isEmpty());
         this->_name = _name;
         return *this;
     }
 
-    virtual NetworkOutput::Builder &inputTensor(Tensor _inputTensor) {
+    virtual NetworkOutput::Builder &inputTensor(const Tensor &_inputTensor) {
         assert(_inputTensor.isInitialized());
         this->_inputTensor = _inputTensor;
         return *this;
     }
 
-    virtual NetworkOutput::Builder &dataType(Tensor::DataType _dataType) {
+    virtual NetworkOutput::Builder &dataType(const Tensor::DataType &_dataType) {
         assert(Tensor::dataTypeValid(_dataType));
         this->_dataType = _dataType;
         return *this;
