@@ -36,7 +36,7 @@ class Tensor {
     };
 
     Tensor() : initialized(false) {}
-    Tensor(DataType dataType, std::vector<uint64_t> dimensions)
+    Tensor(DataType dataType, const std::vector<uint64_t> &dimensions)
         : id(nextId.fetch_add(1)), dataType(dataType), dimensions(dimensions), initialized(true) {
         originalId = id;
         // When dimension[0] == 0, it means copy the batch size when it is known.
@@ -120,6 +120,10 @@ class Tensor {
                 return 1;
             case DataType::UINT8:
                 return 1;
+            case DataType::FP8_E4M3:
+                return 1;
+            case DataType::FP8_E5M2:
+                return 1;
             case DataType::INT16:
                 return 2;
             case DataType::UINT16:
@@ -132,6 +136,8 @@ class Tensor {
                 return 8;
             case DataType::UINT64:
                 return 8;
+            case DataType::BF16:
+                return 2;
             case DataType::FP16:
                 return 2;
             case DataType::FP32:

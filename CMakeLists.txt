@@ -201,7 +201,7 @@ target_compile_options(Thor PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
         )
 
-target_compile_definitions(Thor PRIVATE
+target_compile_definitions(Thor PUBLIC
         $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
         $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
         $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG>
@@ -211,6 +211,16 @@ target_compile_definitions(Thor PRIVATE
 target_compile_options(Thor PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-forward-unknown-to-host-compiler --Werror all-warnings -Xcompiler -fPIC>
         )
+
+option(THOR_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds" OFF)
+if(THOR_ENABLE_SANITIZERS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(SANITIZE_FLAGS
+            "-fsanitize=address,undefined"
+            "-fno-omit-frame-pointer"
+            )
+    add_compile_options(${SANITIZE_FLAGS})
+    add_link_options(${SANITIZE_FLAGS})
+endif()
 
 # ============================================================
 # Dependencies: nlohmann/json, pthread, dl
@@ -259,9 +269,9 @@ gtest_discover_tests(thor_tests)
 
 # Per-configuration flags
 target_compile_definitions(thor_tests PRIVATE
-        $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}">
-        $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64 SOURCE_DIR="${CMAKE_SOURCE_DIR}">
-        $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        $<$<CONFIG:Release>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        $<$<CONFIG:RelWithDebInfo>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        $<$<CONFIG:Debug>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
         )
 
 target_compile_options(thor_tests PRIVATE

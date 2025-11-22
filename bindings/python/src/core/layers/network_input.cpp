@@ -5,8 +5,6 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include "bindings/python/src/core/binding_types.h"
-
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -35,7 +33,7 @@ void bind_network_input(nb::module_ &m) {
                     "network: thor.Network, "
                     "name: str, "
                     "dimensions: list[int], "
-                    "data_type: thor.DataType"
+                    "data_type: thor.Tensor.DataType"
                     ") -> None"),
 
             R"nbdoc(
@@ -53,7 +51,7 @@ void bind_network_input(nb::module_ &m) {
                 Note: the batch dimension is never specified in API layer tensors,
                       the batch dimension is only added when stamping down a physical network instance.
             data_type : thor.DataType
-                Data type of the input tensor (e.g. thor.DataType.fp16).
+                Data type of the input tensor (e.g. thor.Tensor.DataType.fp16).
             )nbdoc")
         .def("get_feature_output", &NetworkInput::getFeatureOutput);
 }
