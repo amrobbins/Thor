@@ -4,7 +4,9 @@ namespace nb = nanobind;
 
 // Forward declarations for per-feature binders
 void bind_version(nb::module_ &m);
+void bind_network(nb::module_ &m);
 void bind_tensor(nb::module_ &m);
+
 void bind_activations(nb::module_ &m);
 void bind_layers(nb::module_ &layers);
 void bind_losses(nb::module_ &m);
@@ -16,6 +18,7 @@ NB_MODULE(thor, m) {
 
     bind_version(m);
     bind_tensor(m);
+    bind_network(m);
 
     auto activations = m.def_submodule("activations");
     bind_activations(activations);
