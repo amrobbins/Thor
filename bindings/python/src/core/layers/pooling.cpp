@@ -21,35 +21,35 @@ void bind_pooling(nb::module_ &m) {
                                     Network &network,
                                     Tensor feature_input,
                                     Pooling::Type type,
-                                    uint32_t window_height,
-                                    uint32_t window_width,
-                                    uint32_t vertical_stride,
-                                    uint32_t horizontal_stride,
-                                    uint32_t vertical_padding,
-                                    uint32_t horizontal_padding,
-                                    bool same_padding,
-                                    bool vertical_same_padding,
-                                    bool horizontal_same_padding) {
+                                    uint32_t windowHeight,
+                                    uint32_t windowWidth,
+                                    uint32_t verticalStride,
+                                    uint32_t horizontalStride,
+                                    uint32_t verticalPadding,
+                                    uint32_t horizontalPadding,
+                                    bool samePadding,
+                                    bool verticalSamePadding,
+                                    bool horizontalSamePadding) {
                                      Pooling::Builder builder;
                                      builder.network(network)
                                          .featureInput(feature_input)
                                          .type(type)
-                                         .windowHeight(window_height)
-                                         .windowWidth(window_width)
-                                         .verticalStride(vertical_stride)
-                                         .horizontalStride(horizontal_stride);
+                                         .windowHeight(windowHeight)
+                                         .windowWidth(windowWidth)
+                                         .verticalStride(verticalStride)
+                                         .horizontalStride(horizontalStride);
 
                                      // These can't all be specified at the same time, but logic to enforce that
                                      // is on the implementation side, not the binding side.
-                                     if (vertical_padding != 0)
-                                         builder.verticalPadding(vertical_padding);
-                                     if (horizontal_padding != 0)
-                                         builder.horizontalPadding(horizontal_padding);
-                                     if (same_padding)
+                                     if (verticalPadding != 0)
+                                         builder.verticalPadding(verticalPadding);
+                                     if (horizontalPadding != 0)
+                                         builder.horizontalPadding(horizontalPadding);
+                                     if (samePadding)
                                          builder.samePadding();
-                                     if (vertical_same_padding != 0)
+                                     if (verticalSamePadding)
                                          builder.verticalSamePadding();
-                                     if (horizontal_same_padding != 0)
+                                     if (horizontalSamePadding)
                                          builder.horizontalSamePadding();
 
                                      Pooling built = builder.build();

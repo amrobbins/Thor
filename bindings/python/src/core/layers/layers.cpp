@@ -25,8 +25,6 @@ void bind_reshape(nb::module_ &m);
 void bind_stub(nb::module_ &m);
 void bind_type_converter(nb::module_ &m);
 
-// void bind_debug(nb::module_ &m);
-
 void bind_layers(nb::module_ &layers) {
     layers.doc() = "Thor layers";
 
@@ -34,18 +32,16 @@ void bind_layers(nb::module_ &layers) {
     nb::class_<MultiConnectionLayer, Layer>(layers, "MultiConnectionLayer");
     nb::class_<TrainableWeightsBiasesLayer, MultiConnectionLayer>(layers, "TrainableWeightsBiasesLayer");
 
-    // bind_debug(layers);
-
     bind_batch_normalization(layers);
     bind_drop_out(layers);
     bind_concatenate(layers);
-    layers.def("Convolution2d", []() { return "temp"; });
+    bind_convolution_2d(layers);
     bind_flatten(layers);
     bind_fully_connected(layers);
     bind_network_input(layers);
     bind_network_output(layers);
     bind_pooling(layers);
-    layers.def("Reshape", []() { return "temp"; });
-    layers.def("Stub", []() { return "temp"; });
+    bind_reshape(layers);
+    bind_stub(layers);
     bind_type_converter(layers);
 }
