@@ -19,7 +19,8 @@ void bind_pooling(nb::module_ &m) {
                                  "__init__",
                                  [](Pooling *self,
                                     Network &network,
-                                    const Pooling::Type &type,
+                                    Tensor feature_input,
+                                    Pooling::Type type,
                                     uint32_t window_height,
                                     uint32_t window_width,
                                     uint32_t vertical_stride,
@@ -29,12 +30,14 @@ void bind_pooling(nb::module_ &m) {
                                     bool same_padding,
                                     bool vertical_same_padding,
                                     bool horizontal_same_padding) {
-                                     Pooling::Builder builder = builder.network(network)
-                                                                    .type(type)
-                                                                    .windowHeight(window_height)
-                                                                    .windowWidth(window_width)
-                                                                    .verticalStride(vertical_stride)
-                                                                    .horizontalStride(horizontal_stride);
+                                     Pooling::Builder builder;
+                                     builder.network(network)
+                                         .featureInput(feature_input)
+                                         .type(type)
+                                         .windowHeight(window_height)
+                                         .windowWidth(window_width)
+                                         .verticalStride(vertical_stride)
+                                         .horizontalStride(horizontal_stride);
 
                                      // These can't all be specified at the same time, but logic to enforce that
                                      // is on the implementation side, not the binding side.
@@ -55,6 +58,7 @@ void bind_pooling(nb::module_ &m) {
                                      new (self) Pooling(std::move(built));
                                  },
                                  "network"_a,
+                                 "feature_input"_a,
                                  "type"_a,
                                  "window_height"_a,
                                  "window_width"_a,
@@ -68,6 +72,7 @@ void bind_pooling(nb::module_ &m) {
 
                                  nb::sig("def __init__(self, "
                                          "network: thor.Network, "
+                                         "feature_input: thor.Tensor, "
                                          "type: thor.Pooling.Type, "
                                          "window_height: int, "
                                          "window_width: int, "
@@ -77,7 +82,7 @@ void bind_pooling(nb::module_ &m) {
                                          "horizontal_padding: int = 0, "
                                          "same_padding: bool = False, "
                                          "vertical_same_padding: bool = False, "
-                                         "horizontal_same_padding: bool = False "
+                                         "horizontal_same_padding: bool = False"
                                          ") -> None"),
 
                                  R"nbdoc(

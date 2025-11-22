@@ -25,7 +25,7 @@ void bind_reshape(nb::module_ &m);
 void bind_stub(nb::module_ &m);
 void bind_type_converter(nb::module_ &m);
 
-void bind_debug(nb::module_ &m);
+// void bind_debug(nb::module_ &m);
 
 void bind_layers(nb::module_ &layers) {
     layers.doc() = "Thor layers";
@@ -34,7 +34,7 @@ void bind_layers(nb::module_ &layers) {
     nb::class_<MultiConnectionLayer, Layer>(layers, "MultiConnectionLayer");
     nb::class_<TrainableWeightsBiasesLayer, MultiConnectionLayer>(layers, "TrainableWeightsBiasesLayer");
 
-    bind_debug(layers);
+    // bind_debug(layers);
 
     bind_batch_normalization(layers);
     bind_drop_out(layers);
