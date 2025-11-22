@@ -421,8 +421,11 @@ class Convolution2d::Builder {
     // padding = ((inputSize - 1) * filterStride + filterSize - inputSize) / 2
     // = ((filterStride-1)*inputSize - filterStride + filterSize) / 2
     static uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t filterSize) {
-        // And round up.
-        return (1 + (stride - 1) * inputSize - stride + filterSize) / 2;
+        if (((stride - 1) * inputSize - stride + filterSize) % 2 == 1)
+            throw std::invalid_argument(
+                "Can't compute SAME padding: required total padding is odd, but this implementation requires equal padding on both sides.");
+
+        return ((stride - 1) * inputSize - stride + filterSize) / 2;
     }
 
    private:

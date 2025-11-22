@@ -21,23 +21,10 @@ using namespace Thor;
 
 using DataType = Thor::Tensor::DataType;
 
-Activation::Builder *getDefaultActivation() {
+Activation::Builder *getDefaultFCActivation() {
     static Relu::Builder defaultActivation;
     return &defaultActivation;
 }
-
-// FIXME: get rid of this when sure won't need it again.
-// void bind_debug(nb::module_ &m) {
-//     m.def("debug_fullyconnected_layout", []() {
-//         FullyConnected dummy;
-//         std::size_t size = sizeof(FullyConnected);
-//         std::size_t offset =
-//             reinterpret_cast<char*>(&dummy.featureInputs) -
-//             reinterpret_cast<char*>(&dummy);
-//         //return std::make_tuple(size, offset);
-//         printf("size %ld offset %ld\n", size, offset);
-//     });
-// }
 
 void bind_fully_connected(nb::module_ &m) {
     nb::class_<FullyConnected, TrainableWeightsBiasesLayer>(m, "FullyConnected")
@@ -57,10 +44,7 @@ void bind_fully_connected(nb::module_ &m) {
                float batch_norm_exp_running_avg_factor,
                float batch_norm_epsilon) {
                 FullyConnected::Builder builder;
-                builder.network(network)
-                    .featureInput(featureInput)
-                    .numOutputFeatures(numOutputFeatures)
-                    .hasBias(hasBias);
+                builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
                 if (!activation.has_value())
                     builder.noActivation();  // Explicitly no activation applied
@@ -85,7 +69,7 @@ void bind_fully_connected(nb::module_ &m) {
             "feature_input"_a,
             "num_output_features"_a,
             "has_bias"_a = true,
-            nb::arg("activation").none() = getDefaultActivation(),
+            nb::arg("activation").none() = getDefaultFCActivation(),
             "weights_initializer"_a = nb::none(),
             "biases_initializer"_a = nb::none(),
             "add_drop_out"_a = false,
@@ -120,7 +104,7 @@ void bind_fully_connected(nb::module_ &m) {
         and optionally followed by a non-linear activation.
 
         The connection order of the optional layers, when used, is the following:
-        batch norm -> drop out -> fully connected -> activation
+        [batch norm] -> [drop out] -> [fully connected] -> [activation]
 
         Parameters
         ----------
@@ -134,28 +118,27 @@ void bind_fully_connected(nb::module_ &m) {
             Whether to learn an additive bias term.
         activation : thor.Activation or None, default thor.activations.Relu()
             Activation to apply after the linear transform (and optional
-            batch normalization). Pass ``None`` to keep the layer purely
-            linear.
+            batch normalization). Pass ``None`` not use any activation and
+            keep the layer purely linear.
         weights_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
-            Initializer for the weight matrix. If omitted or ``None``,
-            the layer’s default weight initializer is used (typically
-            Glorot/Xavier).
+            Initializer for the weight matrix.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
-            Initializer for the bias vector. If omitted or ``None``,
-            the layer’s default bias initializer is used.
+            Initializer for the bias vector.
         add_drop_out : bool, default False
-            If True, inserts a DropOut sub-layer after this layer.
+            If True, inserts a DropOut layer, sequenced as described above.
         drop_proportion : float, default 0.0
             Fraction of units to drop when dropout is enabled.
             Ignored if ``add_drop_out`` is False.
         add_batch_normalization : bool, default False
-            If True, inserts a batch-normalization sub-layer on this
-            layer’s input.
+            If True, inserts a batch-normalization layer, sequenced as
+            described above.
         batch_norm_exp_running_avg_factor : float, default 0.05
             Exponential running-average factor used to update the batch
             normalization mean and variance statistics during training.
+            Ignored if ``add_batch_normalization`` is False.
         batch_norm_epsilon : float, default 1e-4
             Small constant added to the variance in batch normalization
             for numerical stability.
+            Ignored if ``add_batch_normalization`` is False.
         )nbdoc");
 }
