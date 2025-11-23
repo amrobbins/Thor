@@ -9,16 +9,17 @@ using namespace std;
 using namespace Thor;
 
 void bind_soft_plus(nb::module_ &m) {
-    nb::class_<SoftPlus::Builder, Activation::Builder>(m, "SoftPlus").def(
-        "__init__",
-        [](SoftPlus::Builder *self) {
-            // Create a softPlus builder in the pre-allocated but uninitialized memory at self
-            new (self) SoftPlus::Builder();
-        },
+    nb::class_<SoftPlus::Builder, Activation::Builder>(m, "SoftPlus")
+        .def(
+            "__init__",
+            [](SoftPlus::Builder *self) {
+                // Create a softPlus builder in the pre-allocated but uninitialized memory at self
+                new (self) SoftPlus::Builder();
+            },
 
-        nb::sig("def __init__(self) -> None"),
+            nb::sig("def __init__(self) -> None"),
 
-        R"nbdoc(
+            R"nbdoc(
             SoftPlus activation.
 
             SoftPlus is a smooth approximation to ReLU, defined

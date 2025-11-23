@@ -9,16 +9,17 @@ using namespace std;
 using namespace Thor;
 
 void bind_softmax(nb::module_ &m) {
-    nb::class_<Softmax::Builder, Activation::Builder>(m, "Softmax").def(
-        "__init__",
-        [](Softmax::Builder *self) {
-            // Create a softmax builder in the pre-allocated but uninitialized memory at self
-            new (self) Softmax::Builder();
-        },
+    nb::class_<Softmax::Builder, Activation::Builder>(m, "Softmax")
+        .def(
+            "__init__",
+            [](Softmax::Builder *self) {
+                // Create a softmax builder in the pre-allocated but uninitialized memory at self
+                new (self) Softmax::Builder();
+            },
 
-        nb::sig("def __init__(self) -> None"),
+            nb::sig("def __init__(self) -> None"),
 
-        R"nbdoc(
+            R"nbdoc(
             Softmax activation.
 
             Softmax is typically applied along the last (feature) dimension of

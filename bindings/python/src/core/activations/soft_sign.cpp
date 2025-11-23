@@ -9,16 +9,17 @@ using namespace std;
 using namespace Thor;
 
 void bind_soft_sign(nb::module_ &m) {
-    nb::class_<SoftSign::Builder, Activation::Builder>(m, "SoftSign").def(
-        "__init__",
-        [](SoftSign::Builder *self) {
-            // Create a softSign builder in the pre-allocated but uninitialized memory at self
-            new (self) SoftSign::Builder();
-        },
+    nb::class_<SoftSign::Builder, Activation::Builder>(m, "SoftSign")
+        .def(
+            "__init__",
+            [](SoftSign::Builder *self) {
+                // Create a softSign builder in the pre-allocated but uninitialized memory at self
+                new (self) SoftSign::Builder();
+            },
 
-        nb::sig("def __init__(self) -> None"),
+            nb::sig("def __init__(self) -> None"),
 
-        R"nbdoc(
+            R"nbdoc(
             SoftSign activation.
 
             SoftSign is a smooth, bounded activation defined elementwise as
