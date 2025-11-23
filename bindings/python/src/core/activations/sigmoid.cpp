@@ -9,16 +9,17 @@ using namespace std;
 using namespace Thor;
 
 void bind_sigmoid(nb::module_ &m) {
-    nb::class_<Sigmoid::Builder, Activation::Builder>(m, "Sigmoid").def(
-        "__init__",
-        [](Sigmoid::Builder *self) {
-            // Create a sigmoid builder in the pre-allocated but uninitialized memory at self
-            new (self) Sigmoid::Builder();
-        },
+    nb::class_<Sigmoid::Builder, Activation::Builder>(m, "Sigmoid")
+        .def(
+            "__init__",
+            [](Sigmoid::Builder *self) {
+                // Create a sigmoid builder in the pre-allocated but uninitialized memory at self
+                new (self) Sigmoid::Builder();
+            },
 
-        nb::sig("def __init__(self) -> None"),
+            nb::sig("def __init__(self) -> None"),
 
-        R"nbdoc(
+            R"nbdoc(
             Sigmoid activation.
 
             Applied elementwise, this activation is defined as

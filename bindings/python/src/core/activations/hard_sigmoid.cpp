@@ -9,16 +9,17 @@ using namespace std;
 using namespace Thor;
 
 void bind_hard_sigmoid(nb::module_ &m) {
-    nb::class_<HardSigmoid::Builder, Activation::Builder>(m, "HardSigmoid").def(
-        "__init__",
-        [](HardSigmoid::Builder *self) {
-            // Create a hard_sigmoid builder in the pre-allocated but uninitialized memory at self
-            new (self) HardSigmoid::Builder();
-        },
+    nb::class_<HardSigmoid::Builder, Activation::Builder>(m, "HardSigmoid")
+        .def(
+            "__init__",
+            [](HardSigmoid::Builder *self) {
+                // Create a hard_sigmoid builder in the pre-allocated but uninitialized memory at self
+                new (self) HardSigmoid::Builder();
+            },
 
-        nb::sig("def __init__(self) -> None"),
+            nb::sig("def __init__(self) -> None"),
 
-        R"nbdoc(
+            R"nbdoc(
             Hard sigmoid activation.
 
             Hard-sigmoid is a piecewise-linear approximation to the

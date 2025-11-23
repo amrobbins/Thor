@@ -9,16 +9,17 @@ using namespace std;
 using namespace Thor;
 
 void bind_swish(nb::module_ &m) {
-    nb::class_<Swish::Builder, Activation::Builder>(m, "Swish").def(
-        "__init__",
-        [](Swish::Builder *self) {
-            // Create a swish builder in the pre-allocated but uninitialized memory at self
-            new (self) Swish::Builder();
-        },
+    nb::class_<Swish::Builder, Activation::Builder>(m, "Swish")
+        .def(
+            "__init__",
+            [](Swish::Builder *self) {
+                // Create a swish builder in the pre-allocated but uninitialized memory at self
+                new (self) Swish::Builder();
+            },
 
-        nb::sig("def __init__(self) -> None"),
+            nb::sig("def __init__(self) -> None"),
 
-        R"nbdoc(
+            R"nbdoc(
             Swish (SiLU) activation.
 
             Swish is a smooth, non-monotonic activation defined elementwise as
