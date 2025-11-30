@@ -119,9 +119,9 @@ json Convolution2d::serialize(const string &storageDir, Stream stream) const {
     j["outputs"] = outputs;
 
     // Dump the weights to a file and record its name
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = network->getStampedNetworks();
-    assert(!stampedNetworks.empty());
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetworks[0].getPhysicalLayerFromApiLayer(getId());
+    assert(network->getNumStamps() >= 1);
+    ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer =
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
     assert(twbLayer != nullptr);
@@ -205,71 +205,88 @@ void Convolution2d::deserialize(const json &j, Network *network) {
     convolution2d.addToNetwork(network);
 }
 
-vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
                                         bool isFirstStamp,
-                                        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                        Optional<Event> sisterLayerLoadedEvent,
+                                        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
+                                        Optional<Event> sisterPhysicalLayerLoadedEvent,
                                         vector<shared_ptr<Initializer>> &initializers) {
+    vector<Event> initDoneEvents;
+
     // Weights are set right now, based on 1 of 3 methods:
     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+    //      * So this is once per GPU since multiple stamps on the same GPU share the weights
     // 2. Copy from a file - when loading a saved network
     // 3. Run an initializer to set the weights - on an untrained network
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-        assert(sisterLayer != nullptr);
-        ThorImplementation::Tensor weights = layer->getWeights();
+        assert(sisterPhysicalLayer != nullptr);
+        ThorImplementation::Tensor weights = physicalLayer->getWeights();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
-        if (sisterLayerLoadedEvent.isPresent())
-            stream.waitEvent(sisterLayerLoadedEvent);
-        weights.copyFromAsync(sisterLayer->getWeights(), stream);
+        if (sisterPhysicalLayerLoadedEvent.isPresent())
+            stream.waitEvent(sisterPhysicalLayerLoadedEvent);
+        weights.copyFromAsync(sisterPhysicalLayer->getWeights(), stream);
         if (hasBias) {
-            ThorImplementation::Tensor biases = layer->getBiases();
-            Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterLayer->getBiases();
+            ThorImplementation::Tensor biases = physicalLayer->getBiases();
+            Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getBiases();
             assert(sisterLayerBiases.isPresent());
             biases.copyFromAsync(sisterLayerBiases.get(), stream);
         }
-        return {stream.putEvent(false, true)};
+
+        initDoneEvents.push_back(stream.putEvent(false, true));
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
         assert(weightsInitializerBuilder.get() == nullptr);
         assert(biasInitializerBuilder.get() == nullptr);
-        assert(layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
-        Stream stream = Stream::getNextUploadStream(layer->getWeights().getPlacement().getDeviceNum());
-        layer->loadWeightsFromFile(weightsFile.get(), stream);
+        assert(physicalLayer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
+        physicalLayer->loadWeightsFromFile(weightsFile.get(), stream);
         if (hasBias) {
             assert(biasesFile.isPresent());
-            layer->loadBiasesFromFile(biasesFile.get(), stream);
+            physicalLayer->loadBiasesFromFile(biasesFile.get(), stream);
         }
 
         // Can't use the file later, it may not still be there
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
 
-        return {stream.putEvent(false, true)};
+        initDoneEvents.push_back(stream.putEvent(false, true));
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
         Optional<Event> initDoneEvent;
-        vector<Event> initDoneEvents;
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
-        weightsInitializerBuilderClone->tensorToInitialize(layer->getWeights());
-        weightsInitializerBuilderClone->layerThatOwnsTensor(layer.get());
+        weightsInitializerBuilderClone->tensorToInitialize(physicalLayer->getWeights());
+        weightsInitializerBuilderClone->layerThatOwnsTensor(physicalLayer.get());
         initializers.push_back(weightsInitializerBuilderClone->build());
         initDoneEvent = initializers.back()->getInitDoneEvent();
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
-        if (layer->getBiases().isPresent()) {
+        if (physicalLayer->getBiases().isPresent()) {
             shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
-            biasInitializerBuilderClone->tensorToInitialize(layer->getBiases().get());
-            biasInitializerBuilderClone->layerThatOwnsTensor(layer.get());
+            biasInitializerBuilderClone->tensorToInitialize(physicalLayer->getBiases().get());
+            biasInitializerBuilderClone->layerThatOwnsTensor(physicalLayer.get());
             initializers.push_back(biasInitializerBuilderClone->build());
             initDoneEvent = initializers.back()->getInitDoneEvent();
             if (initDoneEvent.isPresent())
                 initDoneEvents.push_back(initDoneEvent);
         }
-        return initDoneEvents;
     }
+
+    if (physicalLayer->hasOptimizer()) {
+        // Initialize the optimizer - it will follow the same process as above.
+        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+        shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+            sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+        assert(optimizer != nullptr);
+
+        vector<Event> optimizerInitDoneEvents =
+            optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+        for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+            initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+    }
+
+    return initDoneEvents;
 }
 
 }  // namespace Thor

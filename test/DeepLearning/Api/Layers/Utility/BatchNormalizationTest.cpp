@@ -248,13 +248,11 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     initDoneEvents.clear();
 
     // Fetch the fully connected layer from the network and write to its weights
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
-    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork.getTrainableLayers();
-    ASSERT_EQ(trainableLayers.size(), 1UL);
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
     shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormLayer =
-        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(trainableLayers[0]);
+        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(0));
     ASSERT_TRUE(physicalBatchNormLayer != nullptr);
     ThorImplementation::Tensor weights = physicalBatchNormLayer->getWeights();
     ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -373,16 +371,11 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     }
     initDoneEvents.clear();
 
-    stampedNetworks.clear();
-    stampedNetworks = newNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    stampedNetwork = stampedNetworks[0];
-    trainableLayers.clear();
-    trainableLayers = stampedNetwork.getTrainableLayers();
-
-    ASSERT_EQ(trainableLayers.size(), 1UL);
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    stampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
     shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormLayerDes =
-        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(trainableLayers[0]);
+        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(0));
     ASSERT_TRUE(physicalBatchNormLayerDes != nullptr);
 
     ThorImplementation::Tensor weightsDes = physicalBatchNormLayerDes->getWeights();

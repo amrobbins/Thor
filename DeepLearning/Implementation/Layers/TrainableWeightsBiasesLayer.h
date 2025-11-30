@@ -204,25 +204,24 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual Tensor getWeights() { return weights; }
     virtual Optional<Tensor> getBiases() { return biases; }
 
-    // If an optimizer is set, it will not be replaced even if setOptimizer() is called again, which allows the user to override
-    // the network level default optimizer for particular layers.
-    // To replace an optimizer after it has been attached, you need to call setOptimizer again with an empty Optional
     virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> newOptimizer) {
-        if (newOptimizer.isEmpty()) {
-            this->optimizer.clear();
-            this->optimizerShared.clear();
-        } else if (this->optimizer.isEmpty()) {
-            assert(optimizerShared.isEmpty());
+        assert(compiled);
+        this->optimizer.clear();
+        this->optimizerShared.clear();
+        if (newOptimizer.isPresent()) {
             this->optimizerShared = newOptimizer;
             this->optimizer = newOptimizer.get().get();
         }
     }
 
-    virtual Optional<std::shared_ptr<Optimizer>> getOptimizer() { return optimizerShared; }
+    virtual bool hasOptimizer() { return optimizerShared.isPresent(); }
+    virtual std::shared_ptr<Optimizer> getOptimizer() { return optimizerShared; }
 
     void clearOptimizer() {
         optimizer.clear();
+        optimizerShared.clear();
         assert(optimizer.isEmpty());
+        assert(optimizerShared.isEmpty());
     }
 
     void dumpWeightsToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty()) {

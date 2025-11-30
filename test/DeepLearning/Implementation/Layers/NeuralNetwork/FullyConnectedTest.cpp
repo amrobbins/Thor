@@ -95,7 +95,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
             ASSERT_TRUE(fullyConnectedLayer->getErrorOutputs()[0].isEmpty());
-            ASSERT_TRUE(fullyConnectedLayer->getOptimizer().isEmpty());
+            ASSERT_TRUE(fullyConnectedLayer->hasOptimizer() == false);
         }
 
         if (!hasBiases) {
@@ -174,8 +174,8 @@ TEST(FullyConnected, FullyConnectedWorks) {
 void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases, bool accumulate) {
     assert(accumulate == false);  // FIXME
 
-    assert(fullyConnectedLayer->getOptimizer().isPresent());
-    shared_ptr<Sgd> sgd = dynamic_pointer_cast<Sgd>(fullyConnectedLayer->getOptimizer().get());
+    assert(fullyConnectedLayer->getOptimizer() != nullptr);
+    shared_ptr<Sgd> sgd = dynamic_pointer_cast<Sgd>(fullyConnectedLayer->getOptimizer());
     assert(sgd != nullptr);
     float learningRate = sgd->getInitialLearningRate();
     assert(sgd->getDecay() == 0.0f);

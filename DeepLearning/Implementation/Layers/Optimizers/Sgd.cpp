@@ -140,14 +140,14 @@ unordered_map<string, float> Sgd::updateHyperParameters(uint64_t epoch, uint64_t
     return updatedParameters;
 }
 
-unordered_map<string, float> Sgd::getAllHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
-    float currentLearningRate = initialLearningRate * pow(1.0 - (double)decay, (double)epoch);
+unordered_map<string, float> Sgd::getAllHyperParameters() {
     unordered_map<string, float> parameters;
     parameters["currentLearningRate"] = currentLearningRate;
     parameters["initialLearningRate"] = initialLearningRate;
     parameters["decay"] = decay;
     parameters["momentum"] = momentum;
     parameters["useNesterovMomentum"] = useNesterovMomentum ? 1.0f : 0.0f;
+
     return parameters;
 }
 

@@ -27,13 +27,6 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     gpuNum = layerPlacement.getDeviceNum();
     gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
 
-    Tensor weights = trainableLayer->getWeights();
-    weightsGradient = weights.clone();
-
-    Optional<Tensor> biases = trainableLayer->getBiases();
-    if (biases.isPresent())
-        biasesGradient = biases.get().clone();
-
     assert(errorInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     if (errorOutput.isPresent()) {
         assert(errorInput.get().getPlacement().getMemDevice() == errorOutput.get().getPlacement().getMemDevice());
@@ -42,15 +35,13 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     assert(errorInput.get().getDimensions().size() > 0);
 }
 
-void Adam::initialize() {
-    assert(weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 ||
-           weightsGradient.getDataType() == TensorDescriptor::DataType::FP32);
-
-    // The minimum strictly positive (subnormal) value of fp16 is 2^−24 ≈ 5.96 × 10^−8
-    // So the default value of epsilon (which prevents divide by zero) is set to no less than this when epsilon is FP16.
-    // https://en.wikipedia.org/wiki/Half-precision_floating-point_format
-    if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 && epsilon < 5.96046448e-8)
-        epsilon = __float2half_ru(5.9604644e-8f);
+vector<Event> Adam::initialize(bool isFirstStamp, shared_ptr<Optimizer> sisterOptimizer, Optional<Event> sisterOptimizerLoadedEvent) {
+    // Allocate all params
+    Tensor weights = trainableLayer->getWeights();
+    weightsGradient = weights.clone();
+    Optional<Tensor> biases = trainableLayer->getBiases();
+    if (biases.isPresent())
+        biasesGradient = biases.get().clone();
 
     weightsUpdate = weightsGradient.clone();
     if (biasesGradient.isPresent())
@@ -65,14 +56,80 @@ void Adam::initialize() {
         vBias = biasesGradient.get().clone();
     }
 
-    m.memsetAsync(gradientUpdateStream, 0);
-    v.memsetAsync(gradientUpdateStream, 0);
-    if (biasesGradient.isPresent()) {
-        mBias.get().memsetAsync(gradientUpdateStream, 0);
-        vBias.get().memsetAsync(gradientUpdateStream, 0);
+    // The minimum strictly positive (subnormal) value of fp16 is 2^−24 ≈ 5.96 × 10^−8
+    // So the default value of epsilon (which prevents divide by zero) is set to no less than this when epsilon is FP16.
+    // https://en.wikipedia.org/wiki/Half-precision_floating-point_format
+    if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 && epsilon < 5.96046448e-8)
+        epsilon = __float2half_ru(5.9604644e-8f);
+
+    assert(weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 ||
+           weightsGradient.getDataType() == TensorDescriptor::DataType::FP32);
+
+    // Parameter values are initialized right now, based on 1 of 3 methods:
+    // 1. Copy from another optimizer whose parameters have already been set - when stamping more than one stamp
+    //      * So this is once per GPU since multiple stamps on the same GPU share the weights
+    // 2. Copy from a file - when loading a saved network with a saved optimizer
+    // 3. Run an initializer to set the weights - on an untrained network or when there the optimizer has not been saved
+    if (!isFirstStamp) {
+        // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+        assert(sisterOptimizer != nullptr);
+        if (sisterOptimizerLoadedEvent.isPresent())
+            gradientUpdateStream.waitEvent(sisterOptimizerLoadedEvent);
+        shared_ptr<Adam> sisterAdam = dynamic_pointer_cast<Adam>(sisterOptimizer);
+        assert(sisterAdam != nullptr);
+        m.copyFromAsync(sisterAdam->m, gradientUpdateStream);
+        v.copyFromAsync(sisterAdam->v, gradientUpdateStream);
+        if (biasesGradient.isPresent()) {
+            mBias.get().copyFromAsync(sisterAdam->mBias, gradientUpdateStream);
+            vBias.get().copyFromAsync(sisterAdam->vBias, gradientUpdateStream);
+        }
+    } else if (mFile.isPresent()) {
+        assert(vFile.isPresent());
+        if (biasesGradient.isPresent()) {
+            assert(mBiasFile.isPresent());
+            assert(vBiasFile.isPresent());
+        }
+        loadParamsFromFiles();
+
+        // Can't use the files later, they may not still be there
+        mFile.clear();
+        vFile.clear();
+        mBiasFile.clear();
+        vBiasFile.clear();
+    } else {
+        m.memsetAsync(gradientUpdateStream, 0);
+        v.memsetAsync(gradientUpdateStream, 0);
+        if (biasesGradient.isPresent()) {
+            mBias.get().memsetAsync(gradientUpdateStream, 0);
+            vBias.get().memsetAsync(gradientUpdateStream, 0);
+        }
     }
 
-    t = 0.0f;
+    return {gradientUpdateStream.putEvent(false, true)};
+}
+
+void Adam::loadParamsFromFiles() {
+    assert(mFile.isPresent());
+    assert(vFile.isPresent());
+
+    if (m.getAttachedFilename() != mFile.get())
+        m.attachFile(mFile, 0, Tensor::FileAccess::READ_WRITE, false);
+    m.loadFromFile(gradientUpdateStream);
+    if (v.getAttachedFilename() != vFile.get())
+        v.attachFile(vFile, 0, Tensor::FileAccess::READ_WRITE, false);
+    v.loadFromFile(gradientUpdateStream);
+
+    if (biasesGradient.isPresent()) {
+        assert(mBiasFile.isPresent());
+        assert(vBiasFile.isPresent());
+
+        if (mBias.get().getAttachedFilename() != mBiasFile.get())
+            mBias.get().attachFile(mFile, 0, Tensor::FileAccess::READ_WRITE, false);
+        mBias.get().loadFromFile(gradientUpdateStream);
+        if (vBias.get().getAttachedFilename() != vBiasFile.get())
+            vBias.get().attachFile(vBiasFile, 0, Tensor::FileAccess::READ_WRITE, false);
+        vBias.get().loadFromFile(gradientUpdateStream);
+    }
 }
 
 void Adam::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
@@ -157,12 +214,13 @@ void Adam::setEpsilon(float epsilon) { this->epsilon = epsilon; }
 
 unordered_map<std::string, float> Adam::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
     // Adam automatically updates its parameters every mini-batch
+    // FIXME: That will not work for multiple stamps, together which form a minibatch
     unordered_map<string, float> hyperParameters;
     hyperParameters["t"] = t;
     return hyperParameters;
 }
 
-unordered_map<std::string, float> Adam::getAllHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
+unordered_map<std::string, float> Adam::getAllHyperParameters() {
     unordered_map<string, float> hyperParameters;
     hyperParameters["t"] = t;
     hyperParameters["alpha"] = alpha;

@@ -99,9 +99,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
-        std::shared_ptr<ThorImplementation::FullyConnected> fullyConnected =
+        std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected =
             std::make_shared<ThorImplementation::FullyConnected>(numOutputFeatures, hasBias, getId());
-        return fullyConnected;
+        return physicalFullyConnected;
     }
 
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,

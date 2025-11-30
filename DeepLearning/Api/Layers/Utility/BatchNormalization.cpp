@@ -13,7 +13,6 @@ void BatchNormalization::buildSupportLayersAndAddToNetwork() {
 
     // Force the input tensor to this type of layer to be FP16
     if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
-        fflush(stdout);
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             TypeConverter typeConverter = TypeConverter::Builder()
                                               .network(*network)
@@ -74,9 +73,9 @@ json BatchNormalization::serialize(const string &storageDir, Stream stream) cons
     j["outputs"] = outputs;
 
     // Dump the weights to a file and record its name
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = network->getStampedNetworks();
-    assert(!stampedNetworks.empty());
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetworks[0].getPhysicalLayerFromApiLayer(getId());
+    assert(network->getNumStamps() >= 1);
+    ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
     shared_ptr<ThorImplementation::BatchNormalization> batchNorm =
         dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
     assert(batchNorm != nullptr);

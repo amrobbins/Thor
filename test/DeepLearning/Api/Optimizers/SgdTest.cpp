@@ -62,11 +62,10 @@ TEST(Sgd, SetAndGetInitialLearningRate) {
     sgd->setInitialLearningRate(0.1f);
     ASSERT_FLOAT_EQ(0.1f, sgd->getInitialLearningRate());
 
-    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
-    for (uint32_t i = 0; i < stamps.size(); ++i) {
-        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+        for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -84,11 +83,10 @@ TEST(Sgd, SetAndGetDecay) {
     sgd->setDecay(0.2f);
     ASSERT_FLOAT_EQ(0.2f, sgd->getDecay());
 
-    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
-    for (uint32_t i = 0; i < stamps.size(); ++i) {
-        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+        for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -106,11 +104,10 @@ TEST(Sgd, SetAndGetMomentum) {
     sgd->setMomentum(0.3f);
     ASSERT_FLOAT_EQ(0.3f, sgd->getMomentum());
 
-    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
-    for (uint32_t i = 0; i < stamps.size(); ++i) {
-        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+        for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -128,11 +125,10 @@ TEST(Sgd, SetAndGetUseNesterovMomentum) {
     sgd->setUseNesterovMomentum(true);
     ASSERT_TRUE(sgd->getUseNesterovMomentum());
 
-    vector<ThorImplementation::StampedNetwork> stamps = network.getStampedNetworks();
-    for (uint32_t i = 0; i < stamps.size(); ++i) {
-        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+        for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -145,10 +141,10 @@ TEST(Sgd, SetAndGetUseNesterovMomentum) {
     sgd->setUseNesterovMomentum(false);
     ASSERT_FALSE(sgd->getUseNesterovMomentum());
 
-    for (uint32_t i = 0; i < stamps.size(); ++i) {
-        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
+    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+        for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
             assert(maybeOptimizer.isPresent());
             shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
@@ -190,12 +186,17 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
     uint32_t epoch = 0;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 10;
-    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->getAllHyperParameters();
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-    ASSERT_EQ(params.size(), 1U);
+    ASSERT_EQ(params.size(), 5U);
     ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
+    ASSERT_EQ(params["useNesterovMomentum"], float(true));
+    ASSERT_EQ(params["momentum"], momentum);
+    ASSERT_EQ(params["initialLearningRate"], initialLearningRate);
+    ASSERT_EQ(params["decay"], decay);
 }
 
 /* FIXME: put this back in once multiple stamps is supported
@@ -243,17 +244,22 @@ TEST(Sgd, SgdUpdatesParameters) {
     Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    sgd->updateHyperParameters(0, 0, 10);
+    Optimizer::updateHyperParameters(&network, 0, 0, 10);
     uint32_t epoch = 5;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->getAllHyperParameters();
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-    ASSERT_EQ(params.size(), 1U);
+    ASSERT_EQ(params.size(), 5U);
     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
+    ASSERT_EQ(params["useNesterovMomentum"], float(true));
+    ASSERT_EQ(params["momentum"], momentum);
+    ASSERT_EQ(params["initialLearningRate"], initialLearningRate);
+    ASSERT_EQ(params["decay"], decay);
 }
 
 TEST(Sgd, SgdInitializesStampedNetworkParameters) {
@@ -274,17 +280,22 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
     Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    sgd->updateHyperParameters(0, 0, 10);
+    Optimizer::updateHyperParameters(&network, 0, 0, 10);
     uint32_t epoch = 1;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->getAllHyperParameters();
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
-    ASSERT_EQ(params.size(), 1U);
+    ASSERT_EQ(params.size(), 5U);
     ASSERT_LT(abs(params["currentLearningRate"] - expected), 0.0001);
+    ASSERT_EQ(params["useNesterovMomentum"], float(true));
+    ASSERT_EQ(params["momentum"], momentum);
+    ASSERT_EQ(params["initialLearningRate"], initialLearningRate);
+    ASSERT_EQ(params["decay"], decay);
 }
 
 TEST(Sgd, SgdReportsParameters) {
@@ -306,7 +317,8 @@ TEST(Sgd, SgdReportsParameters) {
     Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    unordered_map<string, float> params = sgd->getAllHyperParameters(0, 0, 0);
+    Optimizer::updateHyperParameters(&network, 0, 1, 10);
+    unordered_map<string, float> params = sgd->getAllHyperParameters();
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
@@ -322,9 +334,9 @@ TEST(Sgd, SgdReportsParameters) {
     ASSERT_TRUE(params["useNesterovMomentum"]);
 
     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
-    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork0.getTrainableLayers();
-    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-        shared_ptr<ThorImplementation::FullyConnected> fc = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[i]);
+    for (uint32_t i = 0; i < stampedNetwork0.getNumTrainableLayers(); ++i) {
+        shared_ptr<ThorImplementation::FullyConnected> fc =
+            dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork0.getTrainableLayer(i));
         ASSERT_NE(fc, nullptr);
         Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
         assert(maybeOptimizer.isPresent());
@@ -337,14 +349,14 @@ TEST(Sgd, SgdReportsParameters) {
         ASSERT_EQ(sgd->getUseNesterovMomentum(), useNesteroveMomentum);
     }
 
-    sgd->updateHyperParameters(0, 0, 10);
+    Optimizer::updateHyperParameters(&network, 0, 0, 10);
     uint32_t epoch = 2;
     uint32_t batch = 3;
     uint32_t batchesPerEpoch = 50;
-    sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
     params.clear();
-    params = sgd->getAllHyperParameters(epoch, batch, batchesPerEpoch);
+    params = sgd->getAllHyperParameters();
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);

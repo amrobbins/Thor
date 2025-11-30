@@ -15,7 +15,9 @@ class Optimizer {
         id = nextId.fetch_add(1);
     }
 
-    virtual void initialize() {}
+    virtual std::vector<Event> initialize(bool isFirstStamp,
+                                          std::shared_ptr<Optimizer> sisterOptimizer,
+                                          Optional<Event> sisterOptimizerLoadedEvent) = 0;
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until
@@ -26,9 +28,7 @@ class Optimizer {
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
         assert(false);
     }
-    virtual std::unordered_map<std::string, float> getAllHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
-        assert(false);
-    }
+    virtual std::unordered_map<std::string, float> getAllHyperParameters() { assert(false); }
 
     // Whenever an incompatibility with Keras is created, this method must be used to catch the incompatibility and explain it to the user.
     virtual bool isKerasCompatible(std::string &explanation) {

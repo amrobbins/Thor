@@ -254,16 +254,14 @@ TEST(FullyConnected, SerializeDeserialize) {
     initDoneEvents.clear();
 
     // Fetch the fully connected layer from the network and write to its weights
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
-    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork.getTrainableLayers();
-    ASSERT_EQ(trainableLayers.size(), use_batch_norm ? 2UL : 1UL);
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), use_batch_norm ? 2UL : 1UL);
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
-        dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
     if (use_batch_norm) {
         if (physicalFCLayer == nullptr)
-            physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[1]);
+            physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(1));
     }
     ASSERT_TRUE(physicalFCLayer != nullptr);
     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
@@ -376,16 +374,11 @@ TEST(FullyConnected, SerializeDeserialize) {
     }
     initDoneEvents.clear();
 
-    stampedNetworks.clear();
-    stampedNetworks = newNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    stampedNetwork = stampedNetworks[0];
-    trainableLayers.clear();
-    trainableLayers = stampedNetwork.getTrainableLayers();
-
-    ASSERT_EQ(trainableLayers.size(), 1UL);
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    stampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
-        dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[0]);
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
     ASSERT_TRUE(physicalFCLayerDes != nullptr);
 
     ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();

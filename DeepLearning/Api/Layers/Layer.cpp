@@ -39,7 +39,7 @@ void Layer::connectTwoLayers(shared_ptr<ThorImplementation::Layer> drivingLayer,
 }
 
 void Layer::deserialize(const nlohmann::json& j, Network* network) {
-    string factory = j.at("factory").get<std::string>();
+    string factory = j.at("factory").get<string>();
     if (factory == Factory::Activation) {
         Activation::deserialize(j, network);
         return;
@@ -55,15 +55,15 @@ void Layer::deserialize(const nlohmann::json& j, Network* network) {
     }
 
     if (factory != Factory::Layer) {
-        throw std::runtime_error("Unknown layer factory: " + factory);
+        throw runtime_error("Unknown layer factory: " + factory);
     }
 
-    std::string type = j.at("layer_type").get<std::string>();
+    string type = j.at("layer_type").get<string>();
 
     unordered_map<string, Layer::Deserializer>& registry = get_registry();
     auto it = registry.find(type);
     if (it == registry.end())
-        throw std::runtime_error("Unknown layer type: " + type);
+        throw runtime_error("Unknown layer type: " + type);
 
     auto deserializer = it->second;
     deserializer(j, network);

@@ -213,13 +213,15 @@ target_compile_options(Thor PRIVATE
         )
 
 option(THOR_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds" OFF)
-if(THOR_ENABLE_SANITIZERS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(SANITIZE_FLAGS
-            "-fsanitize=address,undefined"
-            "-fno-omit-frame-pointer"
-            )
-    add_compile_options(${SANITIZE_FLAGS})
-    add_link_options(${SANITIZE_FLAGS})
+if(THOR_ENABLE_SANITIZERS)
+add_compile_options(
+        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fsanitize=address,undefined>
+        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fno-omit-frame-pointer>
+)
+add_link_options(
+        $<$<CONFIG:Debug>:-fsanitize=address,undefined>
+        $<$<CONFIG:Debug>:-fno-omit-frame-pointer>
+)
 endif()
 
 # ============================================================
