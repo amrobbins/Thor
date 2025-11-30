@@ -9,7 +9,7 @@
 
 namespace Thor {
 
-struct StampedNetwork;
+// struct StampedNetwork;
 
 class Initializer {
    public:
@@ -41,7 +41,7 @@ class Initializer {
     // Referring to the initializer object, not the tensor that gets initialized:
     bool initialized;
 
-    friend struct StampedNetwork;
+    // friend struct StampedNetwork;
 };
 
 class Initializer::Builder {

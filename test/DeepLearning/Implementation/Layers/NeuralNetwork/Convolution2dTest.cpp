@@ -158,7 +158,7 @@ TEST(Convolution2d, Convolution2dWorks) {
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
             ASSERT_TRUE(convolution2dLayer->getErrorOutputs()[0].isEmpty());
-            ASSERT_TRUE(convolution2dLayer->getOptimizer().isEmpty());
+            ASSERT_TRUE(convolution2dLayer->getOptimizer() == nullptr);
         }
 
         if (!hasBias) {
@@ -307,8 +307,8 @@ void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
     }
 
     // Launch backward pass
-    assert(convolution2dLayer->getOptimizer().isPresent());
-    shared_ptr<Sgd> sgd = dynamic_pointer_cast<Sgd>(convolution2dLayer->getOptimizer().get());
+    assert(convolution2dLayer->getOptimizer() != nullptr);
+    shared_ptr<Sgd> sgd = dynamic_pointer_cast<Sgd>(convolution2dLayer->getOptimizer());
     assert(sgd != nullptr);
     assert(sgd->getDecay() == 0.0f);
     assert(sgd->getMomentum() == 0.0f);

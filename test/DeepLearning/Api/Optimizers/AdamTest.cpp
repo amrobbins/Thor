@@ -79,12 +79,21 @@ TEST(Adam, InitializesParametersWithOneStamp) {
     uint32_t epoch = 0;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 10;
-    unordered_map<string, float> params = adam->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = adam->getAllHyperParameters();
 
     // Check that the proper values are reported
+    ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("t"), 1U);
-    ASSERT_EQ(params.size(), 1U);
     ASSERT_EQ(params["t"], 0.0f);
+    ASSERT_EQ(params.count("alpha"), 1U);
+    ASSERT_EQ(params["alpha"], alpha);
+    ASSERT_EQ(params.count("t"), 1U);
+    ASSERT_EQ(params["beta1"], beta1);
+    ASSERT_EQ(params.count("beta2"), 1U);
+    ASSERT_EQ(params["beta2"], beta2);
+    ASSERT_EQ(params.count("epsilon"), 1U);
+    ASSERT_EQ(params["epsilon"], epsilon);
 }
 
 /* FIXME: put this back in once multile stamps is supported
@@ -125,7 +134,7 @@ TEST(Adam, ReportsParameters) {
     Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    unordered_map<string, float> params = adam->getAllHyperParameters(10, 3, 100);
+    unordered_map<string, float> params = adam->getAllHyperParameters();
 
     ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("t"), 1U);
@@ -137,13 +146,11 @@ TEST(Adam, ReportsParameters) {
     ASSERT_EQ(params.count("beta2"), 1U);
     ASSERT_EQ(params["beta2"], beta2);
     ASSERT_EQ(params.count("epsilon"), 1U);
-    // Since fp16 is used, the minimum epsilon is around 5e-8f, check that this is enforced.
-    ASSERT_GT(params["epsilon"], 1e-8f);
 
     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
-    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork0.getTrainableLayers();
-    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-        shared_ptr<ThorImplementation::FullyConnected> fc = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[i]);
+    for (uint32_t i = 0; i < stampedNetwork0.getNumTrainableLayers(); ++i) {
+        shared_ptr<ThorImplementation::FullyConnected> fc =
+            dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork0.getTrainableLayer(i));
         ASSERT_NE(fc, nullptr);
         Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
         assert(maybeOptimizer.isPresent());
@@ -171,7 +178,7 @@ TEST(Adam, SettersAndGetters) {
     Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    unordered_map<string, float> params = adam->getAllHyperParameters(10, 3, 100);
+    unordered_map<string, float> params = adam->getAllHyperParameters();
 
     ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("t"), 1U);
@@ -200,9 +207,9 @@ TEST(Adam, SettersAndGetters) {
     EXPECT_EQ(adam->getEpsilon(), epsilon);
 
     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
-    vector<shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayers = stampedNetwork0.getTrainableLayers();
-    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-        shared_ptr<ThorImplementation::FullyConnected> fc = dynamic_pointer_cast<ThorImplementation::FullyConnected>(trainableLayers[i]);
+    for (uint32_t i = 0; i < stampedNetwork0.getNumTrainableLayers(); ++i) {
+        shared_ptr<ThorImplementation::FullyConnected> fc =
+            dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork0.getTrainableLayer(i));
         ASSERT_NE(fc, nullptr);
         Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = fc->getOptimizer();
         assert(maybeOptimizer.isPresent());

@@ -27,6 +27,13 @@ class Sgd : public Optimizer {
     virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
     virtual bool getUseNesterovMomentum();
 
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                                          bool isFirstStamp,
+                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
+                                          Optional<Event> sisterOptimizerLoadedEvent) {
+        return {};
+    }
+
    protected:
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
         std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);

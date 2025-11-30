@@ -55,21 +55,22 @@ void Sgd::setUseNesterovMomentum(bool newUseNesterovMomentum) {
 
 void Sgd::updateParameters() {
     assert(network != nullptr);
-    vector<ThorImplementation::StampedNetwork> stamps = network->getStampedNetworks();
-    for (uint32_t i = 0; i < stamps.size(); ++i) {
-        ThorImplementation::StampedNetwork stampedNetwork = stamps[i];
-        for (uint32_t j = 0; j < stampedNetwork.getTrainableLayers().size(); ++j) {
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayers()[j];
-            Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
-            assert(maybeOptimizer.isPresent());
-            shared_ptr<ThorImplementation::Optimizer> optimizer = maybeOptimizer.get();
-            shared_ptr<ThorImplementation::Sgd> sgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
-            if (sgd == nullptr || sgd->getId() != getId())
+    uint32_t numStamps = network->getNumStamps();
+    for (uint32_t i = 0; i < numStamps; ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(i);
+        uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
+        for (uint32_t j = 0; j < numTrainableLayers; ++j) {
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
+            Optional<shared_ptr<ThorImplementation::Optimizer>> maybePhysicalOptimizer = trainableLayer->getOptimizer();
+            assert(maybePhysicalOptimizer.isPresent());
+            shared_ptr<ThorImplementation::Optimizer> optimizer = maybePhysicalOptimizer.get();
+            shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(optimizer);
+            if (physicalSgd == nullptr || physicalSgd->getId() != getId())
                 continue;
-            sgd->setInitialLearningRate(initialLearningRate);
-            sgd->setDecay(decay);
-            sgd->setMomentum(momentum);
-            sgd->setUseNesterovMomentum(useNesterovMomentum);
+            physicalSgd->setInitialLearningRate(initialLearningRate);
+            physicalSgd->setDecay(decay);
+            physicalSgd->setMomentum(momentum);
+            physicalSgd->setUseNesterovMomentum(useNesterovMomentum);
         }
     }
 }

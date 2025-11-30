@@ -122,9 +122,8 @@ TEST(Activations, SeluSerializeDeserialize) {
     initDoneEvents.clear();
 
     // Fetch the layer from the network
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
     json seluJ = selu->serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
@@ -181,22 +180,20 @@ TEST(Activations, SeluSerializeDeserialize) {
     }
     initDoneEvents.clear();
 
-    stampedNetworks.clear();
-    stampedNetworks = newNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    stampedNetwork = stampedNetworks[0];
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &newStamp = newNetwork.getStampedNetwork(0);
 
-    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = newStamp.getOtherLayers();
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::Selu> stampedSelu = dynamic_pointer_cast<ThorImplementation::Selu>(otherLayers[0]);
     ASSERT_NE(stampedSelu, nullptr);
 
-    vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
+    vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = newStamp.getInputs();
     ASSERT_EQ(inputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
     ASSERT_NE(inputLayers[0], nullptr);
 
-    vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = stampedNetwork.getOutputs();
+    vector<shared_ptr<ThorImplementation::NetworkOutput>> outputLayers = newStamp.getOutputs();
     ASSERT_EQ(outputLayers.size(), 1U);
     shared_ptr<ThorImplementation::NetworkOutput> stampedOutput = dynamic_pointer_cast<ThorImplementation::NetworkOutput>(outputLayers[0]);
     ASSERT_NE(outputLayers[0], nullptr);
@@ -253,9 +250,8 @@ TEST(Activations, SeluRegistered) {
     }
     initDoneEvents.clear();
 
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = newNetwork.getStampedNetwork(0);
 
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
     ASSERT_EQ(otherLayers.size(), 1U);

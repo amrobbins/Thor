@@ -19,12 +19,14 @@ class Adam : public Optimizer {
          Optional<Tensor> errorInput,
          Optional<Tensor> errorOutput);
 
-    virtual void initialize();
+    virtual std::vector<Event> initialize(bool isFirstStamp,
+                                          std::shared_ptr<Optimizer> sisterOptimizer,
+                                          Optional<Event> sisterOptimizerLoadedEvent);
 
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-    virtual std::unordered_map<std::string, float> getAllHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
+    virtual std::unordered_map<std::string, float> getAllHyperParameters();
 
     virtual float getT();
     virtual float getAlpha();
@@ -45,6 +47,8 @@ class Adam : public Optimizer {
     virtual Optional<Tensor> getVBias();
 
    protected:
+    void loadParamsFromFiles();
+
     float t;
     float alpha;
     float beta1;
@@ -60,6 +64,11 @@ class Adam : public Optimizer {
     TrainableWeightsBiasesLayer *trainableLayer;
 
     uint32_t gpuNum;
+
+    Optional<std::string> mFile;
+    Optional<std::string> vFile;
+    Optional<std::string> mBiasFile;
+    Optional<std::string> vBiasFile;
 };
 
 }  // namespace ThorImplementation

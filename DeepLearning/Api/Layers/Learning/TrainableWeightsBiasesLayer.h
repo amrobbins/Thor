@@ -22,6 +22,15 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
+    virtual void stampOptimizer(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer) const {
+        // FIXME: when mutiple stamps are supported, optimizer and layer will need to know if there is already one stamped
+        //        for that layer on that GPU, to share things like weights, gradientUpdateStream's.
+        if (hasOptimizer()) {
+            std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalLayer);
+            physicalLayer->setOptimizer(physicalOptimizer);
+        }
+    }
+
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
@@ -30,32 +39,19 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         return {};
     }
 
-    // Override the network default optimizer with a different one
-    void setLayerSpecificOptimizer(Optimizer *layerSpecificOptimizer) {
-        this->layerSpecificOptimizer = layerSpecificOptimizer;
-        /* FIXME: need to save network
-         *        get all stamps and replace the implementation optimizer with layerSpecificOptimizer->stamp()
-         *          note will need to explicitly clear the existing one first since optimizer is sticky
-         *        also during stamp() trainableWeightsBiasesLayers must check if there is a layerSpecificOptimizer and attach it if so.
-         */
-    }
+    void attachOptimizer(std::shared_ptr<Optimizer> optimizer) { this->optimizer = optimizer; }
+    bool hasOptimizer() const { return optimizer != nullptr; }
+    std::shared_ptr<Optimizer> getOptimizer() { return optimizer; }
 
     // Revert layer to the network default optimizer
-    void clearLayerSpecificOptimizer() {
-        this->layerSpecificOptimizer.clear();
-        /* FIXME: need to save network
-         *        get all stamps and replace the implementation optimizer with network->getOptimizer()
-         *          note will need to explicitly clear the existing one first since optimizer is sticky
-         *        also during stamp() trainableWeightsBiasesLayers must check if there is a layerSpecificOptimizer and attach it if so.
-         */
-    }
+    void removeOptimizer() { this->optimizer.reset(); }
 
    protected:
     Tensor weights;
     Optional<Tensor> biases;
     Optional<Tensor> weightsGradient;
     Optional<Tensor> biasesGradient;
-    Optional<Optimizer *> layerSpecificOptimizer;
+    std::shared_ptr<Optimizer> optimizer;
 
     Optional<std::string> weightsFile;
     Optional<std::string> biasesFile;

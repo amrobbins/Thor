@@ -110,9 +110,8 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
     }
     initDoneEvents.clear();
 
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = newNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = newNetwork.getStampedNetwork(0);
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
     ASSERT_EQ(otherLayers.size(), 0U);
 

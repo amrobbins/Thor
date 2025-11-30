@@ -68,11 +68,11 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    assert(network.getStampedNetworks().size() == 1);
-    stampedNetwork = network.getStampedNetworks()[0];
+    ASSERT_EQ(network.getNumStamps(), 1UL);
+    stampedNetwork = network.getStampedNetwork(0);
 
     // Check network structure
-    ASSERT_EQ(stampedNetwork.getTrainableLayers().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
     shared_ptr<ThorImplementation::FullyConnected> fc =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
     ASSERT_NE(fc, nullptr);
@@ -104,10 +104,10 @@ TEST(Network, SimplestNetworkProperlyFormed) {
         ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "label");
         ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), mse->getLabelsInput().get());
     }
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureInputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureOutputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(mse->getPredictionsInput().isPresent(), true);
     ASSERT_EQ(mse->getPredictionsInput().get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
@@ -164,22 +164,22 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    stampedNetwork = network.getStampedNetworks().front();
+    stampedNetwork = network.getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(),
               stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
     shared_ptr<ThorImplementation::FullyConnected> fc =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
     ASSERT_NE(fc, nullptr);
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureInputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureOutputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
@@ -242,23 +242,23 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    assert(network.getStampedNetworks().size() == 1);
-    stampedNetwork = network.getStampedNetworks()[0];
+    ASSERT_EQ(network.getNumStamps(), 1UL);
+    stampedNetwork = network.getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(),
               stampedNetwork.getApiLayerToPhysicalLayer()[networkInput.getId()]->getFeatureOutput().get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
     shared_ptr<ThorImplementation::FullyConnected> fc =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
     ASSERT_NE(fc, nullptr);
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureInputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureOutputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers()[0]->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs()[0].get(), fc->getFeatureInputs()[0].get());
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
+    ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
@@ -349,13 +349,13 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    assert(network.getStampedNetworks().size() == 1);
-    stampedNetwork = network.getStampedNetworks()[0];
+    ASSERT_EQ(network.getNumStamps(), 1UL);
+    stampedNetwork = network.getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers().size(), 2u);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 2u);
     ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 5u);
 
     shared_ptr<ThorImplementation::NetworkInput> input = stampedNetwork.getInputs()[0];
@@ -365,10 +365,10 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     ASSERT_EQ(output->getName(), "output");
 
     shared_ptr<ThorImplementation::BatchNormalization> bn =
-        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayers()[0]);
+        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(0));
     assert(bn != nullptr);
     shared_ptr<ThorImplementation::FullyConnected> fc =
-        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayers()[1]);
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(1));
     assert(fc != nullptr);
 
     shared_ptr<ThorImplementation::TypeConversion> tc8_16 =
@@ -453,13 +453,13 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    assert(network.getStampedNetworks().size() == 1);
-    stampedNetwork = network.getStampedNetworks()[0];
+    ASSERT_EQ(network.getNumStamps(), 1UL);
+    stampedNetwork = network.getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-    ASSERT_EQ(stampedNetwork.getTrainableLayers().size(), 6u);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 6u);
     ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 9u);
 
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
@@ -472,16 +472,15 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     vector<shared_ptr<ThorImplementation::DropOut>> d;
 
     for (int i = 0; i < 6; ++i) {
-        if (dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayers()[i]) != nullptr)
-            fcv.push_back(dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayers()[i]));
-        else if (dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayers()[i]) != nullptr)
-            bn.push_back(dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayers()[i]));
+        if (dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(i)) != nullptr)
+            fcv.push_back(dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(i)));
+        else if (dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(i)) != nullptr)
+            bn.push_back(dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(i)));
         else {
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayers()[i]), nullptr);
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(stampedNetwork.getTrainableLayers()[i]),
-                      nullptr);
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::MultiConnectionLayer>(stampedNetwork.getTrainableLayers()[i]), nullptr);
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Layer>(stampedNetwork.getTrainableLayers()[i]), nullptr);
+            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayer(i)), nullptr);
+            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(stampedNetwork.getTrainableLayer(i)), nullptr);
+            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::MultiConnectionLayer>(stampedNetwork.getTrainableLayer(i)), nullptr);
+            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Layer>(stampedNetwork.getTrainableLayer(i)), nullptr);
             ASSERT_TRUE(false);
         }
     }
@@ -629,13 +628,13 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = alexNet.place(batchSize, initDoneEvents, {gpuNum}, stampsPerGpu);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    assert(alexNet.getStampedNetworks().size() == 1);
-    stampedNetwork = alexNet.getStampedNetworks()[0];
+    ASSERT_EQ(alexNet.getNumStamps(), 1UL);
+    stampedNetwork = alexNet.getStampedNetwork(0);
 
     // Check network structure
     EXPECT_EQ(stampedNetwork.getInputs().size(), 2u);
     EXPECT_EQ(stampedNetwork.getOutputs().size(), 3u);
-    EXPECT_EQ(stampedNetwork.getTrainableLayers().size(), 13u);
+    EXPECT_EQ(stampedNetwork.getNumTrainableLayers(), 13u);
     EXPECT_EQ(stampedNetwork.getOtherLayers().size(), 30u);
 
     shared_ptr<ThorImplementation::NetworkInput> images;
@@ -693,19 +692,19 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     vector<shared_ptr<ThorImplementation::Convolution2d>> cv;
     for (int i = 0; i < 10; ++i) {
         shared_ptr<ThorImplementation::Convolution2d> conv =
-            dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayers()[i]);
+            dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayer(i));
         assert(conv != nullptr);
         cv.push_back(conv);
     }
 
     shared_ptr<ThorImplementation::FullyConnected> fc0 =
-        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayers()[10]);
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(10));
     assert(fc0 != nullptr);
     shared_ptr<ThorImplementation::FullyConnected> fc1 =
-        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayers()[11]);
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(11));
     assert(fc1 != nullptr);
     shared_ptr<ThorImplementation::FullyConnected> fc2 =
-        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayers()[12]);
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(12));
     assert(fc2 != nullptr);
 
     vector<shared_ptr<ThorImplementation::TypeConversion>> tc;

@@ -142,9 +142,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             assert(optimizer.isPresent());
             Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
             assert(anErrorInput.isPresent());
+            uint64_t numUnits = anErrorInput.get().getDimensions()[1];
             biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
                                                                            batchSize,
-                                                                           anErrorInput.get().getDimensions()[1],
+                                                                           numUnits,
                                                                            true,
                                                                            false,
                                                                            ThorImplementation::TensorDescriptor::DataType::FP16,

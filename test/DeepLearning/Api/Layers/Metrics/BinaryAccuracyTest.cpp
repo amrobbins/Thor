@@ -150,9 +150,8 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     initDoneEvents.clear();
 
     // Fetch the layer from the network
-    vector<ThorImplementation::StampedNetwork> stampedNetworks = initialNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = stampedNetworks[0];
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
     json binaryAccuracyJ = binaryAccuracy.serialize("/tmp/", stream);
     json predictionsNetworkInputJ = predictionsNetworkInput.serialize("/tmp/", stream);
@@ -222,10 +221,8 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     }
     initDoneEvents.clear();
 
-    stampedNetworks.clear();
-    stampedNetworks = newNetwork.getStampedNetworks();
-    ASSERT_EQ(stampedNetworks.size(), 1UL);
-    stampedNetwork = stampedNetworks[0];
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    stampedNetwork = newNetwork.getStampedNetwork(0);
 
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
     ASSERT_EQ(otherLayers.size(), 1U);

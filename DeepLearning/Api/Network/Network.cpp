@@ -143,6 +143,14 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
                 stampedNetwork.otherLayers[i]->floatingPointOperationsPerExampleForward();
         }
 
+        // Now that all layers are compiled, stamp the optimizers onto the trainable layers
+        for (const std::shared_ptr<TrainableWeightsBiasesLayer> &apiTrainableLayer : allTrainableLayersInNetwork) {
+            shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.apiLayerToPhysicalLayerShared[apiTrainableLayer->getId()];
+            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer =
+                dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+            apiTrainableLayer->stampOptimizer(physicalTrainableLayer);
+        }
+
     } catch (GpuOutOfMemoryError ex) {
         stampedNetwork.clear();
         return StatusCode::GPU_OUT_OF_MEMORY;
@@ -164,6 +172,10 @@ Network::StatusCode Network::place(uint32_t batchSize,
     assert(forcedDevices == gpu0 || forcedDevices.empty());
 
     StatusCode statusCode;
+
+    if (optimizer != nullptr) {
+        attachOptimizerToLayers();
+    }
 
     vector<int32_t> devices;
     vector<uint32_t> numStampsPerDevice;
@@ -190,11 +202,6 @@ Network::StatusCode Network::place(uint32_t batchSize,
             bool copyWeights = i != 0 && j == 0;
             stampedNetworks.back().initialize(initializeWeights, copyWeights, copyWeights ? &(stampedNetworks[0]) : nullptr);
         }
-    }
-
-    // Each layer could possibly be assigned its own optimizer by the user, rather than specifying a default at the network level.
-    if (optimizer != nullptr) {
-        optimizer->attachToNetwork();
     }
 
     return StatusCode::SUCCESS;
@@ -592,7 +599,10 @@ void Network::addLayerToNetwork(const Layer *layer) {
     if (allLayersInNetwork.count(layerClone) == 1)
         return;
     allLayersInNetwork.insert(layerClone);
-    network.push_back(layer->clone());
+    shared_ptr<TrainableWeightsBiasesLayer> trainableWeightsBiasesLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layerClone);
+    if (trainableWeightsBiasesLayer)
+        allTrainableLayersInNetwork.push_back(trainableWeightsBiasesLayer);
+    network.push_back(layerClone);
 
     auto networkInput = dynamic_cast<const NetworkInput *>(layer);
     auto networkOutput = dynamic_cast<const NetworkOutput *>(layer);
@@ -646,16 +656,25 @@ void Network::addLayerToNetwork(const Layer *layer) {
 // An initializer initializes one tensor
 void Network::addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
 
-#include "DeepLearning/Api/Optimizers/Sgd.h"
 // An optimizer is used to optimize all weights and biases in a network
 // If a new optimizer is added to the network it will replace the old one.
-void Network::addToNetwork(Optimizer *optimizer) {
-    if (this->optimizer != nullptr)
-        this->optimizer->disconnectFromNetwork();
-    this->optimizer = optimizer->clone();
-}
+void Network::addToNetwork(Optimizer *optimizer) { this->optimizer = optimizer->clone(); }
 
 shared_ptr<Optimizer> Network::getOptimizer() { return optimizer; }
+
+// For future multi-gpu support, optimizers for the same layer on different GPU's will need to accumulate into a single weights memory
+// and then broadcast the updated weights to the optimizers on the other gpus.
+void Network::attachOptimizerToLayers() {
+    // If the network is still holding the optimizer, it has not yet been distributed to the layers
+    // Once it is distributed to the layers, the layers own the optimizer instances.
+    assert(optimizer != nullptr);
+
+    for (std::shared_ptr<TrainableWeightsBiasesLayer> &trainableLayer : allTrainableLayersInNetwork) {
+        trainableLayer->attachOptimizer(optimizer);
+    }
+
+    optimizer.reset();
+}
 
 vector<Event> Network::stampLayer(Tensor inputTensor,
                                   const shared_ptr<Thor::Layer> layer,

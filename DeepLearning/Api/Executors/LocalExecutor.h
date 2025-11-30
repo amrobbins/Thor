@@ -68,7 +68,7 @@ class LocalExecutor : public Executor {
     // FIXME: shared_ptr, however how do I deal with singletons then?
     std::vector<Visualizer*> visualizers;
 
-    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
+    //    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
 
     std::shared_ptr<std::mutex> epochMutex;
     std::shared_ptr<uint64_t> currentEpoch;

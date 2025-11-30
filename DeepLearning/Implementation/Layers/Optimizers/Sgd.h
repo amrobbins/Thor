@@ -25,7 +25,7 @@ class Sgd : public Optimizer {
     virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batch_size);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-    virtual std::unordered_map<std::string, float> getAllHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
+    virtual std::unordered_map<std::string, float> getAllHyperParameters();
     virtual void setInitialLearningRate(float initaialLearningRate);
     virtual void setDecay(float decay);
     virtual void setMomentum(float momentum);
@@ -38,6 +38,12 @@ class Sgd : public Optimizer {
 
     Optional<Tensor> getProjectedWeights();
     Optional<Tensor> getProjectedBiases();
+
+    virtual std::vector<Event> initialize(bool isFirstStamp,
+                                          std::shared_ptr<Optimizer> sisterOptimizer,
+                                          Optional<Event> sisterOptimizerLoadedEvent) {
+        return {};
+    }
 
    protected:
     float initialLearningRate;

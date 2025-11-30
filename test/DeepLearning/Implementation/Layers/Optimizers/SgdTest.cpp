@@ -94,7 +94,6 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     Tensor anErrorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
     shared_ptr<Sgd> sgd =
         make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, anErrorInput, anErrorOutput);
-    sgd->initialize();
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -105,7 +104,6 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     initialLearningRate = 10.0 / (1 + rand() % 100);
     decay = 1.0f / (1.0f + (rand() % 10));
     momentum = rand() % 2 ? 0.0f : 1.0f / (1.0f + (rand() % 10));
-    ;
     useNesterovMomentum = rand() % 2;
 
     sgd->setInitialLearningRate(initialLearningRate);
@@ -129,7 +127,8 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     const uint8_t D = 0b00000100;
     const uint8_t M = 0b00001000;
     const uint8_t UNM = 0b00010000;
-    hyperParameters = sgd->getAllHyperParameters(epoch, batch, batchesPerEpoch);
+    sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    hyperParameters = sgd->getAllHyperParameters();
     for (auto it = hyperParameters.begin(); it != hyperParameters.end(); ++it) {
         string parameter = it->first;
         float value = it->second;
@@ -164,7 +163,8 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     batchesPerEpoch = 1 + (rand() % 3000);
     batch = rand() % batchesPerEpoch;
     flags = 0b00000000;
-    hyperParameters = sgd->getAllHyperParameters(epoch, batch, batchesPerEpoch);
+    sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+    hyperParameters = sgd->getAllHyperParameters();
     for (auto it = hyperParameters.begin(); it != hyperParameters.end(); ++it) {
         string parameter = it->first;
         float value = it->second;
@@ -234,7 +234,6 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd =
             make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
-        sgd->initialize();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -502,7 +501,6 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd =
             make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
-        sgd->initialize();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -813,7 +811,6 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
 //         dataStream.synchronize();
 //         shared_ptr<Sgd> sgd =
 //             make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
-//         sgd->initialize();
 //         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 //         Tensor weightsGradient = sgd->getWeightsGradient();
 //
