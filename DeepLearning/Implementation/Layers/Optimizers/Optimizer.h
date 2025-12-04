@@ -15,9 +15,7 @@ class Optimizer {
         id = nextId.fetch_add(1);
     }
 
-    virtual std::vector<Event> initialize(bool isFirstStamp,
-                                          std::shared_ptr<Optimizer> sisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent) = 0;
+    virtual void compile() {}
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until

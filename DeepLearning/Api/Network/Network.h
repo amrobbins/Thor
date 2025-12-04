@@ -78,7 +78,7 @@ class Network {
     virtual void load_from_keras(std::string filename);
 
     std::shared_ptr<Optimizer> getOptimizer();
-    void attachOptimizerToLayers();
+    void attachOptimizerToLayers(bool replaceIfExisting);
 
     Tensor getApiTensorByOriginalId(uint64_t originalId) { return apiTensorByOriginalId[originalId]; }
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }

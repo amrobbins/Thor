@@ -138,6 +138,8 @@ void Optimizer::updateHyperParameters(Network *network, uint64_t epoch, uint64_t
     }
 }
 
+string Optimizer::getVersion() const { return "1.0.0"; }
+
 unordered_map<string, Optimizer::Deserializer> &Optimizer::getRegistry() {
     static unordered_map<string, Deserializer> registry;
     return registry;
@@ -145,13 +147,9 @@ unordered_map<string, Optimizer::Deserializer> &Optimizer::getRegistry() {
 
 void Optimizer::registerLayer(string name, Deserializer fn) { getRegistry().emplace(move(name), move(fn)); }
 
-void Optimizer::deserialize(const json &j, Network *network, uint64_t layerId) {
-    // If there is no saved optimizer here, return.
-    if (!j.contains("optimizer") || !j["optimizer"].is_object())
-        return;
-
-    json optimizerJ = j["optimizer"];
-    string optimizerType = optimizerJ.at("type").get<string>();
+shared_ptr<Optimizer> Optimizer::deserialize(const json &j) {
+    assert(j.contains("optimizer_type"));
+    string optimizerType = j.at("optimizer_type").get<string>();
 
     unordered_map<string, Deserializer> &registry = getRegistry();
     auto it = registry.find(optimizerType);
@@ -159,5 +157,5 @@ void Optimizer::deserialize(const json &j, Network *network, uint64_t layerId) {
         throw runtime_error("Unknown optimizer type: " + optimizerType);
 
     Deserializer deserializer = it->second;
-    deserializer(j, network, layerId);
+    return deserializer(j);
 }

@@ -99,8 +99,13 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // Note: Network notes when a layer has already been stamped and only adds a connection, does not re-stamp the layer
+        //  It would be better (and fix an DAG requirement) if instead every layer had one connection, and to create a layer
+        //  with multiple connections, it would just share weights, etc.
         std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected =
             std::make_shared<ThorImplementation::FullyConnected>(numOutputFeatures, hasBias, getId());
+        if (hasOptimizer())
+            physicalFullyConnected->setOptimizer(optimizer->stamp(physicalFullyConnected));
+
         return physicalFullyConnected;
     }
 

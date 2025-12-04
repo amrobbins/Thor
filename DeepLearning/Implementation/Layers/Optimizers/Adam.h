@@ -19,9 +19,7 @@ class Adam : public Optimizer {
          Optional<Tensor> errorInput,
          Optional<Tensor> errorOutput);
 
-    virtual std::vector<Event> initialize(bool isFirstStamp,
-                                          std::shared_ptr<Optimizer> sisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent);
+    virtual void compile();
 
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
 
@@ -46,6 +44,16 @@ class Adam : public Optimizer {
     virtual Optional<Tensor> getMBias();
     virtual Optional<Tensor> getVBias();
 
+    virtual void dumpMToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+    virtual void dumpVToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+    virtual void dumpMBiasToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+    virtual void dumpVBiasToFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+
+    virtual void loadMFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+    virtual void loadVFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+    virtual void loadMBiasFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+    virtual void loadVBiasFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
+
    protected:
     void loadParamsFromFiles();
 
@@ -69,6 +77,8 @@ class Adam : public Optimizer {
     Optional<std::string> vFile;
     Optional<std::string> mBiasFile;
     Optional<std::string> vBiasFile;
+
+    bool compiled = false;
 };
 
 }  // namespace ThorImplementation
