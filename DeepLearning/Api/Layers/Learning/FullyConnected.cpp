@@ -189,6 +189,10 @@ void FullyConnected::deserialize(const json &j, Network *network) {
 
     fullyConnected.initialized = true;
 
+    if (j.contains("optimizer")) {
+        fullyConnected.optimizer = Optimizer::deserialize(j.at("optimizer"));
+    }
+
     fullyConnected.addToNetwork(network);
 }
 
@@ -260,12 +264,11 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         }
     }
 
-    if (physicalLayer->hasOptimizer()) {
+    if (hasOptimizer()) {
         // Initialize the optimizer - it will follow the same process as above.
         shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
         shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
             sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
-        assert(optimizer != nullptr);
 
         vector<Event> optimizerInitDoneEvents =
             optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);

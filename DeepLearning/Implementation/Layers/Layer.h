@@ -334,6 +334,8 @@ class Layer {
         return true;
     }
 
+    virtual bool isCompiled() { return compiled; }
+
    protected:
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;

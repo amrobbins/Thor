@@ -25,8 +25,11 @@ class Adam : public Optimizer {
     virtual void setEpsilon(float newEpsilon);
     virtual float getEpsilon();
 
-    //    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
-    //    static void deserialize(const nlohmann::json &j, Network *network);
+    virtual nlohmann::json serialize(const std::string &storageDir,
+                                     Stream stream,
+                                     std::shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
+    static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
@@ -46,10 +49,10 @@ class Adam : public Optimizer {
     float beta2;
     float epsilon;
 
-    Optional<std::string> weightsMFile;
-    Optional<std::string> weightsVFile;
-    Optional<std::string> biasesMFile;
-    Optional<std::string> biasesVFile;
+    Optional<std::string> mFile;
+    Optional<std::string> vFile;
+    Optional<std::string> mBiasFile;
+    Optional<std::string> vBiasFile;
 };
 
 class Adam::Builder {

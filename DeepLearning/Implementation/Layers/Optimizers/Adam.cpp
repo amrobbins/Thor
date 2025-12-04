@@ -35,7 +35,7 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     assert(errorInput.get().getDimensions().size() > 0);
 }
 
-vector<Event> Adam::initialize(bool isFirstStamp, shared_ptr<Optimizer> sisterOptimizer, Optional<Event> sisterOptimizerLoadedEvent) {
+void Adam::compile() {
     // Allocate all params
     Tensor weights = trainableLayer->getWeights();
     weightsGradient = weights.clone();
@@ -65,72 +65,78 @@ vector<Event> Adam::initialize(bool isFirstStamp, shared_ptr<Optimizer> sisterOp
     assert(weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 ||
            weightsGradient.getDataType() == TensorDescriptor::DataType::FP32);
 
-    // Parameter values are initialized right now, based on 1 of 3 methods:
-    // 1. Copy from another optimizer whose parameters have already been set - when stamping more than one stamp
-    //      * So this is once per GPU since multiple stamps on the same GPU share the weights
-    // 2. Copy from a file - when loading a saved network with a saved optimizer
-    // 3. Run an initializer to set the weights - on an untrained network or when there the optimizer has not been saved
-    if (!isFirstStamp) {
-        // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-        assert(sisterOptimizer != nullptr);
-        if (sisterOptimizerLoadedEvent.isPresent())
-            gradientUpdateStream.waitEvent(sisterOptimizerLoadedEvent);
-        shared_ptr<Adam> sisterAdam = dynamic_pointer_cast<Adam>(sisterOptimizer);
-        assert(sisterAdam != nullptr);
-        m.copyFromAsync(sisterAdam->m, gradientUpdateStream);
-        v.copyFromAsync(sisterAdam->v, gradientUpdateStream);
-        if (biasesGradient.isPresent()) {
-            mBias.get().copyFromAsync(sisterAdam->mBias, gradientUpdateStream);
-            vBias.get().copyFromAsync(sisterAdam->vBias, gradientUpdateStream);
-        }
-    } else if (mFile.isPresent()) {
-        assert(vFile.isPresent());
-        if (biasesGradient.isPresent()) {
-            assert(mBiasFile.isPresent());
-            assert(vBiasFile.isPresent());
-        }
-        loadParamsFromFiles();
-
-        // Can't use the files later, they may not still be there
-        mFile.clear();
-        vFile.clear();
-        mBiasFile.clear();
-        vBiasFile.clear();
-    } else {
-        m.memsetAsync(gradientUpdateStream, 0);
-        v.memsetAsync(gradientUpdateStream, 0);
-        if (biasesGradient.isPresent()) {
-            mBias.get().memsetAsync(gradientUpdateStream, 0);
-            vBias.get().memsetAsync(gradientUpdateStream, 0);
-        }
-    }
-
-    return {gradientUpdateStream.putEvent(false, true)};
+    compiled = true;
 }
 
-void Adam::loadParamsFromFiles() {
-    assert(mFile.isPresent());
-    assert(vFile.isPresent());
+// vector<Event> Adam::initialize(bool isFirstStamp, shared_ptr<Optimizer> sisterOptimizer, Optional<Event> sisterOptimizerLoadedEvent) {
+//     assert(compiled);
+//
+//     // Parameter values are initialized right now, based on 1 of 3 methods:
+//     // 1. Copy from another optimizer whose parameters have already been set - when stamping more than one stamp
+//     //      * So this is once per GPU since multiple stamps on the same GPU share the weights
+//     // 2. Copy from a file - when loading a saved network with a saved optimizer
+//     // 3. Run an initializer to set the weights - on an untrained network or when there the optimizer has not been saved
+//     if (!isFirstStamp) {
+//         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
+//         assert(sisterOptimizer != nullptr);
+//         if (sisterOptimizerLoadedEvent.isPresent())
+//             gradientUpdateStream.waitEvent(sisterOptimizerLoadedEvent);
+//         shared_ptr<Adam> sisterAdam = dynamic_pointer_cast<Adam>(sisterOptimizer);
+//         assert(sisterAdam != nullptr);
+//         m.copyFromAsync(sisterAdam->m, gradientUpdateStream);
+//         v.copyFromAsync(sisterAdam->v, gradientUpdateStream);
+//         if (biasesGradient.isPresent()) {
+//             mBias.get().copyFromAsync(sisterAdam->mBias, gradientUpdateStream);
+//             vBias.get().copyFromAsync(sisterAdam->vBias, gradientUpdateStream);
+//         }
+//     } else if (mFile.isPresent()) {
+//         assert(vFile.isPresent());
+//         if (biasesGradient.isPresent()) {
+//             assert(mBiasFile.isPresent());
+//             assert(vBiasFile.isPresent());
+//         }
+//         loadParamsFromFiles();
+//
+//         // Can't use the files later, they may not still be there
+//         mFile.clear();
+//         vFile.clear();
+//         mBiasFile.clear();
+//         vBiasFile.clear();
+//     } else {
+//         m.memsetAsync(gradientUpdateStream, 0);
+//         v.memsetAsync(gradientUpdateStream, 0);
+//         if (biasesGradient.isPresent()) {
+//             mBias.get().memsetAsync(gradientUpdateStream, 0);
+//             vBias.get().memsetAsync(gradientUpdateStream, 0);
+//         }
+//     }
+//
+//     return {gradientUpdateStream.putEvent(false, true)};
+// }
 
-    if (m.getAttachedFilename() != mFile.get())
-        m.attachFile(mFile, 0, Tensor::FileAccess::READ_WRITE, false);
-    m.loadFromFile(gradientUpdateStream);
-    if (v.getAttachedFilename() != vFile.get())
-        v.attachFile(vFile, 0, Tensor::FileAccess::READ_WRITE, false);
-    v.loadFromFile(gradientUpdateStream);
-
-    if (biasesGradient.isPresent()) {
-        assert(mBiasFile.isPresent());
-        assert(vBiasFile.isPresent());
-
-        if (mBias.get().getAttachedFilename() != mBiasFile.get())
-            mBias.get().attachFile(mFile, 0, Tensor::FileAccess::READ_WRITE, false);
-        mBias.get().loadFromFile(gradientUpdateStream);
-        if (vBias.get().getAttachedFilename() != vBiasFile.get())
-            vBias.get().attachFile(vBiasFile, 0, Tensor::FileAccess::READ_WRITE, false);
-        vBias.get().loadFromFile(gradientUpdateStream);
-    }
-}
+// void Adam::loadParamsFromFiles() {
+//     assert(mFile.isPresent());
+//     assert(vFile.isPresent());
+//
+//     if (m.getAttachedFilename() != mFile.get())
+//         m.attachFile(mFile, 0, Tensor::FileAccess::READ_WRITE, false);
+//     m.loadFromFile(gradientUpdateStream);
+//     if (v.getAttachedFilename() != vFile.get())
+//         v.attachFile(vFile, 0, Tensor::FileAccess::READ_WRITE, false);
+//     v.loadFromFile(gradientUpdateStream);
+//
+//     if (biasesGradient.isPresent()) {
+//         assert(mBiasFile.isPresent());
+//         assert(vBiasFile.isPresent());
+//
+//         if (mBias.get().getAttachedFilename() != mBiasFile.get())
+//             mBias.get().attachFile(mFile, 0, Tensor::FileAccess::READ_WRITE, false);
+//         mBias.get().loadFromFile(gradientUpdateStream);
+//         if (vBias.get().getAttachedFilename() != vBiasFile.get())
+//             vBias.get().attachFile(vBiasFile, 0, Tensor::FileAccess::READ_WRITE, false);
+//         vBias.get().loadFromFile(gradientUpdateStream);
+//     }
+// }
 
 void Adam::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
     trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
@@ -218,6 +224,74 @@ unordered_map<std::string, float> Adam::updateHyperParameters(uint64_t epoch, ui
     unordered_map<string, float> hyperParameters;
     hyperParameters["t"] = t;
     return hyperParameters;
+}
+
+void Adam::dumpMToFile(std::string filename, Optional<Stream> stream) {
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (m.getAttachedFilename() != filename)
+        m.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+    m.dumpToFile(stream);
+}
+
+void Adam::dumpVToFile(std::string filename, Optional<Stream> stream) {
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (v.getAttachedFilename() != filename)
+        v.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+    v.dumpToFile(stream);
+}
+
+void Adam::dumpMBiasToFile(std::string filename, Optional<Stream> stream) {
+    assert(mBias.isPresent());
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (mBias.get().getAttachedFilename() != filename)
+        mBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+    mBias.get().dumpToFile(stream);
+}
+
+void Adam::dumpVBiasToFile(std::string filename, Optional<Stream> stream) {
+    assert(vBias.isPresent());
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (vBias.get().getAttachedFilename() != filename)
+        vBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
+    vBias.get().dumpToFile(stream);
+}
+
+void Adam::loadMFromFile(std::string filename, Optional<Stream> stream) {
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (m.getAttachedFilename() != filename)
+        m.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+    m.loadFromFile(stream);
+}
+
+void Adam::loadVFromFile(std::string filename, Optional<Stream> stream) {
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (v.getAttachedFilename() != filename)
+        v.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+    v.loadFromFile(stream);
+}
+
+void Adam::loadMBiasFromFile(std::string filename, Optional<Stream> stream) {
+    assert(mBias.isPresent());
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (mBias.get().getAttachedFilename() != filename)
+        mBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+    mBias.get().loadFromFile(stream);
+}
+
+void Adam::loadVBiasFromFile(std::string filename, Optional<Stream> stream) {
+    assert(vBias.isPresent());
+    if (stream.isEmpty())
+        stream = getGradientUpdateStream();
+    if (vBias.get().getAttachedFilename() != filename)
+        vBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
+    vBias.get().loadFromFile(stream);
 }
 
 unordered_map<std::string, float> Adam::getAllHyperParameters() {

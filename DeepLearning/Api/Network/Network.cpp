@@ -174,7 +174,7 @@ Network::StatusCode Network::place(uint32_t batchSize,
     StatusCode statusCode;
 
     if (optimizer != nullptr) {
-        attachOptimizerToLayers();
+        attachOptimizerToLayers(false);
     }
 
     vector<int32_t> devices;
@@ -664,16 +664,18 @@ shared_ptr<Optimizer> Network::getOptimizer() { return optimizer; }
 
 // For future multi-gpu support, optimizers for the same layer on different GPU's will need to accumulate into a single weights memory
 // and then broadcast the updated weights to the optimizers on the other gpus.
-void Network::attachOptimizerToLayers() {
-    // If the network is still holding the optimizer, it has not yet been distributed to the layers
-    // Once it is distributed to the layers, the layers own the optimizer instances.
+// FIXME: What is the right place for network/optimizer interaction code? Is it here? Is it in Optimizer?
+//  I also have Optimizer::updateHyperParameters so currently there is code like that in both places.
+//  This pattern needs to be revisited.
+void Network::attachOptimizerToLayers(bool replaceIfExisting) {
+    // Once the optimizer is distributed to the layers, the layers own the optimizer instances.
+    // If additional layers are added later on, attachOptimizerToLayers(false) will need to be called before training more.
     assert(optimizer != nullptr);
 
     for (std::shared_ptr<TrainableWeightsBiasesLayer> &trainableLayer : allTrainableLayersInNetwork) {
-        trainableLayer->attachOptimizer(optimizer);
+        if (replaceIfExisting or !trainableLayer->hasOptimizer())
+            trainableLayer->attachOptimizer(optimizer);
     }
-
-    optimizer.reset();
 }
 
 vector<Event> Network::stampLayer(Tensor inputTensor,

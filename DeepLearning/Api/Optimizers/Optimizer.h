@@ -14,6 +14,7 @@
 namespace Thor {
 
 class Network;
+class TrainableWeightsBiasesLayer;
 
 class Optimizer {
    public:
@@ -31,10 +32,16 @@ class Optimizer {
     uint64_t getId() const { return id; }
     bool operator==(const Optimizer &other) const { return id == other.id; }
 
-    using Deserializer = std::function<void(const nlohmann::json &, Network *, uint64_t layerId)>;
+    virtual nlohmann::json serialize(const std::string &storageDir,
+                                     Stream stream,
+                                     std::shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
+        return nlohmann::json{};
+    };
+    static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
+    using Deserializer = std::function<std::shared_ptr<Optimizer>(const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
     static void registerLayer(std::string name, Deserializer fn);
-    static void deserialize(const nlohmann::json &j, Network *network, uint64_t layerId);
 
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
         std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) = 0;
@@ -43,6 +50,8 @@ class Optimizer {
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
                                           Optional<Event> sisterOptimizerLoadedEvent) = 0;
+
+    std::string getVersion() const;
 
    protected:
     // Only subclasses can be instantiated
