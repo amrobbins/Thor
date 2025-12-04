@@ -27,12 +27,15 @@ class Sgd : public Optimizer {
     virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
     virtual bool getUseNesterovMomentum();
 
+    virtual nlohmann::json serialize(const std::string &storageDir,
+                                     Stream stream,
+                                     std::shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
+    static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                                          bool isFirstStamp,
-                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent) {
-        return {};
-    }
+                                      bool isFirstStamp,
+                                      std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
+                                      Optional<Event> sisterOptimizerLoadedEvent);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
@@ -47,6 +50,7 @@ class Sgd : public Optimizer {
     float decay;
     float momentum;
     bool useNesterovMomentum;
+    uint64_t startResumeEpoch = 0;
 };
 
 class Sgd::Builder {

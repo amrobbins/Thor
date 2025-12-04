@@ -67,8 +67,6 @@ void Adam::updateParameters() {
     }
 }
 
-//////////////////////////////////
-
 json Adam::serialize(const string &storageDir,
                      Stream stream,
                      shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
