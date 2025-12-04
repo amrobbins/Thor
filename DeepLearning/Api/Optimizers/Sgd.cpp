@@ -1,7 +1,9 @@
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 
 using namespace std;
-using namespace Thor;
+using json = nlohmann::json;
+
+namespace Thor {
 
 Sgd::~Sgd() {}
 
@@ -11,7 +13,7 @@ shared_ptr<ThorImplementation::Optimizer> Sgd::stamp(shared_ptr<ThorImplementati
     Optional<ThorImplementation::Tensor> errorOutput =
         ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(trainableLayer->getErrorOutputs());
     return make_shared<ThorImplementation::Sgd>(
-        trainableLayer, initialLearningRate, decay, momentum, useNesterovMomentum, errorInput, errorOutput);
+        trainableLayer, initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch, errorInput, errorOutput);
 }
 
 void Sgd::setConstantLearningRate(float newCurrentLearningRate) {
@@ -82,3 +84,69 @@ float Sgd::getDecay() { return decay; }
 float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
+
+
+json Sgd::serialize(const string &storageDir,
+                     Stream stream,
+                     shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
+    json j;
+    j["optimizer_type"] = string("sgd");
+    j["version"] = getVersion();
+
+    // Get the params from the physical layer and record them.
+    shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
+    shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
+    assert(physicalSgd != nullptr);
+
+    j["initial_learning_rate"] = physicalSgd->getInitialLearningRate();
+    j["decay"] = physicalSgd->getDecay();
+    j["momentum"] = physicalSgd->getMomentum();
+    j["use_nesterov"] = physicalSgd->getUseNesterovMomentum();
+    j["epoch"] = physicalSgd->getEpoch();
+
+    return j;
+}
+
+shared_ptr<Optimizer> Sgd::deserialize(const json &j) {
+    if (j.at("optimizer_type").get<string>() != "sgd")
+        throw runtime_error("Layer type mismatch in Sgd::deserialize: " + j.at("type").get<string>());
+    if (j.at("version").get<string>() != "1.0.0")
+        throw runtime_error("Unsupported version in Sgd::deserialize: " + j["version"].get<string>());
+
+    float initialLearningRate = j.at("initial_learning_rate").get<float>();
+    float decay = j.at("decay").get<float>();
+    float momentum = j.at("momentum").get<float>();
+    float useNesterov = j.at("use_nesterov").get<float>();
+    float epoch = j.at("epoch").get<float>();
+
+    Sgd sgd;
+    sgd.initialLearningRate = initialLearningRate;
+    sgd.decay = decay;
+    sgd.momentum = momentum;
+    sgd.useNesterovMomentum = useNesterov;
+    sgd.startResumeEpoch = epoch;
+    return sgd.clone();
+}
+
+vector<Event> Sgd::initialize(shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                               bool isFirstStamp,
+                               shared_ptr<ThorImplementation::Optimizer> sisterPhysicalOptimizer,
+                               Optional<Event> sisterOptimizerLoadedEvent) {
+    shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
+    assert(physicalSgd != nullptr);
+    physicalSgd->compile();
+
+    // SGD has no weights and its parameters are set as arguments to the constructor during stamp.
+
+    return {};
+}
+
+}  // namespace Thor
+
+namespace {
+static const bool registered = [] {
+    Thor::Optimizer::registerLayer("sgd", &Thor::Sgd::deserialize);
+    return true;
+}();
+}

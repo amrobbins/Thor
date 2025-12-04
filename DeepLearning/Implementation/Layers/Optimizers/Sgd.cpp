@@ -8,6 +8,7 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
          float decay,
          float momentum,
          bool useNesterovMomentum,
+         uint64_t startResumeEpoch,
          Optional<Tensor> errorInput,
          Optional<Tensor> errorOutput) {
     assert(trainableLayer != nullptr);
@@ -30,6 +31,7 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     this->decay = decay;
     this->momentum = momentum;
     this->useNesterovMomentum = useNesterovMomentum;
+    this->epoch = startResumeEpoch;
 
     epoch = -1;
 
@@ -169,6 +171,8 @@ float Sgd::getDecay() { return decay; }
 float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
+
+uint64_t Sgd::getEpoch() { return epoch; }
 
 Optional<Tensor> Sgd::getProjectedWeights() { return projectedWeights; }
 

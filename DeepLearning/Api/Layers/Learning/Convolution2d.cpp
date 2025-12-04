@@ -286,6 +286,18 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
             initDoneEvents.push_back(optimizerInitDoneEvents[i]);
     }
 
+    if (hasOptimizer()) {
+        // Initialize the optimizer - it will follow the same process as above.
+        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+        shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+            sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+
+        vector<Event> optimizerInitDoneEvents =
+            optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+        for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+            initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+    }
+
     return initDoneEvents;
 }
 

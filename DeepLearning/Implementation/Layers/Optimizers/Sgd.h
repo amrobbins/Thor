@@ -18,6 +18,7 @@ class Sgd : public Optimizer {
         float decay,
         float momentum,
         bool useNesterovMomentum,
+        uint64_t startResumeEpoch,
         Optional<Tensor> errorInput,
         Optional<Tensor> errorOutput);
 
@@ -35,6 +36,7 @@ class Sgd : public Optimizer {
     virtual float getDecay();
     virtual float getMomentum();
     virtual bool getUseNesterovMomentum();
+    virtual uint64_t getEpoch();
 
     Optional<Tensor> getProjectedWeights();
     Optional<Tensor> getProjectedBiases();
