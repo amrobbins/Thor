@@ -85,7 +85,7 @@ class Network {
     std::shared_ptr<TrainableWeightsBiasesLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
 
    private:
-    static const bool DEBUG_STAMP = false;
+    static const bool DEBUG_STAMP = true;
 
     struct LayerComparator {
         bool operator()(const std::shared_ptr<Layer> &lhs, const std::shared_ptr<Layer> &rhs) const { return *lhs < *rhs; }
