@@ -776,6 +776,8 @@ class Tensor : private ReferenceCounted {
 
     std::string dimensionsToString();
 
+    bool setEnableGpuDirectStorage(bool enable) { bool oldEnable = enableGpuDirectStorage; enableGpuDirectStorage = enable; return oldEnable; }
+
     virtual bool isKerasCompatible(std::string &explanation) {
         explanation.clear();
         return true;
@@ -793,6 +795,8 @@ class Tensor : private ReferenceCounted {
     unsigned long instanceId;
 
     TensorDescriptor descriptor;
+
+    bool enableGpuDirectStorage = false;
 
     bool usingExternallyManagedMemory = false;
 

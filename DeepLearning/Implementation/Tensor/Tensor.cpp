@@ -632,18 +632,22 @@ void Tensor::loadFromFile(Stream stream) {
     assert(fileAccessRequirement != FileAccess::WRITE_ONLY);
 
     if (getPlacement() == TensorPlacement::MemDevices::GPU) {
-        gpuDirectStorageBytesAccessed = 0;
-        CUfileError_t cuFileError;
-        cuFileError = cuFileReadAsync(gpuDirectStorageCuFileHandle,
-                                      getMemPtr(),
-                                      &gpuDirectStorageSize,
-                                      &gpuDirectStorageFileOffset,
-                                      &gpuDirectStorageBufOffset,
-                                      &gpuDirectStorageBytesAccessed,
-                                      stream);
-        assert(cuFileError.err == CU_FILE_SUCCESS);
-        std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
-        stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
+        if (enableGpuDirectStorage) {
+            gpuDirectStorageBytesAccessed = 0;
+            CUfileError_t cuFileError;
+            cuFileError = cuFileReadAsync(gpuDirectStorageCuFileHandle,
+                                          getMemPtr(),
+                                          &gpuDirectStorageSize,
+                                          &gpuDirectStorageFileOffset,
+                                          &gpuDirectStorageBufOffset,
+                                          &gpuDirectStorageBytesAccessed,
+                                          stream);
+            assert(cuFileError.err == CU_FILE_SUCCESS);
+            std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
+            stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
+        } else {
+            assert(false); // FIXME
+        }
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(
             new PerformReadParams(getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor));
@@ -658,18 +662,27 @@ void Tensor::dumpToFile(Stream stream) {
     assert(fileAccessRequirement != FileAccess::READ_ONLY);
 
     if (getPlacement() == TensorPlacement::MemDevices::GPU) {
-        gpuDirectStorageBytesAccessed = 0;
-        CUfileError_t cuFileError;
-        cuFileError = cuFileWriteAsync(gpuDirectStorageCuFileHandle,
-                                       getMemPtr(),
-                                       &gpuDirectStorageSize,
-                                       &gpuDirectStorageFileOffset,
-                                       &gpuDirectStorageBufOffset,
-                                       &gpuDirectStorageBytesAccessed,
-                                       stream);
-        assert(cuFileError.err == CU_FILE_SUCCESS);
-        std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
-        stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
+        if (enableGpuDirectStorage) {
+            gpuDirectStorageBytesAccessed = 0;
+            CUfileError_t cuFileError;
+            cuFileError = cuFileWriteAsync(gpuDirectStorageCuFileHandle,
+                                           getMemPtr(),
+                                           &gpuDirectStorageSize,
+                                           &gpuDirectStorageFileOffset,
+                                           &gpuDirectStorageBufOffset,
+                                           &gpuDirectStorageBytesAccessed,
+                                           stream);
+            assert(cuFileError.err == CU_FILE_SUCCESS);
+            std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
+            stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
+        } else {
+            // Since no gpu direct, allocate a cpu buffer, copy data into that buffer, copy data from buffer to gpu.
+            // I can't do this asynchronously because I need to free the host buffer once it is finished and can't call cuda functions
+            // on a stream enqueued host function.
+            // So when gpuDirectStorage is not available and enabled, this will be a synchronous operation.
+            // It could be made async if I am ok keeping the other tensor alive.
+            assert(false); // FIXME
+        }
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(
             new PerformWriteParams(getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor));
