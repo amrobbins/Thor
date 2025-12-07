@@ -205,7 +205,6 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual Optional<Tensor> getBiases() { return biases; }
 
     virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> newOptimizer) {
-        assert(compiled);
         this->optimizer.clear();
         this->optimizerShared.clear();
         if (newOptimizer.isPresent()) {
@@ -304,7 +303,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
    private:
     virtual void backProp(
-        Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber){};
+        Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream, unsigned int connectionNumber) {};
 
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.
     int64_t stampedId;

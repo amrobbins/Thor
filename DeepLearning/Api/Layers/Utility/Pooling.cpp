@@ -64,4 +64,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("pooling", &Thor::Pooling::deserialize);
     return true;
 }();
-}
+}  // namespace

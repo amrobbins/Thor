@@ -1,12 +1,12 @@
-//#pragma once
+// #pragma once
 //
-//#include "DeepLearning/Api/Layers/Layer.h"
-//#include "DeepLearning/Implementation/Layers/NeuralNetwork/DeepDpm.h"
+// #include "DeepLearning/Api/Layers/Layer.h"
+// #include "DeepLearning/Implementation/Layers/NeuralNetwork/DeepDpm.h"
 //
-//#include <string>
-//#include <vector>
+// #include <string>
+// #include <vector>
 //
-// namespace Thor {
+//  namespace Thor {
 //
 ///**
 // * DeepDPM as described in https://arxiv.org/pdf/2203.14309.pdf

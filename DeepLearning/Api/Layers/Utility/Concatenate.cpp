@@ -82,4 +82,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("concatenate", &Thor::Concatenate::deserialize);
     return true;
 }();
-}
+}  // namespace

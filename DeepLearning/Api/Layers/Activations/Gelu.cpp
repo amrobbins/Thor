@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("gelu", &Thor::Gelu::deserialize);
     return true;
 }();
-}
+}  // namespace

@@ -37,4 +37,4 @@ static const bool registered = [] {
     Thor::Metric::register_layer("binary_accuracy", &Thor::BinaryAccuracy::deserialize);
     return true;
 }();
-}
+}  // namespace

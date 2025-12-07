@@ -269,4 +269,4 @@ static const bool registered = [] {
     Thor::TrainableWeightsBiasesLayer::register_layer("batch_normalization", &Thor::BatchNormalization::deserialize);
     return true;
 }();
-}
+}  // namespace

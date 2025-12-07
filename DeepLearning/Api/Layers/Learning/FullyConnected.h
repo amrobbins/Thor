@@ -19,9 +19,9 @@
 #include "Utilities/Exceptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
-//#ifdef THOR_TESTING
-//#include <gtest/gtest_prod.h>
-//#endif
+// #ifdef THOR_TESTING
+// #include <gtest/gtest_prod.h>
+// #endif
 
 #include <assert.h>
 #include <filesystem>
@@ -103,6 +103,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         //  with multiple connections, it would just share weights, etc.
         std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected =
             std::make_shared<ThorImplementation::FullyConnected>(numOutputFeatures, hasBias, getId());
+        // Too early here, that phys layer constructor does nothing. Need to set the optimizer, but the phys layer later compiles it.
         if (hasOptimizer())
             physicalFullyConnected->setOptimizer(optimizer->stamp(physicalFullyConnected));
 
@@ -163,9 +164,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     friend class Network;
 
-    //#ifdef THOR_TESTING
-    //    FRIEND_TEST(FullyConnectedTest, SerializeProducesExpectedJson);
-    //#endif
+    // #ifdef THOR_TESTING
+    //     FRIEND_TEST(FullyConnectedTest, SerializeProducesExpectedJson);
+    // #endif
 };
 
 // featureInput and numOutputFeatures are required, all other parameters are optional.

@@ -367,8 +367,8 @@ MatrixMultiplyKernelInfo LtSgemmCustomFind(cublasLtHandle_t ltHandle,
                                         AlgoCount++;
 
                                 }  // end if
-                            }      // end for
-                        } else {   // Non-splitK case
+                            }  // end for
+                        } else {  // Non-splitK case
                             /* if user preference is ok with workspace */
                             if (AlgoCount < AlgoCombinations) {
                                 status = customMatmulRun(ltHandle,
@@ -413,9 +413,9 @@ MatrixMultiplyKernelInfo LtSgemmCustomFind(cublasLtHandle_t ltHandle,
                             }
                         }
                     }  // end l
-                }      // end k
-            }          // end customOption
-        }              // end tileIdx
+                }  // end k
+            }  // end customOption
+        }  // end tileIdx
         delete[] tileA;
     }  // end idx
 

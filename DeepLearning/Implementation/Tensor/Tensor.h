@@ -776,7 +776,22 @@ class Tensor : private ReferenceCounted {
 
     std::string dimensionsToString();
 
-    bool setEnableGpuDirectStorage(bool enable) { bool oldEnable = enableGpuDirectStorage; enableGpuDirectStorage = enable; return oldEnable; }
+    bool enableGpuDirectStorage(bool enable) {
+        bool oldEnable = gpuDirectStorageEnabled;
+        if (enable == oldEnable)
+            return oldEnable;
+
+        if (!this->fileName.empty()) {
+            std::string attachedFileName = this->fileName;
+            detachFile();
+            gpuDirectStorageEnabled = enable;
+            attachFile(attachedFileName, gpuDirectStorageFileOffset, fileAccessRequirement);
+        } else {
+            gpuDirectStorageEnabled = enable;
+        }
+
+        return oldEnable;
+    }
 
     virtual bool isKerasCompatible(std::string &explanation) {
         explanation.clear();
@@ -796,7 +811,7 @@ class Tensor : private ReferenceCounted {
 
     TensorDescriptor descriptor;
 
-    bool enableGpuDirectStorage = false;
+    bool gpuDirectStorageEnabled = false;
 
     bool usingExternallyManagedMemory = false;
 
@@ -823,7 +838,7 @@ class Tensor : private ReferenceCounted {
     template <typename DATA_TYPE>
     void launchGpuFillRandom(void *mem, uint64_t numElements, double minValue, double maxValue, Stream stream);
 
-    void overrideDescriptor(TensorDescriptor descriptor);
+    void overrideDescriptor(TensorDescriptor overrideDescriptor);
     void clearDescriptorOverride();
 
     void construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);

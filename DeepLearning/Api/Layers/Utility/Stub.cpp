@@ -47,4 +47,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("stub", &Thor::Stub::deserialize);
     return true;
 }();
-}
+}  // namespace

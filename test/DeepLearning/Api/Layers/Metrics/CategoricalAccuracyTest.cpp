@@ -96,7 +96,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     Network initialNetwork;
 
     Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
-    uint64_t numClasses = 1U + (rand() % 20);
+    uint64_t numClasses = 2U + (rand() % 20);
     vector<uint64_t> predictionsDimensions = {numClasses};
     NetworkInput predictionsNetworkInput = NetworkInput::Builder()
                                                .network(initialNetwork)

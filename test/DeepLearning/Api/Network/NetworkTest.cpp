@@ -375,8 +375,8 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     shared_ptr<ThorImplementation::TypeConversion> tc8_16 =
         dynamic_pointer_cast<ThorImplementation::TypeConversion>(stampedNetwork.getOtherLayers()[0]);
     ASSERT_NE(tc8_16, nullptr);
-    shared_ptr<ThorImplementation::DropOut> dropout = dynamic_pointer_cast<ThorImplementation::DropOut>(stampedNetwork.getOtherLayers()[1]);
-    ASSERT_NE(dropout, nullptr);
+    shared_ptr<ThorImplementation::DropOut> dropout =
+    dynamic_pointer_cast<ThorImplementation::DropOut>(stampedNetwork.getOtherLayers()[1]); ASSERT_NE(dropout, nullptr);
     shared_ptr<ThorImplementation::Relu> relu = dynamic_pointer_cast<ThorImplementation::Relu>(stampedNetwork.getOtherLayers()[2]);
     ASSERT_NE(relu, nullptr);
     shared_ptr<ThorImplementation::DropOut> dropout2 =
@@ -479,9 +479,9 @@ TEST(Network, BranchedNetworkProperlyFormed) {
             bn.push_back(dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(i)));
         else {
             ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayer(i)), nullptr);
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(stampedNetwork.getTrainableLayer(i)), nullptr);
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::MultiConnectionLayer>(stampedNetwork.getTrainableLayer(i)), nullptr);
-            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Layer>(stampedNetwork.getTrainableLayer(i)), nullptr);
+            ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(stampedNetwork.getTrainableLayer(i)),
+            nullptr); ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::MultiConnectionLayer>(stampedNetwork.getTrainableLayer(i)),
+            nullptr); ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::Layer>(stampedNetwork.getTrainableLayer(i)), nullptr);
             ASSERT_TRUE(false);
         }
     }
@@ -763,8 +763,8 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     for (uint64_t i = 0; i < stampedNetwork.getOtherLayers().size(); ++i) {
         if (dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]) != nullptr) {
             if (images->getFeatureOutput().get() ==
-                dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i])->getFeatureInputs()[0].get()) {
-                imagesFO = dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]);
+                dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i])->getFeatureInputs()[0].get())
+                { imagesFO = dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]);
             }
         }
     }

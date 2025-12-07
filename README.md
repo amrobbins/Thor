@@ -21,13 +21,13 @@ This framework is for Linux, and is currently being developed using Ubuntu 22.04
 mkdir build  
 cd build  
 
-cmake -DCMAKE_BUILD_TYPE=Release ..  
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ..  
 -- or --  
-cmake -DCMAKE_BUILD_TYPE=Debug ..  
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug ..  
 -- or --  
-cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..  
+cmake -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo ..  
 
-cmake --build . -j12
+cmake --build .
 
 #### Run tests
 

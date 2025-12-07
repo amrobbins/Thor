@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <nlohmann/json.hpp>
 #include "cuda.h"
 #include "cuda_fp16.h"
 #include "cuda_runtime.h"
@@ -14,7 +15,7 @@
 #include <vector>
 
 using namespace std;
-
+using json = nlohmann::json;
 using namespace Thor;
 
 static Network buildNetwork(uint32_t numFCLayers) {
@@ -201,30 +202,30 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
 
 /* FIXME: put this back in once multiple stamps is supported
 TEST(Sgd, SgdInitializesParametersWithTwoStamps) {
-    Network network = buildNetwork(2);
-    float initialLearningRate = 0.25;
-    float decay = 0.8;
-    float momentum = 0.0;
-    shared_ptr<Sgd> sgd =
-        Sgd::Builder().network(network).initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterovMomentum(true).build();
+Network network = buildNetwork(2);
+float initialLearningRate = 0.25;
+float decay = 0.8;
+float momentum = 0.0;
+shared_ptr<Sgd> sgd =
+Sgd::Builder().network(network).initialLearningRate(initialLearningRate).decay(decay).momentum(momentum).useNesterovMomentum(true).build();
 
-    ThorImplementation::StampedNetwork stampedNetwork0;
-    ThorImplementation::StampedNetwork stampedNetwork1;
-    vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 2);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+ThorImplementation::StampedNetwork stampedNetwork0;
+ThorImplementation::StampedNetwork stampedNetwork1;
+vector<Event> initDoneEvents;
+Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 2);
+ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    uint32_t epoch = 0;
-    uint32_t batch = 4;
-    uint32_t batchesPerEpoch = 25;
-    unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
+uint32_t epoch = 0;
+uint32_t batch = 4;
+uint32_t batchesPerEpoch = 25;
+unordered_map<string, float> params = sgd->updateHyperParameters(epoch, batch, batchesPerEpoch);
 
-    // Check that the proper values are reported
-    ASSERT_EQ(params.count("currentLearningRate"), 1U);
-    ASSERT_EQ(params.size(), 1U);
-    ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
+// Check that the proper values are reported
+ASSERT_EQ(params.count("currentLearningRate"), 1U);
+ASSERT_EQ(params.size(), 1U);
+ASSERT_LT(abs(params["currentLearningRate"] - initialLearningRate), 0.0001);
 }
- */
+*/
 
 TEST(Sgd, SgdUpdatesParameters) {
     Network network = buildNetwork(1);
@@ -372,7 +373,246 @@ TEST(Sgd, SgdReportsParameters) {
     ASSERT_TRUE(params["useNesterovMomentum"]);
 }
 
-TEST(ApiSgd, Update) {}
+TEST(Sgd, SerializeDeserialize) {
+    srand(time(nullptr));
 
-// FIXME: Test stamp directly. Connect it to tensors and set its optimizer, set its weights and gradients and test backward to
-// ensure the stamped layer's SGD is numerically correct.
+    Network initialNetwork;
+
+    Tensor::DataType dataType = Tensor::DataType::FP16;
+
+    vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
+
+    uint32_t numOutputFeatures = 1 + (rand() % 1000);
+    bool hasBias = rand() % 2;
+
+    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
+
+    bool use_batch_norm = rand() % 2;
+
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    FullyConnected::Builder fullyConnectedBuilder = FullyConnected::Builder()
+                                                        .network(initialNetwork)
+                                                        .featureInput(networkInput.getFeatureOutput())
+                                                        .numOutputFeatures(numOutputFeatures)
+                                                        .hasBias(hasBias)
+                                                        .dropOut(dropProportion);
+    if (use_batch_norm) {
+        fullyConnectedBuilder.batchNormalization();
+    }
+    FullyConnected fullyConnected = fullyConnectedBuilder.build();
+
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("testOutput")
+                                      .inputTensor(fullyConnected.getFeatureOutputs()[0])
+                                      .dataType(dataType)
+                                      .build();
+
+    float initialLearningRate = (1 + (rand() % 1000)) / 1000.0f;
+    float decay = (rand() % 1000) / 1000.0f;
+    float momentum = (1 + (rand() % 1000)) / 1000.0f;
+    bool useNesterovMomentum = rand() % 2;
+
+    shared_ptr<Sgd> sgd = Sgd::Builder()
+                              .network(initialNetwork)
+                              .initialLearningRate(initialLearningRate)
+                              .decay(decay)
+                              .momentum(momentum)
+                              .useNesterovMomentum(useNesterovMomentum)
+                              .build();
+
+    ASSERT_TRUE(fullyConnected.isInitialized());
+
+    vector<uint64_t> outputDimensions = {numOutputFeatures};
+    vector<Tensor> featureInputs = fullyConnected.getFeatureInputs();
+    vector<Tensor> featureOutputs = fullyConnected.getFeatureOutputs();
+    assert(featureInputs[0] == networkInput.getFeatureOutput());
+
+    ASSERT_EQ(fullyConnected.getFeatureOutput(networkInput.getFeatureOutput()), featureOutputs[0]);
+
+    assert(fullyConnected.getFeatureInput(featureOutputs[0]) == featureInputs[0]);
+
+    ASSERT_EQ(featureInputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureInputs[0].getDimensions(), inputDimensions);
+
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
+    ASSERT_EQ(featureOutputs[0].getDimensions(), outputDimensions);
+
+    // Now stamp the network and test serialization
+    Stream stream(0);
+    uint32_t batchSize = 1 + (rand() % 16);
+    vector<Event> initDoneEvents;
+    Network::StatusCode statusCode;
+    statusCode = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    // Fetch the fully connected layer from the network and write to its weights
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), use_batch_norm ? 2UL : 1UL);
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
+    if (use_batch_norm) {
+        if (physicalFCLayer == nullptr)
+            physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(1));
+    }
+    ASSERT_TRUE(physicalFCLayer != nullptr);
+    ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
+    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
+    for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
+        weightsCpuMem[i] = i;
+    }
+    weights.copyFromAsync(weightsCpu, stream);
+
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesCpu;
+    if (hasBias) {
+        biases = physicalFCLayer->getBiases();
+        biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
+        for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
+            biasesCpuMem[i] = i * i + 6;
+        }
+        biases.copyFromAsync(biasesCpu, stream);
+    }
+
+    json fullyConnectedJ = fullyConnected.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+
+    // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
+    Layer *layer = &fullyConnected;
+    json fromLayerJ = layer->serialize("/tmp/", stream);
+    ASSERT_EQ(fullyConnectedJ, fromLayerJ);
+
+    ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
+    ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");
+
+    EXPECT_TRUE(fullyConnectedJ.contains("num_output_features"));
+    EXPECT_TRUE(fullyConnectedJ.contains("has_bias"));
+    EXPECT_FALSE(fullyConnectedJ.contains("activation"));
+    EXPECT_FALSE(fullyConnectedJ.contains("drop_out"));
+    EXPECT_FALSE(fullyConnectedJ.contains("batch_normalization"));
+    EXPECT_FALSE(fullyConnectedJ.contains("activation"));
+    EXPECT_EQ(fullyConnectedJ.contains("biases_tensor"), hasBias);
+    EXPECT_TRUE(fullyConnectedJ.contains("weights_tensor"));
+    EXPECT_TRUE(fullyConnectedJ.contains("inputs"));
+    EXPECT_TRUE(fullyConnectedJ.contains("outputs"));
+
+    ASSERT_TRUE(fullyConnectedJ.at("num_output_features").is_number_integer());
+    ASSERT_TRUE(fullyConnectedJ.at("has_bias").is_boolean());
+    ASSERT_TRUE(fullyConnectedJ.at("weights_tensor").is_string());
+    ASSERT_TRUE(fullyConnectedJ.at("inputs").is_array());
+    ASSERT_TRUE(fullyConnectedJ.at("outputs").is_array());
+
+    EXPECT_EQ(fullyConnectedJ.at("num_output_features").get<uint32_t>(), numOutputFeatures);
+    EXPECT_EQ(fullyConnectedJ.at("has_bias").get<bool>(), hasBias);
+
+    const auto &inputs = fullyConnectedJ.at("inputs");
+    ASSERT_EQ(inputs.size(), 1U) << "Expect exactly one input";
+    const auto &in0 = inputs.at(0);
+    ASSERT_TRUE(in0.is_object());
+    ASSERT_TRUE(in0.at("data_type").is_string());
+    EXPECT_EQ(in0.at("data_type").get<string>(), "fp16");
+
+    ASSERT_TRUE(in0.at("dimensions").is_array());
+    ASSERT_EQ(in0.at("dimensions").size(), 1U);
+    EXPECT_TRUE(in0.at("dimensions").at(0).is_number_integer());
+    EXPECT_EQ(in0.at("dimensions").at(0).get<uint32_t>(), inputDimensions[0]);
+
+    ASSERT_TRUE(in0.at("id").is_number_integer());
+
+    const auto &outputs = fullyConnectedJ.at("outputs");
+    ASSERT_EQ(outputs.size(), 1U) << "Expect exactly one output";
+    const auto &out0 = outputs.at(0);
+    ASSERT_TRUE(out0.is_object());
+    ASSERT_TRUE(out0.at("data_type").is_string());
+    EXPECT_EQ(out0.at("data_type").get<string>(), "fp16");
+
+    ASSERT_TRUE(out0.at("dimensions").is_array());
+    ASSERT_EQ(out0.at("dimensions").size(), 1U);
+    EXPECT_TRUE(out0.at("dimensions").at(0).is_number_integer());
+    EXPECT_EQ(out0.at("dimensions").at(0).get<uint32_t>(), numOutputFeatures);
+
+    ASSERT_TRUE(out0.at("id").is_number_integer());
+
+    string file_prefix = "/tmp/layer" + to_string(fullyConnected.getId());
+    EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<string>().empty());
+    EXPECT_EQ(fullyConnectedJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
+    if (hasBias) {
+        EXPECT_FALSE(fullyConnectedJ.at("biases_tensor").get<string>().empty());
+        EXPECT_EQ(fullyConnectedJ.at("biases_tensor").get<string>(), file_prefix + "_biases.gds");
+    }
+
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    // printf("%s\n", networkOutputJ.dump(4).c_str());
+
+    ////////////////////////////
+    // Deserialize
+    ////////////////////////////
+    // Verify that the layer gets added to the network and that its weights are set to the correct values
+    Network newNetwork;
+
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(fullyConnectedJ, &newNetwork);
+    Layer::deserialize(networkOutputJ, &newNetwork);
+
+    batchSize = 1 + (rand() % 16);
+    statusCode = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    stampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
+    ASSERT_TRUE(physicalFCLayerDes != nullptr);
+
+    ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();
+    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    weightsCpuDes.copyFromAsync(weightsDes, stream);
+
+    ThorImplementation::Tensor biasesDes;
+    ThorImplementation::Tensor biasesCpuDes;
+    if (hasBias) {
+        biasesDes = physicalFCLayerDes->getBiases();
+        biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpuDes.copyFromAsync(biasesDes, stream);
+    }
+
+    stream.synchronize();
+
+    ASSERT_NE(weightsDes, weights);
+    ASSERT_EQ(weightsDes.getDimensions(), weights.getDimensions());
+    ASSERT_EQ(weightsDes.getDataType(), weights.getDataType());
+    ASSERT_TRUE(weightsDes.getPlacement() == weights.getPlacement());
+
+    half *weightsCpuMemDes = (half *)weightsCpuDes.getMemPtr();
+    for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
+        ASSERT_EQ(weightsCpuMemDes[i], half(i));
+    }
+
+    if (hasBias) {
+        ASSERT_NE(biasesDes, biases);
+        ASSERT_EQ(biasesDes.getDimensions(), biases.getDimensions());
+        ASSERT_EQ(biasesDes.getDataType(), biases.getDataType());
+        ASSERT_TRUE(biasesDes.getPlacement() == biases.getPlacement());
+
+        half *biasesCpuMemDes = (half *)biasesCpuDes.getMemPtr();
+        for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
+            ASSERT_EQ(biasesCpuMemDes[i], half(i * i + 6));
+        }
+    }
+}

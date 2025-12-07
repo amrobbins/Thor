@@ -38,4 +38,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("network_input", &Thor::NetworkInput::deserialize);
     return true;
 }();
-}
+}  // namespace

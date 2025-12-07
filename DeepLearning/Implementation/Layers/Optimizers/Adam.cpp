@@ -7,12 +7,7 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
            float alpha,
            float beta1,
            float beta2,
-           float epsilon,
-           Optional<Tensor> errorInput,
-           Optional<Tensor> errorOutput) {
-    if (errorInput.isEmpty())
-        return;
-
+           float epsilon) {
     this->alpha = alpha;
     this->beta1 = beta1;
     this->beta2 = beta2;
@@ -21,21 +16,14 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
 
     this->trainableLayerShared = trainableLayer;
     this->trainableLayer = trainableLayer.get();
+}
 
+void Adam::compile() {
     TensorPlacement layerPlacement = trainableLayer->getPlacement();
     assert(layerPlacement == TensorPlacement::MemDevices::GPU);
     gpuNum = layerPlacement.getDeviceNum();
     gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
 
-    assert(errorInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    if (errorOutput.isPresent()) {
-        assert(errorInput.get().getPlacement().getMemDevice() == errorOutput.get().getPlacement().getMemDevice());
-        assert(errorInput.get().getPlacement().getDeviceNum() == errorOutput.get().getPlacement().getDeviceNum());
-    }
-    assert(errorInput.get().getDimensions().size() > 0);
-}
-
-void Adam::compile() {
     // Allocate all params
     Tensor weights = trainableLayer->getWeights();
     weightsGradient = weights.clone();

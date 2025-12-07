@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("swish", &Thor::Swish::deserialize);
     return true;
 }();
-}
+}  // namespace

@@ -51,4 +51,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("drop_out", &Thor::DropOut::deserialize);
     return true;
 }();
-}
+}  // namespace
