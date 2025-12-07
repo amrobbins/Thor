@@ -34,6 +34,9 @@ set(THOR_VERSION_NUMERIC "${CMAKE_MATCH_0}")  # "0.1.1"
 # 3) Use numeric for CMake's project version
 project(Thor VERSION ${THOR_VERSION_NUMERIC} LANGUAGES CXX CUDA)
 
+set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
+set(CMAKE_CUDA_COMPILER_LAUNCHER ccache)
+
 # ============================================================
 # Global settings
 # ============================================================
