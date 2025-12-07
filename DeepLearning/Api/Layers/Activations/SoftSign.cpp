@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("soft_sign", &Thor::SoftSign::deserialize);
     return true;
 }();
-}
+}  // namespace

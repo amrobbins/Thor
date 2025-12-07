@@ -8,11 +8,7 @@ namespace Thor {
 Adam::~Adam() {}
 
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
-    Optional<ThorImplementation::Tensor> errorInput =
-        ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(trainableLayer->getErrorInputs());
-    Optional<ThorImplementation::Tensor> errorOutput =
-        ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(trainableLayer->getErrorOutputs());
-    return make_shared<ThorImplementation::Adam>(trainableLayer, alpha, beta1, beta2, epsilon, errorInput, errorOutput);
+    return make_shared<ThorImplementation::Adam>(trainableLayer, alpha, beta1, beta2, epsilon);
 }
 
 void Adam::setAlpha(float newAlpha) {
@@ -239,4 +235,4 @@ static const bool registered = [] {
     Thor::Optimizer::registerLayer("adam", &Thor::Adam::deserialize);
     return true;
 }();
-}
+}  // namespace

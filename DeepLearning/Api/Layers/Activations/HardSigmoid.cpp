@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("hard_sigmoid", &Thor::HardSigmoid::deserialize);
     return true;
 }();
-}
+}  // namespace

@@ -15,7 +15,7 @@ class Optimizer {
         id = nextId.fetch_add(1);
     }
 
-    virtual void compile() {}
+    virtual void compile() { compiled = true; }
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until
@@ -64,6 +64,8 @@ class Optimizer {
 
     Tensor weightsUpdate;
     Optional<Tensor> biasesUpdate;
+
+    bool compiled = false;
 
    private:
     uint64_t id;

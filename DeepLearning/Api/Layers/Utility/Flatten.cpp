@@ -48,4 +48,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("flatten", &Thor::Flatten::deserialize);
     return true;
 }();
-}
+}  // namespace

@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("exponential", &Thor::Exponential::deserialize);
     return true;
 }();
-}
+}  // namespace

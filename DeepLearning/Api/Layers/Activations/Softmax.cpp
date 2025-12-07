@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("softmax", &Thor::Softmax::deserialize);
     return true;
 }();
-}
+}  // namespace

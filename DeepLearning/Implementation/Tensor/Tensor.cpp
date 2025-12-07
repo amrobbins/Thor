@@ -649,8 +649,7 @@ void Tensor::loadFromFile(Stream stream) {
             // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
             Tensor bounceBuffer = clone(TensorPlacement::MemDevices::CPU);
             // disk -> cpu
-            PerformReadParams args(
-                bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
+            PerformReadParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
             performRead(&args);
             // cpu -> gpu
             copyFromAsync(bounceBuffer, stream);

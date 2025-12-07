@@ -15,9 +15,7 @@ class Adam : public Optimizer {
          float alpha,
          float beta1,
          float beta2,
-         float epsilon,
-         Optional<Tensor> errorInput,
-         Optional<Tensor> errorOutput);
+         float epsilon);
 
     virtual void compile();
 

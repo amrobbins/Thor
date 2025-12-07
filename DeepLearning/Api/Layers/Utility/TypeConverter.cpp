@@ -51,4 +51,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("type_converter", &Thor::TypeConverter::deserialize);
     return true;
 }();
-}
+}  // namespace

@@ -58,4 +58,4 @@ static bool registered = []() {
     Thor::Layer::register_layer("reshape", &Thor::Reshape::deserialize);
     return true;
 }();
-}
+}  // namespace

@@ -61,6 +61,22 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
 
+        if (!isInferenceOnly()) {
+            assert(optimizer.isPresent());
+            Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
+            assert(anErrorInput.isPresent());
+            uint64_t numUnits = anErrorInput.get().getDimensions()[1];
+            biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
+                                                                           batchSize,
+                                                                           numUnits,
+                                                                           true,
+                                                                           false,
+                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                           optimizer.get()->getGradientUpdateStream(),
+                                                                           false));
+        }
+
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         bool kernelWillRunOnGpu;
@@ -132,26 +148,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             // so there is no need to create FeatureOutputCudnnTensorDescriptor.
             createFeatureOutputCudnnTensorDescriptor();
             createBiasesCudnnTensorDescriptor();
-        }
-    }
-
-    virtual void setOptimizer(Optional<std::shared_ptr<Optimizer>> optimizer) {
-        TrainableWeightsBiasesLayer::setOptimizer(optimizer);
-
-        if (!isInferenceOnly()) {
-            assert(optimizer.isPresent());
-            Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
-            assert(anErrorInput.isPresent());
-            uint64_t numUnits = anErrorInput.get().getDimensions()[1];
-            biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
-                                                                           batchSize,
-                                                                           numUnits,
-                                                                           true,
-                                                                           false,
-                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
-                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
-                                                                           optimizer.get()->getGradientUpdateStream(),
-                                                                           false));
         }
     }
 

@@ -46,4 +46,4 @@ static const bool registered = [] {
     Thor::Metric::register_layer("categorical_accuracy", &Thor::CategoricalAccuracy::deserialize);
     return true;
 }();
-}
+}  // namespace

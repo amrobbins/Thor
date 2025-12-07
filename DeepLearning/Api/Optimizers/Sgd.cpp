@@ -5,15 +5,11 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-Sgd::~Sgd() {}
+// Sgd::~Sgd() {}
 
 shared_ptr<ThorImplementation::Optimizer> Sgd::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
-    Optional<ThorImplementation::Tensor> errorInput =
-        ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(trainableLayer->getErrorInputs());
-    Optional<ThorImplementation::Tensor> errorOutput =
-        ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(trainableLayer->getErrorOutputs());
     return make_shared<ThorImplementation::Sgd>(
-        trainableLayer, initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch, errorInput, errorOutput);
+        trainableLayer, initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch);
 }
 
 void Sgd::setConstantLearningRate(float newCurrentLearningRate) {
@@ -85,11 +81,10 @@ float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
 
-
 json Sgd::serialize(const string &storageDir,
-                     Stream stream,
-                     shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
-                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
+                    Stream stream,
+                    shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
     json j;
     j["optimizer_type"] = string("sgd");
     j["version"] = getVersion();
@@ -130,9 +125,9 @@ shared_ptr<Optimizer> Sgd::deserialize(const json &j) {
 }
 
 vector<Event> Sgd::initialize(shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                               bool isFirstStamp,
-                               shared_ptr<ThorImplementation::Optimizer> sisterPhysicalOptimizer,
-                               Optional<Event> sisterOptimizerLoadedEvent) {
+                              bool isFirstStamp,
+                              shared_ptr<ThorImplementation::Optimizer> sisterPhysicalOptimizer,
+                              Optional<Event> sisterOptimizerLoadedEvent) {
     shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
     assert(physicalSgd != nullptr);
     physicalSgd->compile();
@@ -149,4 +144,4 @@ static const bool registered = [] {
     Thor::Optimizer::registerLayer("sgd", &Thor::Sgd::deserialize);
     return true;
 }();
-}
+}  // namespace

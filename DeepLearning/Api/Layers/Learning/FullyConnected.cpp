@@ -286,4 +286,4 @@ static const bool registered = [] {
     Thor::TrainableWeightsBiasesLayer::register_layer("fully_connected", &Thor::FullyConnected::deserialize);
     return true;
 }();
-}
+}  // namespace

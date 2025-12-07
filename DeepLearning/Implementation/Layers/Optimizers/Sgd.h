@@ -18,9 +18,7 @@ class Sgd : public Optimizer {
         float decay,
         float momentum,
         bool useNesterovMomentum,
-        uint64_t startResumeEpoch,
-        Optional<Tensor> errorInput,
-        Optional<Tensor> errorOutput);
+        uint64_t startResumeEpoch);
 
     virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
     virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batch_size);
@@ -46,6 +44,8 @@ class Sgd : public Optimizer {
                                           Optional<Event> sisterOptimizerLoadedEvent) {
         return {};
     }
+
+    virtual void compile();
 
    protected:
     float initialLearningRate;

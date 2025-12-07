@@ -8,24 +8,12 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
          float decay,
          float momentum,
          bool useNesterovMomentum,
-         uint64_t startResumeEpoch,
-         Optional<Tensor> errorInput,
-         Optional<Tensor> errorOutput) {
-    assert(trainableLayer != nullptr);
-    TensorPlacement layerPlacement = trainableLayer->getPlacement();
-    assert(layerPlacement == TensorPlacement::MemDevices::GPU);
-    gpuNum = layerPlacement.getDeviceNum();
-    gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
-    if (errorInput.isEmpty())
-        return;
-    assert(initialLearningRate > 0.0f);
-    assert(decay >= 0.0f);
-    assert(momentum >= 0.0f);
-    assert(gpuNum < (uint32_t)MachineEvaluator::instance().getNumGpus());
+         uint64_t startResumeEpoch) {
+    // I think the fix here is to just grab params and parent, then lazy compile
 
+    assert(trainableLayer != nullptr);
     this->trainableLayerShared = trainableLayer;
     this->trainableLayer = trainableLayer.get();
-    assert(gradientUpdateStream.isInitialized());
 
     this->initialLearningRate = initialLearningRate;
     this->decay = decay;
@@ -34,13 +22,19 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     this->epoch = startResumeEpoch;
 
     epoch = -1;
+}
 
-    assert(errorInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    if (errorOutput.isPresent()) {
-        assert(errorInput.get().getPlacement().getMemDevice() == errorOutput.get().getPlacement().getMemDevice());
-        assert(errorInput.get().getPlacement().getDeviceNum() == errorOutput.get().getPlacement().getDeviceNum());
-    }
-    assert(errorInput.get().getDimensions().size() > 0);
+void Sgd::compile() {
+    TensorPlacement layerPlacement = trainableLayer->getPlacement();
+    assert(layerPlacement == TensorPlacement::MemDevices::GPU);
+    gpuNum = layerPlacement.getDeviceNum();
+    gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
+    assert(initialLearningRate > 0.0f);
+    assert(decay >= 0.0f);
+    assert(momentum >= 0.0f);
+    assert(gpuNum < (uint32_t)MachineEvaluator::instance().getNumGpus());
+
+    assert(gradientUpdateStream.isInitialized());
 
     Tensor weights = trainableLayer->getWeights();
     weightsGradient = weights.clone();
@@ -49,6 +43,8 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     if (biases.isPresent()) {
         biasesGradient = biases.get().clone();
     }
+
+    printf("weightsUpdate.placement %d\n", int(weightsUpdate.getPlacement().getMemDevice()));
 
     if (momentum > 0.0f) {
         weightsUpdate = weightsGradient.clone();
@@ -68,10 +64,17 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
             this->trainableLayer->assignProjectedWeightsTensor(projectedWeights, projectedBiases);
         }
     }
+
+    compiled = true;
 }
 
 // This function just accumulates the gradient
 void Sgd::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
+    // Lazy compile on first use
+    if (!compiled)
+        compile();
+    assert(compiled);
+
     if (errorIn.isEmpty())
         return;
     assert(featureIn.isPresent());

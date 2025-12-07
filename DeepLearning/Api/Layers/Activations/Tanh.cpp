@@ -7,4 +7,4 @@ static bool registered = []() {
     Thor::Activation::register_layer("tanh", &Thor::Tanh::deserialize);
     return true;
 }();
-}
+}  // namespace

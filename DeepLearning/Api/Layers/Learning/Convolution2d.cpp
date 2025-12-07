@@ -308,4 +308,4 @@ static const bool registered = [] {
     Thor::TrainableWeightsBiasesLayer::register_layer("convolution_2d", &Thor::Convolution2d::deserialize);
     return true;
 }();
-}
+}  // namespace
