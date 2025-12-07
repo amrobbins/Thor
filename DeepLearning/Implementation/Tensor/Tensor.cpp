@@ -233,7 +233,7 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
     this->fileAccessRequirement = fileAccessRequirement;
 
     int32_t o_flags = O_CLOEXEC;
-    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU && gpuDirectStorageEnabled)
         o_flags |= O_DIRECT;
     if (fileAccessRequirement == FileAccess::READ_ONLY)
         o_flags |= O_RDONLY;
@@ -262,8 +262,8 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
         fflush(stdout);
         assert(fileDescriptor >= 0);
     }
-    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        // Note: Its critical to zero-initialize cuFileDescriptor, which is done with the {}
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU && gpuDirectStorageEnabled) {
+        // Note: It's critical to zero-initialize cuFileDescriptor, which is done with the {}
         CUfileDescr_t cuFileDescriptor{};
         CUfileError_t cuFileError;
         cuFileDescriptor.type = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
@@ -282,7 +282,7 @@ void Tensor::detachFile() {
         return;
     }
 
-    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU && gpuDirectStorageEnabled) {
         cuFileHandleDeregister(gpuDirectStorageCuFileHandle);
     }
 
@@ -632,7 +632,7 @@ void Tensor::loadFromFile(Stream stream) {
     assert(fileAccessRequirement != FileAccess::WRITE_ONLY);
 
     if (getPlacement() == TensorPlacement::MemDevices::GPU) {
-        if (enableGpuDirectStorage) {
+        if (gpuDirectStorageEnabled) {
             gpuDirectStorageBytesAccessed = 0;
             CUfileError_t cuFileError;
             cuFileError = cuFileReadAsync(gpuDirectStorageCuFileHandle,
@@ -646,7 +646,16 @@ void Tensor::loadFromFile(Stream stream) {
             std::unique_ptr<HostFunctionArgsBase> args(new CheckIoBytesParams(getArraySizeInBytes(), &gpuDirectStorageBytesAccessed));
             stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
         } else {
-            assert(false); // FIXME
+            // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
+            Tensor bounceBuffer = clone(TensorPlacement::MemDevices::CPU);
+            // disk -> cpu
+            PerformReadParams args(
+                bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
+            performRead(&args);
+            // cpu -> gpu
+            copyFromAsync(bounceBuffer, stream);
+            Event copyDoneEvent = stream.putEvent(false, true);
+            copyDoneEvent.synchronize();
         }
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(
@@ -662,7 +671,7 @@ void Tensor::dumpToFile(Stream stream) {
     assert(fileAccessRequirement != FileAccess::READ_ONLY);
 
     if (getPlacement() == TensorPlacement::MemDevices::GPU) {
-        if (enableGpuDirectStorage) {
+        if (gpuDirectStorageEnabled) {
             gpuDirectStorageBytesAccessed = 0;
             CUfileError_t cuFileError;
             cuFileError = cuFileWriteAsync(gpuDirectStorageCuFileHandle,
@@ -681,7 +690,15 @@ void Tensor::dumpToFile(Stream stream) {
             // on a stream enqueued host function.
             // So when gpuDirectStorage is not available and enabled, this will be a synchronous operation.
             // It could be made async if I am ok keeping the other tensor alive.
-            assert(false); // FIXME
+            // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
+            Tensor bounceBuffer = clone(TensorPlacement::MemDevices::CPU);
+            // gpu -> cpu
+            bounceBuffer.copyFromAsync(*this, stream);
+            Event copyDoneEvent = stream.putEvent(false, true);
+            copyDoneEvent.synchronize();
+            // cpu -> disk
+            PerformWriteParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
+            performWrite(&args);
         }
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(
@@ -698,11 +715,11 @@ TensorDescriptor Tensor::getDescriptor() {
     return descriptor;
 }
 
-void Tensor::overrideDescriptor(TensorDescriptor descriptor) {
+void Tensor::overrideDescriptor(TensorDescriptor overrideDescriptor) {
     assert(!uninitialized());
 
     descriptorOverridden = true;
-    overriddenDescriptor = descriptor;
+    overriddenDescriptor = overrideDescriptor;
 }
 
 void Tensor::clearDescriptorOverride() {
