@@ -9,6 +9,8 @@ namespace Thor {
 
 class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
    public:
+    using Layer::initialize;    // So that compiler doesn't complain about override below.
+
     virtual ~TrainableWeightsBiasesLayer() {}
 
     Tensor getWeights() const { return weights; }

@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 
 #include <stdio.h>
 #include <unistd.h>

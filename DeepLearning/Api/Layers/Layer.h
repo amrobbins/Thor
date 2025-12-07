@@ -154,4 +154,12 @@ class Layer {
     friend class Network;
 };
 
+inline bool operator==(const std::string &lhs, const Layer::Factory &rhs) {
+    return lhs == rhs.value();
+}
+
+inline bool operator!=(const std::string &lhs, const Layer::Factory &rhs) {
+    return !(lhs == rhs);
+}
+
 }  // namespace Thor

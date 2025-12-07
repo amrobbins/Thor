@@ -185,7 +185,10 @@ separate_arguments(GM_CXXFLAGS_LIST NATIVE_COMMAND "${GM_CXXFLAGS}")
 separate_arguments(GM_LDFLAGS_LIST NATIVE_COMMAND "${GM_LDFLAGS}")
 
 target_include_directories(Thor PUBLIC ${GMAGICK_INCLUDE_DIRS})
-target_compile_options(Thor PRIVATE ${GM_CPPFLAGS_LIST} ${GM_CXXFLAGS_LIST})
+target_compile_options(Thor PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${GM_CPPFLAGS_LIST}>
+        $<$<COMPILE_LANGUAGE:CXX>:${GM_CXXFLAGS_LIST}>
+)
 target_link_libraries(Thor PRIVATE ${GM_LDFLAGS_LIST})
 
 # ============================================================
@@ -209,7 +212,7 @@ target_compile_definitions(Thor PUBLIC
 
 # CUDA-specific extra flags
 target_compile_options(Thor PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:-forward-unknown-to-host-compiler --Werror all-warnings -Xcompiler -fPIC>
+        $<$<COMPILE_LANGUAGE:CUDA>:--Werror all-warnings>
         )
 
 option(THOR_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds" OFF)
