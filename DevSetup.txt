@@ -30,9 +30,32 @@ git clone git@github.com:amrobbins/Thor.git
 cd ~/Thor
 python3 -m venv .venv
 python -m pip install --upgrade pip
-python -m pip install nanobind
+python -m pip install nanobind yapf
 
 mkdir build
 cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build .
 ./thor_tests
+
+When setting up IDE, clion recommended, point it to the python interpretter at <repo root>/.venv/.
+Go to  settings → editor → general → on save and check
+    1. remove trailing blank lines
+    2. ensure every file ends in newline
+
+Settings → Editor → Code Style → C/C++
+Check use clang-format
+Settings → Tools → Actions on Save
+Check reformat code. Choose C++, and cmake
+Settings → Plugins → Marketplace
+Install File Watchers
+
+Settings → Tools → File Watchers → + → Custom
+Name: YAPF
+File type: Python
+Scope: Project Files
+Program: path to yapf i.e. <content root>/.venv/bin/yapf
+Arguments:
+--in-place $FilePath$
+Working directory: $ProjectFileDir$
+Output paths to refresh: $FilePath$
+Make sure “Trigger the watcher on save” (or “On Save”) is checked.
