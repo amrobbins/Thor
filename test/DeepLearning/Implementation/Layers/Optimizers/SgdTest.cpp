@@ -92,8 +92,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
 
     Tensor anErrorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
     Tensor anErrorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
-    shared_ptr<Sgd> sgd =
-        make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+    shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -232,8 +231,7 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
-        shared_ptr<Sgd> sgd =
-            make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -499,8 +497,7 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
-        shared_ptr<Sgd> sgd =
-            make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -777,8 +774,7 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
         uint32_t numOutputFeatures = (rand() % 300) + 1;
         bool hasBias = rand() % 2;
 
-        Tensor networkFeatureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize,
-        numInputFeatures}));
+        Tensor networkFeatureIn = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numInputFeatures}));
 
         float initialLearningRate = 10000.0 / (1 + rand() % 33);
         float decay = ((rand() % 5) / 10.0f);
@@ -809,8 +805,7 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
         errorInput.fillRandom(-2.0, 2.0, dataStream);
         weights.fillRandom(-2.0, 2.0, dataStream);
         dataStream.synchronize();
-        shared_ptr<Sgd> sgd =
-            make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         Tensor weightsGradient = sgd->getWeightsGradient();
 
@@ -1037,8 +1032,8 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
                                   .get()
                                   .clone(TensorPlacement::MemDevices::CPU);
         Tensor weightsFromGpu = fullyConnectedLayer->getProjectedWeightsTensor().get().clone(TensorPlacement::MemDevices::CPU);
-        inputFromGpu.copyFromAsync(MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs()).get(),
-        dataStream); weightsFromGpu.copyFromAsync(fullyConnectedLayer->getProjectedWeightsTensor(), dataStream);
+        inputFromGpu.copyFromAsync(MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs()).get(), dataStream);
+        weightsFromGpu.copyFromAsync(fullyConnectedLayer->getProjectedWeightsTensor(), dataStream);
         dataStream.synchronize();
         for (int i = 0; i < (int)inputFromGpu.getTotalNumElements(); i++) {
             if (!(featureInMem_h[i] == inputFromGpu.getMemPtr<half>()[i])) {

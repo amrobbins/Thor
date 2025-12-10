@@ -34,7 +34,7 @@ class Optimizer {
 
     virtual nlohmann::json serialize(const std::string &storageDir,
                                      Stream stream,
-                                     std::shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                                     TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
         return nlohmann::json{};
     };

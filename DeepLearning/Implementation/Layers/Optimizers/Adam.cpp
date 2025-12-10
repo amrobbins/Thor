@@ -3,11 +3,7 @@
 using namespace ThorImplementation;
 using namespace std;
 
-Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
-           float alpha,
-           float beta1,
-           float beta2,
-           float epsilon) {
+Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer, float alpha, float beta1, float beta2, float epsilon) {
     this->alpha = alpha;
     this->beta1 = beta1;
     this->beta2 = beta2;

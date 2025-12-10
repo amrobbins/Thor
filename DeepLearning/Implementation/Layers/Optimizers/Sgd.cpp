@@ -20,8 +20,6 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
     this->momentum = momentum;
     this->useNesterovMomentum = useNesterovMomentum;
     this->epoch = startResumeEpoch;
-
-    epoch = -1;
 }
 
 void Sgd::compile() {
@@ -43,8 +41,6 @@ void Sgd::compile() {
     if (biases.isPresent()) {
         biasesGradient = biases.get().clone();
     }
-
-    printf("weightsUpdate.placement %d\n", int(weightsUpdate.getPlacement().getMemDevice()));
 
     if (momentum > 0.0f) {
         weightsUpdate = weightsGradient.clone();

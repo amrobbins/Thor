@@ -148,7 +148,13 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
             shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.apiLayerToPhysicalLayerShared[apiTrainableLayer->getId()];
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer =
                 dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-            apiTrainableLayer->stampOptimizer(physicalTrainableLayer);
+            bool isInferenceOnly = physicalTrainableLayer->isInferenceOnly();
+            if (!isInferenceOnly) {
+                // A trainable layer should either
+                //   1. be inference only or
+                //   2. have a back-prop error path that has not been pruned.
+                apiTrainableLayer->stampOptimizer(physicalTrainableLayer);
+            }
         }
 
     } catch (GpuOutOfMemoryError ex) {
