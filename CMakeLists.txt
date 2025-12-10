@@ -11,9 +11,9 @@ string(
         "${_thor_version_header}"
 )
 
-if(NOT _thor_version_match)
+if (NOT _thor_version_match)
     message(FATAL_ERROR "Could not find THOR_VERSION in ThorVersion.h.in")
-endif()
+endif ()
 
 set(THOR_VERSION_FULL "${CMAKE_MATCH_1}")  # e.g. "0.1.1.dev0"
 
@@ -25,9 +25,9 @@ string(
         "${THOR_VERSION_FULL}"
 )
 
-if(NOT _thor_version_numeric_match)
+if (NOT _thor_version_numeric_match)
     message(FATAL_ERROR "THOR_VERSION must start with numeric semver, got ${THOR_VERSION_FULL}")
-endif()
+endif ()
 
 set(THOR_VERSION_NUMERIC "${CMAKE_MATCH_0}")  # "0.1.1"
 
@@ -55,9 +55,9 @@ set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE}")
 #set(CMAKE_CUDA_ARCHITECTURES 75 120)
 
 # Default to Release if not specified
-if(NOT CMAKE_BUILD_TYPE)
+if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
-endif()
+endif ()
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 add_compile_options(-UNDEBUG)
@@ -66,16 +66,16 @@ add_compile_options(-UNDEBUG)
 # Automatic Git versioning
 # ============================================================
 find_package(Git QUIET)
-if(Git_FOUND)
+if (Git_FOUND)
     execute_process(
             COMMAND ${GIT_EXECUTABLE} describe --tags --always
             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
             OUTPUT_VARIABLE GIT_VERSION
             OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-else()
+else ()
     set(GIT_VERSION "unknown")
-endif()
+endif ()
 
 message(STATUS "Git version: ${GIT_VERSION}")
 
@@ -93,9 +93,9 @@ file(GLOB_RECURSE THOR_SOURCES
         "${CMAKE_SOURCE_DIR}/Utilities/**/*.cu"
         "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cpp"
         "${CMAKE_SOURCE_DIR}/DeepLearning/**/*.cu"
-#        "${CMAKE_SOURCE_DIR}/Demos/**/*.cpp"
-#        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
-        )
+        #        "${CMAKE_SOURCE_DIR}/Demos/**/*.cpp"
+        #        "${CMAKE_SOURCE_DIR}/Demos/**/*.cu"
+)
 
 # ============================================================
 # Create shared library
@@ -105,14 +105,14 @@ add_library(Thor SHARED ${THOR_SOURCES})
 set_target_properties(Thor PROPERTIES
         CXX_STANDARD 20
         CUDA_STANDARD 17
-        )
+)
 
 target_include_directories(Thor
         PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/generated>
         $<INSTALL_INTERFACE:include>
-        )
+)
 
 # ============================================================
 # Compiler and linker flags (replacing Makefile logic)
@@ -123,10 +123,10 @@ target_compile_options(Thor PRIVATE
         -Wall
         $<$<COMPILE_LANGUAGE:CXX>:-Werror>
         -Wdeprecated
-        )
+)
 target_link_options(Thor PRIVATE
         -Wl,--no-as-needed
-        )
+)
 
 # OpenMP
 find_package(OpenMP REQUIRED)
@@ -139,22 +139,22 @@ target_link_libraries(Thor PRIVATE
         CUDA::cublas
         CUDA::cublasLt
         CUDA::cusolver
-        )
+)
 
 # Manually include cuDNN and cuFile
 target_link_directories(Thor PRIVATE
         /usr/local/cuda/lib64
         /usr/lib/x86_64-linux-gnu
-        )
+)
 
 target_link_libraries(Thor PRIVATE
         cudnn
         cufile
-        )
+)
 
 target_include_directories(Thor PUBLIC
         $<BUILD_INTERFACE:${CUDAToolkit_INCLUDE_DIRS}>
-        )
+)
 
 find_package(Curses REQUIRED)
 target_include_directories(Thor PUBLIC ${CURSES_INCLUDE_DIRS})
@@ -205,30 +205,30 @@ target_compile_options(Thor PRIVATE
         $<$<CONFIG:Release>:-O3>
         $<$<CONFIG:RelWithDebInfo>:-O3 -ggdb -fsanitize=undefined>
         $<$<CONFIG:Debug>:-O0 -ggdb>
-        )
+)
 
 target_compile_definitions(Thor PUBLIC
         $<$<CONFIG:Release>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
         $<$<CONFIG:RelWithDebInfo>:THOR_RELEASE GDK_NVDIRECT _FILE_OFFSET_BITS=64>
         $<$<CONFIG:Debug>:THOR_DEBUG GDK_NVDIRECT _FILE_OFFSET_BITS=64 _GLIBCXX_DEBUG>
-        )
+)
 
 # CUDA-specific extra flags
 target_compile_options(Thor PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:--Werror all-warnings>
-        )
+)
 
 option(THOR_ENABLE_SANITIZERS "Enable ASan/UBSan in Debug builds" OFF)
-if(THOR_ENABLE_SANITIZERS)
-add_compile_options(
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fsanitize=address,undefined>
-        $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fno-omit-frame-pointer>
-)
-add_link_options(
-        $<$<CONFIG:Debug>:-fsanitize=address,undefined>
-        $<$<CONFIG:Debug>:-fno-omit-frame-pointer>
-)
-endif()
+if (THOR_ENABLE_SANITIZERS)
+    add_compile_options(
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fsanitize=address,undefined>
+            $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:CXX>>:-fno-omit-frame-pointer>
+    )
+    add_link_options(
+            $<$<CONFIG:Debug>:-fsanitize=address,undefined>
+            $<$<CONFIG:Debug>:-fno-omit-frame-pointer>
+    )
+endif ()
 
 # ============================================================
 # Dependencies: nlohmann/json, pthread, dl
@@ -240,7 +240,7 @@ target_link_libraries(Thor PUBLIC nlohmann_json::nlohmann_json)
 target_link_libraries(Thor PRIVATE
         pthread
         dl
-        )
+)
 
 
 # ============================================================
@@ -263,11 +263,11 @@ target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUD
 target_link_directories(thor_tests PRIVATE
         /usr/local/cuda/lib64
         /usr/lib/x86_64-linux-gnu
-        )
+)
 target_link_libraries(thor_tests PRIVATE
         cudnn
         cufile
-        )
+)
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
 find_package(Boost REQUIRED)
@@ -280,13 +280,13 @@ target_compile_definitions(thor_tests PRIVATE
         $<$<CONFIG:Release>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
         $<$<CONFIG:RelWithDebInfo>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
         $<$<CONFIG:Debug>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
-        )
+)
 
 target_compile_options(thor_tests PRIVATE
         $<$<CONFIG:Release>:-O3>
         $<$<CONFIG:RelWithDebInfo>:-O3>
         $<$<CONFIG:Debug>:-O0 -ggdb>
-        )
+)
 
 # ============================================================
 # Install & Export for find_package()
@@ -297,14 +297,14 @@ install(TARGETS Thor
         ARCHIVE DESTINATION lib
         RUNTIME DESTINATION bin
         INCLUDES DESTINATION include
-        )
+)
 install(FILES Thor.h ${CMAKE_BINARY_DIR}/generated/ThorVersion.h DESTINATION include)
 
 install(EXPORT ThorTargets
         FILE ThorTargets.cmake
         NAMESPACE Thor::
         DESTINATION lib/cmake/Thor
-        )
+)
 
 include(CMakePackageConfigHelpers)
 write_basic_package_version_file(
@@ -323,7 +323,7 @@ install(FILES
         ${CMAKE_BINARY_DIR}/ThorConfig.cmake
         ${CMAKE_BINARY_DIR}/ThorConfigVersion.cmake
         DESTINATION lib/cmake/Thor
-        )
+)
 
 
 # ============================================================
@@ -332,7 +332,7 @@ install(FILES
 add_executable(createMasterHeader buildTools/createMasterHeader.cpp)
 set_target_properties(createMasterHeader PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/buildTools
-        )
+)
 
 # ============================================================
 # Generate headerlist.txt
@@ -362,7 +362,7 @@ add_dependencies(Thor ThorHeader)
 # Python bindings
 option(THOR_USE_PROJECT_VENV "Prefer the project's .venv for Python" ON)
 
-if(THOR_USE_PROJECT_VENV)
+if (THOR_USE_PROJECT_VENV)
     set(_thor_venv_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
     message(STATUS "Thor: using project venv Python at ${_thor_venv_python}")
 
@@ -375,8 +375,8 @@ if(THOR_USE_PROJECT_VENV)
     unset(Python_INCLUDE_DIR CACHE)
 
     set(Python3_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python3 executable for Thor bindings" FORCE)
-    set(Python_EXECUTABLE  "${_thor_venv_python}" CACHE FILEPATH "Python executable for Thor bindings (nanobind)" FORCE)
-endif()
+    set(Python_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python executable for Thor bindings (nanobind)" FORCE)
+endif ()
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
@@ -389,9 +389,9 @@ execute_process(
 find_package(nanobind CONFIG REQUIRED)
 
 option(THOR_BUILD_PYTHON "Build Python bindings" ON)
-if(THOR_BUILD_PYTHON)
+if (THOR_BUILD_PYTHON)
     add_subdirectory(bindings/python)
-endif()
+endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
 add_dependencies(thor_tests thor)

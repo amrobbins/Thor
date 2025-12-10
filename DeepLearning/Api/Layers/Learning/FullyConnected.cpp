@@ -145,6 +145,10 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
         twbLayer->dumpBiasesToFile(biasesFile.string(), stream);
     }
 
+    if (hasOptimizer()) {
+        j["optimizer"] = optimizer->serialize(storageDir, stream, this, twbLayer);
+    }
+
     return j;
 }
 

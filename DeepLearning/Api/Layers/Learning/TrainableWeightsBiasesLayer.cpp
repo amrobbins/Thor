@@ -25,4 +25,6 @@ void TrainableWeightsBiasesLayer::deserialize(const nlohmann::json &j, Network *
     deserializer(j, network);
 }
 
+void TrainableWeightsBiasesLayer::removeOptimizer() { this->optimizer.reset(); }
+
 }  // namespace Thor

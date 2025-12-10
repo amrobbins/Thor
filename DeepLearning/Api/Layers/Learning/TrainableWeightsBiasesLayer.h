@@ -46,8 +46,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     bool hasOptimizer() const { return optimizer != nullptr; }
     std::shared_ptr<Optimizer> getOptimizer() { return optimizer; }
 
-    // Revert layer to the network default optimizer
-    void removeOptimizer() { this->optimizer.reset(); }
+    void removeOptimizer();
 
    protected:
     Tensor weights;

@@ -27,7 +27,7 @@ class Adam : public Optimizer {
 
     virtual nlohmann::json serialize(const std::string &storageDir,
                                      Stream stream,
-                                     std::shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                                     TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
     static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,

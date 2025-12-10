@@ -65,7 +65,7 @@ void Adam::updateParameters() {
 
 json Adam::serialize(const string &storageDir,
                      Stream stream,
-                     shared_ptr<TrainableWeightsBiasesLayer> owningLayer,
+                     TrainableWeightsBiasesLayer const *owningLayer,
                      shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
     json j;
     j["optimizer_type"] = string("adam");
