@@ -140,13 +140,24 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
                                         .noActivation()
                                         .build();
 
-    MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
-                                              .network(initialNetwork)
-                                              .labels(labelsInput.getFeatureOutput())
-                                              .predictions(fullyConnected.getFeatureOutput())
-                                              .reportsBatchLoss()
-                                              .lossDataType(lossDataType)
-                                              .build();
+    MeanAbsoluteError::Builder meanAbsoluteErrorBuilder = MeanAbsoluteError::Builder()
+                                                              .network(initialNetwork)
+                                                              .labels(labelsInput.getFeatureOutput())
+                                                              .predictions(fullyConnected.getFeatureOutput())
+                                                              .lossDataType(lossDataType);
+
+    uint32_t lossShape = rand() % 2;
+    if (lossShape == 0)
+        meanAbsoluteErrorBuilder.reportsBatchLoss();
+    else
+        meanAbsoluteErrorBuilder.reportsPerOutputLoss();
+    // FIXME: Get the following to work, seems error output path issue
+    // else if (lossShape == 2)
+    //     meanAbsoluteErrorBuilder.reportsElementwiseLoss();
+    // else
+    //     meanAbsoluteErrorBuilder.reportsRawLoss();
+
+    MeanAbsoluteError meanAbsoluteError = meanAbsoluteErrorBuilder.build();
 
     shared_ptr<Sgd> sgd = Sgd::Builder().network(initialNetwork).initialLearningRate(0.1).decay(0.1).build();
 
@@ -185,7 +196,10 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     ASSERT_EQ(meanAbsoluteErrorJ["version"], "1.0.0");
     ASSERT_EQ(meanAbsoluteErrorJ["layer_type"], "mean_absolute_error");
     EXPECT_TRUE(meanAbsoluteErrorJ.contains("layer_name"));
-    ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::BATCH);
+    if (lossShape == 0)
+        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::BATCH);
+    else
+        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::CLASSWISE);
     ASSERT_EQ(meanAbsoluteErrorJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
 
     const json &labelsJ = meanAbsoluteErrorJ["labels_tensor"];
@@ -199,7 +213,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     ASSERT_TRUE(predictionsJ.at("id").is_number_integer());
 
     const json &lossJ = meanAbsoluteErrorJ["loss_tensor"];
-    ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
     ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
     ASSERT_TRUE(lossJ.at("id").is_number_integer());
 

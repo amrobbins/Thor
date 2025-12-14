@@ -1,7 +1,9 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
+#include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageError.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 
 #include "gtest/gtest.h"
 
@@ -10,6 +12,7 @@
 
 using namespace Thor;
 using namespace std;
+using json = nlohmann::json;
 
 TEST(MeanAbsolutePercentageError, Builds) {
     srand(time(nullptr));
@@ -114,4 +117,172 @@ TEST(MeanAbsolutePercentageError, Builds) {
         ASSERT_FALSE(meanAbsolutePercentageError > *clone);
         ASSERT_FALSE(meanAbsolutePercentageError < *clone);
     }
+}
+
+TEST(MeanAbsolutePercentageError, SerializeDeserialize) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+    Tensor::DataType dataType = Tensor::DataType::FP16;
+    vector<uint64_t> inputDimensions = {1UL};
+    Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+
+    NetworkInput labelsInput =
+        NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(inputDimensions).dataType(dataType).build();
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("networkInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    FullyConnected fullyConnected = FullyConnected::Builder()
+                                        .network(initialNetwork)
+                                        .featureInput(networkInput.getFeatureOutput())
+                                        .numOutputFeatures(1)
+                                        .hasBias(false)
+                                        .noActivation()
+                                        .build();
+
+    MeanAbsolutePercentageError::Builder meanAbsolutePercentageErrorBuilder = MeanAbsolutePercentageError::Builder()
+                                                                                  .network(initialNetwork)
+                                                                                  .labels(labelsInput.getFeatureOutput())
+                                                                                  .predictions(fullyConnected.getFeatureOutput())
+                                                                                  .lossDataType(lossDataType);
+
+    uint32_t lossShape = rand() % 2;
+    if (lossShape == 0)
+        meanAbsolutePercentageErrorBuilder.reportsBatchLoss();
+    else
+        meanAbsolutePercentageErrorBuilder.reportsPerOutputLoss();
+    // FIXME: Get the following to work, seems error output path issue
+    // else if (lossShape == 2)
+    //     meanAbsolutePercentageErrorBuilder.reportsElementwiseLoss();
+    // else
+    //     meanAbsolutePercentageErrorBuilder.reportsRawLoss();
+
+    MeanAbsolutePercentageError meanAbsolutePercentageError = meanAbsolutePercentageErrorBuilder.build();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(initialNetwork).initialLearningRate(0.1).decay(0.1).build();
+
+    NetworkOutput lossOutput = NetworkOutput::Builder()
+                                   .network(initialNetwork)
+                                   .name("lossOutput")
+                                   .inputTensor(meanAbsolutePercentageError.getLoss())
+                                   .dataType(dataType)
+                                   .build();
+
+    ASSERT_TRUE(meanAbsolutePercentageError.isInitialized());
+
+    // Now stamp the network and test serialization
+    Stream stream(0);
+    uint32_t batchSize = 1 + (rand() % 16);
+    vector<Event> initDoneEvents;
+    Network::StatusCode placementStatus;
+    placementStatus = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    // Fetch the layer from the network
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+
+    Layer *layer = &meanAbsolutePercentageError;
+    json meanAbsolutePercentageErrorJ = layer->serialize("/tmp/", stream);
+    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json lossOutputJ = lossOutput.serialize("/tmp/", stream);
+
+    ASSERT_EQ(meanAbsolutePercentageErrorJ["factory"], "loss");
+    ASSERT_EQ(meanAbsolutePercentageErrorJ["version"], "1.0.0");
+    ASSERT_EQ(meanAbsolutePercentageErrorJ["layer_type"], "mean_absolute_percentage_error");
+    EXPECT_TRUE(meanAbsolutePercentageErrorJ.contains("layer_name"));
+    if (lossShape == 0)
+        ASSERT_EQ(meanAbsolutePercentageErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::BATCH);
+    else
+        ASSERT_EQ(meanAbsolutePercentageErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::CLASSWISE);
+    ASSERT_EQ(meanAbsolutePercentageErrorJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
+
+    const json &labelsJ = meanAbsolutePercentageErrorJ["labels_tensor"];
+    ASSERT_EQ(labelsJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(labelsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(labelsJ.at("id").is_number_integer());
+
+    const json &predictionsJ = meanAbsolutePercentageErrorJ["predictions_tensor"];
+    ASSERT_EQ(predictionsJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(predictionsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(predictionsJ.at("id").is_number_integer());
+
+    const json &lossJ = meanAbsolutePercentageErrorJ["loss_tensor"];
+    ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+    ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(lossJ.at("id").is_number_integer());
+
+    // The network attached the optimizer to its copy of the FC layer
+    json fullyConnectedJ;
+    bool fcFound = false;
+    shared_ptr<FullyConnected> initalNetworkFC;
+    for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
+        shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
+        initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
+        if (initalNetworkFC) {
+            fullyConnectedJ = initalNetworkFC->serialize("/tmp", stream);
+            fcFound = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(fcFound);
+
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    // printf("%s\n", meanAbsolutePercentageErrorJ.dump(4).c_str());
+    // printf("%s\n", networkOutputJ.dump(4).c_str());
+
+    // ////////////////////////////
+    // // Deserialize
+    // ////////////////////////////
+    // Verify that the layer gets added to the network and that its weights are set to the correct values
+    Network newNetwork;
+
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(labelsInputJ, &newNetwork);
+    Layer::deserialize(fullyConnectedJ, &newNetwork);
+    Layer::deserialize(meanAbsolutePercentageErrorJ, &newNetwork);
+    Layer::deserialize(lossOutputJ, &newNetwork);
+
+    batchSize = 1 + (rand() % 16);
+    placementStatus = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    stampedNetwork = newNetwork.getStampedNetwork(0);
+
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    ASSERT_EQ(otherLayers.size(), 1U);
+    shared_ptr<ThorImplementation::MeanAbsolutePercentageError> stampedMeanAbsolutePercentageError =
+        dynamic_pointer_cast<ThorImplementation::MeanAbsolutePercentageError>(otherLayers[0]);
+    ASSERT_NE(stampedMeanAbsolutePercentageError, nullptr);
+
+    shared_ptr<ThorImplementation::FullyConnected> stampedFC =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
+    ASSERT_NE(stampedFC, nullptr);
+
+    // vector<shared_ptr<ThorImplementation::NetworkInput>> stampedInputs = stampedNetwork.getInputs();
+    shared_ptr<ThorImplementation::NetworkInput> stampedLabelsInput;
+    for (auto input : stampedNetwork.getInputs()) {
+        if (input->getName() == "labelsInput") {
+            stampedLabelsInput = input;
+        }
+    }
+    ASSERT_TRUE(stampedLabelsInput != nullptr);
+
+    shared_ptr<ThorImplementation::NetworkOutput> stampedLossOutput;
+    stampedLossOutput = stampedNetwork.getOutputs()[0];
+
+    ASSERT_EQ(stampedMeanAbsolutePercentageError->getPredictionsInput().get(), stampedFC->getFeatureOutputs()[0].get());
+    ASSERT_EQ(stampedMeanAbsolutePercentageError->getLabelsInput().get(), stampedLabelsInput->getFeatureOutput().get());
+    ASSERT_EQ(stampedMeanAbsolutePercentageError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
 }
