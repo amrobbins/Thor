@@ -27,7 +27,7 @@ class CategoricalCrossEntropy : public Loss {
 
    protected:
     virtual bool isMultiLayer() const {
-        if (lossType != LossType::RAW || !softmaxStamped)
+        if (lossShape != LossShape::RAW || !softmaxStamped)
             return true;
         return false;
     }
@@ -47,9 +47,7 @@ class CategoricalCrossEntropy : public Loss {
         return crossEntropy;
     }
 
-    Network *network;
     LabelType labelType;
-    Tensor::DataType lossDataType;
     uint32_t numClasses;
     bool softmaxStamped;
     Tensor softmaxOutput;
@@ -99,18 +97,18 @@ class CategoricalCrossEntropy::Builder {
         categoricalCrossEntropy.lossDataType = _lossDataType;
 
         if (_lossType.isEmpty())
-            _lossType = LossType::BATCH;
-        if (_lossType == LossType::BATCH) {
-            categoricalCrossEntropy.lossType = LossType::BATCH;
-        } else if (_lossType == LossType::CLASSWISE) {
+            _lossType = LossShape::BATCH;
+        if (_lossType == LossShape::BATCH) {
+            categoricalCrossEntropy.lossShape = LossShape::BATCH;
+        } else if (_lossType == LossShape::CLASSWISE) {
             // This type is batch-reduced by the implemenation layer
-            categoricalCrossEntropy.lossType = LossType::CLASSWISE;
-        } else if (_lossType == LossType::ELEMENTWISE) {
-            categoricalCrossEntropy.lossType = LossType::ELEMENTWISE;
+            categoricalCrossEntropy.lossShape = LossShape::CLASSWISE;
+        } else if (_lossType == LossShape::ELEMENTWISE) {
+            categoricalCrossEntropy.lossShape = LossShape::ELEMENTWISE;
         } else {
             // This type is *not* batch-reduced by the implemenation layer
-            assert(_lossType == LossType::RAW);
-            categoricalCrossEntropy.lossType = LossType::RAW;
+            assert(_lossType == LossShape::RAW);
+            categoricalCrossEntropy.lossShape = LossShape::RAW;
         }
         categoricalCrossEntropy.labelType = _labelType;
         categoricalCrossEntropy.initialized = true;
@@ -119,7 +117,7 @@ class CategoricalCrossEntropy::Builder {
         if (categoricalCrossEntropy.isMultiLayer()) {
             categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
-            assert(categoricalCrossEntropy.lossType == LossType::RAW);
+            assert(categoricalCrossEntropy.lossShape == LossShape::RAW);
             categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
             categoricalCrossEntropy.addToNetwork(_network.get());
         }
@@ -154,7 +152,7 @@ class CategoricalCrossEntropy::Builder {
      */
     virtual CategoricalCrossEntropy::Builder &reportsBatchLoss() {
         assert(!_lossType.isPresent());
-        _lossType = LossType::BATCH;
+        _lossType = LossShape::BATCH;
         return *this;
     }
 
@@ -164,7 +162,7 @@ class CategoricalCrossEntropy::Builder {
      */
     virtual CategoricalCrossEntropy::Builder &reportsClasswiseLoss() {
         assert(!_lossType.isPresent());
-        _lossType = LossType::CLASSWISE;
+        _lossType = LossShape::CLASSWISE;
         return *this;
     }
 
@@ -174,7 +172,7 @@ class CategoricalCrossEntropy::Builder {
      */
     virtual CategoricalCrossEntropy::Builder &reportsElementwiseLoss() {
         assert(!_lossType.isPresent());
-        _lossType = LossType::ELEMENTWISE;
+        _lossType = LossShape::ELEMENTWISE;
         return *this;
     }
 
@@ -183,7 +181,7 @@ class CategoricalCrossEntropy::Builder {
      */
     virtual CategoricalCrossEntropy::Builder &reportsRawLoss() {
         assert(!_lossType.isPresent());
-        _lossType = LossType::RAW;
+        _lossType = LossShape::RAW;
         return *this;
     }
 
@@ -236,7 +234,7 @@ class CategoricalCrossEntropy::Builder {
     Optional<Tensor> _labels;
     Optional<LabelType> _labelType;
     Optional<uint32_t> _numClasses;
-    Optional<LossType> _lossType;
+    Optional<LossShape> _lossType;
     Optional<Tensor::DataType> _lossDataType;
     Optional<bool> _softmaxStamped;
 

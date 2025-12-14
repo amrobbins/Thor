@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 
 #include "gtest/gtest.h"
 
@@ -216,6 +217,8 @@ TEST(FullyConnected, SerializeDeserialize) {
         fullyConnectedBuilder.batchNormalization();
     }
     FullyConnected fullyConnected = fullyConnectedBuilder.build();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(initialNetwork).initialLearningRate(0.1).decay(0.1).build();
 
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)

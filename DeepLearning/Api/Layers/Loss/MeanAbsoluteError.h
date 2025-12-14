@@ -18,12 +18,11 @@ class MeanAbsoluteError : public Loss {
 
     virtual std::string getLayerType() const { return "MeanAbsoluteError"; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual bool isMultiLayer() const {
-        if (lossType == LossType::RAW)
+        if (lossShape == LossShape::RAW)
             return false;
         return true;
     }
@@ -56,9 +55,6 @@ class MeanAbsoluteError : public Loss {
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         return standardLossBytes + lossShaperBytes;
     }
-
-    Tensor::DataType lossDataType;
-    Network *network;
 };
 
 class MeanAbsoluteError::Builder {
@@ -74,7 +70,7 @@ class MeanAbsoluteError::Builder {
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
         if (_lossType.isEmpty())
-            _lossType = LossType::BATCH;
+            _lossType = LossShape::BATCH;
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -83,7 +79,7 @@ class MeanAbsoluteError::Builder {
         meanAbsoluteError.predictionsTensor = _predictions;
         meanAbsoluteError.labelsTensor = _labels;
         meanAbsoluteError.lossDataType = _lossDataType;
-        meanAbsoluteError.lossType = _lossType;
+        meanAbsoluteError.lossShape = _lossType;
         meanAbsoluteError.network = _network;
         meanAbsoluteError.initialized = true;
 
@@ -120,25 +116,25 @@ class MeanAbsoluteError::Builder {
 
     virtual MeanAbsoluteError::Builder &reportsBatchLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::BATCH;
+        _lossType = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanAbsoluteError::Builder &reportsElementwiseLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::ELEMENTWISE;
+        _lossType = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanAbsoluteError::Builder &reportsPerOutputLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::CLASSWISE;
+        _lossType = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanAbsoluteError::Builder &reportsRawLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::RAW;
+        _lossType = LossShape::RAW;
         return *this;
     }
 
@@ -152,7 +148,7 @@ class MeanAbsoluteError::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<LossType> _lossType;
+    Optional<LossShape> _lossType;
     Optional<Tensor::DataType> _lossDataType;
 };
 
