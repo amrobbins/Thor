@@ -8,8 +8,13 @@ namespace Thor {
 void MeanAbsoluteError::buildSupportLayersAndAddToNetwork() {
     Tensor currentFeatureInput = predictionsTensor;
 
-    MeanAbsoluteError meanAbsoluteError =
-        MeanAbsoluteError::Builder().network(*network).predictions(predictionsTensor).labels(labelsTensor).reportsRawLoss().build();
+    MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
+                                              .network(*network)
+                                              .predictions(predictionsTensor)
+                                              .labels(labelsTensor)
+                                              .lossDataType(lossDataType)
+                                              .reportsRawLoss()
+                                              .build();
 
     if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(meanAbsoluteError.getLoss()).reportsBatchLoss().build();
