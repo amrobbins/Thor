@@ -32,18 +32,18 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
     currentFeatureInput = crossEntropy.getLoss();
 
-    if (lossType == LossType::BATCH) {
+    if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
         lossTensor = lossShaper.getLossOutput();
-    } else if (lossType == LossType::CLASSWISE) {
+    } else if (lossShape == LossShape::CLASSWISE) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsClasswiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
-    } else if (lossType == LossType::ELEMENTWISE) {
+    } else if (lossShape == LossShape::ELEMENTWISE) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsElementwiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else {
         // No loss shaper needed in this case
-        assert(lossType == LossType::RAW);
+        assert(lossShape == LossShape::RAW);
         lossTensor = currentFeatureInput;
     }
 }
@@ -56,7 +56,7 @@ json CategoricalCrossEntropy::serialize(const string &storageDir, Stream stream)
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
     j["label_type"] = labelType;
-    j["loss_type"] = lossType;
+    j["loss_shape"] = lossShape;
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();
@@ -74,7 +74,7 @@ void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
 
     CategoricalCrossEntropy categoricalCrossEntropy;
     categoricalCrossEntropy.labelType = j.at("label_type").get<LabelType>();
-    categoricalCrossEntropy.lossType = j.at("loss_type").get<LossType>();
+    categoricalCrossEntropy.lossShape = j.at("loss_shape").get<LossShape>();
 
     uint64_t originalTensorId;
     originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();

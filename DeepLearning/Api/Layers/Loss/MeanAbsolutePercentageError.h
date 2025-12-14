@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/MeanAbsolutePercentageError.h"
 
 namespace Thor {
@@ -17,9 +18,11 @@ class MeanAbsolutePercentageError : public Loss {
 
     virtual std::string getLayerType() const { return "MeanAbsolutePercentageError"; }
 
+    static void deserialize(const nlohmann::json &j, Network *network);
+
    protected:
     virtual bool isMultiLayer() const {
-        if (lossType == LossType::RAW)
+        if (lossShape == LossShape::RAW)
             return false;
         return true;
     }
@@ -52,9 +55,6 @@ class MeanAbsolutePercentageError : public Loss {
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         return standardLossBytes + lossShaperBytes;
     }
-
-    Tensor::DataType lossDataType;
-    Network *network;
 };
 
 class MeanAbsolutePercentageError::Builder {
@@ -68,7 +68,7 @@ class MeanAbsolutePercentageError::Builder {
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
         if (_lossType.isEmpty())
-            _lossType = LossType::BATCH;
+            _lossType = LossShape::BATCH;
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -77,7 +77,7 @@ class MeanAbsolutePercentageError::Builder {
         meanAbsolutePercentageError.predictionsTensor = _predictions;
         meanAbsolutePercentageError.labelsTensor = _labels;
         meanAbsolutePercentageError.lossDataType = _lossDataType;
-        meanAbsolutePercentageError.lossType = _lossType;
+        meanAbsolutePercentageError.lossShape = _lossType;
         meanAbsolutePercentageError.network = _network;
         meanAbsolutePercentageError.initialized = true;
 
@@ -114,25 +114,25 @@ class MeanAbsolutePercentageError::Builder {
 
     virtual MeanAbsolutePercentageError::Builder &reportsBatchLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::BATCH;
+        _lossType = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsElementwiseLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::ELEMENTWISE;
+        _lossType = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsPerOutputLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::CLASSWISE;
+        _lossType = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsRawLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = LossType::RAW;
+        _lossType = LossShape::RAW;
         return *this;
     }
 
@@ -146,7 +146,7 @@ class MeanAbsolutePercentageError::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<LossType> _lossType;
+    Optional<LossShape> _lossType;
     Optional<Tensor::DataType> _lossDataType;
 };
 

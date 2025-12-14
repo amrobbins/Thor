@@ -5,6 +5,22 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+json Loss::serialize(const string &storageDir, Stream stream) const {
+    json j;
+    j["factory"] = Factory::Loss.value();
+    j["version"] = getLayerVersion();
+    j["layer_type"] = to_snake_case(getLayerType());
+    string layerName = string("layer") + to_string(getId());
+    j["layer_name"] = layerName;
+    j["loss_shape"] = lossShape;
+    j["loss_data_type"] = lossDataType;
+    j["labels_tensor"] = labelsTensor.serialize();
+    j["predictions_tensor"] = predictionsTensor.serialize();
+    j["loss_tensor"] = lossTensor.serialize();
+
+    return j;
+}
+
 unordered_map<string, Loss::Deserializer> &Loss::get_registry() {
     static unordered_map<string, Deserializer> registry;
     return registry;

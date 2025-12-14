@@ -14,7 +14,7 @@ namespace Thor {
 class Loss : public Layer {
    public:
     enum class LabelType { INDEX = 5, ONE_HOT };
-    enum class LossType { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
+    enum class LossShape { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
 
     enum class InputLossType { NUMERICAL_LOSS = 5, CATEGORICAL_LOSS };
     enum class OutputLossType { BATCH_LOSS = 11, CLASSWISE_LOSS };
@@ -22,7 +22,7 @@ class Loss : public Layer {
     Loss() { numInputConnectionsMade = 0; }
     virtual ~Loss() {}
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
     static void deserialize(const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
@@ -71,6 +71,10 @@ class Loss : public Layer {
     Tensor predictionsTensor;
     Tensor lossTensor;
 
+    Tensor::DataType lossDataType;
+
+    Network *network;
+
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint32_t fixedMem = 4;  // loss scaling factor, FP32
 
@@ -89,20 +93,18 @@ class Loss : public Layer {
         return fixedMem + batchSize * (predictionsOutputBytes + labelsBytes + errorOutputBytes + lossBytes);
     }
 
-    // Loss type must be set by deriving class
-    LossType lossType;
-    // Why do I duplicate loss type, why not just use implementation enum? I guess because
+    LossShape lossShape;
 
    private:
     uint32_t numInputConnectionsMade = 0;
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(Loss::LossType,
+NLOHMANN_JSON_SERIALIZE_ENUM(Loss::LossShape,
                              {
-                                 {Loss::LossType::BATCH, "batch"},
-                                 {Loss::LossType::ELEMENTWISE, "elementwise"},
-                                 {Loss::LossType::CLASSWISE, "classwise"},
-                                 {Loss::LossType::RAW, "raw"},
+                                 {Loss::LossShape::BATCH, "batch"},
+                                 {Loss::LossShape::ELEMENTWISE, "elementwise"},
+                                 {Loss::LossShape::CLASSWISE, "classwise"},
+                                 {Loss::LossShape::RAW, "raw"},
                              })
 
 }  // namespace Thor

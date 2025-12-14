@@ -11,40 +11,24 @@ void MeanAbsoluteError::buildSupportLayersAndAddToNetwork() {
     MeanAbsoluteError meanAbsoluteError =
         MeanAbsoluteError::Builder().network(*network).predictions(predictionsTensor).labels(labelsTensor).reportsRawLoss().build();
 
-    if (lossType == LossType::BATCH) {
+    if (lossShape == LossShape::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(meanAbsoluteError.getLoss()).reportsBatchLoss().build();
         // Replace the output on the compound layer to be the output of the last stage
         // i.e. tunnel the actual input to actual output of the compound layer,
         // Network uses single layers, user uses compound layer.
         lossTensor = lossShaper.getLossOutput();
-    } else if (lossType == LossType::ELEMENTWISE) {
+    } else if (lossShape == LossShape::ELEMENTWISE) {
         LossShaper lossShaper =
             LossShaper::Builder().network(*network).lossInput(meanAbsoluteError.getLoss()).reportsElementwiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
-    } else if (lossType == LossType::CLASSWISE) {
+    } else if (lossShape == LossShape::CLASSWISE) {
         LossShaper lossShaper =
             LossShaper::Builder().network(*network).lossInput(meanAbsoluteError.getLoss()).reportsClasswiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else {
         // No loss shaper needed
-        assert(lossType == LossType::RAW);
+        assert(lossShape == LossShape::RAW);
     }
-}
-
-json MeanAbsoluteError::serialize(const string &storageDir, Stream stream) const {
-    json j;
-    j["factory"] = Layer::Factory::Loss.value();
-    j["version"] = getLayerVersion();
-    j["layer_type"] = "mean_absolute_error";
-    string layerName = string("layer") + to_string(getId());
-    j["layer_name"] = layerName;
-    j["loss_type"] = lossType;
-    j["loss_data_type"] = lossDataType;
-    j["labels_tensor"] = labelsTensor.serialize();
-    j["predictions_tensor"] = predictionsTensor.serialize();
-    j["loss_tensor"] = lossTensor.serialize();
-
-    return j;
 }
 
 void MeanAbsoluteError::deserialize(const json &j, Network *network) {
@@ -54,7 +38,7 @@ void MeanAbsoluteError::deserialize(const json &j, Network *network) {
         throw runtime_error("Layer type mismatch in MeanAbsoluteError::deserialize: " + j.at("layer_type").get<std::string>());
 
     MeanAbsoluteError meanAbsoluteError;
-    meanAbsoluteError.lossType = j.at("loss_type").get<LossType>();
+    meanAbsoluteError.lossShape = j.at("loss_shape").get<LossShape>();
     meanAbsoluteError.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
 
     uint64_t originalTensorId;

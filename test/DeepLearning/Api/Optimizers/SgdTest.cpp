@@ -481,7 +481,7 @@ TEST(Sgd, SerializeDeserialize) {
         biases.copyFromAsync(biasesCpu, stream);
     }
 
-    // The network attached the optimizer to its copy of the optimizer
+    // The network attached the optimizer to its copy of the FC layer
     json fullyConnectedJ;
     bool fcFound = false;
     shared_ptr<FullyConnected> initalNetworkFC;
@@ -577,12 +577,11 @@ TEST(Sgd, SerializeDeserialize) {
     ASSERT_EQ(optimizer.at("use_nesterov").get<bool>(), useNesterovMomentum);
     ASSERT_EQ(optimizer.at("version").get<string>(), "1.0.0");
 
-    printf("%s\n", networkInputJ.dump(4).c_str());
-    printf("%s\n", labelsInputJ.dump(4).c_str());
-    printf("%s\n", fullyConnectedJ.dump(4).c_str());
-    printf("%s\n", networkOutputJ.dump(4).c_str());
-    // printf("%s\n", sgdJ.dump(4).c_str());
-    printf("%s\n", crossEntropyJ.dump(4).c_str());
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", labelsInputJ.dump(4).c_str());
+    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    // printf("%s\n", networkOutputJ.dump(4).c_str());
+    // printf("%s\n", crossEntropyJ.dump(4).c_str());
 
     ////////////////////////////
     // Deserialize
