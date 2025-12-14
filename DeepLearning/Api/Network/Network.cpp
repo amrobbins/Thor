@@ -852,3 +852,14 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkOutput] = networkOutput->getId();
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput.get()] = networkOutput->getId();
 }
+
+Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
+    if (apiTensorByOriginalId.count(originalId) == 0) {
+        for (auto it = apiTensorByOriginalId.begin(); it != apiTensorByOriginalId.end(); ++it) {
+            printf("tensor orig id %ld\n", it->first);
+            fflush(stdout);
+        }
+    }
+    assert(apiTensorByOriginalId.count(originalId) != 0);
+    return apiTensorByOriginalId[originalId];
+}

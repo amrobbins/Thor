@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 
+# Prefer Boost's own CMake config instead of the deprecated FindBoost module.
+if (POLICY CMP0167)
+    cmake_policy(SET CMP0167 NEW)
+endif ()
+
 # Read THOR_VERSION from ThorVersion.h.in
 file(READ "${CMAKE_SOURCE_DIR}/ThorVersion.h.in" _thor_version_header)
 
@@ -197,7 +202,12 @@ target_link_libraries(Thor PRIVATE ${GM_LDFLAGS_LIST})
 # ============================================================
 # Boost
 # ============================================================
-find_package(Boost REQUIRED)
+set(Boost_MIN_VERSION 1.83)
+
+# Use Boost's config package (BoostConfig.cmake), not the old FindBoost module.
+find_package(Boost ${Boost_MIN_VERSION} REQUIRED CONFIG)
+
+# Header-only: Boost::boost / Boost::headers gives you the include dirs.
 target_link_libraries(Thor PRIVATE Boost::boost)
 
 # Per-configuration flags
@@ -270,7 +280,6 @@ target_link_libraries(thor_tests PRIVATE
 )
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
-find_package(Boost REQUIRED)
 target_link_libraries(thor_tests PRIVATE Boost::boost)
 include(GoogleTest)
 gtest_discover_tests(thor_tests)

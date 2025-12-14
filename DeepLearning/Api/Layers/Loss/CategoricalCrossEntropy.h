@@ -5,7 +5,6 @@
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 
 #include "DeepLearning/Implementation/Layers/Activation/Softmax.h"
-#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Loss/CrossEntropy.h"
 
 namespace Thor {
@@ -23,13 +22,12 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual Tensor getPredictions() const { return softmaxOutput; }
 
-   private:
-    enum class LabelType { INDEX = 5, ONE_HOT };
-    enum class LossType { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual bool isMultiLayer() const {
-        if (lossType != ThorImplementation::Loss::LossType::RAW || !softmaxStamped)
+        if (lossType != LossType::RAW || !softmaxStamped)
             return true;
         return false;
     }
@@ -103,16 +101,16 @@ class CategoricalCrossEntropy::Builder {
         if (_lossType.isEmpty())
             _lossType = LossType::BATCH;
         if (_lossType == LossType::BATCH) {
-            categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
+            categoricalCrossEntropy.lossType = LossType::BATCH;
         } else if (_lossType == LossType::CLASSWISE) {
             // This type is batch-reduced by the implemenation layer
-            categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::CLASSWISE;
+            categoricalCrossEntropy.lossType = LossType::CLASSWISE;
         } else if (_lossType == LossType::ELEMENTWISE) {
-            categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
+            categoricalCrossEntropy.lossType = LossType::ELEMENTWISE;
         } else {
             // This type is *not* batch-reduced by the implemenation layer
             assert(_lossType == LossType::RAW);
-            categoricalCrossEntropy.lossType = ThorImplementation::Loss::LossType::RAW;
+            categoricalCrossEntropy.lossType = LossType::RAW;
         }
         categoricalCrossEntropy.labelType = _labelType;
         categoricalCrossEntropy.initialized = true;
@@ -121,7 +119,7 @@ class CategoricalCrossEntropy::Builder {
         if (categoricalCrossEntropy.isMultiLayer()) {
             categoricalCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
-            assert(categoricalCrossEntropy.lossType == ThorImplementation::Loss::LossType::RAW);
+            assert(categoricalCrossEntropy.lossType == LossType::RAW);
             categoricalCrossEntropy.lossTensor = Tensor(_lossDataType, {categoricalCrossEntropy.numClasses});
             categoricalCrossEntropy.addToNetwork(_network.get());
         }
@@ -244,5 +242,11 @@ class CategoricalCrossEntropy::Builder {
 
     friend class CategoricalCrossEntropy;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(CategoricalCrossEntropy::LabelType,
+                             {
+                                 {CategoricalCrossEntropy::LabelType::INDEX, "index"},
+                                 {CategoricalCrossEntropy::LabelType::ONE_HOT, "one_hot"},
+                             })
 
 }  // namespace Thor
