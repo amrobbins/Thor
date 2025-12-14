@@ -1,6 +1,6 @@
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
-#include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 
 #include <stdio.h>
@@ -42,13 +42,12 @@ static Network buildNetwork(uint32_t numFCLayers) {
         latestOutputTensor = fullyConnected.getFeatureOutput();
     }
 
-    CategoricalCrossEntropy lossLayer = CategoricalCrossEntropy::Builder()
-                                            .network(network)
-                                            .predictions(latestOutputTensor)
-                                            .labels(labels.getFeatureOutput())
-                                            .reportsBatchLoss()
-                                            .receivesOneHotLabels()
-                                            .build();
+    MeanAbsoluteError lossLayer = MeanAbsoluteError::Builder()
+                                      .network(network)
+                                      .predictions(latestOutputTensor)
+                                      .labels(labels.getFeatureOutput())
+                                      .reportsBatchLoss()
+                                      .build();
 
     NetworkOutput networkOutput =
         NetworkOutput::Builder().network(network).name("output").inputTensor(lossLayer.getLoss()).dataType(Tensor::DataType::FP16).build();
@@ -385,37 +384,29 @@ TEST(Sgd, SerializeDeserialize) {
     uint32_t numOutputFeatures = 1 + (rand() % 1000);
     bool hasBias = rand() % 2;
 
-    float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
-
-    bool use_batch_norm = rand() % 2;
-
     NetworkInput networkInput =
         NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
 
-    FullyConnected::Builder fullyConnectedBuilder = FullyConnected::Builder()
-                                                        .network(initialNetwork)
-                                                        .featureInput(networkInput.getFeatureOutput())
-                                                        .numOutputFeatures(numOutputFeatures)
-                                                        .hasBias(hasBias)
-                                                        .dropOut(dropProportion);
-    if (use_batch_norm) {
-        fullyConnectedBuilder.batchNormalization();
-    }
-    FullyConnected fullyConnected = fullyConnectedBuilder.build();
+    FullyConnected fullyConnected = FullyConnected::Builder()
+                                        .network(initialNetwork)
+                                        .featureInput(networkInput.getFeatureOutput())
+                                        .numOutputFeatures(numOutputFeatures)
+                                        .hasBias(hasBias)
+                                        .noActivation()
+                                        .build();
 
     Tensor logits = fullyConnected.getFeatureOutputs()[0];
     uint32_t numClasses = logits.getDimensions()[0];
     NetworkInput labelsInput =
         NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions({numClasses}).dataType(dataType).build();
 
-    CategoricalCrossEntropy crossEntropy = CategoricalCrossEntropy::Builder()
-                                               .network(initialNetwork)
-                                               .predictions(logits)
-                                               .reportsBatchLoss()
-                                               .receivesOneHotLabels()
-                                               .lossDataType(dataType)
-                                               .labels(labelsInput.getFeatureOutput())
-                                               .build();
+    MeanAbsoluteError crossEntropy = MeanAbsoluteError::Builder()
+                                         .network(initialNetwork)
+                                         .predictions(logits)
+                                         .reportsRawLoss()
+                                         .lossDataType(dataType)
+                                         .labels(labelsInput.getFeatureOutput())
+                                         .build();
 
     NetworkOutput networkOutput =
         NetworkOutput::Builder().network(initialNetwork).name("lossOutput").inputTensor(crossEntropy.getLoss()).dataType(dataType).build();
@@ -466,13 +457,9 @@ TEST(Sgd, SerializeDeserialize) {
     // Fetch the fully connected layer from the network and write to its weights
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
-    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), use_batch_norm ? 2UL : 1UL);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
-    if (use_batch_norm) {
-        if (physicalFCLayer == nullptr)
-            physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(1));
-    }
     ASSERT_TRUE(physicalFCLayer != nullptr);
     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
     ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -510,7 +497,9 @@ TEST(Sgd, SerializeDeserialize) {
     ASSERT_TRUE(fcFound);
 
     json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json crossEntropyJ = crossEntropy.serialize("/tmp/", stream);
 
     ThorImplementation::StampedNetwork &initial_stamped_network = initialNetwork.getStampedNetwork(0);
     shared_ptr<ThorImplementation::Layer> initial_phys_layer = initial_stamped_network.getPhysicalLayerFromApiLayer(fullyConnected.getId());
@@ -588,69 +577,46 @@ TEST(Sgd, SerializeDeserialize) {
     ASSERT_EQ(optimizer.at("use_nesterov").get<bool>(), useNesterovMomentum);
     ASSERT_EQ(optimizer.at("version").get<string>(), "1.0.0");
 
-    // printf("%s\n", networkInputJ.dump(4).c_str());
-    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
-    // printf("%s\n", networkOutputJ.dump(4).c_str());
+    printf("%s\n", networkInputJ.dump(4).c_str());
+    printf("%s\n", labelsInputJ.dump(4).c_str());
+    printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    printf("%s\n", networkOutputJ.dump(4).c_str());
     // printf("%s\n", sgdJ.dump(4).c_str());
+    printf("%s\n", crossEntropyJ.dump(4).c_str());
 
     ////////////////////////////
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    // Network newNetwork;
-    //
-    // Layer::deserialize(networkInputJ, &newNetwork);
-    // Layer::deserialize(fullyConnectedJ, &newNetwork);
-    // Layer::deserialize(networkOutputJ, &newNetwork);
-    //
-    // batchSize = 1 + (rand() % 16);
-    // statusCode = newNetwork.place(batchSize, initDoneEvents);
-    // ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    // for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
-    //     stream.waitEvent(initDoneEvents[i]);
-    // }
-    // initDoneEvents.clear();
-    //
-    // ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-    // stampedNetwork = newNetwork.getStampedNetwork(0);
-    // ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
-    // shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
-    //     dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
-    // ASSERT_TRUE(physicalFCLayerDes != nullptr);
-    //
-    // ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();
-    // ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    // weightsCpuDes.copyFromAsync(weightsDes, stream);
-    //
-    // ThorImplementation::Tensor biasesDes;
-    // ThorImplementation::Tensor biasesCpuDes;
-    // if (hasBias) {
-    //     biasesDes = physicalFCLayerDes->getBiases();
-    //     biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    //     biasesCpuDes.copyFromAsync(biasesDes, stream);
-    // }
-    //
-    // stream.synchronize();
-    //
-    // ASSERT_NE(weightsDes, weights);
-    // ASSERT_EQ(weightsDes.getDimensions(), weights.getDimensions());
-    // ASSERT_EQ(weightsDes.getDataType(), weights.getDataType());
-    // ASSERT_TRUE(weightsDes.getPlacement() == weights.getPlacement());
-    //
-    // half *weightsCpuMemDes = (half *)weightsCpuDes.getMemPtr();
-    // for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
-    //     ASSERT_EQ(weightsCpuMemDes[i], half(i));
-    // }
-    //
-    // if (hasBias) {
-    //     ASSERT_NE(biasesDes, biases);
-    //     ASSERT_EQ(biasesDes.getDimensions(), biases.getDimensions());
-    //     ASSERT_EQ(biasesDes.getDataType(), biases.getDataType());
-    //     ASSERT_TRUE(biasesDes.getPlacement() == biases.getPlacement());
-    //
-    //     half *biasesCpuMemDes = (half *)biasesCpuDes.getMemPtr();
-    //     for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
-    //         ASSERT_EQ(biasesCpuMemDes[i], half(i * i + 6));
-    //     }
-    // }
+    Network newNetwork;
+
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(labelsInputJ, &newNetwork);
+    Layer::deserialize(fullyConnectedJ, &newNetwork);
+    Layer::deserialize(crossEntropyJ, &newNetwork);
+    Layer::deserialize(networkOutputJ, &newNetwork);
+
+    batchSize = 1 + (rand() % 16);
+    statusCode = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &newStampedNetwork = newNetwork.getStampedNetwork(0);
+
+    // Find the FullyConnected layer and verify its optimizer's parameters
+    shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
+    ASSERT_TRUE(physicalFCLayerDes != nullptr);
+
+    shared_ptr<ThorImplementation::Sgd> stampedSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalFCLayerDes->getOptimizer());
+    ASSERT_TRUE(stampedSgd != nullptr);
+
+    ASSERT_EQ(stampedSgd->getInitialLearningRate(), initialLearningRate);
+    ASSERT_EQ(stampedSgd->getDecay(), decay);
+    ASSERT_EQ(stampedSgd->getMomentum(), momentum);
+    ASSERT_EQ(stampedSgd->getUseNesterovMomentum(), useNesterovMomentum);
 }

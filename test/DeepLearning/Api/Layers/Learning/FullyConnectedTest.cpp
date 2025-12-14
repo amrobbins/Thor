@@ -362,6 +362,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
+    // FIXME: Why does this pass when there is a batch norm? Its output tensor which is FC's input tensor should not be found then.
     Layer::deserialize(networkInputJ, &newNetwork);
     Layer::deserialize(fullyConnectedJ, &newNetwork);
     Layer::deserialize(networkOutputJ, &newNetwork);

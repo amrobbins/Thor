@@ -80,7 +80,7 @@ class Network {
     std::shared_ptr<Optimizer> getOptimizer();
     void attachOptimizerToLayers(bool replaceIfExisting);
 
-    Tensor getApiTensorByOriginalId(uint64_t originalId) { return apiTensorByOriginalId[originalId]; }
+    Tensor getApiTensorByOriginalId(uint64_t originalId);
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
     std::shared_ptr<TrainableWeightsBiasesLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
 

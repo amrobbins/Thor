@@ -23,11 +23,6 @@ class BinaryCrossEntropy : public Loss {
 
     virtual std::string getLayerType() const { return "BinaryCrossEntropy"; }
 
-   private:
-    // Binary cross entropy only supports batch and elementwise loss.
-    // For classwise loss or raw loss use CategoricalCrossEntropy with 2 classes instead of BinaryCrossEntropy
-    enum class LossType { BATCH = 9, ELEMENTWISE };
-
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -35,6 +30,7 @@ class BinaryCrossEntropy : public Loss {
                                                              Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
+        assert(lossType == LossType::BATCH || lossType == LossType::ELEMENTWISE);
 
         // Softmax and LossShaper are connected during multi-layer flattening
         std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
@@ -43,7 +39,7 @@ class BinaryCrossEntropy : public Loss {
     }
 
     virtual bool isMultiLayer() const {
-        if (lossType != ThorImplementation::Loss::LossType::ELEMENTWISE || !sigmoidStamped)
+        if (lossType != LossType::ELEMENTWISE || !sigmoidStamped)
             return true;
         return false;
     }
@@ -84,9 +80,9 @@ class BinaryCrossEntropy::Builder {
         binaryCrossEntropy.lossDataType = _lossDataType;
 
         if (_lossType == LossType::BATCH) {
-            binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::BATCH;
+            binaryCrossEntropy.lossType = LossType::BATCH;
         } else if (_lossType == LossType::ELEMENTWISE) {
-            binaryCrossEntropy.lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
+            binaryCrossEntropy.lossType = LossType::ELEMENTWISE;
         }
         binaryCrossEntropy.initialized = true;
         binaryCrossEntropy.network = _network;
@@ -94,7 +90,7 @@ class BinaryCrossEntropy::Builder {
         if (binaryCrossEntropy.isMultiLayer()) {
             binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
         } else {
-            assert(binaryCrossEntropy.lossType == ThorImplementation::Loss::LossType::ELEMENTWISE);
+            assert(binaryCrossEntropy.lossType == LossType::ELEMENTWISE);
             binaryCrossEntropy.lossTensor = Tensor(_lossDataType, {1});
             binaryCrossEntropy.addToNetwork(_network.get());
         }

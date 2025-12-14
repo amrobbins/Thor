@@ -13,6 +13,9 @@ namespace Thor {
 
 class Loss : public Layer {
    public:
+    enum class LabelType { INDEX = 5, ONE_HOT };
+    enum class LossType { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
+
     enum class InputLossType { NUMERICAL_LOSS = 5, CATEGORICAL_LOSS };
     enum class OutputLossType { BATCH_LOSS = 11, CLASSWISE_LOSS };
 
@@ -87,10 +90,19 @@ class Loss : public Layer {
     }
 
     // Loss type must be set by deriving class
-    ThorImplementation::Loss::LossType lossType;
+    LossType lossType;
+    // Why do I duplicate loss type, why not just use implementation enum? I guess because
 
    private:
     uint32_t numInputConnectionsMade = 0;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(Loss::LossType,
+                             {
+                                 {Loss::LossType::BATCH, "batch"},
+                                 {Loss::LossType::ELEMENTWISE, "elementwise"},
+                                 {Loss::LossType::CLASSWISE, "classwise"},
+                                 {Loss::LossType::RAW, "raw"},
+                             })
 
 }  // namespace Thor

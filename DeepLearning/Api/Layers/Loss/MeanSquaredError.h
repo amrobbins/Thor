@@ -19,7 +19,7 @@ class MeanSquaredError : public Loss {
 
    protected:
     virtual bool isMultiLayer() const {
-        if (lossType == ThorImplementation::Loss::LossType::RAW)
+        if (lossType == LossType::RAW)
             return false;
         return true;
     }
@@ -68,7 +68,7 @@ class MeanSquaredError::Builder {
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
         if (_lossType.isEmpty())
-            _lossType = ThorImplementation::Loss::LossType::BATCH;
+            _lossType = LossType::BATCH;
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -114,25 +114,25 @@ class MeanSquaredError::Builder {
 
     virtual MeanSquaredError::Builder &reportsBatchLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = ThorImplementation::Loss::LossType::BATCH;
+        _lossType = LossType::BATCH;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsElementwiseLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = ThorImplementation::Loss::LossType::ELEMENTWISE;
+        _lossType = LossType::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsPerOutputLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = ThorImplementation::Loss::LossType::CLASSWISE;
+        _lossType = LossType::CLASSWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsRawLoss() {
         assert(this->_lossType.isEmpty());
-        _lossType = ThorImplementation::Loss::LossType::RAW;
+        _lossType = LossType::RAW;
         return *this;
     }
 
@@ -146,7 +146,7 @@ class MeanSquaredError::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<ThorImplementation::Loss::LossType> _lossType;
+    Optional<LossType> _lossType;
     Optional<Tensor::DataType> _lossDataType;
 };
 

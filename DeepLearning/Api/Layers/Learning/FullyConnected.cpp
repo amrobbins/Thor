@@ -102,6 +102,8 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = "fully_connected";
+    string layerName = string("layer") + to_string(getId());
+    j["layer_name"] = layerName;
     j["num_output_features"] = numOutputFeatures;
     j["has_bias"] = hasBias;
 
@@ -135,7 +137,6 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
         throw runtime_error("Storage path is not a directory: " + dir.string());
     }
 
-    string layerName = string("layer") + to_string(getId());
     filesystem::path weightsFile = dir / (layerName + "_weights.gds");
     j["weights_tensor"] = weightsFile.string();
     twbLayer->dumpWeightsToFile(weightsFile.string(), stream);

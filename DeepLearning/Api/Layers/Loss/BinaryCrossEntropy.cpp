@@ -25,12 +25,12 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     BinaryCrossEntropy crossEntropy = binaryCrossEntropyBuilder.build();
     currentFeatureInput = crossEntropy.getLoss();
 
-    if (lossType == ThorImplementation::Loss::LossType::BATCH) {
+    if (lossType == LossType::BATCH) {
         LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
         lossTensor = lossShaper.getFeatureOutput();
     } else {
         // No loss shaper needed in this case
-        assert(lossType == ThorImplementation::Loss::LossType::ELEMENTWISE);
+        assert(lossType == LossType::ELEMENTWISE);
         lossTensor = currentFeatureInput;
     }
 }
