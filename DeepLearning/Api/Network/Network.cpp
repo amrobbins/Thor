@@ -423,7 +423,8 @@ Network::StatusCode Network::checkForFloatingInputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
         if (apiTensorToApiDrivingLayer.count(tensor) == 0) {
-            printf("Tensor with id = %ld is not driven.\n", tensor.getId());
+            printf("Tensor with id = %ld (original id %ld) is not driven.\n", tensor.getId(), tensor.getOriginalId());
+            fflush(stdout);
             return StatusCode::FLOATING_INPUT;
         }
     }
@@ -436,8 +437,11 @@ Network::StatusCode Network::checkForFloatingInputs() {
 Network::StatusCode Network::checkForDanglingOutputs() {
     for (auto it = allTensors.begin(); it != allTensors.end(); ++it) {
         Tensor tensor = *it;
-        if (apiTensorToApiLoadingLayers.count(tensor) == 0)
+        if (apiTensorToApiLoadingLayers.count(tensor) == 0) {
+            printf("tensor with id = %ld (original id %ld) is not loaded.\n", tensor.getId(), tensor.getOriginalId());
+            fflush(stdout);
             return StatusCode::DANGLING_OUTPUT;
+        }
     }
     return StatusCode::SUCCESS;
 }
@@ -605,6 +609,7 @@ void Network::addLayerToNetwork(const Layer *layer) {
     if (allLayersInNetwork.count(layerClone) == 1)
         return;
     allLayersInNetwork.insert(layerClone);
+    allLayersInNetworkList.push_back(layerClone);
     shared_ptr<TrainableWeightsBiasesLayer> trainableWeightsBiasesLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layerClone);
     if (trainableWeightsBiasesLayer)
         allTrainableLayersInNetwork.push_back(trainableWeightsBiasesLayer);
@@ -855,6 +860,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
 
 Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
     if (apiTensorByOriginalId.count(originalId) == 0) {
+        printf("Looking for tensor orig id %ld.\n I have these:\n\n", originalId);
         for (auto it = apiTensorByOriginalId.begin(); it != apiTensorByOriginalId.end(); ++it) {
             printf("tensor orig id %ld\n", it->first);
             fflush(stdout);

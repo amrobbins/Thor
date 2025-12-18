@@ -84,6 +84,9 @@ class Network {
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
     std::shared_ptr<TrainableWeightsBiasesLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
 
+    uint32_t getNumLayers() { return allLayersInNetwork.size(); }
+    std::shared_ptr<Layer> getLayer(uint32_t i) { return allLayersInNetworkList[i]; }
+
    private:
     static const bool DEBUG_STAMP = false;
 
@@ -93,6 +96,7 @@ class Network {
 
    protected:
     std::set<std::shared_ptr<Layer>, Network::LayerComparator> allLayersInNetwork;
+    std::vector<std::shared_ptr<Layer>> allLayersInNetworkList;
     std::vector<std::shared_ptr<TrainableWeightsBiasesLayer>> allTrainableLayersInNetwork;
     std::vector<std::shared_ptr<Layer>> network;
     std::vector<std::pair<Optional<Tensor>, std::shared_ptr<Layer>>> orderedNetwork;

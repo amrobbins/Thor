@@ -35,22 +35,23 @@ class BinaryCrossEntropy : public Loss {
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
         assert(lossShape == LossShape::BATCH || lossShape == LossShape::ELEMENTWISE);
 
-        // Softmax and LossShaper are connected during multi-layer flattening
+        // Sigmoid and LossShaper are connected during multi-layer flattening
         std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
             CrossEntropyLossType::BINARY, Tensor::convertToImplementationDataType(lossDataType));
         return crossEntropy;
     }
 
     virtual bool isMultiLayer() const {
-        if (lossShape != LossShape::ELEMENTWISE || !sigmoidStamped)
+        if (lossShape != LossShape::ELEMENTWISE || !sigmoidAddedToNetwork)
             return true;
         return false;
     }
 
     virtual void buildSupportLayersAndAddToNetwork();
 
-    bool sigmoidStamped;
+    bool sigmoidAddedToNetwork;
     Tensor sigmoidOutput;
+    Tensor lossShaperInput;
 };
 
 class BinaryCrossEntropy::Builder {
@@ -67,11 +68,11 @@ class BinaryCrossEntropy::Builder {
         assert(labelDimensions.size() == 1 && labelDimensions[0] == 1);
 
         BinaryCrossEntropy binaryCrossEntropy;
-        if (_sigmoidStamped.isPresent()) {
-            assert(_sigmoidStamped.get() == true);
-            binaryCrossEntropy.sigmoidStamped = true;
+        if (_sigmoidAddedToNetwork.isPresent()) {
+            assert(_sigmoidAddedToNetwork.get() == true);
+            binaryCrossEntropy.sigmoidAddedToNetwork = true;
         } else {
-            binaryCrossEntropy.sigmoidStamped = false;
+            binaryCrossEntropy.sigmoidAddedToNetwork = false;
         }
         binaryCrossEntropy.predictionsTensor = _predictions.get();
         binaryCrossEntropy.labelsTensor = _labels.get();
@@ -149,12 +150,12 @@ class BinaryCrossEntropy::Builder {
    protected:
     /**
      * BinaryCrossEntropy is a sigmoid activation followed by a cross entropy loss.
-     * When the layer is stamped an external sigmoid will also be stamped and this will be recorded so that next attempt to stamp will
-     * result in a single layer that can be stamped.
+     * When the layer is built an external sigmoid will also be built and this will be recorded so that next attempt to build will
+     * result in a single layer that can be directly built.
      */
-    virtual BinaryCrossEntropy::Builder &sigmoidStamped() {
-        assert(!_sigmoidStamped.isPresent());
-        _sigmoidStamped = true;
+    virtual BinaryCrossEntropy::Builder &sigmoidAddedToNetwork() {
+        assert(!_sigmoidAddedToNetwork.isPresent());
+        _sigmoidAddedToNetwork = true;
         return *this;
     }
 
@@ -164,7 +165,7 @@ class BinaryCrossEntropy::Builder {
     Optional<Tensor> _labels;
     Optional<LossShape> _lossType;
     Optional<Tensor::DataType> _lossDataType;
-    Optional<bool> _sigmoidStamped;
+    Optional<bool> _sigmoidAddedToNetwork;
 
     friend class BinaryCrossEntropy;
 };

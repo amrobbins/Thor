@@ -3,6 +3,8 @@
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
 
+#include <nlohmann/json.hpp>
+
 #include <memory>
 
 namespace ThorImplementation {
@@ -40,5 +42,12 @@ class LossShaper : public Layer {
     OutputLossType outputLossType;
     std::shared_ptr<BatchReduce> batchReduce;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(LossShaper::OutputLossType,
+                             {
+                                 {LossShaper::OutputLossType::BATCH, "batch"},
+                                 {LossShaper::OutputLossType::ELEMENTWISE, "elementwise"},
+                                 {LossShaper::OutputLossType::CLASSWISE, "classwise"},
+                             })
 
 }  // namespace ThorImplementation
