@@ -88,9 +88,10 @@ class Sigmoid::Builder : public Activation::Builder {
     virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Sigmoid::Builder>(*this); }
 
    protected:
-    void backwardComputedExternally() {
+    virtual Sigmoid::Builder &backwardComputedExternally() {
         assert(!_backwardComputedExternally.isPresent());
         _backwardComputedExternally = true;
+        return *this;
     }
 
    private:

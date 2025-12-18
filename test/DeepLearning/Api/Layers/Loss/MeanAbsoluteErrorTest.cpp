@@ -151,6 +151,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
         meanAbsoluteErrorBuilder.reportsBatchLoss();
     else
         meanAbsoluteErrorBuilder.reportsPerOutputLoss();
+    // FIXME: serialize should be hard coded to element wise
     // FIXME: Get the following to work, seems error output path issue
     // else if (lossShape == 2)
     //     meanAbsoluteErrorBuilder.reportsElementwiseLoss();

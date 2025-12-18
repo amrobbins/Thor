@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
+#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Implementation/Layers/Utility/Reshape.h"
 #include "Utilities/TensorOperations/Misc/BatchReduce.h"
@@ -24,6 +25,9 @@ class LossShaper : public Layer {
     // getLossInput() and getLossOutput() are synonyms for getFeatureInput() and getFeatureOutput() in losses:
     virtual Optional<Tensor> getFeatureInput() const { return getLossInput(); }
     virtual Optional<Tensor> getFeatureOutput() const { return getLossOutput(); }
+
+    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
