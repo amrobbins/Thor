@@ -21,7 +21,8 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
         return streams[0].putEvent();
     }
 
-    Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor buffer = tensorToInitialize.clone(cpuPlacement);
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
     half *bufferMem = (half *)buffer.getMemPtr();
     int numProcessors = omp_get_num_procs();

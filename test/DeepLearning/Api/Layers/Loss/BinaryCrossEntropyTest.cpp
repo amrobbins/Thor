@@ -207,11 +207,10 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
                                                                 .predictions(fullyConnected.getFeatureOutput())
                                                                 .lossDataType(lossDataType);
 
-    uint32_t lossShape = 0;  // rand() % 2;
+    uint32_t lossShape = rand() % 2;
     if (lossShape == 0)
         binaryCrossEntropyBuilder.reportsBatchLoss();
     else
-        // FIXME: Get the following to work, seems error output path issue
         binaryCrossEntropyBuilder.reportsElementwiseLoss();
 
     BinaryCrossEntropy binaryCrossEntropy = binaryCrossEntropyBuilder.build();
@@ -264,14 +263,16 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
             break;
     }
     ASSERT_TRUE(sigmoidFound);
-    ASSERT_TRUE(lossShaperFound);
+    ASSERT_EQ(lossShaperFound, lossShape == 0);
 
     json labelsInputJ = labelsInput.serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json sigmoidJ = sigmoid->serialize("/tmp/", stream);
     Layer *layer = &binaryCrossEntropy;
     json binaryCrossEntropyJ = layer->serialize("/tmp/", stream);
-    json lossShaperJ = lossShaper->serialize("/tmp/", stream);
+    json lossShaperJ;
+    if (lossShaper)
+        lossShaperJ = lossShaper->serialize("/tmp/", stream);
     json lossOutputJ = lossOutput.serialize("/tmp/", stream);
 
     ASSERT_EQ(binaryCrossEntropyJ["factory"], "loss");
@@ -296,10 +297,12 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     ASSERT_EQ(sigmoidOutputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
     ASSERT_TRUE(sigmoidOutputJ.at("id").is_number_integer());
 
-    const json &lossShaperInputJ = binaryCrossEntropyJ["loss_shaper_input_tensor"];
-    ASSERT_EQ(lossShaperInputJ.at("data_type").get<Tensor::DataType>(), lossDataType);
-    ASSERT_EQ(lossShaperInputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
-    ASSERT_TRUE(lossShaperInputJ.at("id").is_number_integer());
+    if (lossShaper) {
+        const json &lossShaperInputJ = binaryCrossEntropyJ["loss_shaper_input_tensor"];
+        ASSERT_EQ(lossShaperInputJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+        ASSERT_EQ(lossShaperInputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+        ASSERT_TRUE(lossShaperInputJ.at("id").is_number_integer());
+    }
 
     const json &lossJ = binaryCrossEntropyJ["loss_tensor"];
     ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
@@ -326,7 +329,8 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     printf("%s\n", fullyConnectedJ.dump(4).c_str());
     printf("%s\n", sigmoidJ.dump(4).c_str());
     printf("%s\n", binaryCrossEntropyJ.dump(4).c_str());
-    printf("%s\n", lossShaperJ.dump(4).c_str());
+    if (lossShaper)
+        printf("%s\n", lossShaperJ.dump(4).c_str());
     printf("%s\n", lossOutputJ.dump(4).c_str());
 
     // ////////////////////////////
@@ -343,7 +347,8 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     Layer::deserialize(fullyConnectedJ, &newNetwork);
     Layer::deserialize(sigmoidJ, &newNetwork);
     Layer::deserialize(binaryCrossEntropyJ, &newNetwork);
-    Layer::deserialize(lossShaperJ, &newNetwork);
+    if (lossShaper)
+        Layer::deserialize(lossShaperJ, &newNetwork);
     Layer::deserialize(lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
@@ -358,9 +363,10 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     stampedNetwork = newNetwork.getStampedNetwork(0);
 
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 3U);
-    // shared_ptr<ThorImplementation::CrossEntropy> stampedBinaryCrossEntropy =
-    //     dynamic_pointer_cast<ThorImplementation::CrossEntropy>(otherLayers[0]);
+    if (lossShaper)
+        ASSERT_EQ(otherLayers.size(), 3U);
+    else
+        ASSERT_EQ(otherLayers.size(), 2U);
     shared_ptr<ThorImplementation::Sigmoid> stampedSigmoid;
     shared_ptr<ThorImplementation::CrossEntropy> stampedBinaryCrossEntropy;
     shared_ptr<ThorImplementation::LossShaper> stampedLossShaper;
@@ -384,9 +390,9 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
                 lossShaperFound = true;
         }
     }
-    assert(sigmoidFound);
-    assert(crossEntropyFound);
-    assert(lossShaperFound);
+    ASSERT_TRUE(sigmoidFound);
+    ASSERT_TRUE(crossEntropyFound);
+    ASSERT_EQ(lossShaperFound, lossShape == 0);
 
     ASSERT_NE(stampedBinaryCrossEntropy, nullptr);
 
@@ -409,6 +415,10 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     ASSERT_EQ(stampedSigmoid->getFeatureInput().get(), stampedFC->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedBinaryCrossEntropy->getPredictionsInput().get(), stampedSigmoid->getFeatureOutput().get());
     ASSERT_EQ(stampedBinaryCrossEntropy->getLabelsInput().get(), stampedLabelsInput->getFeatureOutput().get());
-    ASSERT_EQ(stampedBinaryCrossEntropy->getLossOutput().get(), stampedLossShaper->getFeatureInput().get());
-    ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+    if (lossShaper) {
+        ASSERT_EQ(stampedBinaryCrossEntropy->getLossOutput().get(), stampedLossShaper->getFeatureInput().get());
+        ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+    } else {
+        ASSERT_EQ(stampedBinaryCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
+    }
 }

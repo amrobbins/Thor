@@ -24,7 +24,7 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
 
 void Sgd::compile() {
     TensorPlacement layerPlacement = trainableLayer->getPlacement();
-    assert(layerPlacement == TensorPlacement::MemDevices::GPU);
+    assert(layerPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     gpuNum = layerPlacement.getDeviceNum();
     gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
     assert(initialLearningRate > 0.0f);

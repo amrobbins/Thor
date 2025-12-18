@@ -146,17 +146,15 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
                                                               .predictions(fullyConnected.getFeatureOutput())
                                                               .lossDataType(lossDataType);
 
-    uint32_t lossShape = rand() % 2;
+    uint32_t lossShape = rand() % 4;
     if (lossShape == 0)
         meanAbsoluteErrorBuilder.reportsBatchLoss();
-    else
+    else if (lossShape == 1)
         meanAbsoluteErrorBuilder.reportsPerOutputLoss();
-    // FIXME: serialize should be hard coded to element wise
-    // FIXME: Get the following to work, seems error output path issue
-    // else if (lossShape == 2)
-    //     meanAbsoluteErrorBuilder.reportsElementwiseLoss();
-    // else
-    //     meanAbsoluteErrorBuilder.reportsRawLoss();
+    else if (lossShape == 2)
+        meanAbsoluteErrorBuilder.reportsElementwiseLoss();
+    else
+        meanAbsoluteErrorBuilder.reportsRawLoss();
 
     MeanAbsoluteError meanAbsoluteError = meanAbsoluteErrorBuilder.build();
 
@@ -199,8 +197,12 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     EXPECT_TRUE(meanAbsoluteErrorJ.contains("layer_name"));
     if (lossShape == 0)
         ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::BATCH);
-    else
+    else if (lossShape == 1)
         ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::CLASSWISE);
+    else if (lossShape == 2)
+        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    else
+        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
     ASSERT_EQ(meanAbsoluteErrorJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
 
     const json &labelsJ = meanAbsoluteErrorJ["labels_tensor"];
@@ -248,6 +250,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     Layer::deserialize(labelsInputJ, &newNetwork);
     Layer::deserialize(fullyConnectedJ, &newNetwork);
     Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
+    // FIXME: Find, serialize and deserialize the loss shaper
     Layer::deserialize(lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);

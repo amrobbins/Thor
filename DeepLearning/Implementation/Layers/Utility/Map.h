@@ -141,7 +141,8 @@ class Map : public Layer {
 
         Stream stream(0);
 
-        Tensor cpuMappingTensor = mappingOfSourceTensorIntoDestTensor.clone(TensorPlacement::MemDevices::CPU);
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        Tensor cpuMappingTensor = mappingOfSourceTensorIntoDestTensor.clone(cpuPlacement);
         cpuMappingTensor.copyFromAsync(mappingOfSourceTensorIntoDestTensor, stream);
         stream.synchronize();
         INDEX_TYPE *cpuMappingTensorMem = (INDEX_TYPE *)cpuMappingTensor.getMemPtr();
@@ -163,7 +164,7 @@ class Map : public Layer {
             nGroupingsOfOutputDestinationsOfInputElement;
 
         TensorDescriptor elementPopulatedTensorDescriptor(TensorDescriptor::DataType::BOOLEAN, sourceDimensions);
-        Tensor elementPopulatedTensor(TensorPlacement::MemDevices::CPU, elementPopulatedTensorDescriptor);
+        Tensor elementPopulatedTensor(cpuPlacement, elementPopulatedTensorDescriptor);
         bool *elementPopulated = (bool *)elementPopulatedTensor.getMemPtr();
         INDEX_TYPE numErrorOutputElements = elementPopulatedTensorDescriptor.getTotalNumElements();
         memset(elementPopulated, false, elementPopulatedTensorDescriptor.getTotalNumElements());
@@ -192,8 +193,7 @@ class Map : public Layer {
             //   errorOutputIndex_mappingsOfSizeN, {errorInputIndex1, ..., errorInputIndexN} }
             flatDimension.push_back((N + 1) * mappingsOfSizeN);
 
-            Tensor backwardMappingTensor =
-                Tensor(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::UINT64, flatDimension));
+            Tensor backwardMappingTensor = Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT64, flatDimension));
             INDEX_TYPE *backwardMappingMem = (INDEX_TYPE *)backwardMappingTensor.getMemPtr();
 
             INDEX_TYPE i = 0;

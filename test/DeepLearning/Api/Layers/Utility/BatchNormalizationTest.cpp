@@ -255,7 +255,8 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(0));
     ASSERT_TRUE(physicalBatchNormLayer != nullptr);
     ThorImplementation::Tensor weights = physicalBatchNormLayer->getWeights();
-    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpu = weights.clone(cpuPlacement);
     half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         weightsCpuMem[i] = i;
@@ -263,7 +264,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     weights.copyFromAsync(weightsCpu, stream);
 
     ThorImplementation::Tensor biases = physicalBatchNormLayer->getBiases();
-    ThorImplementation::Tensor biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor biasesCpu = biases.clone(cpuPlacement);
     half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
     for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
         biasesCpuMem[i] = i * i + 6;
@@ -271,7 +272,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     biases.copyFromAsync(biasesCpu, stream);
 
     ThorImplementation::Tensor means = physicalBatchNormLayer->getResultRunningMean();
-    ThorImplementation::Tensor meansCpu = means.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor meansCpu = means.clone(cpuPlacement);
     half *meansCpuMem = (half *)meansCpu.getMemPtr();
     for (uint32_t i = 0; i < means.getTotalNumElements(); ++i) {
         meansCpuMem[i] = i * i + 6;
@@ -279,7 +280,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     means.copyFromAsync(meansCpu, stream);
 
     ThorImplementation::Tensor variances = physicalBatchNormLayer->getResultRunningVariance();
-    ThorImplementation::Tensor variancesCpu = variances.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor variancesCpu = variances.clone(cpuPlacement);
     half *variancesCpuMem = (half *)variancesCpu.getMemPtr();
     for (uint32_t i = 0; i < variances.getTotalNumElements(); ++i) {
         variancesCpuMem[i] = i * i + 6;
@@ -379,19 +380,19 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     ASSERT_TRUE(physicalBatchNormLayerDes != nullptr);
 
     ThorImplementation::Tensor weightsDes = physicalBatchNormLayerDes->getWeights();
-    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(cpuPlacement);
     weightsCpuDes.copyFromAsync(weightsDes, stream);
 
     ThorImplementation::Tensor biasesDes = physicalBatchNormLayerDes->getBiases();
-    ThorImplementation::Tensor biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor biasesCpuDes = biasesDes.clone(cpuPlacement);
     biasesCpuDes.copyFromAsync(biasesDes, stream);
 
     ThorImplementation::Tensor meansDes = physicalBatchNormLayerDes->getResultRunningMean();
-    ThorImplementation::Tensor meansCpuDes = meansDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor meansCpuDes = meansDes.clone(cpuPlacement);
     meansCpuDes.copyFromAsync(meansDes, stream);
 
     ThorImplementation::Tensor variancesDes = physicalBatchNormLayerDes->getResultRunningVariance();
-    ThorImplementation::Tensor variancesCpuDes = variancesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor variancesCpuDes = variancesDes.clone(cpuPlacement);
     variancesCpuDes.copyFromAsync(variancesDes, stream);
 
     stream.synchronize();

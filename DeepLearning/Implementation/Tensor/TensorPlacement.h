@@ -10,7 +10,7 @@ class TensorPlacement {
     enum class MemDevices { INVALID = 0, CPU, GPU };
 
     TensorPlacement() { memDevice = MemDevices::INVALID; }
-    TensorPlacement(MemDevices memDevice, int deviceNum = 0) : memDevice(memDevice), deviceNum(deviceNum) {
+    explicit TensorPlacement(MemDevices memDevice, int deviceNum = 0) : memDevice(memDevice), deviceNum(deviceNum) {
         assert(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);
         if (memDevice == MemDevices::CPU)
             assert(deviceNum == 0);

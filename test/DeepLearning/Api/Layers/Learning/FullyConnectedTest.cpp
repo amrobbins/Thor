@@ -267,8 +267,9 @@ TEST(FullyConnected, SerializeDeserialize) {
             physicalFCLayer = dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(1));
     }
     ASSERT_TRUE(physicalFCLayer != nullptr);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
-    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpu = weights.clone(cpuPlacement);
     half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         weightsCpuMem[i] = i;
@@ -279,7 +280,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     ThorImplementation::Tensor biasesCpu;
     if (hasBias) {
         biases = physicalFCLayer->getBiases();
-        biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpu = biases.clone(cpuPlacement);
         half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
         for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
             biasesCpuMem[i] = i * i + 6;
@@ -386,14 +387,14 @@ TEST(FullyConnected, SerializeDeserialize) {
     ASSERT_TRUE(physicalFCLayerDes != nullptr);
 
     ThorImplementation::Tensor weightsDes = physicalFCLayerDes->getWeights();
-    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(cpuPlacement);
     weightsCpuDes.copyFromAsync(weightsDes, stream);
 
     ThorImplementation::Tensor biasesDes;
     ThorImplementation::Tensor biasesCpuDes;
     if (hasBias) {
         biasesDes = physicalFCLayerDes->getBiases();
-        biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpuDes = biasesDes.clone(cpuPlacement);
         biasesCpuDes.copyFromAsync(biasesDes, stream);
     }
 

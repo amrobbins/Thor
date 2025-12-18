@@ -51,7 +51,6 @@ class BinaryCrossEntropy : public Loss {
 
     bool sigmoidAddedToNetwork;
     Tensor sigmoidOutput;
-    Tensor lossShaperInput;
 };
 
 class BinaryCrossEntropy::Builder {

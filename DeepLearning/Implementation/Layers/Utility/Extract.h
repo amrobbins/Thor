@@ -39,8 +39,8 @@ class Extract : public Layer {
 
         std::vector<unsigned long> inputTensorDimensions = featureInput.get().getDescriptor().getDimensions();
         strideArrayDimensions.push_back(inputTensorDimensions.size());
-        Tensor stridePerPaddedDimension(TensorPlacement::MemDevices::CPU,
-                                        TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        Tensor stridePerPaddedDimension(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         stridePerPaddedDimension_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         unsigned long *strideCpu = (unsigned long *)stridePerPaddedDimension.getMemPtr();
         strideCpu[strideArrayDimensions[0] - 1] = 1;
@@ -49,8 +49,7 @@ class Extract : public Layer {
         stridePerPaddedDimension_d.copyFromAsync(stridePerPaddedDimension, stream);
 
         std::vector<unsigned long> outputTensorDimensions = featureOutput.get().getDescriptor().getDimensions();
-        Tensor stridePerUnpaddedDimension(TensorPlacement::MemDevices::CPU,
-                                          TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
+        Tensor stridePerUnpaddedDimension(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         stridePerUnpaddedDimension_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT64, strideArrayDimensions));
         strideCpu = (unsigned long *)stridePerUnpaddedDimension.getMemPtr();
         strideCpu[strideArrayDimensions[0] - 1] = 1;
@@ -62,9 +61,9 @@ class Extract : public Layer {
             paddingAmount[d] =
                 std::pair<unsigned int, unsigned int>(dimensionSpans[d].first, (inputTensorDimensions[d] - 1) - dimensionSpans[d].second);
 
-        Tensor padBefore(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
+        Tensor padBefore(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
         padBefore_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
-        Tensor padAfter(TensorPlacement::MemDevices::CPU, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
+        Tensor padAfter(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
         padAfter_d = Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::UINT32, strideArrayDimensions));
         unsigned int *padBeforeCpu = (unsigned int *)padBefore.getMemPtr();
         unsigned int *padAfterCpu = (unsigned int *)padAfter.getMemPtr();

@@ -237,7 +237,7 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         // 2. Copy from a file - when loading a saved network
         assert(weightsInitializerBuilder.get() == nullptr);
         assert(biasInitializerBuilder.get() == nullptr);
-        assert(physicalLayer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
         physicalLayer->loadWeightsFromFile(weightsFile.get(), stream);
         if (hasBias) {

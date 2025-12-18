@@ -205,6 +205,8 @@ class Loss : public Layer {
         }
     }
 
+    virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {}
+
     virtual Optional<Tensor> getLabelsInput() { return labelsInput; }
     virtual Optional<Tensor> getPredictionsInput() { return getFeatureInput(); }
     // When a loss shaper is present, that will provide batch loss etc. Loss::getLossOutput() provides raw loss

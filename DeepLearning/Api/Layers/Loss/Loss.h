@@ -94,6 +94,7 @@ class Loss : public Layer {
     }
 
     LossShape lossShape;
+    Tensor lossShaperInput;
 
    private:
     uint32_t numInputConnectionsMade = 0;

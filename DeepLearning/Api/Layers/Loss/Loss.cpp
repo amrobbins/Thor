@@ -16,6 +16,7 @@ json Loss::serialize(const string &storageDir, Stream stream) const {
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();
+    j["loss_shaper_input_tensor"] = lossShaperInput.serialize();
     j["loss_tensor"] = lossTensor.serialize();
 
     return j;

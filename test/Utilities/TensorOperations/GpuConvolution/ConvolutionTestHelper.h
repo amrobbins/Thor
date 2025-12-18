@@ -37,7 +37,7 @@ class ConvolutionTestHelper {
                                       Tensor outputFeatures,
                                       ConvolutionKernelRequirement convolutionKernelRequirement) {
         // Validate input tensor
-        assert(inputFeatures.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(inputFeatures.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> inputTensorDimensions = inputFeatures.getDescriptor().getDimensions();
         assert(inputTensorDimensions.size() == 4);
         assert(inputTensorDimensions[0] == (unsigned long)convolutionKernelRequirement.getBatchSize());
@@ -46,7 +46,7 @@ class ConvolutionTestHelper {
         assert(inputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumInputColumns());
 
         // Validate output tensor
-        assert(outputFeatures.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(outputFeatures.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> outputTensorDimensions = outputFeatures.getDescriptor().getDimensions();
         assert(outputTensorDimensions.size() == 4);
         assert(outputTensorDimensions[0] == (unsigned long)convolutionKernelRequirement.getBatchSize());
@@ -55,7 +55,7 @@ class ConvolutionTestHelper {
         assert(outputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumOutputColumns());
 
         // Validate weights tensor
-        assert(weights.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> weightsDimensions = weights.getDescriptor().getDimensions();
         assert(weightsDimensions.size() == 4);
         assert(weightsDimensions[0] == (unsigned long)convolutionKernelRequirement.getNumOutputChannels());
@@ -136,7 +136,7 @@ class ConvolutionTestHelper {
         Stream copyStream(0);
 
         // Validate feature input tensor
-        assert(featureInput.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(featureInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> featureInputTensorDimensions = featureInput.getDescriptor().getDimensions();
         assert(featureInputTensorDimensions.size() == 4);
         assert(featureInputTensorDimensions[0] == (unsigned long)convolutionKernelRequirement.getBatchSize());
@@ -145,7 +145,7 @@ class ConvolutionTestHelper {
         assert(featureInputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumInputColumns());
 
         // Validate error input tensor
-        assert(errorInput.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(errorInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> errorInputTensorDimensions = errorInput.getDescriptor().getDimensions();
         assert(errorInputTensorDimensions.size() == 4);
         assert(errorInputTensorDimensions[0] == (unsigned long)convolutionKernelRequirement.getBatchSize());
@@ -154,14 +154,15 @@ class ConvolutionTestHelper {
         assert(errorInputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumOutputColumns());
 
         // Validate weightsGradient gradient tensor
-        assert(weightsGradient.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(weightsGradient.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> weightsGradientDimensions = weightsGradient.getDescriptor().getDimensions();
         assert(weightsGradientDimensions.size() == 4);
         assert(weightsGradientDimensions[0] == (unsigned long)convolutionKernelRequirement.getNumOutputChannels());
         assert(weightsGradientDimensions[1] == (unsigned long)convolutionKernelRequirement.getNumInputChannels());
         assert(weightsGradientDimensions[2] == (unsigned long)convolutionKernelRequirement.getFilterHeight());
         assert(weightsGradientDimensions[3] == (unsigned long)convolutionKernelRequirement.getFilterWidth());
-        Tensor weightsGradientFloat(TensorPlacement::MemDevices::CPU,
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        Tensor weightsGradientFloat(cpuPlacement,
                                     TensorDescriptor(TensorDescriptor::DataType::FP32, weightsGradient.getDescriptor().getDimensions()));
         if (accumulate) {
             weightsGradientFloat.copyFromAsync(weightsGradient, copyStream);
@@ -188,8 +189,7 @@ class ConvolutionTestHelper {
         std::vector<unsigned long> featureInputDimensionsWithPadding = featureInput.getDescriptor().getDimensions();
         featureInputDimensionsWithPadding[2] += 2 * verticalPadding;
         featureInputDimensionsWithPadding[3] += 2 * horizontalPadding;
-        Tensor featureInputPadded(TensorPlacement::MemDevices::CPU,
-                                  TensorDescriptor(TensorDescriptor::DataType::FP16, featureInputDimensionsWithPadding));
+        Tensor featureInputPadded(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, featureInputDimensionsWithPadding));
         for (unsigned int n = 0; n < featureInputDimensionsWithPadding[0]; ++n) {
             for (unsigned int c = 0; c < featureInputDimensionsWithPadding[1]; ++c) {
                 for (unsigned int h = 0; h < featureInputDimensionsWithPadding[2]; ++h) {
@@ -250,7 +250,7 @@ class ConvolutionTestHelper {
         Stream copyStream(0);
 
         // Validate error input tensor
-        assert(errorInput.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(errorInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> errorInputTensorDimensions = errorInput.getDescriptor().getDimensions();
         assert(errorInputTensorDimensions.size() == 4);
         assert(errorInputTensorDimensions[0] == (unsigned long)convolutionKernelRequirement.getBatchSize());
@@ -259,7 +259,7 @@ class ConvolutionTestHelper {
         assert(errorInputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumOutputColumns());
 
         // Validate weights gradient tensor
-        assert(weights.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> weightsDimensions = weights.getDescriptor().getDimensions();
         assert(weightsDimensions.size() == 4);
         assert(weightsDimensions[0] == (unsigned long)convolutionKernelRequirement.getNumOutputChannels());
@@ -268,15 +268,16 @@ class ConvolutionTestHelper {
         assert(weightsDimensions[3] == (unsigned long)convolutionKernelRequirement.getFilterWidth());
 
         // Validate error output tensor
-        assert(errorOutput.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(errorOutput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         std::vector<unsigned long> errorOutputTensorDimensions = errorOutput.getDescriptor().getDimensions();
         assert(errorOutputTensorDimensions.size() == 4);
         assert(errorOutputTensorDimensions[0] == (unsigned long)convolutionKernelRequirement.getBatchSize());
         assert(errorOutputTensorDimensions[1] == (unsigned long)convolutionKernelRequirement.getNumInputChannels());
         assert(errorOutputTensorDimensions[2] == (unsigned long)convolutionKernelRequirement.getNumInputRows());
         assert(errorOutputTensorDimensions[3] == (unsigned long)convolutionKernelRequirement.getNumInputColumns());
-        Tensor errorOutputFloat = Tensor(TensorPlacement::MemDevices::CPU,
-                                         TensorDescriptor(TensorDescriptor::DataType::FP32, errorOutput.getDescriptor().getDimensions()));
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        Tensor errorOutputFloat =
+            Tensor(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP32, errorOutput.getDescriptor().getDimensions()));
         memset(errorOutputFloat.getMemPtr(), 0, sizeof(float) * errorOutputFloat.getDescriptor().getTotalNumElements());
 
         unsigned int filterHeight = convolutionKernelRequirement.getFilterHeight();
@@ -335,7 +336,8 @@ class ConvolutionTestHelper {
         assert(biasesGradientDimensions.size() == 1);
         assert(biasesGradientDimensions[0] == c);
 
-        Tensor biasesGradientFloat(TensorPlacement::MemDevices::CPU,
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        Tensor biasesGradientFloat(cpuPlacement,
                                    TensorDescriptor(TensorDescriptor::DataType::FP32, biasesGradient.getDescriptor().getDimensions()));
         float *biasesGradientFloatMem = (float *)biasesGradientFloat.getMemPtr();
         if (accumulate) {

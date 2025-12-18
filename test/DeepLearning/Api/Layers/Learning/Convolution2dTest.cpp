@@ -795,7 +795,8 @@ TEST(Convolution2d, SerializeDeserialize) {
     ASSERT_TRUE(physicalConvLayer != nullptr);
 
     ThorImplementation::Tensor weights = physicalConvLayer->getWeights();
-    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpu = weights.clone(cpuPlacement);
     half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         weightsCpuMem[i] = i;
@@ -806,7 +807,7 @@ TEST(Convolution2d, SerializeDeserialize) {
     ThorImplementation::Tensor biasesCpu;
     if (hasBias) {
         biases = physicalConvLayer->getBiases();
-        biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpu = biases.clone(cpuPlacement);
         half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
         for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
             biasesCpuMem[i] = i * i + 6;
@@ -938,14 +939,14 @@ TEST(Convolution2d, SerializeDeserialize) {
     ASSERT_TRUE(physicalConvLayerDes != nullptr);
 
     ThorImplementation::Tensor weightsDes = physicalConvLayerDes->getWeights();
-    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpuDes = weightsDes.clone(cpuPlacement);
     weightsCpuDes.copyFromAsync(weightsDes, stream);
 
     ThorImplementation::Tensor biasesDes;
     ThorImplementation::Tensor biasesCpuDes;
     if (hasBias) {
         biasesDes = physicalConvLayerDes->getBiases();
-        biasesCpuDes = biasesDes.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpuDes = biasesDes.clone(cpuPlacement);
         biasesCpuDes.copyFromAsync(biasesDes, stream);
     }
 

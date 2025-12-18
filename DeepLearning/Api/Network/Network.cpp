@@ -835,9 +835,9 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     }
 
     // Stamp the network output
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     shared_ptr<ThorImplementation::Layer> implementationLayer =
-        ((Layer *)networkOutput.get())
-            ->stamp(ThorImplementation::TensorPlacement::MemDevices::CPU, physicalDrivingLayer, apiDrivingLayer, inputTensor);
+        ((Layer *)networkOutput.get())->stamp(cpuPlacement, physicalDrivingLayer, apiDrivingLayer, inputTensor);
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);
