@@ -84,6 +84,7 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
     BufferStampTensorsParams *params = (BufferStampTensorsParams *)data;
 
     unordered_map<string, vector<uint8_t>> bufferMap;
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     for (auto it = params->tensorsToReturn.begin(); it != params->tensorsToReturn.end(); ++it) {
         string tensorName = *it;
         ThorImplementation::Tensor copyFromTensor;
@@ -94,7 +95,7 @@ void CUDART_CB LocalExecutor::bufferStampTensors(void *data) {
             assert(params->batchletOutput.count(tensorName) == 1);
             copyFromTensor = params->batchletOutput[tensorName];
         }
-        assert(copyFromTensor.getPlacement() == ThorImplementation::TensorPlacement::MemDevices::CPU);
+        assert(copyFromTensor.getPlacement() == cpuPlacement);
         uint64_t numTensorBytes = copyFromTensor.getDescriptor().getArraySizeInBytes();
         bufferMap[tensorName] = vector<uint8_t>(numTensorBytes);
         memcpy(&(bufferMap[tensorName][0]), copyFromTensor.getMemPtr(), numTensorBytes);

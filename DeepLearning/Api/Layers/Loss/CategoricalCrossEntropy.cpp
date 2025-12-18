@@ -5,22 +5,19 @@ using json = nlohmann::json;
 
 namespace Thor {
 void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
-    Tensor currentFeatureInput = predictionsTensor;
-
-    assert(!softmaxStamped);
+    assert(!softmaxAddedToNetwork);
     Softmax::Builder softmaxBuilder = Softmax::Builder();
     softmaxBuilder.network(*network);
-    softmaxBuilder.featureInput(currentFeatureInput);
+    softmaxBuilder.featureInput(predictionsTensor);
     softmaxBuilder.backwardComputedExternally();
     shared_ptr<Layer> softmax = softmaxBuilder.build();
     softmaxOutput = softmax->getFeatureOutput();
-    currentFeatureInput = softmaxOutput;
 
     CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
                                                                           .network(*network)
-                                                                          .predictions(currentFeatureInput)
+                                                                          .predictions(softmaxOutput)
                                                                           .labels(labelsTensor)
-                                                                          .softmaxStamped()
+                                                                          .softmaxAddedToNetwork()
                                                                           .reportsRawLoss()
                                                                           .lossDataType(lossDataType);
     if (labelType == LabelType::INDEX) {
@@ -30,21 +27,21 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
         categoricalCrossEntropyBuilder.receivesOneHotLabels();
     }
     CategoricalCrossEntropy crossEntropy = categoricalCrossEntropyBuilder.build();
-    currentFeatureInput = crossEntropy.getLoss();
+    lossShaperInput = crossEntropy.getLoss();
 
     if (lossShape == LossShape::BATCH) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsBatchLoss().build();
+        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsBatchLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else if (lossShape == LossShape::CLASSWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsClasswiseLoss().build();
+        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsClasswiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else if (lossShape == LossShape::ELEMENTWISE) {
-        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(currentFeatureInput).reportsElementwiseLoss().build();
+        LossShaper lossShaper = LossShaper::Builder().network(*network).lossInput(lossShaperInput).reportsElementwiseLoss().build();
         lossTensor = lossShaper.getLossOutput();
     } else {
         // No loss shaper needed in this case
         assert(lossShape == LossShape::RAW);
-        lossTensor = currentFeatureInput;
+        lossTensor = lossShaperInput;
     }
 }
 
@@ -61,6 +58,7 @@ json CategoricalCrossEntropy::serialize(const string &storageDir, Stream stream)
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();
     j["softmax_output_tensor"] = softmaxOutput.serialize();
+    j["loss_shaper_input_tensor"] = lossShaperInput.serialize();
     j["loss_tensor"] = lossTensor.serialize();
 
     return j;
@@ -77,14 +75,12 @@ void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
     categoricalCrossEntropy.lossShape = j.at("loss_shape").get<LossShape>();
 
     uint64_t originalTensorId;
-    originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
-    categoricalCrossEntropy.predictionsTensor = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["softmax_output_tensor"].at("id").get<uint64_t>();
-    categoricalCrossEntropy.softmaxOutput = network->getApiTensorByOriginalId(originalTensorId);
+    categoricalCrossEntropy.predictionsTensor = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     categoricalCrossEntropy.labelsTensor = network->getApiTensorByOriginalId(originalTensorId);
 
-    categoricalCrossEntropy.lossTensor = Tensor::deserialize(j["loss_tensor"]);
+    categoricalCrossEntropy.lossTensor = Tensor::deserialize(j["loss_shaper_input_tensor"]);
 
     categoricalCrossEntropy.initialized = true;
     categoricalCrossEntropy.addToNetwork(network);

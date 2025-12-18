@@ -119,14 +119,15 @@ TEST(Network, SimplestNetworkProperlyFormed) {
               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().get());
 
     // Check weights initialization
-    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 1024; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -196,14 +197,15 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     ASSERT_EQ(fanOut, 500U);
     half maxValue = sqrt(6.0 / (fanIn + fanOut)) * 1.0001;
     half minValue = (half)-1.0f * maxValue;
-    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 1024 * 500; ++i) {
         ASSERT_TRUE(weightsMem[i] >= minValue && weightsMem[i] <= maxValue);
     }
-    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -275,14 +277,15 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     ASSERT_EQ(fanOut, 500U);
     half maxValue = sqrt(6.0 / (fanIn + fanOut)) * 1.0001;
     half minValue = (half)-1.0f * maxValue;
-    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 1024 * 500; ++i) {
         ASSERT_TRUE(weightsMem[i] >= minValue && weightsMem[i] <= maxValue);
     }
-    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -395,7 +398,8 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     ASSERT_EQ(dropout2->getFeatureOutput().get(), tc16_32->getFeatureInput().get());
     ASSERT_EQ(tc16_32->getFeatureOutput().get(), output->getFeatureInput().get());
 
-    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
@@ -560,15 +564,16 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     }
 
     // Check weights initialization
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     shared_ptr<ThorImplementation::FullyConnected> fc = fcv[0];
-    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 1024 * 800; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *biasesMem = (half *)fcBiases.getMemPtr();
@@ -577,14 +582,14 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     }
 
     fc = fcv[2];
-    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 800 * 200; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     biasesMem = (half *)fcBiases.getMemPtr();
@@ -593,14 +598,14 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     }
 
     fc = fcv[1];
-    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 1024 * 800; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     biasesMem = (half *)fcBiases.getMemPtr();
@@ -1088,15 +1093,16 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     ASSERT_EQ(fc2->getErrorInputs()[0].get().getDescriptor().getDimensions(), expectedDimensions);
 
     // Check weights initialization
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     shared_ptr<ThorImplementation::Convolution2d> conv = cv[0];
-    ThorImplementation::Tensor convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     half *weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 11 * 11 * 3 * 48; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    ThorImplementation::Tensor convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     half *biasesMem = (half *)convBiases.getMemPtr();
@@ -1105,14 +1111,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[1];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 5 * 5 * 48 * 128; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1121,14 +1127,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[2];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 3 * 3 * 128 * 192; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1137,14 +1143,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[3];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 3 * 3 * 192 * 192; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1153,14 +1159,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[4];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 3 * 3 * 192 * 128; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1169,14 +1175,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[5];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 11 * 11 * 3 * 48; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1185,14 +1191,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[6];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 5 * 5 * 48 * 128; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1201,14 +1207,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[7];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 3 * 3 * 128 * 192; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1217,14 +1223,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[8];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 3 * 3 * 192 * 192; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1233,14 +1239,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     conv = cv[9];
-    convWeights = conv->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convWeights = conv->getWeights().clone(cpuPlacement);
     convWeights.copyFromAsync(conv->getWeights(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     weightsMem = (half *)convWeights.getMemPtr();
     for (uint32_t i = 0; i < 3 * 3 * 192 * 128; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    convBiases = conv->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    convBiases = conv->getBiases().get().clone(cpuPlacement);
     convBiases.copyFromAsync(conv->getBiases(), conv->getStreams()[0]);
     conv->getStreams()[0].synchronize();
     biasesMem = (half *)convBiases.getMemPtr();
@@ -1249,14 +1255,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     shared_ptr<ThorImplementation::FullyConnected> fc = fc0;
-    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 9216 * 4096; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     biasesMem = (half *)fcBiases.getMemPtr();
@@ -1265,14 +1271,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     fc = fc1;
-    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 4096 * 4096; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     biasesMem = (half *)fcBiases.getMemPtr();
@@ -1281,14 +1287,14 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     }
 
     fc = fc2;
-    fcWeights = fc->getWeights().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 4096 * 1000; ++i) {
         ASSERT_TRUE(weightsMem[i] >= (half)-0.1 && weightsMem[i] <= (half)0.1);
     }
-    fcBiases = fc->getBiases().get().clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     biasesMem = (half *)fcBiases.getMemPtr();

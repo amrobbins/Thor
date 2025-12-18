@@ -36,7 +36,7 @@ json BinaryCrossEntropy::serialize(const string &storageDir, Stream stream) cons
     // The thing that is deserialized must be just the base layer, any helper layers
     // are themselves deserialized. So loss_shape set to LossShape::ELEMENTWISE
 
-    json j;
+    json j;  // dfgf
     j["factory"] = Layer::Factory::Loss.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = "binary_cross_entropy";

@@ -196,7 +196,7 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         return {stream.putEvent(false, true)};
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
-        assert(layer->getWeights().getPlacement() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        assert(layer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(layer->getWeights().getPlacement().getDeviceNum());
 
         layer->loadWeightsFromFile(weightsFile.get(), stream);

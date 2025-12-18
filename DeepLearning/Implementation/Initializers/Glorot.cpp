@@ -19,7 +19,8 @@ Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream>
 Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
     // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when
     // not fp16
-    Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor buffer = tensorToInitialize.clone(cpuPlacement);
 
     uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
     half *bufferMem = (half *)buffer.getMemPtr();
@@ -53,7 +54,8 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
 Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
     // FIXME: I hard-coded half values here, so any uniformRandom init will only work for half type weights - networks will not train when
     // not fp16
-    Tensor buffer = tensorToInitialize.clone(TensorPlacement::MemDevices::CPU);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor buffer = tensorToInitialize.clone(cpuPlacement);
 
     float mean = 0.0;
     double variance = 2.0 / (fanIn + fanOut);

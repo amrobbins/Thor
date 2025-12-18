@@ -462,7 +462,8 @@ TEST(Sgd, SerializeDeserialize) {
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
     ASSERT_TRUE(physicalFCLayer != nullptr);
     ThorImplementation::Tensor weights = physicalFCLayer->getWeights();
-    ThorImplementation::Tensor weightsCpu = weights.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor weightsCpu = weights.clone(cpuPlacement);
     half *weightsCpuMem = (half *)weightsCpu.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
         weightsCpuMem[i] = i;
@@ -473,7 +474,7 @@ TEST(Sgd, SerializeDeserialize) {
     ThorImplementation::Tensor biasesCpu;
     if (hasBias) {
         biases = physicalFCLayer->getBiases();
-        biasesCpu = biases.clone(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        biasesCpu = biases.clone(cpuPlacement);
         half *biasesCpuMem = (half *)biasesCpu.getMemPtr();
         for (uint32_t i = 0; i < biases.getTotalNumElements(); ++i) {
             biasesCpuMem[i] = i * i + 6;

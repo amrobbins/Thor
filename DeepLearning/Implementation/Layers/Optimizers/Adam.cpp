@@ -16,7 +16,7 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer, float al
 
 void Adam::compile() {
     TensorPlacement layerPlacement = trainableLayer->getPlacement();
-    assert(layerPlacement == TensorPlacement::MemDevices::GPU);
+    assert(layerPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     gpuNum = layerPlacement.getDeviceNum();
     gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
 

@@ -73,7 +73,7 @@ class CategoricalAccuracy : public Metric {
     }
 
     virtual std::string toDisplayString(Tensor metric_h) {
-        assert(metric_h.getPlacement() == TensorPlacement::MemDevices::CPU);
+        assert(metric_h.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
         float accuracy = *((float *)metric_h.getMemPtr());
         return "Accuracy: " + std::to_string(accuracy);
     }

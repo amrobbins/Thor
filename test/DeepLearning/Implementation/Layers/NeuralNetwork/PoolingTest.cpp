@@ -40,7 +40,8 @@ static Tensor maxPoolingForward(Tensor featureIn,
     uint32_t outputHeight = ConvolutionTestHelper::computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
     uint32_t outputWidth = ConvolutionTestHelper::computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
-    Tensor featureOut(TensorPlacement::MemDevices::CPU,
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor featureOut(cpuPlacement,
                       TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, outputHeight, outputWidth}));
 
     uint32_t paddedInputHeight = inputHeight + 2 * verticalPadding;
@@ -93,8 +94,8 @@ static Tensor maxPoolingBackward(Tensor featureIn,
                                  uint32_t inputWidth,
                                  uint32_t verticalPadding,
                                  uint32_t horizontalPadding) {
-    Tensor errorOut(TensorPlacement::MemDevices::CPU,
-                    TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor errorOut(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
     half *errorOutMem = (half *)errorOut.getMemPtr();
     for (uint32_t i = 0; i < errorOut.getDescriptor().getTotalNumElements(); ++i)
         errorOutMem[i] = 0.0f;
@@ -166,7 +167,8 @@ static Tensor averagePoolingForward(Tensor featureIn,
     uint32_t outputHeight = ConvolutionTestHelper::computeOutputDimensionSize(inputHeight, verticalPadding, windowHeight, verticalStride);
     uint32_t outputWidth = ConvolutionTestHelper::computeOutputDimensionSize(inputWidth, horizontalPadding, windowWidth, horizontalStride);
 
-    Tensor featureOut(TensorPlacement::MemDevices::CPU,
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor featureOut(cpuPlacement,
                       TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, outputHeight, outputWidth}));
 
     uint32_t paddedInputHeight = inputHeight + 2 * verticalPadding;
@@ -220,8 +222,8 @@ static Tensor averagePoolingBackward(Tensor errorIn,
                                      uint32_t inputWidth,
                                      uint32_t verticalPadding,
                                      uint32_t horizontalPadding) {
-    Tensor errorOut(TensorPlacement::MemDevices::CPU,
-                    TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor errorOut(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numFeatures, inputHeight, inputWidth}));
     half *errorOutMem = (half *)errorOut.getMemPtr();
     for (uint32_t i = 0; i < errorOut.getDescriptor().getTotalNumElements(); ++i)
         errorOutMem[i] = 0.0f;

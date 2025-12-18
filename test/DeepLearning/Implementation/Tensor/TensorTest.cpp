@@ -1563,7 +1563,7 @@ TEST(Tensor, identityMatrixCpu) {
     }
 
     // Ensure that the async host function works properly when the only reference to the tensor is immediately dropped
-    Tensor::identityMatrix(300, TensorPlacement::MemDevices::CPU, TensorDescriptor::DataType::FP32, stream);
+    Tensor::identityMatrix(300, cpuPlacement, TensorDescriptor::DataType::FP32, stream);
 }
 
 TEST(Tensor, identityMatrixGpu) {
@@ -1611,7 +1611,7 @@ TEST(Tensor, identityMatrixGpu) {
     }
 
     // Ensure that the async host function works properly when the only reference to the tensor is immediately dropped
-    Tensor::identityMatrix(300, TensorPlacement::MemDevices::GPU, TensorDescriptor::DataType::FP32, stream);
+    Tensor::identityMatrix(300, cpuPlacement, TensorDescriptor::DataType::FP32, stream);
 }
 
 TEST(Tensor, zerosCpu) {
@@ -5748,25 +5748,25 @@ TEST(Tensor, writeToFileGpu) {
 
         Tensor tensor(gpuPlacement, descriptor);
         if (dataType == TensorDescriptor::DataType::FP16)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -500, 500);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -500, 500);
         else if (dataType == TensorDescriptor::DataType::FP32)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -20000, 2000);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -20000, 2000);
         else if (dataType == TensorDescriptor::DataType::UINT8)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 255);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 255);
         else if (dataType == TensorDescriptor::DataType::UINT16)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 65535);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 65535);
         else if (dataType == TensorDescriptor::DataType::UINT32)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 4294967295);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 4294967295);
         else if (dataType == TensorDescriptor::DataType::UINT64)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 254294967295);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 254294967295);
         else if (dataType == TensorDescriptor::DataType::INT8)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -128, 127);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -128, 127);
         else if (dataType == TensorDescriptor::DataType::INT16)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -32768, 32767);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -32768, 32767);
         else if (dataType == TensorDescriptor::DataType::INT32)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -2147483648, 2147483647);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -2147483648, 2147483647);
         else  // dataType == TensorDescriptor::DataType::INT64)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -252147483648, 252147483647);
+            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -252147483648, 252147483647);
 
         uint32_t fileOffset = 0;
         fileOffset = rand() % 1000;
@@ -5777,7 +5777,7 @@ TEST(Tensor, writeToFileGpu) {
         tensor.attachFile(testFileName, fileOffset, fileAccess);
 
         // Call loadFromFile, then clean up.
-        Tensor fileTensor = tensor.clone();
+        Tensor fileTensor = tensor.clone(cpuPlacement);
         Tensor tensor_h = tensor.clone(cpuPlacement);
         tensor_h.copyFromAsync(tensor, stream);
         fileTensor.attachFile(testFileName, fileOffset, rand() % 2 ? Tensor::FileAccess::READ_ONLY : Tensor::FileAccess::READ_WRITE);

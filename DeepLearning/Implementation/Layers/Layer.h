@@ -197,7 +197,9 @@ class Layer {
     // in that case the errorInput is set to Optional<Tensor>.empty().
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {
         assert(oldErrorInput.isPresent());
-        assert(oldErrorInput.get() == errorInput.get());
+        if (errorInput.isPresent()) {
+            assert(oldErrorInput.get() == errorInput.get());
+        }
 
         if (errorOutput.isPresent()) {
             // 1. When it was populated but now should not be, then deallocate it

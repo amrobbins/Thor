@@ -27,7 +27,7 @@ class CategoricalCrossEntropy : public Loss {
 
    protected:
     virtual bool isMultiLayer() const {
-        if (lossShape != LossShape::RAW || !softmaxStamped)
+        if (lossShape != LossShape::RAW || !softmaxAddedToNetwork)
             return true;
         return false;
     }
@@ -49,7 +49,7 @@ class CategoricalCrossEntropy : public Loss {
 
     LabelType labelType;
     uint32_t numClasses;
-    bool softmaxStamped;
+    bool softmaxAddedToNetwork;
     Tensor softmaxOutput;
 };
 
@@ -83,11 +83,11 @@ class CategoricalCrossEntropy::Builder {
             categoricalCrossEntropy.numClasses = _numClasses;
         }
 
-        if (_softmaxStamped.isPresent()) {
-            assert(_softmaxStamped.get() == true);
-            categoricalCrossEntropy.softmaxStamped = true;
+        if (_softmaxAddedToNetwork.isPresent()) {
+            assert(_softmaxAddedToNetwork.get() == true);
+            categoricalCrossEntropy.softmaxAddedToNetwork = true;
         } else {
-            categoricalCrossEntropy.softmaxStamped = false;
+            categoricalCrossEntropy.softmaxAddedToNetwork = false;
         }
         categoricalCrossEntropy.predictionsTensor = _predictions.get();
         categoricalCrossEntropy.labelsTensor = _labels.get();
@@ -222,9 +222,9 @@ class CategoricalCrossEntropy::Builder {
      * When the layer is stamped, an external softmax will also be stamped and this will be recorded so that next attempt to stamp will
      * result in a single layer that can be stamped.
      */
-    virtual CategoricalCrossEntropy::Builder &softmaxStamped() {
-        assert(!_softmaxStamped.isPresent());
-        _softmaxStamped = true;
+    virtual CategoricalCrossEntropy::Builder &softmaxAddedToNetwork() {
+        assert(!_softmaxAddedToNetwork.isPresent());
+        _softmaxAddedToNetwork = true;
         return *this;
     }
 
@@ -236,7 +236,7 @@ class CategoricalCrossEntropy::Builder {
     Optional<uint32_t> _numClasses;
     Optional<LossShape> _lossType;
     Optional<Tensor::DataType> _lossDataType;
-    Optional<bool> _softmaxStamped;
+    Optional<bool> _softmaxAddedToNetwork;
 
     friend class CategoricalCrossEntropy;
 };

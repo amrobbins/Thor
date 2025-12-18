@@ -495,7 +495,8 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
 // Otherwise stream may be on either device
 void Tensor::moveFromAsync(Tensor source, Stream stream) {
     assert(!uninitialized());
-    assert(getPlacement() == TensorPlacement::MemDevices::CPU || getPlacement() == TensorPlacement::MemDevices::GPU);
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(!fileName.empty());
     assert(fileAccessRequirement != FileAccess::READ_ONLY);
 
@@ -627,11 +628,12 @@ void performWrite(void *params) {
 
 void Tensor::loadFromFile(Stream stream) {
     assert(!uninitialized());
-    assert(getPlacement() == TensorPlacement::MemDevices::CPU || getPlacement() == TensorPlacement::MemDevices::GPU);
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(!fileName.empty());
     assert(fileAccessRequirement != FileAccess::WRITE_ONLY);
 
-    if (getPlacement() == TensorPlacement::MemDevices::GPU) {
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
         if (gpuDirectStorageEnabled) {
             gpuDirectStorageBytesAccessed = 0;
             CUfileError_t cuFileError;
@@ -647,7 +649,8 @@ void Tensor::loadFromFile(Stream stream) {
             stream.enqueueHostFunction(checkBytesIoOp, std::move(args));
         } else {
             // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
-            Tensor bounceBuffer = clone(TensorPlacement::MemDevices::CPU);
+            TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+            Tensor bounceBuffer = clone(cpuPlacement);
             // disk -> cpu
             PerformReadParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
             performRead(&args);
@@ -665,11 +668,12 @@ void Tensor::loadFromFile(Stream stream) {
 
 void Tensor::dumpToFile(Stream stream) {
     assert(!uninitialized());
-    assert(getPlacement() == TensorPlacement::MemDevices::CPU || getPlacement() == TensorPlacement::MemDevices::GPU);
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(!fileName.empty());
     assert(fileAccessRequirement != FileAccess::READ_ONLY);
 
-    if (getPlacement() == TensorPlacement::MemDevices::GPU) {
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
         if (gpuDirectStorageEnabled) {
             gpuDirectStorageBytesAccessed = 0;
             CUfileError_t cuFileError;
@@ -690,7 +694,8 @@ void Tensor::dumpToFile(Stream stream) {
             // So when gpuDirectStorage is not available and enabled, this will be a synchronous operation.
             // It could be made async if I am ok keeping the other tensor alive.
             // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
-            Tensor bounceBuffer = clone(TensorPlacement::MemDevices::CPU);
+            TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+            Tensor bounceBuffer = clone(cpuPlacement);
             // gpu -> cpu
             bounceBuffer.copyFromAsync(*this, stream);
             Event copyDoneEvent = stream.putEvent(false, true);
@@ -905,7 +910,7 @@ void fillCpuIdentityMatrixOnes(void *data) {
     IdentityMatrixArgs *args = dynamic_cast<IdentityMatrixArgs *>(baseArgs);
     assert(args != nullptr);
 
-    assert(args->tensor.getPlacement() == TensorPlacement::MemDevices::CPU);
+    assert(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     TensorDescriptor::DataType dataType = args->tensor.getDataType();
 
     uint64_t N = args->tensor.getDimensions()[0];
@@ -924,7 +929,7 @@ Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescr
     assert(dataType == TensorDescriptor::DataType::FP16 || dataType == TensorDescriptor::DataType::FP32);
     Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
-    if (placement == TensorPlacement::MemDevices::CPU) {
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         tensor.clearAsync(stream);
         std::unique_ptr<HostFunctionArgsBase> args(new IdentityMatrixArgs(tensor));
         stream.enqueueHostFunction(fillCpuIdentityMatrixOnes, std::move(args));
@@ -1023,7 +1028,7 @@ void fillCpuRandom(void *data) {
     FillRandomArgs *args = dynamic_cast<FillRandomArgs *>(baseArgs);
     assert(args != nullptr);
 
-    assert(args->tensor.getPlacement() == TensorPlacement::MemDevices::CPU);
+    assert(args->tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
     TensorDescriptor::DataType dataType = args->tensor.getDataType();
 
     Tensor tensor = args->tensor;
@@ -1296,7 +1301,7 @@ void Tensor::fillRandom(double minValue, double maxValue, Stream stream) {
     if (maxValue < minValue)
         swap(maxValue, minValue);
 
-    if (getPlacement() == TensorPlacement::MemDevices::CPU) {
+    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
         std::unique_ptr<HostFunctionArgsBase> args(new FillRandomArgs(*this, minValue, maxValue));
         stream.enqueueHostFunction(fillCpuRandom, std::move(args));
     } else {

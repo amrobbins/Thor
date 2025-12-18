@@ -184,18 +184,19 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     Stream dataStream = fullyConnectedLayer->getStreams()[0];
     Stream gradientUpdateStream = fullyConnectedLayer->getOptimizer().get()->getGradientUpdateStream();
 
-    Tensor errorInput = fullyConnectedLayer->getErrorInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor errorInput = fullyConnectedLayer->getErrorInputs().front().get().clone(cpuPlacement);
 
-    Tensor featureInput = fullyConnectedLayer->getFeatureInputs().front().get().clone(TensorPlacement::MemDevices::CPU);
-    Tensor errorOutput = fullyConnectedLayer->getErrorOutputs().front().get().clone(TensorPlacement::MemDevices::CPU);
-    Tensor weights = fullyConnectedLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
-    Tensor weightsGradient = fullyConnectedLayer->getOptimizer().get()->getWeightsGradient().clone(TensorPlacement::MemDevices::CPU);
+    Tensor featureInput = fullyConnectedLayer->getFeatureInputs().front().get().clone(cpuPlacement);
+    Tensor errorOutput = fullyConnectedLayer->getErrorOutputs().front().get().clone(cpuPlacement);
+    Tensor weights = fullyConnectedLayer->getWeights().clone(cpuPlacement);
+    Tensor weightsGradient = fullyConnectedLayer->getOptimizer().get()->getWeightsGradient().clone(cpuPlacement);
     Tensor biases;
     Tensor biasesGradient;
     Tensor biasesGradientFloat;
     if (hasBiases) {
-        biases = fullyConnectedLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
-        biasesGradient = fullyConnectedLayer->getOptimizer().get()->getBiasesGradient().get().clone(TensorPlacement::MemDevices::CPU);
+        biases = fullyConnectedLayer->getBiases().get().clone(cpuPlacement);
+        biasesGradient = fullyConnectedLayer->getOptimizer().get()->getBiasesGradient().get().clone(cpuPlacement);
         biasesGradientFloat = biasesGradient.clone(TensorDescriptor::DataType::FP32);
     }
 
@@ -268,11 +269,11 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
         biasesGradient.copyFromAsync(biasesGradientFloat, gradientUpdateStream);
     }
 
-    Tensor errorOutputGpu_h = fullyConnectedLayer->getErrorOutputs().front().get().clone(TensorPlacement::MemDevices::CPU);
-    Tensor weightsGradientGpu_h = fullyConnectedLayer->getOptimizer().get()->getWeightsGradient().clone(TensorPlacement::MemDevices::CPU);
+    Tensor errorOutputGpu_h = fullyConnectedLayer->getErrorOutputs().front().get().clone(cpuPlacement);
+    Tensor weightsGradientGpu_h = fullyConnectedLayer->getOptimizer().get()->getWeightsGradient().clone(cpuPlacement);
     Tensor biasesGradientGpu_h;
     if (hasBiases)
-        biasesGradientGpu_h = fullyConnectedLayer->getOptimizer().get()->getBiasesGradient().get().clone(TensorPlacement::MemDevices::CPU);
+        biasesGradientGpu_h = fullyConnectedLayer->getOptimizer().get()->getBiasesGradient().get().clone(cpuPlacement);
 
     errorOutputGpu_h.copyFromAsync(fullyConnectedLayer->getErrorOutputs().front(), dataStream);
     weightsGradientGpu_h.copyFromAsync(fullyConnectedLayer->getOptimizer().get()->getWeightsGradient(), gradientUpdateStream);
@@ -318,10 +319,10 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     }
 
     // Test apply gradients
-    Tensor weightsGpu_h = fullyConnectedLayer->getWeights().clone(TensorPlacement::MemDevices::CPU);
+    Tensor weightsGpu_h = fullyConnectedLayer->getWeights().clone(cpuPlacement);
     Tensor biasesGpu_h;
     if (hasBiases)
-        biasesGpu_h = fullyConnectedLayer->getBiases().get().clone(TensorPlacement::MemDevices::CPU);
+        biasesGpu_h = fullyConnectedLayer->getBiases().get().clone(cpuPlacement);
 
     gradientUpdateStream.synchronize();
     weightsGpu_h.copyFromAsync(fullyConnectedLayer->getWeights(), dataStream);

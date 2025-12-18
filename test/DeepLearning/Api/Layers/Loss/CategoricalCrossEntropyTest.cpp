@@ -1,5 +1,6 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
+#include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 
 #include "gtest/gtest.h"
@@ -7,9 +8,11 @@
 #include <stdio.h>
 #include <memory>
 
-using namespace std;
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 
+using namespace std;
 using namespace Thor;
+using json = nlohmann::json;
 
 TEST(CategoricalCrossEntropy, ClassIndexLabelsBatchLossBuilds) {
     srand(time(nullptr));
@@ -380,5 +383,260 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
         ASSERT_FALSE(crossEntropy != *clone);
         ASSERT_FALSE(crossEntropy > *clone);
         ASSERT_FALSE(crossEntropy < *clone);
+    }
+}
+
+TEST(CategoricalCrossEntropy, SerializeDeserialize) {
+    srand(time(nullptr));
+
+    Network initialNetwork;
+    Tensor::DataType dataType = Tensor::DataType::FP16;
+    vector<uint64_t> inputDimensions = {1UL};
+    Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
+    Tensor::DataType labelDataType = rand() % 2 ? Tensor::DataType::UINT16 : Tensor::DataType::UINT32;
+
+    NetworkInput labelsInput =
+        NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(inputDimensions).dataType(labelDataType).build();
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(initialNetwork).name("networkInput").dimensions(inputDimensions).dataType(dataType).build();
+
+    FullyConnected fullyConnected = FullyConnected::Builder()
+                                        .network(initialNetwork)
+                                        .featureInput(networkInput.getFeatureOutput())
+                                        .numOutputFeatures(1)
+                                        .hasBias(false)
+                                        .noActivation()
+                                        .build();
+
+    CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
+                                                                          .network(initialNetwork)
+                                                                          .labels(labelsInput.getFeatureOutput())
+                                                                          .predictions(fullyConnected.getFeatureOutput())
+                                                                          .lossDataType(lossDataType);
+
+    uint32_t lossShape = rand() % 4;
+    if (lossShape == 0)
+        categoricalCrossEntropyBuilder.reportsBatchLoss();
+    else if (lossShape == 1)
+        categoricalCrossEntropyBuilder.reportsClasswiseLoss();
+    else if (lossShape == 2)
+        categoricalCrossEntropyBuilder.reportsElementwiseLoss();
+    else
+        categoricalCrossEntropyBuilder.reportsRawLoss();
+
+    uint32_t labelType = rand() % 2;
+    uint32_t numClasses = 1 + (rand() % 100);
+    if (labelType == 0)
+        categoricalCrossEntropyBuilder.receivesClassIndexLabels(numClasses);
+    else
+        categoricalCrossEntropyBuilder.receivesOneHotLabels();
+
+    CategoricalCrossEntropy categoricalCrossEntropy = categoricalCrossEntropyBuilder.build();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(initialNetwork).initialLearningRate(0.1).decay(0.1).build();
+
+    NetworkOutput lossOutput = NetworkOutput::Builder()
+                                   .network(initialNetwork)
+                                   .name("lossOutput")
+                                   .inputTensor(categoricalCrossEntropy.getLoss())
+                                   .dataType(dataType)
+                                   .build();
+
+    ASSERT_TRUE(categoricalCrossEntropy.isInitialized());
+
+    // Now stamp the network and test serialization
+    Stream stream(0);
+    uint32_t batchSize = 1 + (rand() % 16);
+    vector<Event> initDoneEvents;
+    Network::StatusCode placementStatus;
+    placementStatus = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    // Fetch the layer from the network
+    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+
+    // Find the softmax layer in the network so can serialize it for this test case
+    shared_ptr<Softmax> softmax;
+    shared_ptr<LossShaper> lossShaper;
+    bool softmaxFound = false;
+    bool lossShaperFound = false;
+    for (int32_t i = 0; i < initialNetwork.getNumLayers(); ++i) {
+        shared_ptr<Layer> layer = initialNetwork.getLayer(i);
+        if (!softmaxFound) {
+            softmax = dynamic_pointer_cast<Softmax>(layer);
+            if (softmax)
+                softmaxFound = true;
+        }
+        if (!lossShaperFound) {
+            lossShaper = dynamic_pointer_cast<LossShaper>(layer);
+            if (lossShaper)
+                lossShaperFound = true;
+        }
+        if (softmaxFound && lossShaperFound)
+            break;
+    }
+    ASSERT_TRUE(softmaxFound);
+    ASSERT_EQ(lossShaperFound, lossShape != 3);
+
+    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json softmaxJ = softmax->serialize("/tmp/", stream);
+    Layer *layer = &categoricalCrossEntropy;
+    json categoricalCrossEntropyJ = layer->serialize("/tmp/", stream);
+    json lossShaperJ;
+    if (lossShaper)
+        lossShaperJ = lossShaper->serialize("/tmp/", stream);
+    json lossOutputJ = lossOutput.serialize("/tmp/", stream);
+
+    ASSERT_EQ(categoricalCrossEntropyJ["factory"], "loss");
+    ASSERT_EQ(categoricalCrossEntropyJ["version"], "1.0.0");
+    ASSERT_EQ(categoricalCrossEntropyJ["layer_type"], "categorical_cross_entropy");
+    EXPECT_TRUE(categoricalCrossEntropyJ.contains("layer_name"));
+    ASSERT_EQ(categoricalCrossEntropyJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    ASSERT_EQ(categoricalCrossEntropyJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
+
+    const json &labelsJ = categoricalCrossEntropyJ["labels_tensor"];
+    ASSERT_EQ(labelsJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(labelsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(labelsJ.at("id").is_number_integer());
+
+    const json &predictionsJ = categoricalCrossEntropyJ["predictions_tensor"];
+    ASSERT_EQ(predictionsJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(predictionsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(predictionsJ.at("id").is_number_integer());
+
+    const json &softmaxOutputJ = categoricalCrossEntropyJ["softmax_output_tensor"];
+    ASSERT_EQ(softmaxOutputJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(softmaxOutputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(softmaxOutputJ.at("id").is_number_integer());
+
+    if (lossShaper) {
+        const json &lossShaperInputJ = categoricalCrossEntropyJ["loss_shaper_input_tensor"];
+        ASSERT_EQ(lossShaperInputJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+        ASSERT_EQ(lossShaperInputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+        ASSERT_TRUE(lossShaperInputJ.at("id").is_number_integer());
+    }
+
+    const json &lossJ = categoricalCrossEntropyJ["loss_tensor"];
+    ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
+    ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_TRUE(lossJ.at("id").is_number_integer());
+
+    // The network attached the optimizer to its copy of the FC layer
+    json fullyConnectedJ;
+    bool fcFound = false;
+    shared_ptr<FullyConnected> initalNetworkFC;
+    for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
+        shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
+        initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
+        if (initalNetworkFC) {
+            fullyConnectedJ = initalNetworkFC->serialize("/tmp", stream);
+            fcFound = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(fcFound);
+
+    printf("%s\n", networkInputJ.dump(4).c_str());
+    printf("%s\n", labelsInputJ.dump(4).c_str());
+    printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    printf("%s\n", softmaxJ.dump(4).c_str());
+    printf("%s\n", categoricalCrossEntropyJ.dump(4).c_str());
+    if (lossShaper)
+        printf("%s\n", lossShaperJ.dump(4).c_str());
+    printf("%s\n", lossOutputJ.dump(4).c_str());
+
+    // ////////////////////////////
+    // // Deserialize
+    // ////////////////////////////
+    // Verify that the layer gets added to the network and that its weights are set to the correct values
+    Network newNetwork;
+
+    // The softmax output is not loaded, probably it is restamped? Oh it needs to be serialized so that it looks like a single layer or
+    // stamping will not work, I did this for FC etc.
+
+    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(labelsInputJ, &newNetwork);
+    Layer::deserialize(fullyConnectedJ, &newNetwork);
+    Layer::deserialize(softmaxJ, &newNetwork);
+    Layer::deserialize(categoricalCrossEntropyJ, &newNetwork);
+    if (lossShaper)
+        Layer::deserialize(lossShaperJ, &newNetwork);
+    Layer::deserialize(lossOutputJ, &newNetwork);
+
+    batchSize = 1 + (rand() % 16);
+    placementStatus = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
+    stampedNetwork = newNetwork.getStampedNetwork(0);
+
+    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
+    if (lossShaper)
+        ASSERT_EQ(otherLayers.size(), 3U);
+    else
+        ASSERT_EQ(otherLayers.size(), 2U);
+    shared_ptr<ThorImplementation::Softmax> stampedSoftmax;
+    shared_ptr<ThorImplementation::CrossEntropy> stampedCategoricalCrossEntropy;
+    shared_ptr<ThorImplementation::LossShaper> stampedLossShaper;
+    softmaxFound = false;
+    bool crossEntropyFound = false;
+    lossShaperFound = false;
+    for (shared_ptr<ThorImplementation::Layer> layer : otherLayers) {
+        if (!softmaxFound) {
+            stampedSoftmax = dynamic_pointer_cast<ThorImplementation::Softmax>(layer);
+            if (stampedSoftmax != nullptr)
+                softmaxFound = true;
+        }
+        if (!crossEntropyFound) {
+            stampedCategoricalCrossEntropy = dynamic_pointer_cast<ThorImplementation::CrossEntropy>(layer);
+            if (stampedCategoricalCrossEntropy != nullptr)
+                crossEntropyFound = true;
+        }
+        if (!lossShaperFound) {
+            stampedLossShaper = dynamic_pointer_cast<ThorImplementation::LossShaper>(layer);
+            if (stampedLossShaper != nullptr)
+                lossShaperFound = true;
+        }
+    }
+    ASSERT_TRUE(softmaxFound);
+    ASSERT_TRUE(crossEntropyFound);
+    ASSERT_EQ(lossShaperFound, lossShape != 3);
+
+    ASSERT_NE(stampedCategoricalCrossEntropy, nullptr);
+
+    shared_ptr<ThorImplementation::FullyConnected> stampedFC =
+        dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
+    ASSERT_NE(stampedFC, nullptr);
+
+    // vector<shared_ptr<ThorImplementation::NetworkInput>> stampedInputs = stampedNetwork.getInputs();
+    shared_ptr<ThorImplementation::NetworkInput> stampedLabelsInput;
+    for (auto input : stampedNetwork.getInputs()) {
+        if (input->getName() == "labelsInput") {
+            stampedLabelsInput = input;
+        }
+    }
+    ASSERT_TRUE(stampedLabelsInput != nullptr);
+
+    shared_ptr<ThorImplementation::NetworkOutput> stampedLossOutput;
+    stampedLossOutput = stampedNetwork.getOutputs()[0];
+
+    ASSERT_EQ(stampedSoftmax->getFeatureInput().get(), stampedFC->getFeatureOutputs()[0].get());
+    ASSERT_EQ(stampedCategoricalCrossEntropy->getPredictionsInput().get(), stampedSoftmax->getFeatureOutput().get());
+    ASSERT_EQ(stampedCategoricalCrossEntropy->getLabelsInput().get(), stampedLabelsInput->getFeatureOutput().get());
+    if (lossShaper) {
+        ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().get(), stampedLossShaper->getFeatureInput().get());
+        ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+    } else {
+        ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
 }

@@ -83,9 +83,10 @@ void BatchAssembler::open() {
     currentBatchNum = 0;
     currentExampleNum = 0;
 
-    batchDataQueue.resize(32, batchDataTensorDescriptor, TensorPlacement::MemDevices::CPU);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    batchDataQueue.resize(32, batchDataTensorDescriptor, cpuPlacement);
     batchDataQueue.open();
-    batchLabelQueue.resize(32, batchLabelTensorDescriptor, TensorPlacement::MemDevices::CPU);
+    batchLabelQueue.resize(32, batchLabelTensorDescriptor, cpuPlacement);
     batchLabelQueue.open();
     batchNumQueue.resize(32);
     batchNumQueue.open();

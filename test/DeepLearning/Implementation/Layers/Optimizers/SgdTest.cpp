@@ -1028,10 +1028,10 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
         dataStream.synchronize();
 
         // FIXME: TEMP
-        Tensor inputFromGpu = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs())
-                                  .get()
-                                  .clone(TensorPlacement::MemDevices::CPU);
-        Tensor weightsFromGpu = fullyConnectedLayer->getProjectedWeightsTensor().get().clone(TensorPlacement::MemDevices::CPU);
+        ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        Tensor inputFromGpu =
+            MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs()).get().clone(cpuPlacement);
+        Tensor weightsFromGpu = fullyConnectedLayer->getProjectedWeightsTensor().get().clone(cpuPlacement);
         inputFromGpu.copyFromAsync(MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs()).get(), dataStream);
         weightsFromGpu.copyFromAsync(fullyConnectedLayer->getProjectedWeightsTensor(), dataStream);
         dataStream.synchronize();
