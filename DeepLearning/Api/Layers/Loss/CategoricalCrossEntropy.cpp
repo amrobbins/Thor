@@ -53,7 +53,7 @@ json CategoricalCrossEntropy::serialize(const string &storageDir, Stream stream)
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
     j["label_type"] = labelType;
-    j["loss_shape"] = lossShape;
+    j["loss_shape"] = LossShape::ELEMENTWISE;
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();
@@ -73,6 +73,7 @@ void CategoricalCrossEntropy::deserialize(const json &j, Network *network) {
     CategoricalCrossEntropy categoricalCrossEntropy;
     categoricalCrossEntropy.labelType = j.at("label_type").get<LabelType>();
     categoricalCrossEntropy.lossShape = j.at("loss_shape").get<LossShape>();
+    categoricalCrossEntropy.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
 
     uint64_t originalTensorId;
     originalTensorId = j["softmax_output_tensor"].at("id").get<uint64_t>();
