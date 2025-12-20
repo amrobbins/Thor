@@ -390,46 +390,65 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     srand(time(nullptr));
 
     Network initialNetwork;
-    Tensor::DataType dataType = Tensor::DataType::FP16;
-    vector<uint64_t> inputDimensions = {1UL};
+    Tensor::DataType predictionsDataType = Tensor::DataType::FP16;
+    uint32_t numClasses = 2 + (rand() % 100);
+    vector<uint64_t> inputDimensions = {numClasses};
     Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     Tensor::DataType labelDataType = rand() % 2 ? Tensor::DataType::UINT16 : Tensor::DataType::UINT32;
+    NetworkInput predictionsInput = NetworkInput::Builder()
+                                        .network(initialNetwork)
+                                        .name("predictionsInput")
+                                        .dimensions(inputDimensions)
+                                        .dataType(predictionsDataType)
+                                        .build();
 
-    NetworkInput labelsInput =
-        NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(inputDimensions).dataType(labelDataType).build();
-    NetworkInput networkInput =
-        NetworkInput::Builder().network(initialNetwork).name("networkInput").dimensions(inputDimensions).dataType(dataType).build();
+    vector<uint64_t> labelDimensions;
+    uint32_t labelType = rand() % 2;
+    if (labelType == 0) {
+        labelDimensions = {1UL};
+    } else {
+        labelDimensions = {numClasses};
+    }
 
     FullyConnected fullyConnected = FullyConnected::Builder()
                                         .network(initialNetwork)
-                                        .featureInput(networkInput.getFeatureOutput())
-                                        .numOutputFeatures(1)
+                                        .featureInput(predictionsInput.getFeatureOutput())
+                                        .numOutputFeatures(numClasses)
                                         .hasBias(false)
                                         .noActivation()
                                         .build();
 
     CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
                                                                           .network(initialNetwork)
-                                                                          .labels(labelsInput.getFeatureOutput())
                                                                           .predictions(fullyConnected.getFeatureOutput())
                                                                           .lossDataType(lossDataType);
 
-    uint32_t lossShape = rand() % 4;
-    if (lossShape == 0)
-        categoricalCrossEntropyBuilder.reportsBatchLoss();
-    else if (lossShape == 1)
-        categoricalCrossEntropyBuilder.reportsClasswiseLoss();
-    else if (lossShape == 2)
-        categoricalCrossEntropyBuilder.reportsElementwiseLoss();
-    else
-        categoricalCrossEntropyBuilder.reportsRawLoss();
-
-    uint32_t labelType = rand() % 2;
-    uint32_t numClasses = 1 + (rand() % 100);
-    if (labelType == 0)
+    if (labelType == 0) {
         categoricalCrossEntropyBuilder.receivesClassIndexLabels(numClasses);
-    else
+    } else {
         categoricalCrossEntropyBuilder.receivesOneHotLabels();
+    }
+
+    NetworkInput labelsInput =
+        NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(labelDimensions).dataType(labelDataType).build();
+
+    categoricalCrossEntropyBuilder.labels(labelsInput.getFeatureOutput());
+
+    uint32_t lossShape = rand() % 4;
+    vector<uint64_t> lossDimensions;
+    if (lossShape == 0) {
+        categoricalCrossEntropyBuilder.reportsBatchLoss();
+        lossDimensions = {1UL};
+    } else if (lossShape == 1) {
+        categoricalCrossEntropyBuilder.reportsClasswiseLoss();
+        lossDimensions = {numClasses};
+    } else if (lossShape == 2) {
+        categoricalCrossEntropyBuilder.reportsElementwiseLoss();
+        lossDimensions = {1UL};
+    } else {
+        categoricalCrossEntropyBuilder.reportsRawLoss();
+        lossDimensions = inputDimensions;
+    }
 
     CategoricalCrossEntropy categoricalCrossEntropy = categoricalCrossEntropyBuilder.build();
 
@@ -439,7 +458,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
                                    .network(initialNetwork)
                                    .name("lossOutput")
                                    .inputTensor(categoricalCrossEntropy.getLoss())
-                                   .dataType(dataType)
+                                   .dataType(lossDataType)
                                    .build();
 
     ASSERT_TRUE(categoricalCrossEntropy.isInitialized());
@@ -484,7 +503,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     ASSERT_EQ(lossShaperFound, lossShape != 3);
 
     json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json networkInputJ = predictionsInput.serialize("/tmp/", stream);
     json softmaxJ = softmax->serialize("/tmp/", stream);
     Layer *layer = &categoricalCrossEntropy;
     json categoricalCrossEntropyJ = layer->serialize("/tmp/", stream);
@@ -501,17 +520,17 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     ASSERT_EQ(categoricalCrossEntropyJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
 
     const json &labelsJ = categoricalCrossEntropyJ["labels_tensor"];
-    ASSERT_EQ(labelsJ.at("data_type").get<Tensor::DataType>(), dataType);
-    ASSERT_EQ(labelsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_EQ(labelsJ.at("data_type").get<Tensor::DataType>(), labelDataType);
+    ASSERT_EQ(labelsJ.at("dimensions").get<vector<uint64_t>>(), labelDimensions);
     ASSERT_TRUE(labelsJ.at("id").is_number_integer());
 
     const json &predictionsJ = categoricalCrossEntropyJ["predictions_tensor"];
-    ASSERT_EQ(predictionsJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(predictionsJ.at("data_type").get<Tensor::DataType>(), predictionsDataType);
     ASSERT_EQ(predictionsJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
     ASSERT_TRUE(predictionsJ.at("id").is_number_integer());
 
     const json &softmaxOutputJ = categoricalCrossEntropyJ["softmax_output_tensor"];
-    ASSERT_EQ(softmaxOutputJ.at("data_type").get<Tensor::DataType>(), dataType);
+    ASSERT_EQ(softmaxOutputJ.at("data_type").get<Tensor::DataType>(), predictionsDataType);
     ASSERT_EQ(softmaxOutputJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
     ASSERT_TRUE(softmaxOutputJ.at("id").is_number_integer());
 
@@ -524,7 +543,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
 
     const json &lossJ = categoricalCrossEntropyJ["loss_tensor"];
     ASSERT_EQ(lossJ.at("data_type").get<Tensor::DataType>(), lossDataType);
-    ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
+    ASSERT_EQ(lossJ.at("dimensions").get<vector<uint64_t>>(), lossDimensions);
     ASSERT_TRUE(lossJ.at("id").is_number_integer());
 
     // The network attached the optimizer to its copy of the FC layer
@@ -542,14 +561,14 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     }
     ASSERT_TRUE(fcFound);
 
-    printf("%s\n", networkInputJ.dump(4).c_str());
-    printf("%s\n", labelsInputJ.dump(4).c_str());
-    printf("%s\n", fullyConnectedJ.dump(4).c_str());
-    printf("%s\n", softmaxJ.dump(4).c_str());
-    printf("%s\n", categoricalCrossEntropyJ.dump(4).c_str());
-    if (lossShaper)
-        printf("%s\n", lossShaperJ.dump(4).c_str());
-    printf("%s\n", lossOutputJ.dump(4).c_str());
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", labelsInputJ.dump(4).c_str());
+    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    // printf("%s\n", softmaxJ.dump(4).c_str());
+    // printf("%s\n", categoricalCrossEntropyJ.dump(4).c_str());
+    // if (lossShaper)&
+    //     printf("%s\n", lossShaperJ.dump(4).c_str());
+    // printf("%s\n", lossOutputJ.dump(4).c_str());
 
     // ////////////////////////////
     // // Deserialize

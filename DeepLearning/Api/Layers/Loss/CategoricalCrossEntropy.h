@@ -69,8 +69,10 @@ class CategoricalCrossEntropy::Builder {
         if (_labelType == LabelType::ONE_HOT) {
             std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             assert(labelDimensions.size() == 1 && labelDimensions[0] > 1);
-            assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
-            categoricalCrossEntropy.numClasses = _predictions.get().getDimensions()[0];
+            assert(_predictions.get().getDimensions() == labelDimensions);
+            std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
+            assert(predictionDimensions.size() == 1);
+            categoricalCrossEntropy.numClasses = predictionDimensions[0];
         } else {
             std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
             std::vector<uint64_t> predictionDimensions = _predictions.get().getDimensions();
@@ -79,7 +81,7 @@ class CategoricalCrossEntropy::Builder {
             assert(labelsDataType == Tensor::DataType::UINT8 || labelsDataType == Tensor::DataType::UINT16 ||
                    labelsDataType == Tensor::DataType::UINT32);
             assert(_numClasses.isPresent());
-            assert(predictionDimensions.size() == 1 && predictionDimensions[0] == _numClasses);
+            assert(predictionDimensions.size() == 1);
             categoricalCrossEntropy.numClasses = _numClasses;
         }
 
@@ -149,6 +151,10 @@ class CategoricalCrossEntropy::Builder {
     /**
      * Reports loss to the user as a single scalar that represents the total loss of the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
+     * Batch [b][c] -> [1]
+     * Classwise [b][c] -> [c]
+     * Elementwise [b][c] -> [b]
+     * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsBatchLoss() {
         assert(!_lossType.isPresent());
@@ -159,6 +165,10 @@ class CategoricalCrossEntropy::Builder {
     /**
      * Reports loss to the user as a scalar per class that indicates the loss attributed to that class across the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
+     * Batch [b][c] -> [1]
+     * Classwise [b][c] -> [c]
+     * Elementwise [b][c] -> [b]
+     * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsClasswiseLoss() {
         assert(!_lossType.isPresent());
@@ -167,8 +177,12 @@ class CategoricalCrossEntropy::Builder {
     }
 
     /**
-     * Reports loss to the user as a scalar per class per example in the batch.
+     * Reports loss to the user as a scalar per example in the batch.
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
+     * Batch [b][c] -> [1]
+     * Classwise [b][c] -> [c]
+     * Elementwise [b][c] -> [b]
+     * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsElementwiseLoss() {
         assert(!_lossType.isPresent());
@@ -178,6 +192,10 @@ class CategoricalCrossEntropy::Builder {
 
     /**
      * Reports loss to the user in its raw form: one scalar per class per example in the batch.
+     * Batch [b][c] -> [1]
+     * Classwise [b][c] -> [c]
+     * Elementwise [b][c] -> [b]
+     * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsRawLoss() {
         assert(!_lossType.isPresent());

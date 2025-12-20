@@ -18,6 +18,7 @@ namespace ThorImplementation {
  * Batch [b][c] -> [1]
  * Classwise [b][c] -> [c]
  * Elementwise [b][c] -> [b]
+ * Raw [b][c] -> [b][c]
  */
 class LossShaper : public Layer {
    public:

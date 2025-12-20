@@ -111,36 +111,32 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
         // reorderStampedNetworkForTestability(stampedNetwork);
 
         // All layers are connected, so now they can all be compiled
-        for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
-            stampedNetwork.trainableLayers[i]->parentCompile();
-            stampedNetwork.trainableLayers[i]->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward +=
-                stampedNetwork.trainableLayers[i]->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward +=
-                stampedNetwork.trainableLayers[i]->floatingPointOperationsPerExampleForward();
+        // for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
+        for (ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer : stampedNetwork.trainableLayers) {
+            // FIXME: All layer derived classes call parentCompile() at the top of compile
+            //        actually parentCompile is just a bad pattern. all layers call <Super>::compile()
+            trainableLayer->parentCompile();
+            trainableLayer->compile();
+            stampedNetwork.floatingPointOperationsPerExampleForward += trainableLayer->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += trainableLayer->floatingPointOperationsPerExampleForward();
         }
-        for (uint32_t i = 0; i < stampedNetwork.inputs.size(); ++i) {
-            stampedNetwork.inputs[i]->parentCompile();
-            stampedNetwork.inputs[i]->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward += stampedNetwork.inputs[i]->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward +=
-                stampedNetwork.inputs[i]->floatingPointOperationsPerExampleForward();
+        for (ThorImplementation::NetworkInput *input : stampedNetwork.inputs) {
+            input->parentCompile();
+            input->compile();
+            stampedNetwork.floatingPointOperationsPerExampleForward += input->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += input->floatingPointOperationsPerExampleForward();
         }
-        for (uint32_t i = 0; i < stampedNetwork.outputs.size(); ++i) {
-            stampedNetwork.outputs[i]->parentCompile();
-            stampedNetwork.outputs[i]->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward +=
-                stampedNetwork.outputs[i]->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward +=
-                stampedNetwork.outputs[i]->floatingPointOperationsPerExampleForward();
+        for (ThorImplementation::NetworkOutput *output : stampedNetwork.outputs) {
+            output->parentCompile();
+            output->compile();
+            stampedNetwork.floatingPointOperationsPerExampleForward += output->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += output->floatingPointOperationsPerExampleForward();
         }
-        for (uint32_t i = 0; i < stampedNetwork.otherLayers.size(); ++i) {
-            stampedNetwork.otherLayers[i]->parentCompile();
-            stampedNetwork.otherLayers[i]->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward +=
-                stampedNetwork.otherLayers[i]->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward +=
-                stampedNetwork.otherLayers[i]->floatingPointOperationsPerExampleForward();
+        for (ThorImplementation::Layer *layer : stampedNetwork.otherLayers) {
+            layer->parentCompile();
+            layer->compile();
+            stampedNetwork.floatingPointOperationsPerExampleForward += layer->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += layer->floatingPointOperationsPerExampleBackward();
         }
 
         // Now that all layers are compiled, stamp the optimizers onto the trainable layers

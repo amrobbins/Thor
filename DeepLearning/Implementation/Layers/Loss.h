@@ -81,7 +81,6 @@ class Loss : public Layer {
         assert(this->featureInput.isEmpty());
 
         if (labelsInput.isPresent()) {
-            assert(featureInput.get().getDescriptor().getDimensions() == labelsInput.get().getDescriptor().getDimensions());
             assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
             assert(featureInput.get().getPlacement() == labelsInput.get().getPlacement());
         }

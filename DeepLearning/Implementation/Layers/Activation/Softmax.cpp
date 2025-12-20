@@ -32,9 +32,12 @@ void Softmax::compile() {
 }
 
 void Softmax::cleanup() {
-    cudnnStatus_t cudnnStatus;
-    cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
-    assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    if (compiled) {
+        cudnnStatus_t cudnnStatus;
+        cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
+        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        compiled = false;
+    }
 }
 
 void Softmax::infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
