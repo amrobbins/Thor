@@ -74,7 +74,6 @@ void Sgd::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> erro
     if (errorIn.isEmpty())
         return;
     assert(featureIn.isPresent());
-    assert(epoch > 0);  // Negative epoch indicates that optimizer has not been initialized
 
     trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
 }
