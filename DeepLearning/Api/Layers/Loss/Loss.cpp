@@ -12,7 +12,7 @@ json Loss::serialize(const string &storageDir, Stream stream) const {
     j["layer_type"] = to_snake_case(getLayerType());
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
-    j["loss_shape"] = lossShape;
+    j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();

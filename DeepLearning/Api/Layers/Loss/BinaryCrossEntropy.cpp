@@ -42,7 +42,7 @@ json BinaryCrossEntropy::serialize(const string &storageDir, Stream stream) cons
     j["layer_type"] = "binary_cross_entropy";
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
-    j["loss_shape"] = LossShape::ELEMENTWISE;
+    j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();
@@ -62,8 +62,8 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
     // Only connect the single layer and add it to the network, like when it was built.
     // Helper layers deserialize themselves.
     BinaryCrossEntropy binaryCrossEntropy;
-    assert(j.at("loss_shape").get<LossShape>() == LossShape::ELEMENTWISE);
-    binaryCrossEntropy.lossShape = LossShape::ELEMENTWISE;
+    assert(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
+    binaryCrossEntropy.lossShape = LossShape::RAW;
     binaryCrossEntropy.lossDataType = j.at("loss_data_type").get<Tensor::DataType>();
 
     uint64_t originalTensorId;
