@@ -33,7 +33,6 @@ class BinaryCrossEntropy : public Loss {
                                                              Thor::Tensor connectingApiTensor) const {
         assert(initialized);
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
-        assert(lossShape == LossShape::BATCH || lossShape == LossShape::ELEMENTWISE);
 
         // Sigmoid and LossShaper are connected during multi-layer flattening
         std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(

@@ -88,6 +88,7 @@ class MeanAbsoluteError::Builder {
         } else {
             // lossTensor is the one that comes directly out of MeanAbsoluteError, that may be replaced by a loss shaper.
             meanAbsoluteError.lossTensor = Tensor(_lossDataType, {batchSize});
+            meanAbsoluteError.lossShaperInput = meanAbsoluteError.lossTensor;
             meanAbsoluteError.addToNetwork(_network.get());
         }
 

@@ -516,7 +516,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     ASSERT_EQ(categoricalCrossEntropyJ["version"], "1.0.0");
     ASSERT_EQ(categoricalCrossEntropyJ["layer_type"], "categorical_cross_entropy");
     EXPECT_TRUE(categoricalCrossEntropyJ.contains("layer_name"));
-    ASSERT_EQ(categoricalCrossEntropyJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    ASSERT_EQ(categoricalCrossEntropyJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
     ASSERT_EQ(categoricalCrossEntropyJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
 
     const json &labelsJ = categoricalCrossEntropyJ["labels_tensor"];

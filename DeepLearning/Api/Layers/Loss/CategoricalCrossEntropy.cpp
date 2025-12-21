@@ -53,7 +53,7 @@ json CategoricalCrossEntropy::serialize(const string &storageDir, Stream stream)
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
     j["label_type"] = labelType;
-    j["loss_shape"] = LossShape::ELEMENTWISE;
+    j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
     j["labels_tensor"] = labelsTensor.serialize();
     j["predictions_tensor"] = predictionsTensor.serialize();

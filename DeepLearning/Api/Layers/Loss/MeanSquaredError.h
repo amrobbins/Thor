@@ -86,6 +86,7 @@ class MeanSquaredError::Builder {
         } else {
             // lossTensor is the one that comes directly out of MeanSquaredError, that may be replaced by a loss shaper.
             meanSquaredError.lossTensor = Tensor(_lossDataType, {batchSize});
+            meanSquaredError.lossShaperInput = meanSquaredError.lossTensor;
             meanSquaredError.addToNetwork(_network.get());
         }
 

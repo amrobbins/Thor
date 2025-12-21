@@ -86,6 +86,7 @@ class MeanAbsolutePercentageError::Builder {
         } else {
             // lossTensor is the one that comes directly out of MeanAbsolutePercentageError, that may be replaced by a loss shaper.
             meanAbsolutePercentageError.lossTensor = Tensor(_lossDataType, {batchSize});
+            meanAbsolutePercentageError.lossShaperInput = meanAbsolutePercentageError.lossTensor;
             meanAbsolutePercentageError.addToNetwork(_network.get());
         }
 

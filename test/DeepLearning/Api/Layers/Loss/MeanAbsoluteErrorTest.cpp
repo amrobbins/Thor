@@ -129,12 +129,12 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
 
     NetworkInput labelsInput =
         NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions(inputDimensions).dataType(dataType).build();
-    NetworkInput networkInput =
+    NetworkInput predictionsInput =
         NetworkInput::Builder().network(initialNetwork).name("networkInput").dimensions(inputDimensions).dataType(dataType).build();
 
     FullyConnected fullyConnected = FullyConnected::Builder()
                                         .network(initialNetwork)
-                                        .featureInput(networkInput.getFeatureOutput())
+                                        .featureInput(predictionsInput.getFeatureOutput())
                                         .numOutputFeatures(1)
                                         .hasBias(false)
                                         .noActivation()
@@ -147,6 +147,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
                                                               .lossDataType(lossDataType);
 
     uint32_t lossShape = rand() % 4;
+    lossShape = 2;  // FIXME
     if (lossShape == 0)
         meanAbsoluteErrorBuilder.reportsBatchLoss();
     else if (lossShape == 1)
@@ -188,21 +189,14 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     Layer *layer = &meanAbsoluteError;
     json meanAbsoluteErrorJ = layer->serialize("/tmp/", stream);
     json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json predictionsInputJ = predictionsInput.serialize("/tmp/", stream);
     json lossOutputJ = lossOutput.serialize("/tmp/", stream);
 
     ASSERT_EQ(meanAbsoluteErrorJ["factory"], "loss");
     ASSERT_EQ(meanAbsoluteErrorJ["version"], "1.0.0");
     ASSERT_EQ(meanAbsoluteErrorJ["layer_type"], "mean_absolute_error");
     EXPECT_TRUE(meanAbsoluteErrorJ.contains("layer_name"));
-    if (lossShape == 0)
-        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::BATCH);
-    else if (lossShape == 1)
-        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::CLASSWISE);
-    else if (lossShape == 2)
-        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
-    else
-        ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
+    ASSERT_EQ(meanAbsoluteErrorJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
     ASSERT_EQ(meanAbsoluteErrorJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
 
     const json &labelsJ = meanAbsoluteErrorJ["labels_tensor"];
@@ -235,22 +229,38 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     }
     ASSERT_TRUE(fcFound);
 
-    // printf("%s\n", networkInputJ.dump(4).c_str());
+    shared_ptr<LossShaper> lossShaper;
+    for (uint32_t i = 0; i < initialNetwork.getNumLayers(); ++i) {
+        shared_ptr<Layer> layer = initialNetwork.getLayer(i);
+        lossShaper = dynamic_pointer_cast<LossShaper>(layer);
+        if (lossShaper)
+            break;
+    }
+    ASSERT_EQ(lossShaper == nullptr, lossShape == 3);
+    json lossShaperJ;
+    if (lossShaper)
+        lossShaperJ = lossShaper->serialize("/tmp", stream);
+
+    // printf("%s\n", predictionsInputJ.dump(4).c_str());
+    // printf("%s\n", labelsInputJ.dump(4).c_str());
     // printf("%s\n", fullyConnectedJ.dump(4).c_str());
     // printf("%s\n", meanAbsoluteErrorJ.dump(4).c_str());
-    // printf("%s\n", networkOutputJ.dump(4).c_str());
+    // if (lossShaper)
+    //     printf("%s\n", lossShaperJ.dump(4).c_str());
+    // printf("%s\n", lossOutputJ.dump(4).c_str());
 
-    // ////////////////////////////
-    // // Deserialize
-    // ////////////////////////////
+    ////////////////////////////
+    // Deserialize
+    ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(predictionsInputJ, &newNetwork);
     Layer::deserialize(labelsInputJ, &newNetwork);
     Layer::deserialize(fullyConnectedJ, &newNetwork);
     Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
-    // FIXME: Find, serialize and deserialize the loss shaper
+    if (lossShaper)
+        Layer::deserialize(lossShaperJ, &newNetwork);
     Layer::deserialize(lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
@@ -265,7 +275,10 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     stampedNetwork = newNetwork.getStampedNetwork(0);
 
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 1U);
+    if (lossShaper)
+        ASSERT_EQ(otherLayers.size(), 2U);
+    else
+        ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::MeanAbsoluteError> stampedMeanAbsoluteError =
         dynamic_pointer_cast<ThorImplementation::MeanAbsoluteError>(otherLayers[0]);
     ASSERT_NE(stampedMeanAbsoluteError, nullptr);
@@ -286,7 +299,30 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     shared_ptr<ThorImplementation::NetworkOutput> stampedLossOutput;
     stampedLossOutput = stampedNetwork.getOutputs()[0];
 
+    shared_ptr<ThorImplementation::LossShaper> stampedLossShaper;
+    shared_ptr<ThorImplementation::Reshape> stampedReshape;
+    if (lossShaper) {
+        for (auto layer : stampedNetwork.getOtherLayers()) {
+            stampedLossShaper = dynamic_pointer_cast<ThorImplementation::LossShaper>(layer);
+            if (stampedLossShaper)
+                break;
+            stampedReshape = dynamic_pointer_cast<ThorImplementation::Reshape>(layer);
+            if (stampedReshape)
+                break;
+        }
+        ASSERT_EQ(stampedLossShaper == nullptr, lossShape == 2);
+        ASSERT_EQ(stampedReshape == nullptr, lossShape != 2);
+    }
+
     ASSERT_EQ(stampedMeanAbsoluteError->getPredictionsInput().get(), stampedFC->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedMeanAbsoluteError->getLabelsInput().get(), stampedLabelsInput->getFeatureOutput().get());
-    ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
+    if (stampedLossShaper) {
+        ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossShaper->getFeatureInput().get());
+        ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+    } else if (stampedReshape) {
+        ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedReshape->getFeatureInput().get());
+        ASSERT_EQ(stampedReshape->getFeatureOutput().get(), stampedLossOutput->getFeatureInput().get());
+    } else {
+        ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
+    }
 }

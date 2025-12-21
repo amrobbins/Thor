@@ -279,7 +279,7 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     ASSERT_EQ(binaryCrossEntropyJ["version"], "1.0.0");
     ASSERT_EQ(binaryCrossEntropyJ["layer_type"], "binary_cross_entropy");
     EXPECT_TRUE(binaryCrossEntropyJ.contains("layer_name"));
-    ASSERT_EQ(binaryCrossEntropyJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::ELEMENTWISE);
+    ASSERT_EQ(binaryCrossEntropyJ.at("loss_shape").get<Loss::LossShape>(), Loss::LossShape::RAW);
     ASSERT_EQ(binaryCrossEntropyJ.at("loss_data_type").get<Tensor::DataType>(), lossDataType);
 
     const json &labelsJ = binaryCrossEntropyJ["labels_tensor"];
