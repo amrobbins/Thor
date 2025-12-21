@@ -169,6 +169,7 @@
 //     shared_ptr<FullyConnected> fc = dynamic_pointer_cast<FullyConnected>(constructTrainableLayer(hasBias));
 //     ASSERT_NE(fc, nullptr);
 //     shared_ptr<Adam> adam = make_shared<Adam>(fc, alpha, beta1, beta2, epsilon, fc->getErrorInputs()[0], Optional<Tensor>::empty());
+//     adam->compile();
 //     fc->compile();
 //     fc->setOptimizer(dynamic_pointer_cast<Optimizer>(adam));
 //     adam->initialize();
@@ -488,6 +489,7 @@
 //     shared_ptr<FullyConnected> fc = dynamic_pointer_cast<FullyConnected>(constructTrainableLayer(hasBias));
 //     ASSERT_NE(fc, nullptr);
 //     shared_ptr<Adam> adam = make_shared<Adam>(fc, alpha, beta1, beta2, epsilon, fc->getErrorInputs()[0], Optional<Tensor>::empty());
+//     adam->compile();
 //     fc->compile();
 //     fc->setOptimizer(dynamic_pointer_cast<Optimizer>(adam));
 //     adam->initialize();
@@ -859,6 +861,7 @@
 //                                               epsilon,
 //                                               fullyConnectedLayer->getErrorInputs()[0],
 //                                               fullyConnectedLayer->getErrorOutputs()[0]);
+//     adam->compile();
 //     adam->initialize();
 //     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(adam));
 //

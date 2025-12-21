@@ -150,6 +150,7 @@ TEST(Convolution2d, Convolution2dWorks) {
                 ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(convolution2dLayer->getErrorOutputs());
             learningRate = (10.0f * batchSize * Loss::getLossScalingFactor()) / ((rand() % 10) + 3);
             shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(convolution2dLayer, learningRate, 0, 0, false, 0);
+            sgd->compile();
             convolution2dLayer->setOptimizer(sgd);
             gradientUpdateStream = convolution2dLayer->getOptimizer().get()->getGradientUpdateStream();
         }

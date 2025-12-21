@@ -93,6 +93,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     Tensor anErrorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
     Tensor anErrorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
     shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+    sgd->compile();
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -232,6 +233,7 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -498,6 +500,7 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -806,6 +809,7 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
         weights.fillRandom(-2.0, 2.0, dataStream);
         dataStream.synchronize();
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         Tensor weightsGradient = sgd->getWeightsGradient();
 
