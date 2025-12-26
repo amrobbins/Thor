@@ -6,6 +6,7 @@ using json = nlohmann::json;
 namespace Thor {
 
 void FullyConnected::buildSupportLayersAndAddToNetwork() {
+    // current feature inputs needs to go away and every connection gets named
     vector<Tensor> currentFeatureInputs;
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
@@ -68,7 +69,11 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
     FullyConnected standAloneFullyConnected = fullyConnectedBuilder.build();
     this->id = standAloneFullyConnected.getId();
-    currentFeatureInputs = standAloneFullyConnected.getFeatureOutputs();
+
+    standaloneFCFeatureInputs = standAloneFullyConnected.getFeatureInputs();
+    standaloneFCFeatureOutputs = standAloneFullyConnected.getFeatureOutputs();
+
+    currentFeatureInputs = standaloneFCFeatureOutputs;
 
     if (activationBuilder) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
@@ -109,15 +114,15 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
 
     // Input connections
     json inputs = json::array();
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        inputs.push_back(featureInputs[i].serialize());
+    for (uint32_t i = 0; i < standaloneFCFeatureInputs.size(); ++i) {
+        inputs.push_back(standaloneFCFeatureInputs[i].serialize());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
-    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-        outputs.push_back(featureOutputs[i].serialize());
+    for (uint32_t i = 0; i < standaloneFCFeatureOutputs.size(); ++i) {
+        outputs.push_back(standaloneFCFeatureOutputs[i].serialize());
     }
     j["outputs"] = outputs;
 

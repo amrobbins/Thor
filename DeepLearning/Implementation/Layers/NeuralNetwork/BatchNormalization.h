@@ -142,6 +142,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         assert(exponentialRunningAverageFactor > 0.0);
         assert(exponentialRunningAverageFactor <= 1.0);
         itemsObserved = 0;
+
+        if (!isInferenceOnly())
+            optimizer.get()->compile();
     }
 
     void cleanup() {

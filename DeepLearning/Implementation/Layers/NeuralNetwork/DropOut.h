@@ -76,7 +76,6 @@ class DropOut : public Layer {
         reserveSpace = Tensor(featureInput.get().getPlacement(), TensorDescriptor(TensorDescriptor::DataType::UINT8, {reserveSpaceBytes}));
 
         mtx.lock();
-
         cudnnStatus = cudnnSetDropoutDescriptor(
             dropoutDescriptor, stream.getCudnnHandle(), probabilityOfDroppingOut, randomState.getMemPtr(), randomStateBytes, randomSeed);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
@@ -85,12 +84,15 @@ class DropOut : public Layer {
     }
 
     void cleanup() {
-        cudnnStatus_t cudnnStatus;
+        if (compiled) {
+            cudnnStatus_t cudnnStatus;
 
-        cudnnStatus = cudnnDestroyDropoutDescriptor(dropoutDescriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            cudnnStatus = cudnnDestroyDropoutDescriptor(dropoutDescriptor);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+            cudnnStatus = cudnnDestroyTensorDescriptor(cudnnTensorDescriptor);
+            assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        }
+        compiled = false;
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {
@@ -153,8 +155,8 @@ class DropOut : public Layer {
     Tensor reserveSpace;
     size_t reserveSpaceBytes;
 
-    cudnnDropoutDescriptor_t dropoutDescriptor;
-    cudnnTensorDescriptor_t cudnnTensorDescriptor;
+    cudnnDropoutDescriptor_t dropoutDescriptor = nullptr;
+    cudnnTensorDescriptor_t cudnnTensorDescriptor = nullptr;
 };
 
 }  // namespace ThorImplementation
