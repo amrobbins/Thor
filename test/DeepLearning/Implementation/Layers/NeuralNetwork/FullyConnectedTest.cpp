@@ -88,7 +88,6 @@ TEST(FullyConnected, FullyConnectedWorks) {
                 ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
             learningRate = (10.0f * batchSize * Loss::getLossScalingFactor()) / ((rand() % 10) + 3);
             shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(fullyConnectedLayer, learningRate, 0, 0, false, 0);
-            sgd->compile();
             fullyConnectedLayer->setOptimizer(sgd);
         }
 

@@ -35,9 +35,11 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
                                                              Thor::Tensor connectingApiTensor) const {
         assert(initialized);
 
-        std::shared_ptr<ThorImplementation::BatchNormalization> batchNormalization =
+        std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(true, getId(), exponentialRunningAverageFactor, epsilon);
-        return batchNormalization;
+        if (hasOptimizer())
+            physicalBatchNormalization->setOptimizer(optimizer->stamp(physicalBatchNormalization));
+        return physicalBatchNormalization;
     }
 
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,

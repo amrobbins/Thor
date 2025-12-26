@@ -107,6 +107,10 @@ json BatchNormalization::serialize(const string &storageDir, Stream stream) cons
     j["variances_tensor"] = resultRunningVarianceToFile.string();
     batchNorm->dumpResultRunningVarianceToFile(resultRunningVarianceToFile.string(), stream);
 
+    if (hasOptimizer()) {
+        j["optimizer"] = optimizer->serialize(storageDir, stream, this, batchNorm);
+    }
+
     return j;
 }
 
@@ -151,6 +155,10 @@ void BatchNormalization::deserialize(const json &j, Network *network) {
     batchNormalization.runningVariancesFile = variancesFile;
 
     batchNormalization.initialized = true;
+
+    if (j.contains("optimizer")) {
+        batchNormalization.optimizer = Optimizer::deserialize(j.at("optimizer"));
+    }
 
     batchNormalization.addToNetwork(network);
 }

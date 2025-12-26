@@ -400,16 +400,20 @@ TEST(Sgd, SerializeDeserialize) {
     NetworkInput labelsInput =
         NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions({numClasses}).dataType(dataType).build();
 
-    MeanAbsoluteError crossEntropy = MeanAbsoluteError::Builder()
-                                         .network(initialNetwork)
-                                         .predictions(logits)
-                                         .reportsRawLoss()
-                                         .lossDataType(dataType)
-                                         .labels(labelsInput.getFeatureOutput())
-                                         .build();
+    MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
+                                              .network(initialNetwork)
+                                              .predictions(logits)
+                                              .reportsRawLoss()
+                                              .lossDataType(dataType)
+                                              .labels(labelsInput.getFeatureOutput())
+                                              .build();
 
-    NetworkOutput networkOutput =
-        NetworkOutput::Builder().network(initialNetwork).name("lossOutput").inputTensor(crossEntropy.getLoss()).dataType(dataType).build();
+    NetworkOutput networkOutput = NetworkOutput::Builder()
+                                      .network(initialNetwork)
+                                      .name("lossOutput")
+                                      .inputTensor(meanAbsoluteError.getLoss())
+                                      .dataType(dataType)
+                                      .build();
 
     float initialLearningRate = (1 + (rand() % 1000)) / 1000.0f;
     float decay = (rand() % 1000) / 1000.0f;
@@ -500,7 +504,7 @@ TEST(Sgd, SerializeDeserialize) {
     json networkInputJ = networkInput.serialize("/tmp/", stream);
     json labelsInputJ = labelsInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
-    json crossEntropyJ = crossEntropy.serialize("/tmp/", stream);
+    json crossEntropyJ = meanAbsoluteError.serialize("/tmp/", stream);
 
     ThorImplementation::StampedNetwork &initial_stamped_network = initialNetwork.getStampedNetwork(0);
     shared_ptr<ThorImplementation::Layer> initial_phys_layer = initial_stamped_network.getPhysicalLayerFromApiLayer(fullyConnected.getId());

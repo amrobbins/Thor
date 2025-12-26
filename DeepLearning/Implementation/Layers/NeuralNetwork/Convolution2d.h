@@ -167,6 +167,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                 }
             }
         }
+
+        if (!isInferenceOnly())
+            optimizer.get()->compile();
     }
 
     virtual void infer(Optional<Tensor> inputTensor,

@@ -144,6 +144,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual std::string getLayerType() const { return "FullyConnected"; }
 
+    std::vector<Tensor> standaloneFCFeatureInputs;
+    std::vector<Tensor> standaloneFCFeatureOutputs;
+
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
@@ -220,6 +223,10 @@ class FullyConnected::Builder {
                 fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
                 fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
             }
+
+            fullyConnected.standaloneFCFeatureInputs = fullyConnected.getFeatureInputs();
+            fullyConnected.standaloneFCFeatureOutputs = fullyConnected.getFeatureOutputs();
+
             fullyConnected.addToNetwork(_network.get());
         }
 

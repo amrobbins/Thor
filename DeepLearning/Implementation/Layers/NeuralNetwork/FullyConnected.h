@@ -55,6 +55,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
         ScopedGpu scopedGpu(gpuNum);
 
+        TrainableWeightsBiasesLayer::compile();
+
         batchSize = featureInputs[0].get().getDescriptor().getDimensions()[0];
         numInputFeatures = featureInputs[0].get().getDescriptor().getDimensions()[1];
 
@@ -149,6 +151,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             createFeatureOutputCudnnTensorDescriptor();
             createBiasesCudnnTensorDescriptor();
         }
+
+        if (!isInferenceOnly())
+            optimizer.get()->compile();
     }
 
     virtual void infer(Optional<Tensor> inputTensor,
