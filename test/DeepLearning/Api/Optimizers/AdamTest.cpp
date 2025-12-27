@@ -73,7 +73,7 @@ TEST(Adam, InitializesParametersWithOneStamp) {
     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
 
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
@@ -131,7 +131,7 @@ TEST(Adam, ReportsParameters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     unordered_map<string, float> params = adam->getAllHyperParameters();
@@ -175,7 +175,7 @@ TEST(Adam, SettersAndGetters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     unordered_map<string, float> params = adam->getAllHyperParameters();

@@ -180,7 +180,7 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     uint32_t epoch = 0;
@@ -241,7 +241,7 @@ TEST(Sgd, SgdUpdatesParameters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     Optimizer::updateHyperParameters(&network, 0, 0, 10);
@@ -277,7 +277,7 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     Optimizer::updateHyperParameters(&network, 0, 0, 10);
@@ -314,7 +314,7 @@ TEST(Sgd, SgdReportsParameters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, {0}, 1);
+    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
     Optimizer::updateHyperParameters(&network, 0, 1, 10);

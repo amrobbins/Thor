@@ -165,6 +165,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
 
 Network::StatusCode Network::place(uint32_t batchSize,
                                    std::vector<Event> &initDoneEvents,
+                                   bool inferenceOnly,
                                    std::vector<int32_t> forcedDevices,
                                    uint32_t forcedNumStampsPerGpu) {
     // FIXME: multiple stamps, multiple gpus
@@ -177,6 +178,17 @@ Network::StatusCode Network::place(uint32_t batchSize,
 
     if (optimizer != nullptr) {
         attachOptimizerToLayers(false);
+    }
+
+    if (!inferenceOnly) {
+        for (auto trainableLayer : allTrainableLayersInNetwork) {
+            if (!trainableLayer->hasOptimizer()) {
+                string message = "A layer of type ";
+                message += trainableLayer->getLayerType();
+                message += " does not have an optimizer assigned, but the network is being placed for training.";
+                throw std::runtime_error(message);
+            }
+        }
     }
 
     vector<int32_t> devices;

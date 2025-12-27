@@ -62,6 +62,7 @@ class Network {
 
     virtual StatusCode place(uint32_t batchSize,
                              std::vector<Event> &initDoneEvents,
+                             bool inferenceOnly = false,
                              std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
                              uint32_t forcedNumStampsPerGpu = 0);
     //    virtual std::vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
