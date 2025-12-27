@@ -64,7 +64,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
 
         if (!isInferenceOnly()) {
-            assert(optimizer.isPresent());
+            if (optimizer.isEmpty()) {
+                throw std::runtime_error("FullyConnected: compiled but optimizer is not present, and not in inference only mode.");
+            }
             Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
             assert(anErrorInput.isPresent());
             uint64_t numUnits = anErrorInput.get().getDimensions()[1];

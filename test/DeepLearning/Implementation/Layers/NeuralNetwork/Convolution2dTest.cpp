@@ -408,7 +408,7 @@ void backwardPass(shared_ptr<Convolution2d> convolution2dLayer,
     }
 }
 
-TEST(Convolution2dInitializers, UniformRandomWorks) {
+TEST(Convolution2d, UniformRandomInitializes) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);

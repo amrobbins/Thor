@@ -1047,9 +1047,11 @@ TEST(Convolution2d, SerializeDeserialize) {
 
         ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
         stampedNetwork = newNetwork.getStampedNetwork(0);
-        ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
+        ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), useBatchNorm ? 2UL : 1UL);
         shared_ptr<ThorImplementation::Convolution2d> physicalConvLayerDes =
             dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayer(0));
+        if (physicalConvLayerDes == nullptr && useBatchNorm)
+            physicalConvLayerDes = dynamic_pointer_cast<ThorImplementation::Convolution2d>(stampedNetwork.getTrainableLayer(1));
         ASSERT_TRUE(physicalConvLayerDes != nullptr);
 
         ThorImplementation::Tensor weightsDes = physicalConvLayerDes->getWeights();

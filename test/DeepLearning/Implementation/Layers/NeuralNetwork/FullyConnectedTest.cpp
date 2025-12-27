@@ -375,7 +375,7 @@ void backwardPass(shared_ptr<FullyConnected> fullyConnectedLayer, bool hasBiases
     }
 }
 
-TEST(FullyConnectedInitializers, UniformRandomWorks) {
+TEST(FullyConnected, UniformRandomInitializes) {
     srand(time(NULL));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);

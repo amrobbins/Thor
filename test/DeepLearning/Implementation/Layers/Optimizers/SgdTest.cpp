@@ -82,6 +82,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     layers.push_back(make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
     layers.push_back(make_shared<NoOpLayer>());
     shared_ptr<FullyConnected> fullyConnectedLayer = make_shared<FullyConnected>(numOutputFeatures, hasBias);
+    fullyConnectedLayer->setConstructForInferenceOnly(true);
     layers.push_back(fullyConnectedLayer);
     layers.push_back(make_shared<NoOpLayer>());
     layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
@@ -90,8 +91,6 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
-    Tensor anErrorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
-    Tensor anErrorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
     shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
     sgd->compile();
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
@@ -227,14 +226,14 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
 
         Stream dataStream = layers.front()->getStream();
 
-        LayerTestHelper::connectAndInitializeNetwork(layers);
+        LayerTestHelper::connectNetwork(layers);
 
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
-        Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
+        LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
         ASSERT_EQ(sgd->getDecay(), decay);
@@ -272,7 +271,7 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
 
         Stream gradientUpdateStream = sgd->getGradientUpdateStream();
 
-        // Set fill featureIn and errorIn and check that weights are updated properly
+        // Fill featureIn and errorIn and check that weights are updated properly
         half *featureInMem_h = featureInput_h.getMemPtr<half>();
         half *errorInMem_h = errorInput_h.getMemPtr<half>();
         half *weightsGradientMem_h = weightsGradient_h.getMemPtr<half>();
@@ -494,14 +493,15 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
 
         Stream dataStream = layers.front()->getStream();
 
-        LayerTestHelper::connectAndInitializeNetwork(layers);
+        LayerTestHelper::connectNetwork(layers);
 
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
-        Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
+        // Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
+        LayerTestHelper::initializeNetwork(layers);
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
         ASSERT_EQ(sgd->getDecay(), decay);
@@ -797,7 +797,7 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
 
         Stream dataStream = layers.front()->getStream();
 
-        LayerTestHelper::connectAndInitializeNetwork(layers);
+        LayerTestHelper::connectNetwork(layers);
 
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor featureOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureOutputs());
@@ -811,6 +811,7 @@ TEST(SgdTest, DISABLED_TestWeightsUpdateWithNesterovMomentum) {
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
+        LayerTestHelper::initializeNetwork(layers);
         Tensor weightsGradient = sgd->getWeightsGradient();
 
         ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
