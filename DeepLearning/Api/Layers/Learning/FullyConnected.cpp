@@ -188,8 +188,10 @@ void FullyConnected::deserialize(const json &j, Network *network) {
     fullyConnected.numOutputFeatures = numOutputFeatures;
     fullyConnected.hasBias = hasBias;
     fullyConnected.featureInputs = featureInputs;
+    fullyConnected.standaloneFCFeatureInputs = featureInputs;
     for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
         fullyConnected.featureOutputs.push_back(featureOutputs[i]);
+        fullyConnected.standaloneFCFeatureOutputs.push_back(featureOutputs[i]);
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
     }

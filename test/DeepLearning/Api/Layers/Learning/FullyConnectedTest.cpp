@@ -202,11 +202,8 @@ TEST(FullyConnected, SerializeDeserialize) {
 
         uint32_t numOutputFeatures = 1 + (rand() % 1000);
         bool hasBias = rand() % 2;
-
         float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
-
         bool useBatchNorm = rand() % 2;
-
         bool useRelu = rand() % 2;
 
         NetworkInput networkInput =
@@ -383,18 +380,18 @@ TEST(FullyConnected, SerializeDeserialize) {
             ASSERT_TRUE(dropOutFound);
         }
 
-        printf("%s\n", networkInputJ.dump(4).c_str());
-        printf("%s\n", labelsInputJ.dump(4).c_str());
-        if (useBatchNorm)
-            printf("%s\n", batchNormJ.dump(4).c_str());
-        if (dropProportion > 0.0f) {
-            printf("%s\n", dropOutJ.dump(4).c_str());
-        }
-        printf("%s\n", fullyConnectedJ.dump(4).c_str());
-        if (useRelu)
-            printf("%s\n", reluJ.dump(4).c_str());
-        printf("%s\n", meanAbsoluteErrorJ.dump(4).c_str());
-        printf("%s\n", networkOutputJ.dump(4).c_str());
+        // printf("%s\n", networkInputJ.dump(4).c_str());
+        // printf("%s\n", labelsInputJ.dump(4).c_str());
+        // if (useBatchNorm)
+        //     printf("%s\n", batchNormJ.dump(4).c_str());
+        // if (dropProportion > 0.0f) {
+        //     printf("%s\n", dropOutJ.dump(4).c_str());
+        // }
+        // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+        // if (useRelu)
+        //     printf("%s\n", reluJ.dump(4).c_str());
+        // printf("%s\n", meanAbsoluteErrorJ.dump(4).c_str());
+        // printf("%s\n", networkOutputJ.dump(4).c_str());
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkFC;
@@ -466,7 +463,6 @@ TEST(FullyConnected, SerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
-        // FIXME: Why does this pass when there is a batch norm? Its output tensor which is FC's input tensor should not be found then.
         Layer::deserialize(networkInputJ, &newNetwork);
         Layer::deserialize(labelsInputJ, &newNetwork);
         if (useBatchNorm)
