@@ -80,7 +80,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         assert(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
         // FIXME: It doesn't look like this would work for multiple input/output connections. Check this on all multi-connection
-        std::shared_ptr<ThorImplementation::Convolution2d> convolution2d =
+        std::shared_ptr<ThorImplementation::Convolution2d> physicalConvolution2d =
             std::make_shared<ThorImplementation::Convolution2d>(filterWidth,
                                                                 filterHeight,
                                                                 horizontalStride,
@@ -90,7 +90,11 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                                                 numOutputChannels,
                                                                 hasBias,
                                                                 getId());
-        return convolution2d;
+
+        if (hasOptimizer())
+            physicalConvolution2d->setOptimizer(optimizer->stamp(physicalConvolution2d));
+
+        return physicalConvolution2d;
     }
 
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
@@ -118,6 +122,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             2 * featureInputs.size() * (featureInputs[0].getTotalSizeInBytes() + featureOutputs[0].getTotalSizeInBytes()) * batchSize;
         return batchSizeDependentMem;
     }
+
+    std::vector<Tensor> standaloneLayerFeatureInputs;
+    std::vector<Tensor> standaloneLayerFeatureOutputs;
 
    private:
     Network *network;
@@ -233,6 +240,10 @@ class Convolution2d::Builder {
                 convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs[i];
                 convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs[i]] = convolution2d.featureInputs[i];
             }
+
+            convolution2d.standaloneLayerFeatureInputs = convolution2d.getFeatureInputs();
+            convolution2d.standaloneLayerFeatureOutputs = convolution2d.getFeatureOutputs();
+
             convolution2d.addToNetwork(_network.get());
         }
 

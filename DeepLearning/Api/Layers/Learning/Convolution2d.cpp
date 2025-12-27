@@ -62,8 +62,12 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
         convolution2dBuilder.featureInput(currentFeatureInputs[i]);
     Convolution2d convolution2d = convolution2dBuilder.build();
     this->id = convolution2d.getId();
+
+    standaloneLayerFeatureInputs = convolution2d.getFeatureInputs();
+    standaloneLayerFeatureOutputs = convolution2d.getFeatureOutputs();
+
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
-        currentFeatureInputs[i] = convolution2d.getFeatureOutputs()[i];
+        currentFeatureInputs[i] = standaloneLayerFeatureOutputs[i];
 
     if (activationBuilder) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
@@ -106,15 +110,15 @@ json Convolution2d::serialize(const string &storageDir, Stream stream) const {
 
     // Input connections
     json inputs = json::array();
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        inputs.push_back(featureInputs[i].serialize());
+    for (uint32_t i = 0; i < standaloneLayerFeatureInputs.size(); ++i) {
+        inputs.push_back(standaloneLayerFeatureInputs[i].serialize());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
-    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-        outputs.push_back(featureOutputs[i].serialize());
+    for (uint32_t i = 0; i < standaloneLayerFeatureOutputs.size(); ++i) {
+        outputs.push_back(standaloneLayerFeatureOutputs[i].serialize());
     }
     j["outputs"] = outputs;
 
@@ -142,6 +146,10 @@ json Convolution2d::serialize(const string &storageDir, Stream stream) const {
         filesystem::path biasesFile = dir / (layerName + "_biases.gds");
         j["biases_tensor"] = biasesFile.string();
         twbLayer->dumpBiasesToFile(biasesFile.string(), stream);
+    }
+
+    if (hasOptimizer()) {
+        j["optimizer"] = optimizer->serialize(storageDir, stream, this, twbLayer);
     }
 
     return j;
@@ -191,14 +199,20 @@ void Convolution2d::deserialize(const json &j, Network *network) {
     convolution2d.numOutputChannels = numOutputChannels;
     convolution2d.hasBias = hasBias;
     convolution2d.featureInputs = featureInputs;
+    convolution2d.standaloneLayerFeatureInputs = featureInputs;
     for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
         convolution2d.featureOutputs.push_back(featureOutputs[i]);
+        convolution2d.standaloneLayerFeatureOutputs.push_back(featureOutputs[i]);
         convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs.back();
         convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs.back()] = convolution2d.featureInputs[i];
     }
     convolution2d.weightsFile = weightsFile;
     if (hasBias)
         convolution2d.biasesFile = biasesFile;
+
+    if (j.contains("optimizer")) {
+        convolution2d.optimizer = Optimizer::deserialize(j.at("optimizer"));
+    }
 
     convolution2d.initialized = true;
 
