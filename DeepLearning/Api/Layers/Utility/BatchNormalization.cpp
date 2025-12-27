@@ -5,48 +5,6 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-void BatchNormalization::buildSupportLayersAndAddToNetwork() {
-    vector<Tensor> currentFeatureInputs;
-
-    for (uint32_t i = 0; i < featureInputs.size(); ++i)
-        currentFeatureInputs.push_back(featureInputs[i]);
-
-    // Force the input tensor to this type of layer to be FP16
-    if (featureInputs.front().getDataType() != Tensor::DataType::FP16) {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            TypeConverter typeConverter = TypeConverter::Builder()
-                                              .network(*network)
-                                              .featureInput(currentFeatureInputs[i])
-                                              .newDataType(Tensor::DataType::FP16)
-                                              .build();
-            currentFeatureInputs[i] = typeConverter.getFeatureOutput();
-        }
-    }
-
-    BatchNormalization::Builder batchNormBuilder;
-    for (uint32_t i = 0; i < featureInputs.size(); ++i)
-        batchNormBuilder.featureInput(currentFeatureInputs[i]);
-    batchNormBuilder.exponentialRunningAverageFactor(exponentialRunningAverageFactor);
-    batchNormBuilder.epsilon(epsilon);
-    BatchNormalization standaloneBatchNormalization = batchNormBuilder.network(*network).build();
-    this->id = standaloneBatchNormalization.getId();
-    currentFeatureInputs = standaloneBatchNormalization.getFeatureOutputs();
-
-    vector<uint64_t> dimensions = currentFeatureInputs[0].getDimensions();
-
-    // Replace the outputs on the compound layer to be the outputs of the last stage
-    // i.e. tunnel the actual inputs to actual outputs of the compound layer,
-    // these are not necessarily the outputs of the stand-alone batch normalization connected layer.
-    // Network uses single layers, user uses compound layer.
-    outputTensorFromInputTensor.clear();
-    inputTensorFromOutputTensor.clear();
-    featureOutputs = currentFeatureInputs;
-    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        outputTensorFromInputTensor[featureInputs[i]] = featureOutputs[i];
-        inputTensorFromOutputTensor[featureOutputs[i]] = featureInputs[i];
-    }
-}
-
 json BatchNormalization::serialize(const string &storageDir, Stream stream) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network

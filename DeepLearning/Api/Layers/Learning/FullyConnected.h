@@ -175,6 +175,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 // featureInput and numOutputFeatures are required, all other parameters are optional.
 class FullyConnected::Builder {
    public:
+    virtual ~Builder() = default;
+
     Builder() { _activationExplicitlyRemoved = false; }
 
     virtual FullyConnected build() {
