@@ -150,6 +150,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 // featureInput, numOutputChannels, filterHeight and filterWidth are required, all other parameters are optional.
 class Convolution2d::Builder {
    public:
+    virtual ~Builder() = default;
+
     Builder() { _activationExplicitlyRemoved = false; }
 
     virtual Convolution2d build() {

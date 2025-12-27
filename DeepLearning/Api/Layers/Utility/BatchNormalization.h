@@ -21,9 +21,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual std::string getLayerType() const { return "BatchNormalization"; }
 
-    virtual bool isMultiLayer() const { return featureInputs.front().getDataType() != Tensor::DataType::FP16; }
-
-    virtual void buildSupportLayersAndAddToNetwork();
+    virtual bool isMultiLayer() const { return false; }
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -83,6 +81,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
 class BatchNormalization::Builder {
    public:
+    virtual ~Builder() = default;
+
     virtual BatchNormalization build() {
         assert(_network.isPresent());
         assert(!_featureInputs.empty());
@@ -97,16 +97,13 @@ class BatchNormalization::Builder {
             batchNormalization.epsilon = _epsilon.get();
         batchNormalization.network = _network.get();
         batchNormalization.initialized = true;
-        if (batchNormalization.isMultiLayer()) {
-            batchNormalization.buildSupportLayersAndAddToNetwork();
-        } else {
-            for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
-                batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
-                batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
-                batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs[i]] = batchNormalization.featureInputs[i];
-            }
-            batchNormalization.addToNetwork(_network.get());
+        for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
+            batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
+            batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
+            batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs[i]] = batchNormalization.featureInputs[i];
         }
+        batchNormalization.addToNetwork(_network.get());
+
         return batchNormalization;
     }
 

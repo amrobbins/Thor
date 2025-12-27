@@ -104,15 +104,22 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         featureInputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureInputDescriptor.get());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        cudnnDataType_t cudnnDataType;
+        if (featureInputs[0].get().getDataType() == TensorDescriptor::DataType::FP16)
+            cudnnDataType = CUDNN_DATA_HALF;
+        else if (featureInputs[0].get().getDataType() == TensorDescriptor::DataType::FP32)
+            cudnnDataType = CUDNN_DATA_FLOAT;
+        else
+            assert(false);
         cudnnStatus =
-            cudnnSetTensor4dDescriptor(featureInputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numChannels, height, width);
+            cudnnSetTensor4dDescriptor(featureInputDescriptor, CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numChannels, height, width);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         featureOutputDescriptor = cudnnTensorDescriptor_t();
         cudnnStatus = cudnnCreateTensorDescriptor(&featureOutputDescriptor.get());
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
         cudnnStatus =
-            cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numChannels, height, width);
+            cudnnSetTensor4dDescriptor(featureOutputDescriptor, CUDNN_TENSOR_NCHW, cudnnDataType, batchSize, numChannels, height, width);
         assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         derivedBnDescriptor = cudnnTensorDescriptor_t();

@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <memory>
 
+#include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
+
 using namespace Thor;
 using namespace std;
 using json = nlohmann::json;
@@ -211,10 +214,24 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
                                                                 .epsilon(epsilon);
     BatchNormalization batchNormalization = batchNormalizationBuilder.build();
 
+    Tensor logits = batchNormalization.getFeatureOutputs()[0];
+    uint32_t numClasses = logits.getDimensions()[0];
+    NetworkInput labelsInput =
+        NetworkInput::Builder().network(initialNetwork).name("labelsInput").dimensions({numClasses}).dataType(dataType).build();
+
+    MeanAbsoluteError meanAbsoluteError = MeanAbsoluteError::Builder()
+                                              .network(initialNetwork)
+                                              .predictions(logits)
+                                              .reportsRawLoss()
+                                              .lossDataType(dataType)
+                                              .labels(labelsInput.getFeatureOutput())
+                                              .build();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(initialNetwork).initialLearningRate(0.1).decay(0.1).build();
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(initialNetwork)
                                       .name("testOutput")
-                                      .inputTensor(batchNormalization.getFeatureOutputs()[0])
+                                      .inputTensor(meanAbsoluteError.getLoss())
                                       .dataType(dataType)
                                       .build();
 
@@ -232,7 +249,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     ASSERT_EQ(featureInputs[0].getDimensions(), inputDimensions);
 
     // At the moment BatchNormalization data type is forced to fp16
-    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
     ASSERT_EQ(featureOutputs[0].getDimensions(), inputDimensions);
 
     // Now stamp the network and test serialization
@@ -247,7 +264,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     }
     initDoneEvents.clear();
 
-    // Fetch the fully connected layer from the network and write to its weights
+    // Fetch the physical batch norm layer from the stamped network and write to its weights
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
@@ -287,12 +304,28 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     }
     variances.copyFromAsync(variancesCpu, stream);
 
-    json batchNormalizationJ = batchNormalization.serialize("/tmp/", stream);
+    json meanAbsoluteErrorJ = meanAbsoluteError.serialize("/tmp/", stream);
     json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
     json networkOutputJ = networkOutput.serialize("/tmp/", stream);
 
+    // The network attached the optimizer to its copy of the BN layer
+    json batchNormalizationJ;
+    bool bnFound = false;
+    shared_ptr<BatchNormalization> initalNetworkBN;
+    for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
+        shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
+        initalNetworkBN = dynamic_pointer_cast<BatchNormalization>(layer);
+        if (initalNetworkBN) {
+            batchNormalizationJ = initalNetworkBN->serialize("/tmp", stream);
+            bnFound = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(bnFound);
+
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
-    Layer *layer = &batchNormalization;
+    shared_ptr<Layer> layer = initalNetworkBN;
     json fromLayerJ = layer->serialize("/tmp/", stream);
     ASSERT_EQ(batchNormalizationJ, fromLayerJ);
 
@@ -331,7 +364,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     const auto &out0 = outputs.at(0);
     ASSERT_TRUE(out0.is_object());
     ASSERT_TRUE(out0.at("data_type").is_string());
-    EXPECT_EQ(out0.at("data_type").get<string>(), "fp16");
+    EXPECT_EQ(out0.at("data_type").get<string>(), dataType == Tensor::DataType::FP16 ? "fp16" : "fp32");
 
     ASSERT_TRUE(out0.at("dimensions").is_array());
     ASSERT_EQ(out0.at("dimensions").size(), inputDimensions.size());
@@ -361,7 +394,9 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     Network newNetwork;
 
     Layer::deserialize(networkInputJ, &newNetwork);
+    Layer::deserialize(labelsInputJ, &newNetwork);
     Layer::deserialize(batchNormalizationJ, &newNetwork);
+    Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
     Layer::deserialize(networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
