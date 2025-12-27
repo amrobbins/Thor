@@ -7,6 +7,8 @@
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 
+#include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+
 #include <stdio.h>
 #include <unistd.h>
 #include "cuda.h"
@@ -156,9 +158,14 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
                                         .build();
     latestOutputTensor = fullyConnected.getFeatureOutput();
 
+    GradientRivet gradientRivet = GradientRivet::Builder().network(network).tensor(latestOutputTensor).build();
+    latestOutputTensor = gradientRivet.getFeatureOutput();
+
     NetworkOutput networkOutput =
         NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
     Tensor networkOutputTensor = networkOutput.getFeatureOutput();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
 
     ThorImplementation::StampedNetwork stampedNetwork;
     int gpuNum = 0;
@@ -175,7 +182,10 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
     shared_ptr<ThorImplementation::FullyConnected> fc =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
+    shared_ptr<ThorImplementation::GradientRivet> rivet =
+        dynamic_pointer_cast<ThorImplementation::GradientRivet>(stampedNetwork.getApiLayerToPhysicalLayer()[gradientRivet.getId()]);
     ASSERT_NE(fc, nullptr);
+    ASSERT_NE(rivet, nullptr);
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
@@ -183,11 +193,12 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-    ASSERT_EQ(fc->getFeatureOutputs()[0].get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+    ASSERT_EQ(fc->getFeatureOutputs()[0].get(), rivet->getFeatureInput().get());
+    ASSERT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().get(),
               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().get());
-    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 0u);
+    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 1u);
 
     // Check weights initialization
     // First check if fanIn and fanOut is correct
@@ -234,10 +245,14 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
                                         .build();
     latestOutputTensor = fullyConnected.getFeatureOutput();
 
+    GradientRivet gradientRivet = GradientRivet::Builder().network(network).tensor(latestOutputTensor).build();
+    latestOutputTensor = gradientRivet.getFeatureOutput();
+
     NetworkOutput networkOutput =
         NetworkOutput::Builder().network(network).name("output").inputTensor(latestOutputTensor).dataType(Tensor::DataType::FP16).build();
     Tensor networkOutputTensor = networkOutput.getFeatureOutput();
 
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
     ThorImplementation::StampedNetwork stampedNetwork;
     int gpuNum = 0;
     int batchSize = 32;
@@ -255,7 +270,10 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
     shared_ptr<ThorImplementation::FullyConnected> fc =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getApiLayerToPhysicalLayer()[fullyConnected.getId()]);
+    shared_ptr<ThorImplementation::GradientRivet> rivet =
+        dynamic_pointer_cast<ThorImplementation::GradientRivet>(stampedNetwork.getApiLayerToPhysicalLayer()[gradientRivet.getId()]);
     ASSERT_NE(fc, nullptr);
+    ASSERT_NE(rivet, nullptr);
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureInputs().size(), 1u);
@@ -263,11 +281,12 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getTrainableLayer(0)->getFeatureOutputs()[0].get(), fc->getFeatureOutputs()[0].get());
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
-    ASSERT_EQ(fc->getFeatureOutputs()[0].get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+    ASSERT_EQ(fc->getFeatureOutputs()[0].get(), rivet->getFeatureInput().get());
+    ASSERT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getFeatureInput().get(),
               stampedNetwork.getApiLayerToPhysicalLayer()[networkOutput.getId()]->getFeatureInput().get());
-    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 0u);
+    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 1u);
 
     // Check weights initialization
     // First check if fanIn and fanOut is correct
@@ -335,6 +354,10 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
                              .getFeatureOutput();
     latestOutputTensor =
         DropOut::Builder().network(network).featureInput(latestOutputTensor).dropProportion(0.25).build().getFeatureOutput();
+
+    GradientRivet gradientRivet = GradientRivet::Builder().network(network).tensor(latestOutputTensor).build();
+    latestOutputTensor = gradientRivet.getFeatureOutput();
+
     Tensor networkOutputTensor = NetworkOutput::Builder()
                                      .network(network)
                                      .name("output")
@@ -342,6 +365,8 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
                                      .dataType(Tensor::DataType::FP32)
                                      .build()
                                      .getFeatureOutput();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
 
     ASSERT_EQ(networkInputTensor.getDataType(), Tensor::DataType::UINT8);
     ASSERT_EQ(networkOutputTensor.getDataType(), Tensor::DataType::FP32);
@@ -360,7 +385,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 2u);
-    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 5u);
+    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 6u);
 
     shared_ptr<ThorImplementation::NetworkInput> input = stampedNetwork.getInputs()[0];
     ASSERT_EQ(input->getName(), "features");
@@ -385,8 +410,11 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     shared_ptr<ThorImplementation::DropOut> dropout2 =
         dynamic_pointer_cast<ThorImplementation::DropOut>(stampedNetwork.getOtherLayers()[3]);
     ASSERT_NE(dropout2, nullptr);
+    shared_ptr<ThorImplementation::GradientRivet> rivet =
+        dynamic_pointer_cast<ThorImplementation::GradientRivet>(stampedNetwork.getOtherLayers()[4]);
+    ASSERT_NE(rivet, nullptr);
     shared_ptr<ThorImplementation::TypeConversion> tc16_32 =
-        dynamic_pointer_cast<ThorImplementation::TypeConversion>(stampedNetwork.getOtherLayers()[4]);
+        dynamic_pointer_cast<ThorImplementation::TypeConversion>(stampedNetwork.getOtherLayers()[5]);
     ASSERT_NE(tc16_32, nullptr);
 
     ASSERT_EQ(input->getFeatureOutput().get(), tc8_16->getFeatureInput().get());
@@ -395,7 +423,8 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     ASSERT_EQ(dropout->getFeatureOutput().get(), fc->getFeatureInputs()[0].get());
     ASSERT_EQ(fc->getFeatureOutputs()[0].get(), relu->getFeatureInput().get());
     ASSERT_EQ(relu->getFeatureOutput().get(), dropout2->getFeatureInput().get());
-    ASSERT_EQ(dropout2->getFeatureOutput().get(), tc16_32->getFeatureInput().get());
+    ASSERT_EQ(dropout2->getFeatureOutput().get(), rivet->getFeatureInput().get());
+    ASSERT_EQ(rivet->getFeatureOutput().get(), tc16_32->getFeatureInput().get());
     ASSERT_EQ(tc16_32->getFeatureOutput().get(), output->getFeatureInput().get());
 
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -443,13 +472,18 @@ TEST(Network, BranchedNetworkProperlyFormed) {
                              .weightsInitializerBuilder(uniformRandomInitializerBuilder)
                              .build();
 
+    GradientRivet gradientRivet = GradientRivet::Builder().network(network).tensor(fc2.getFeatureOutputs()[0]).build();
+    latestOutputTensor = gradientRivet.getFeatureOutput();
+
     NetworkOutput networkOutput = NetworkOutput::Builder()
                                       .network(network)
                                       .name("output")
-                                      .inputTensor(fc2.getFeatureOutputs()[0])
+                                      .inputTensor(gradientRivet.getFeatureOutput())
                                       .dataType(Tensor::DataType::FP16)
                                       .build();
     Stub stub = Stub::Builder().network(network).inputTensor(fc2.getFeatureOutputs()[1]).build();
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().network(network).initialLearningRate(0.1).decay(0.1).build();
 
     ThorImplementation::StampedNetwork stampedNetwork;
     int gpuNum = 0;
@@ -465,7 +499,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getOutputs().size(), 1u);
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 6u);
-    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 9u);
+    ASSERT_EQ(stampedNetwork.getOtherLayers().size(), 10u);
 
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getName(), "input");
     ASSERT_EQ(stampedNetwork.getOutputs()[0]->getName(), "output");
@@ -476,7 +510,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     vector<shared_ptr<ThorImplementation::TensorFanout>> f;
     vector<shared_ptr<ThorImplementation::DropOut>> d;
 
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < stampedNetwork.getNumTrainableLayers(); ++i) {
         if (dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(i)) != nullptr)
             fcv.push_back(dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(i)));
         else if (dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(i)) != nullptr)
@@ -490,13 +524,16 @@ TEST(Network, BranchedNetworkProperlyFormed) {
         }
     }
 
-    for (int i = 0; i < 9; ++i) {
+    shared_ptr<ThorImplementation::GradientRivet> rivet;
+    for (int i = 0; i < stampedNetwork.getOtherLayers().size(); ++i) {
         if (dynamic_pointer_cast<ThorImplementation::Relu>(stampedNetwork.getOtherLayers()[i]) != nullptr)
             r.push_back(dynamic_pointer_cast<ThorImplementation::Relu>(stampedNetwork.getOtherLayers()[i]));
         else if (dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]) != nullptr)
             f.push_back(dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]));
         else if (dynamic_pointer_cast<ThorImplementation::DropOut>(stampedNetwork.getOtherLayers()[i]) != nullptr)
             d.push_back(dynamic_pointer_cast<ThorImplementation::DropOut>(stampedNetwork.getOtherLayers()[i]));
+        else if (dynamic_pointer_cast<ThorImplementation::GradientRivet>(stampedNetwork.getOtherLayers()[i]) != nullptr)
+            rivet = dynamic_pointer_cast<ThorImplementation::GradientRivet>(stampedNetwork.getOtherLayers()[i]);
         else {
             ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::TensorFanout>(stampedNetwork.getOtherLayers()[i]), nullptr);
             ASSERT_EQ(dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getOtherLayers()[i]), nullptr);
@@ -512,6 +549,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     ASSERT_EQ(d.size(), 4u);
     ASSERT_EQ(r.size(), 4u);
     ASSERT_EQ(fcv.size(), 3u);
+    ASSERT_TRUE(rivet != nullptr);
 
     ASSERT_EQ(stampedNetwork.getInputs()[0]->getFeatureOutput().get(), f[0]->getFeatureInputs()[0].get());
 
@@ -557,10 +595,12 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     //    }
 
     if (r[3]->getFeatureOutput().isEmpty()) {
-        EXPECT_EQ(r[2]->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+        EXPECT_EQ(r[2]->getFeatureOutput().get(), rivet->getFeatureInput().get());
+        EXPECT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
     } else {
         EXPECT_TRUE(r[2]->getFeatureOutput().isEmpty());
-        EXPECT_EQ(r[3]->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
+        EXPECT_EQ(r[3]->getFeatureOutput().get(), rivet->getFeatureInput().get());
+        EXPECT_EQ(rivet->getFeatureOutput().get(), stampedNetwork.getOutputs()[0]->getFeatureInput().get());
     }
 
     // Check weights initialization

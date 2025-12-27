@@ -245,7 +245,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             return;
         assert(errorIn.isPresent());
 
-        assert(optimizer.isPresent());
+        if (optimizer.isEmpty()) {
+            throw std::runtime_error("BatchNormalization: compiled but optimizer is not present, and not in inference only mode.");
+        }
         Tensor weightsGradient = optimizer.get()->getWeightsGradient();
         Optional<Tensor> biasesGradient = optimizer.get()->getBiasesGradient();
         assert(biasesGradient.isPresent());

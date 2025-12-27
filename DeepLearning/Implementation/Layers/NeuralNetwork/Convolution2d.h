@@ -206,7 +206,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         }
 
         if (!isInferenceOnly()) {
-            assert(optimizer.isPresent());
+            if (optimizer.isEmpty()) {
+                throw std::runtime_error("Convolution2d: compiled but optimizer is not present, and not in inference only mode.");
+            }
 
             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
             optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);

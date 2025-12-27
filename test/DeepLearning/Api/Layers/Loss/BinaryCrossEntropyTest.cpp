@@ -324,14 +324,14 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     }
     ASSERT_TRUE(fcFound);
 
-    printf("%s\n", networkInputJ.dump(4).c_str());
-    printf("%s\n", labelsInputJ.dump(4).c_str());
-    printf("%s\n", fullyConnectedJ.dump(4).c_str());
-    printf("%s\n", sigmoidJ.dump(4).c_str());
-    printf("%s\n", binaryCrossEntropyJ.dump(4).c_str());
-    if (lossShaper)
-        printf("%s\n", lossShaperJ.dump(4).c_str());
-    printf("%s\n", lossOutputJ.dump(4).c_str());
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", labelsInputJ.dump(4).c_str());
+    // printf("%s\n", fullyConnectedJ.dump(4).c_str());
+    // printf("%s\n", sigmoidJ.dump(4).c_str());
+    // printf("%s\n", binaryCrossEntropyJ.dump(4).c_str());
+    // if (lossShaper)
+    //     printf("%s\n", lossShaperJ.dump(4).c_str());
+    // printf("%s\n", lossOutputJ.dump(4).c_str());
 
     // ////////////////////////////
     // // Deserialize
