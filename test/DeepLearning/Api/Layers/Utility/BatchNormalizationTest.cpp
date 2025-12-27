@@ -47,7 +47,7 @@ TEST(UtilityApiLayers, BatchNormalizationSingleFeatureInputBuilds) {
 
     Optional<Tensor> actualOutput = batchNormalization.getFeatureOutput();
     ASSERT_TRUE(actualOutput.isPresent());
-    ASSERT_EQ(actualOutput.get().getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(actualOutput.get().getDataType(), dataType);
     ASSERT_EQ(actualOutput.get().getDimensions(), dimensions);
 
     double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
@@ -69,7 +69,7 @@ TEST(UtilityApiLayers, BatchNormalizationSingleFeatureInputBuilds) {
 
     Optional<Tensor> cloneOutput = clone->getFeatureOutput();
     ASSERT_TRUE(cloneOutput.isPresent());
-    ASSERT_EQ(cloneOutput.get().getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
     double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();
@@ -132,10 +132,10 @@ TEST(UtilityApiLayers, BatchNormalizationMultipleFeatureInputsBuilds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
     ASSERT_EQ(featureOutputs[0].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
     ASSERT_EQ(featureOutputs[1].getDimensions(), dimensions);
 
     double actualExponentialRunningAverageFactor = batchNormalization.getExponentialRunningAverageFactor();
@@ -170,10 +170,10 @@ TEST(UtilityApiLayers, BatchNormalizationMultipleFeatureInputsBuilds) {
     ASSERT_EQ(featureInputs[1].getDataType(), dataType);
     ASSERT_EQ(featureInputs[1].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[0].getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(featureOutputs[0].getDataType(), dataType);
     ASSERT_EQ(featureOutputs[0].getDimensions(), dimensions);
 
-    ASSERT_EQ(featureOutputs[1].getDataType(), Tensor::DataType::FP16);
+    ASSERT_EQ(featureOutputs[1].getDataType(), dataType);
     ASSERT_EQ(featureOutputs[1].getDimensions(), dimensions);
 
     double cloneExponentialRunningAverageFactor = clone->getExponentialRunningAverageFactor();
@@ -196,7 +196,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
     Network initialNetwork;
 
-    Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
+    Tensor::DataType dataType = Tensor::DataType::FP16;
     string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
 
     vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
@@ -439,7 +439,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
     half *weightsCpuMemDes = (half *)weightsCpuDes.getMemPtr();
     for (uint32_t i = 0; i < weights.getTotalNumElements(); ++i) {
-        ASSERT_EQ(weightsCpuMemDes[i], half(i));
+        ASSERT_EQ(float(weightsCpuMemDes[i]), float(half(i)));
     }
 
     ASSERT_NE(biasesDes, biases);

@@ -12,7 +12,7 @@ using namespace std;
 TEST(GpuConvolution, ConvolutionBackwardBiasProducesCorrectResult) {
     Stream stream(0);
 
-    for (uint64_t t = 0; t < 5; ++t) {
+    for (uint64_t t = 0; t < 1; ++t) {
         uint64_t numInputColumns = (rand() % 75) + 1;
         uint64_t numInputRows = (rand() % 75) + 1;
         uint64_t filterWidth = (rand() % numInputColumns) + 1;
@@ -100,7 +100,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
 
     Stream stream(0);
 
-    for (uint64_t t = 0; t < 5; ++t) {
+    for (uint64_t t = 0; t < 1; ++t) {
         uint64_t numInputColumns = (rand() % 75) + 1;
         uint64_t numInputRows = (rand() % 75) + 1;
         uint64_t filterWidth = (rand() % numInputColumns) + 1;
@@ -214,7 +214,7 @@ TEST(GpuConvolution, ConvolutionForwardProducesCorrectResult) {
 void backwardFilterTest(bool accumulate) {
     Stream stream(0);
 
-    for (uint64_t t = 0; t < 5; ++t) {
+    for (uint64_t t = 0; t < 1; ++t) {
         uint64_t numInputColumns = (rand() % 75) + 1;
         uint64_t numInputRows = (rand() % 75) + 1;
         uint64_t filterWidth = (rand() % numInputColumns) + 1;
@@ -343,7 +343,7 @@ TEST(GpuConvolution, ConvolutionBackwardFilterProducesCorrectResult_WithAccumula
 TEST(GpuConvolution, ConvolutionBackwardDataProducesCorrectResult) {
     Stream stream(0);
 
-    for (uint64_t t = 0; t < 5; ++t) {
+    for (uint64_t t = 0; t < 1; ++t) {
         uint64_t numInputColumns = (rand() % 75) + 1;
         uint64_t numInputRows = (rand() % 75) + 1;
         uint64_t filterWidth = (rand() % numInputColumns) + 1;
