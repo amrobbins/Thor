@@ -100,8 +100,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                   bool isFirstStamp,
                                   std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent,
-                                  std::vector<std::shared_ptr<Initializer>> &initializers);
+                                  Optional<Event> sisterLayerLoadedEvent);
 
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         // FIXME: workspace size?

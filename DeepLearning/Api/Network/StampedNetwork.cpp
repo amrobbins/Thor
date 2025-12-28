@@ -3,10 +3,6 @@
 namespace ThorImplementation {
 
 void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOtherStamp, StampedNetwork *otherStamp) {
-    for (auto it = initializersShared.begin(); it != initializersShared.end(); ++it) {
-        initializers.push_back(it->get());
-    }
-
     // First, ensure the shared pointers and raw pointers match
     for (auto it = inputsShared.begin(); it != inputsShared.end(); ++it)
         assert(count(inputs, it->get()) == 1);
@@ -16,8 +12,6 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
         assert(count(trainableLayers, it->get()) == 1);
     for (auto it = otherLayersShared.begin(); it != otherLayersShared.end(); ++it)
         assert(count(otherLayers, it->get()) == 1);
-    for (auto it = initializersShared.begin(); it != initializersShared.end(); ++it)
-        assert(count(initializers, it->get()) == 1);
     for (auto it = apiTensorToPhysicalDrivingLayerShared.begin(); it != apiTensorToPhysicalDrivingLayerShared.end(); ++it) {
         assert(apiTensorToPhysicalDrivingLayer.count(it->first) == 1);
         assert(apiTensorToPhysicalDrivingLayer[it->first] == it->second.get());
@@ -43,61 +37,63 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
         assert(outputNamed[it->first] == it->second.get());
     }
 
-    // FIXME: This overlaps + fights with newer deserialization/initialization logic
-    // Now that checks have been run, initialize the stamp
-    assert(!(initializeWeights && copyWeightsFromOtherStamp));
-    if (initializeWeights) {
-        // Weights are shared by all stamps so weights are only initialized once
-        for (uint32_t i = 0; i < initializers.size(); ++i)
-            initializers[i]->initialize();
-    } else if (copyWeightsFromOtherStamp) {
-        // Every GPU needs its a copy of the weights, if they have already been initialized in a weights memory, then copy that memory
-        // to the target GPU.
-        assert(otherStamp != nullptr);
-        // FIXME use trainable layer stamped ids to copy weights and when present biases from other stamp to this stamp
-        std::unordered_map<uint64_t, ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayerMap;
-        for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-            trainableLayerMap[trainableLayers[i]->getStampedId()] = trainableLayers[i];
-        }
-        std::vector<Stream> streams;
-        Stream stream;
-        for (uint32_t i = 0; i < otherStamp->trainableLayers.size(); ++i) {
-            uint32_t stampedId = otherStamp->trainableLayers[i]->getStampedId();
-            if (i == 0) {
-                streams.push_back(trainableLayerMap[stampedId]->getStreams()[0]);
-            }
-            Tensor uninitializedWeights = trainableLayerMap[stampedId]->getWeights();
-            Optional<Tensor> uninitializedBiases = trainableLayerMap[stampedId]->getBiases();
-            ThorImplementation::TrainableWeightsBiasesLayer *initializedLayer = otherStamp->trainableLayers[i];
-            Tensor initializedWeights = initializedLayer->getWeights();
-            Optional<Tensor> initializedBiases = initializedLayer->getBiases();
-            uninitializedWeights.copyFromAsync(initializedWeights, streams.back());
-            if (initializedBiases.isPresent()) {
-                assert(uninitializedBiases.isPresent());
-                uninitializedBiases.get().copyFromAsync(initializedBiases.get(), stream);
-            }
-        }
-        for (uint32_t i = 0; i < streams.size(); ++i) {
-            streams[i].synchronize();
-        }
-    }
+    // // FIXME: This overlaps + fights with newer deserialization/initialization logic
+    // // Now that checks have been run, initialize the stamp
+    // assert(!(initializeWeights && copyWeightsFromOtherStamp));
+    // if (initializeWeights) {
+    //     // Weights are shared by all stamps so weights are only initialized once
+    //     for (uint32_t i = 0; i < initializers.size(); ++i)
+    //         initializers[i]->initialize();
+    // } else if (copyWeightsFromOtherStamp) {
+    //     // Every GPU needs its a copy of the weights, if they have already been initialized in a weights memory, then copy that memory
+    //     // to the target GPU.
+    //     assert(otherStamp != nullptr);
+    //     // FIXME use trainable layer stamped ids to copy weights and when present biases from other stamp to this stamp
+    //     std::unordered_map<uint64_t, ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayerMap;
+    //     for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+    //         trainableLayerMap[trainableLayers[i]->getStampedId()] = trainableLayers[i];
+    //     }
+    //     std::vector<Stream> streams;
+    //     Stream stream;
+    //     for (uint32_t i = 0; i < otherStamp->trainableLayers.size(); ++i) {
+    //         uint32_t stampedId = otherStamp->trainableLayers[i]->getStampedId();
+    //         if (i == 0) {
+    //             streams.push_back(trainableLayerMap[stampedId]->getStreams()[0]);
+    //         }
+    //         Tensor uninitializedWeights = trainableLayerMap[stampedId]->getWeights();
+    //         Optional<Tensor> uninitializedBiases = trainableLayerMap[stampedId]->getBiases();
+    //         ThorImplementation::TrainableWeightsBiasesLayer *initializedLayer = otherStamp->trainableLayers[i];
+    //         Tensor initializedWeights = initializedLayer->getWeights();
+    //         Optional<Tensor> initializedBiases = initializedLayer->getBiases();
+    //         uninitializedWeights.copyFromAsync(initializedWeights, streams.back());
+    //         if (initializedBiases.isPresent()) {
+    //             assert(uninitializedBiases.isPresent());
+    //             uninitializedBiases.get().copyFromAsync(initializedBiases.get(), stream);
+    //         }
+    //     }
+    //     for (uint32_t i = 0; i < streams.size(); ++i) {
+    //         streams[i].synchronize();
+    //     }
+    // }
 
-    for (uint32_t i = 0; i < inputs.size(); ++i) {
-        inputs[i]->parentInitialize();
-        inputs[i]->initialize();
-    }
-    for (uint32_t i = 0; i < outputs.size(); ++i) {
-        outputs[i]->parentInitialize();
-        outputs[i]->initialize();
-    }
-    for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
-        trainableLayers[i]->parentInitialize();
-        trainableLayers[i]->initialize();
-    }
-    for (uint32_t i = 0; i < otherLayers.size(); ++i) {
-        otherLayers[i]->parentInitialize();
-        otherLayers[i]->initialize();
-    }
+    // // FIXME: get rid of implementation layer initialize, that is owned by API layer. Implementation layer has compile.
+    // // so implementationLayer.compile then apiLayer.initialize()
+    // for (uint32_t i = 0; i < inputs.size(); ++i) {
+    //     inputs[i]->parentInitialize();
+    //     inputs[i]->initialize();
+    // }
+    // for (uint32_t i = 0; i < outputs.size(); ++i) {
+    //     outputs[i]->parentInitialize();
+    //     outputs[i]->initialize();
+    // }
+    // for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
+    //     trainableLayers[i]->parentInitialize();
+    //     trainableLayers[i]->initialize();
+    // }
+    // for (uint32_t i = 0; i < otherLayers.size(); ++i) {
+    //     otherLayers[i]->parentInitialize();
+    //     otherLayers[i]->initialize();
+    // }
 }
 
 // Note that all processing is finished at the end of any input stream of the stamp.
@@ -159,7 +155,6 @@ void StampedNetwork::clear() {
     }
     otherLayers.clear();
 
-    initializers.clear();
     apiTensorToPhysicalDrivingLayer.clear();
     apiLayerToPhysicalLayer.clear();
     physicalLayerToApiLayer.clear();
@@ -171,7 +166,6 @@ void StampedNetwork::clear() {
     outputsShared.clear();
     trainableLayersShared.clear();
     otherLayersShared.clear();
-    initializersShared.clear();
     apiTensorToPhysicalDrivingLayerShared.clear();
     apiLayerToPhysicalLayerShared.clear();
     physicalLayerToApiLayerShared.clear();

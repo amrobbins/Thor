@@ -121,14 +121,14 @@ void BatchNormalization::deserialize(const json &j, Network *network) {
     batchNormalization.addToNetwork(network);
 }
 
-vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
                                              bool isFirstStamp,
-                                             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                             Optional<Event> sisterLayerLoadedEvent,
-                                             vector<shared_ptr<Initializer>> &initializers) {
-    shared_ptr<ThorImplementation::BatchNormalization> batchNorm = dynamic_pointer_cast<ThorImplementation::BatchNormalization>(layer);
-    shared_ptr<ThorImplementation::BatchNormalization> sisterBatchNorm =
-        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(sisterLayer);
+                                             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
+                                             Optional<Event> sisterPhysicalLayerLoadedEvent) {
+    shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNorm =
+        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
+    shared_ptr<ThorImplementation::BatchNormalization> sisterPhysicalBatchNorm =
+        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(sisterPhysicalLayer);
 
     // Weights are set right now, based on 1 of 3 methods:
     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
@@ -136,42 +136,42 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
     // 3. Run an initializer to set the weights - on an untrained network
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
-        assert(sisterLayer != nullptr);
-        ThorImplementation::Tensor weights = layer->getWeights();
+        assert(sisterPhysicalLayer != nullptr);
+        ThorImplementation::Tensor weights = physicalLayer->getWeights();
         Stream stream = Stream::getNextDownloadStream(weights.getPlacement().getDeviceNum());
-        if (sisterLayerLoadedEvent.isPresent())
-            stream.waitEvent(sisterLayerLoadedEvent);
-        weights.copyFromAsync(sisterLayer->getWeights(), stream);
+        if (sisterPhysicalLayerLoadedEvent.isPresent())
+            stream.waitEvent(sisterPhysicalLayerLoadedEvent);
+        weights.copyFromAsync(sisterPhysicalLayer->getWeights(), stream);
 
-        assert(layer->getBiases().isPresent());
-        ThorImplementation::Tensor biases = layer->getBiases();
-        Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterLayer->getBiases();
+        assert(physicalLayer->getBiases().isPresent());
+        ThorImplementation::Tensor biases = physicalLayer->getBiases();
+        Optional<ThorImplementation::Tensor> sisterLayerBiases = sisterPhysicalLayer->getBiases();
         assert(sisterLayerBiases.isPresent());
         biases.copyFromAsync(sisterLayerBiases.get(), stream);
 
-        ThorImplementation::Tensor resultRunningVariance = batchNorm->getResultRunningVariance();
-        Optional<ThorImplementation::Tensor> sisterLayerResultRunningVariance = sisterBatchNorm->getResultRunningVariance();
+        ThorImplementation::Tensor resultRunningVariance = physicalBatchNorm->getResultRunningVariance();
+        Optional<ThorImplementation::Tensor> sisterLayerResultRunningVariance = sisterPhysicalBatchNorm->getResultRunningVariance();
         resultRunningVariance.copyFromAsync(sisterLayerResultRunningVariance, stream);
 
-        ThorImplementation::Tensor resultRunningMean = batchNorm->getResultRunningMean();
-        Optional<ThorImplementation::Tensor> sisterLayerResultRunningMean = sisterBatchNorm->getResultRunningMean();
+        ThorImplementation::Tensor resultRunningMean = physicalBatchNorm->getResultRunningMean();
+        Optional<ThorImplementation::Tensor> sisterLayerResultRunningMean = sisterPhysicalBatchNorm->getResultRunningMean();
         resultRunningMean.copyFromAsync(sisterLayerResultRunningMean, stream);
 
-        batchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
+        physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
 
         return {stream.putEvent(false, true)};
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
-        assert(layer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
-        Stream stream = Stream::getNextUploadStream(layer->getWeights().getPlacement().getDeviceNum());
+        assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
+        Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
 
-        layer->loadWeightsFromFile(weightsFile.get(), stream);
+        physicalLayer->loadWeightsFromFile(weightsFile.get(), stream);
         assert(biasesFile.isPresent());
-        layer->loadBiasesFromFile(biasesFile.get(), stream);
+        physicalLayer->loadBiasesFromFile(biasesFile.get(), stream);
         assert(runningVariancesFile.isPresent());
-        batchNorm->loadResultRunningVarianceFromFile(runningVariancesFile, stream);
+        physicalBatchNorm->loadResultRunningVarianceFromFile(runningVariancesFile, stream);
         assert(runningMeansFile.isPresent());
-        batchNorm->loadResultRunningMeanFromFile(runningVariancesFile, stream);
+        physicalBatchNorm->loadResultRunningMeanFromFile(runningMeansFile, stream);
 
         // Can't use the file later, it may not still be there
         weightsFile = Optional<string>::empty();
@@ -179,7 +179,7 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         runningVariancesFile = Optional<string>::empty();
         runningMeansFile = Optional<string>::empty();
 
-        batchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
+        physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
 
         return {stream.putEvent(false, true)};
     } else {
@@ -190,39 +190,60 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         UniformRandom::Builder onesInitializerBuilder = UniformRandom::Builder().minValue(1.0).maxValue(1.0);
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
-        weightsInitializerBuilder->tensorToInitialize(layer->getWeights());
-        weightsInitializerBuilder->layerThatOwnsTensor(layer.get());
-        initializers.push_back(weightsInitializerBuilder->build());
-        initDoneEvent = initializers.back()->getInitDoneEvent();
+        // FIXME: builder chaining
+        weightsInitializerBuilder->tensorToInitialize(physicalLayer->getWeights());
+        weightsInitializerBuilder->layerThatOwnsTensor(physicalLayer.get());
+        shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
+        weightsInitializer->initialize();
+        initDoneEvent = weightsInitializer->getInitDoneEvent();
+        if (initDoneEvent.isPresent())
+            initDoneEvents.push_back(initDoneEvent);
 
         shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
-        resultRunningVarianceBuilder->tensorToInitialize(batchNorm->getResultRunningVariance());
-        resultRunningVarianceBuilder->layerThatOwnsTensor(layer.get());
-        initializers.push_back(resultRunningVarianceBuilder->build());
-        initDoneEvent = initializers.back()->getInitDoneEvent();
+        resultRunningVarianceBuilder->tensorToInitialize(physicalBatchNorm->getResultRunningVariance());
+        resultRunningVarianceBuilder->layerThatOwnsTensor(physicalLayer.get());
+        shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
+        resultRunningVarianceInitializer->initialize();
+        initDoneEvent = resultRunningVarianceInitializer->getInitDoneEvent();
+        if (initDoneEvent.isPresent())
+            initDoneEvents.push_back(initDoneEvent);
 
         UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
 
-        assert(layer->getBiases().isPresent());
+        assert(physicalLayer->getBiases().isPresent());
         shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
-        biasInitializerBuilder->tensorToInitialize(layer->getBiases().get());
-        biasInitializerBuilder->layerThatOwnsTensor(layer.get());
-        initializers.push_back(biasInitializerBuilder->build());
-        initDoneEvent = initializers.back()->getInitDoneEvent();
+        biasInitializerBuilder->tensorToInitialize(physicalLayer->getBiases().get());
+        biasInitializerBuilder->layerThatOwnsTensor(physicalLayer.get());
+        shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
+        biasInitializer->initialize();
+        initDoneEvent = biasInitializer->getInitDoneEvent();
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
-        resultRunningMeanBuilder->tensorToInitialize(batchNorm->getResultRunningMean());
-        resultRunningMeanBuilder->layerThatOwnsTensor(layer.get());
-        initializers.push_back(resultRunningMeanBuilder->build());
-        initDoneEvent = initializers.back()->getInitDoneEvent();
+        resultRunningMeanBuilder->tensorToInitialize(physicalBatchNorm->getResultRunningMean());
+        resultRunningMeanBuilder->layerThatOwnsTensor(physicalLayer.get());
+        shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
+        resultRunningMeanInitializer->initialize();
+        initDoneEvent = resultRunningMeanInitializer->getInitDoneEvent();
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         // Start with the actual average until there are enough elements observed so that the running average
         // is a larger divisor than the actual.
-        batchNorm->setCurrentExponentialRunningAverageFactor(1.0);
+        physicalBatchNorm->setCurrentExponentialRunningAverageFactor(1.0);
+
+        if (hasOptimizer()) {
+            // Initialize the optimizer - it will follow the same process as above.
+            shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+            shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+                sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+
+            vector<Event> optimizerInitDoneEvents =
+                optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+            for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+                initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+        }
 
         return initDoneEvents;
     }

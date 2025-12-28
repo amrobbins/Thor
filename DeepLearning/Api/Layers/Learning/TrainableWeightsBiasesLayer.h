@@ -37,8 +37,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                          Optional<Event> sisterLayerLoadedEvent,
-                                          std::vector<std::shared_ptr<Initializer>> &initializers) {
+                                          Optional<Event> sisterLayerLoadedEvent) {
         return {};
     }
 

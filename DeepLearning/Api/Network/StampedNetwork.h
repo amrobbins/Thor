@@ -1,6 +1,5 @@
 #pragma once
 
-#include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
@@ -71,7 +70,6 @@ class StampedNetwork {
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> outputsShared;
     std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> trainableLayersShared;
     std::vector<std::shared_ptr<ThorImplementation::Layer>> otherLayersShared;
-    std::vector<std::shared_ptr<Thor::Initializer>> initializersShared;
     std::map<Thor::Tensor, std::shared_ptr<ThorImplementation::Layer>> apiTensorToPhysicalDrivingLayerShared;
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> apiLayerToPhysicalLayerShared;
     std::map<std::shared_ptr<ThorImplementation::Layer>, uint64_t, StampedNetwork::LayerComparatorShared> physicalLayerToApiLayerShared;
@@ -84,7 +82,6 @@ class StampedNetwork {
     std::vector<ThorImplementation::NetworkOutput *> outputs;
     std::vector<ThorImplementation::TrainableWeightsBiasesLayer *> trainableLayers;
     std::vector<ThorImplementation::Layer *> otherLayers;
-    std::vector<Thor::Initializer *> initializers;
     std::map<Thor::Tensor, ThorImplementation::Layer *> apiTensorToPhysicalDrivingLayer;
     std::map<uint64_t, ThorImplementation::Layer *> apiLayerToPhysicalLayer;
     std::map<ThorImplementation::Layer *, uint64_t, StampedNetwork::LayerComparator> physicalLayerToApiLayer;

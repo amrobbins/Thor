@@ -114,10 +114,7 @@ class Layer {
 
     // initialize() is called for a layer after it has been stamped, the first connection that is made to the layer.
     // often layers will not need initialize() at all.
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> layer,
-                                          std::vector<std::shared_ptr<Initializer>> &initializers) {
-        return {};
-    }
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> layer) { return {}; }
 
     virtual void addToNetwork(Network *network);
 

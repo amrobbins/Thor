@@ -40,20 +40,19 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         return physicalBatchNormalization;
     }
 
-    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
+    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
                                   bool isFirstStamp,
-                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
-                                  Optional<Event> sisterLayerLoadedEvent,
-                                  std::vector<std::shared_ptr<Initializer>> &initializers);
+                                  std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
+                                  Optional<Event> sisterPhysicalLayerLoadedEvent);
 
     // mem requirements are the weights
     virtual uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
-        uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16
+        uint64_t perInstanceWeights = (4 + featureInputs.size()) * numChannels * 2;  // FP16 FIXME not anymore
         uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;       // FP16
 
-        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();  // FP16
-        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();      // FP16
+        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();
 
         return perInstanceWeights + perInputState + batchSize * (featureOutputSize + errorOutputSize);
     }
@@ -63,8 +62,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         uint64_t numChannels = featureInputs[0].getDimensions()[0];
         uint64_t perInputState = (2 + featureInputs.size()) * numChannels * 2;  // FP16
 
-        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();  // FP16
-        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();      // FP16
+        uint64_t featureOutputSize = featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+        uint64_t errorOutputSize = featureInputs.size() * featureInputs[0].getTotalSizeInBytes();
 
         return perInputState + batchSize * (featureOutputSize + errorOutputSize);
     }
