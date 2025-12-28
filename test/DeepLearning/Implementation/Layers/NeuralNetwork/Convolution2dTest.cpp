@@ -140,20 +140,22 @@ TEST(Convolution2d, Convolution2dWorks) {
 
         Stream stream = layers.front()->getStream();
 
-        LayerTestHelper::connectAndInitializeNetwork(layers);
+        LayerTestHelper::connectNetwork(layers);
 
         float learningRate;
         if (!inferenceOnly) {
             learningRate = (10.0f * batchSize * Loss::getLossScalingFactor()) / ((rand() % 10) + 3);
             shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(convolution2dLayer, learningRate, 0, 0, false, 0);
+            sgd->compile();
             convolution2dLayer->setOptimizer(sgd);
             gradientUpdateStream = convolution2dLayer->getOptimizer().get()->getGradientUpdateStream();
         }
 
+        LayerTestHelper::initializeNetwork(layers);
+
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
             ASSERT_TRUE(convolution2dLayer->getErrorOutputs()[0].isEmpty());
-            ASSERT_TRUE(convolution2dLayer->getOptimizer() == nullptr);
         }
 
         if (!hasBias) {
@@ -449,6 +451,7 @@ TEST(Convolution2d, UniformRandomInitializes) {
                                                                                   topAndBottomPadHeight,
                                                                                   numOutputChannels,
                                                                                   hasBias);
+        convolution2dLayer->setConstructForInferenceOnly(true);
         layers.push_back(convolution2dLayer);
         layers.push_back(make_shared<NoOpLayer>());
         layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
