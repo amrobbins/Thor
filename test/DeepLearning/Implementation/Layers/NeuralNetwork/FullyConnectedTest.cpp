@@ -78,7 +78,7 @@ TEST(FullyConnected, FullyConnectedWorks) {
 
         Stream dataStream = layers.front()->getStream();
 
-        LayerTestHelper::connectAndInitializeNetwork(layers);
+        LayerTestHelper::connectNetwork(layers);
 
         float learningRate;
         if (!inferenceOnly) {
@@ -88,8 +88,11 @@ TEST(FullyConnected, FullyConnectedWorks) {
                 ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
             learningRate = (10.0f * batchSize * Loss::getLossScalingFactor()) / ((rand() % 10) + 3);
             shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(fullyConnectedLayer, learningRate, 0, 0, false, 0);
+            sgd->compile();
             fullyConnectedLayer->setOptimizer(sgd);
         }
+
+        LayerTestHelper::initializeNetwork(layers);
 
         // Backward tensors must not be created, since they would be unused and would waist memory.
         if (inferenceOnly) {
@@ -394,6 +397,7 @@ TEST(FullyConnected, UniformRandomInitializes) {
             make_shared<NetworkInput>(gpuPlacement, TensorDescriptor::DataType::FP16, featureIn.getDescriptor().getDimensions()));
         layers.push_back(make_shared<NoOpLayer>());
         shared_ptr<FullyConnected> fullyConnectedLayer = make_shared<FullyConnected>(numOutputFeatures, hasBiases);
+        fullyConnectedLayer->setConstructForInferenceOnly(true);
         layers.push_back(fullyConnectedLayer);
         layers.push_back(make_shared<NoOpLayer>());
         layers.push_back(make_shared<NetworkOutput>(cpuPlacement));
