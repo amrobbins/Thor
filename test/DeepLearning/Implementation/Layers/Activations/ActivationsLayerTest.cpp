@@ -54,6 +54,11 @@ TEST(Relu, Works) {
         Tensor destCpu(cpuPlacement, descriptor);
 
         half *featureInMem = (half *)featureInCpu.getMemPtr();
+        for (int i = 0; i < numElements; ++i) {
+            float x = ((rand() % 2001) - 1000) / 100.0f;  // [-10, 10]
+            featureInMem[i] = (half)x;
+        }
+
         vector<shared_ptr<Layer>> layers;
         layers.push_back(make_shared<NetworkInput>(featureInGpu));
         layers.push_back(make_shared<NoOpLayer>());
