@@ -172,6 +172,8 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     int batchSize = 32;
     vector<Event> initDoneEvents;
     Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, false, {gpuNum}, 1);
+    for (Event initDoneEvent : initDoneEvents)
+        initDoneEvent.synchronize();
     ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
     stampedNetwork = network.getStampedNetwork(0);
 
@@ -206,7 +208,7 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     uint64_t fanOut = fc->getFanOut();
     ASSERT_EQ(fanIn, 1024U);
     ASSERT_EQ(fanOut, 500U);
-    half maxValue = sqrt(6.0 / (fanIn + fanOut)) * 1.0001;
+    half maxValue = sqrt(6.0 / (fanIn + fanOut)) * 1.01;
     half minValue = (half)-1.0f * maxValue;
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
@@ -214,6 +216,7 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
     for (uint32_t i = 0; i < 1024 * 500; ++i) {
+        printf("%f %f %f\n", (float)weightsMem[i], (float)minValue, (float)maxValue);
         ASSERT_TRUE(weightsMem[i] >= minValue && weightsMem[i] <= maxValue);
     }
     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);

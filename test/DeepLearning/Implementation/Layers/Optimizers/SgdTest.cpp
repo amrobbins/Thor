@@ -39,8 +39,8 @@ static void verifyMatricesMatch(
         }
     }
     meanAbsoluteError /= (double)(rows * cols);
-    printf("MeanAbsoluteError: %lf\n", meanAbsoluteError);
-    fflush(stdout);
+    // printf("MeanAbsoluteError: %lf\n", meanAbsoluteError);
+    // fflush(stdout);
 
     //    if (print == false && meanAbsoluteError > 0.75) {
     //        verifyMatricesMatch(expected, actual, rows, cols, true, staticThresh, dynamicThresh);

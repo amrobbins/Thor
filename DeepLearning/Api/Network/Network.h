@@ -1,6 +1,5 @@
 #pragma once
 
-#include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
@@ -109,7 +108,6 @@ class Network {
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiOutputTensors;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiInputTensors;
 
-    std::vector<std::shared_ptr<Initializer>> initializers;
     std::shared_ptr<Optimizer> optimizer;
 
     // FIXME: this should be an unordered_map of gpu -> vector of stamps

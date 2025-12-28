@@ -108,7 +108,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
             initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
         }
 
-        // reorderStampedNetworkForTestability(stampedNetwork);
+        // FIXME: parentCompile() should be called by <implementationLayer>->compile()
+        // actually get rid of parentCompile and just do Class::compile
 
         // All layers are connected, so now they can all be compiled
         // for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
@@ -212,9 +213,6 @@ Network::StatusCode Network::place(uint32_t batchSize,
             if (statusCode != StatusCode::SUCCESS) {
                 return statusCode;
             }
-            bool initializeWeights = i == 0 && j == 0;
-            bool copyWeights = i != 0 && j == 0;
-            stampedNetworks.back().initialize(initializeWeights, copyWeights, copyWeights ? &(stampedNetworks[0]) : nullptr);
         }
     }
 
@@ -588,7 +586,7 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
         printf("stamped network input\n");
         fflush(stdout);
     }
-    networkInput->initialize(implementationNetworkInput, stampedNetwork.initializersShared);
+    networkInput->initialize(implementationNetworkInput);
     stampedNetwork.inputsShared.push_back(implementationNetworkInput);
     stampedNetwork.inputs.push_back(implementationNetworkInput.get());
     stampedNetwork.inputNamedShared[implementationNetworkInput->getName()] = implementationNetworkInput;
@@ -671,9 +669,6 @@ void Network::addLayerToNetwork(const Layer *layer) {
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
     }
 }
-
-// An initializer initializes one tensor
-void Network::addToNetwork(Initializer *initializer) { initializers.push_back(initializer->clone()); }
 
 // An optimizer is used to optimize all weights and biases in a network
 // If a new optimizer is added to the network it will replace the old one.
@@ -778,12 +773,11 @@ vector<Event> Network::stampLayer(Tensor inputTensor,
         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
             dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
         if (trainableLayer != nullptr) {
-            vector<Event> layerEvents = trainableLayer->initialize(
-                implementationTrainableLayer, true, nullptr, Optional<Event>::empty(), stampedNetwork.initializersShared);
+            vector<Event> layerEvents = trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
             initializationReadyEvents.insert(
                 initializationReadyEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
         } else {
-            vector<Event> layerEvents = layer->initialize(implementationLayer, stampedNetwork.initializersShared);
+            vector<Event> layerEvents = layer->initialize(implementationLayer);
             initializationReadyEvents.insert(
                 initializationReadyEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
         }
@@ -849,7 +843,7 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);
-    networkOutput->initialize(implementationNetworkOutput, stampedNetwork.initializersShared);
+    networkOutput->initialize(implementationNetworkOutput);
     assert(implementationNetworkOutput != nullptr);
     stampedNetwork.outputsShared.push_back(implementationNetworkOutput);
     stampedNetwork.outputs.push_back(implementationNetworkOutput.get());

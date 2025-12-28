@@ -222,8 +222,7 @@ void Convolution2d::deserialize(const json &j, Network *network) {
 vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer,
                                         bool isFirstStamp,
                                         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
-                                        Optional<Event> sisterPhysicalLayerLoadedEvent,
-                                        vector<shared_ptr<Initializer>> &initializers) {
+                                        Optional<Event> sisterPhysicalLayerLoadedEvent) {
     vector<Event> initDoneEvents;
 
     // Weights are set right now, based on 1 of 3 methods:
@@ -271,8 +270,9 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
         weightsInitializerBuilderClone->tensorToInitialize(physicalLayer->getWeights());
         weightsInitializerBuilderClone->layerThatOwnsTensor(physicalLayer.get());
-        initializers.push_back(weightsInitializerBuilderClone->build());
-        initDoneEvent = initializers.back()->getInitDoneEvent();
+        shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilderClone->build();
+        weightsInitializer->initialize();
+        initDoneEvent = weightsInitializer->getInitDoneEvent();
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
@@ -280,8 +280,9 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
             shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
             biasInitializerBuilderClone->tensorToInitialize(physicalLayer->getBiases().get());
             biasInitializerBuilderClone->layerThatOwnsTensor(physicalLayer.get());
-            initializers.push_back(biasInitializerBuilderClone->build());
-            initDoneEvent = initializers.back()->getInitDoneEvent();
+            shared_ptr<Initializer> biasInitializer = biasInitializerBuilderClone->build();
+            biasInitializer->initialize();
+            initDoneEvent = biasInitializer->getInitDoneEvent();
             if (initDoneEvent.isPresent())
                 initDoneEvents.push_back(initDoneEvent);
         }
