@@ -65,7 +65,8 @@ class Split : public MultiConnectionLayer {
                       TensorDescriptor(featureInputs[0].get().getDescriptor().getDataType(), dimensions));
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        MultiConnectionLayer::compileImpl();
         // Ensure that the right amount of axis elements are specified and all output tensors were connected
         unsigned long totalAxisElements = 0;
         for (unsigned int i = 0; i < axisElements.size(); ++i)
@@ -165,8 +166,6 @@ class Split : public MultiConnectionLayer {
         assert(cudaStatus == cudaSuccess);
         delete[] stridePerPackedTensorDimension;
     }
-
-    virtual void initialize() {}
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {}
 

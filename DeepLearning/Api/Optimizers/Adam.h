@@ -16,6 +16,12 @@ class Adam : public Optimizer {
     class Builder;
     virtual ~Adam();
 
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
+        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                                          bool isFirstStamp,
+                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
+                                          Optional<Event> sisterOptimizerLoadedEvent);
     virtual void setAlpha(float newAlpha);
     virtual float getAlpha();
     virtual void setBeta1(float newBeta1);
@@ -30,17 +36,11 @@ class Adam : public Optimizer {
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
     static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                                          bool isFirstStamp,
-                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent);
 
    protected:
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
-        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
-    virtual std::shared_ptr<Optimizer> clone() const;
-
     void updateParameters();
+
+    virtual std::shared_ptr<Optimizer> clone() const;
 
    private:
     float t = 0.0f;

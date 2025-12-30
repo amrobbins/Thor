@@ -82,7 +82,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     double getEpsilon() { return epsilon; }
     void setEpsilon(double epsilon) { this->epsilon = epsilon; }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        TrainableWeightsBiasesLayer::compileImpl();
         cudnnStatus_t cudnnStatus;
 
         assert(!featureInputs.empty());

@@ -18,7 +18,8 @@ CrossEntropy::CrossEntropy(CrossEntropyLossType crossEntropyLossType, TensorDesc
 
 CrossEntropy::~CrossEntropy() {}
 
-void CrossEntropy::compile() {
+void CrossEntropy::compileImpl() {
+    Layer::compileImpl();
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
     assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);

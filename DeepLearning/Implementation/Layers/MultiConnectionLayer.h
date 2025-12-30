@@ -13,8 +13,8 @@ class MultiConnectionLayer : public Layer {
    public:
     virtual ~MultiConnectionLayer() {}
 
-    virtual void parentCompile() {
-        Layer::parentCompile();
+    virtual void compileImpl() {
+        Layer::compileImpl();
 
         numEmptyErrorInputConnections = 0;
         for (unsigned int i = 0; i < errorInputs.size(); ++i) {
@@ -23,6 +23,11 @@ class MultiConnectionLayer : public Layer {
             else
                 numEmptyErrorInputConnections += 1;
         }
+    }
+
+    virtual void initialize() {
+        Layer::initialize();
+        stillWaitingForErrorInputTensors = allErrorInputTensorIds;
     }
 
     // For situations where the error input should just pass through to the error output of the next layer,
@@ -51,12 +56,6 @@ class MultiConnectionLayer : public Layer {
                 allErrorInputTensorIds.insert(errorInputs[i].get().getTensorId());
         }
         assert(replacementHappend);
-    }
-
-    virtual void parentInitialize() {
-        Layer::parentInitialize();
-
-        stillWaitingForErrorInputTensors = allErrorInputTensorIds;
     }
 
     virtual void forward(Optional<Tensor> featureInput, bool validationPass) {

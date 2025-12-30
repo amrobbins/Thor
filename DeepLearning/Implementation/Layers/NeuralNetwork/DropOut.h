@@ -54,7 +54,9 @@ class DropOut : public Layer {
         return numBytes;
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        Layer::compileImpl();
+
         cudnnStatus_t cudnnStatus;
 
         // The random state may not change between calls of cudnnDropoutForward(...) and cudnnDropoutBackward(...),

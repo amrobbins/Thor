@@ -512,9 +512,7 @@ TEST(TensorFanout, CreatesFanout) {
     // Special case, two outputs
     layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
     layers[1]->connectToNextLayer(layers[3].get());
-    layers[3]->parentCompile();
     layers[3]->compile();
-    layers[3]->parentInitialize();
     layers[3]->initialize();
 
     Tensor outputGpu0 = layers[2]->getFeatureOutput();

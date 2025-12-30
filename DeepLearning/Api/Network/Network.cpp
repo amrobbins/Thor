@@ -31,7 +31,8 @@ Network::~Network() {
     stampedNetworks.clear();
 }
 
-Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
+// Records the layers in sorted DAG order.
+Network::StatusCode Network::createDagAndFreeze() {
     if (!frozen) {
         StatusCode status = evaluateGraph();
         if (status != StatusCode::SUCCESS)
@@ -40,6 +41,11 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
         frozen = true;
     }
 
+    return StatusCode::SUCCESS;
+}
+
+// Calls preomptimize on each layer, one at a time, in DAG order.
+void Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
     for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it) {
         Optional<Tensor> inputTensor = it->first;
         shared_ptr<Layer> layer = it->second;
@@ -48,21 +54,12 @@ Network::StatusCode Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
             layer->preOptimize(inputTensor.get(), batchSize, MachineEvaluator::instance().getCopyStreamFromCpu(gpuNum));
         }
     }
-
-    return StatusCode::SUCCESS;
 }
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
 Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &initDoneEvents, uint32_t batchSize) {
     ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
-
-    StatusCode preoptimizeStatus = preOptimize(gpuNum, batchSize);
-    if (preoptimizeStatus != StatusCode::SUCCESS) {
-        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString((int)preoptimizeStatus).c_str());
-        fflush(stdout);
-    }
-    assert(preoptimizeStatus == StatusCode::SUCCESS);
 
     // FIXME: check for non-first instance to use shared weights
     // FIXME: support other gpus
@@ -76,6 +73,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
     if (MachineEvaluator::instance().getFreeMemBytes(gpuNum) < firstInstanceBytes + 100000000)
         return StatusCode::GPU_OUT_OF_MEMORY;
 
+    // 1. Stamp (i.e. construct) all layers
+    // 2. At the moment, I connect the layers upon stamping them, I think I should change that and stamp everything first,
+    //    then for the next phase, connect them
     stampedNetwork.clear();
     try {
         // FIXME: need to throw GPU_OUT_OF_MEMORY when stamping and run out of memory
@@ -104,53 +104,35 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
                 continue;
             }
 
-            vector<Event> layerEvents = stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
-            initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
+            stampLayer(inputTensor, layer, gpuNum, batchSize, stampedNetwork);
         }
 
-        // FIXME: parentCompile() should be called by <implementationLayer>->compile()
-        // actually get rid of parentCompile and just do Class::compile
+        // 3. Now that all layers have been constructed and connected, compile all layers
+        for (const std::shared_ptr<Layer> &apiLayer : allLayersInNetworkList) {
+            // It is possible for an implementation layer to have no physical layer, for example a stub layer
+            if (stampedNetwork.apiLayerToPhysicalLayerShared.count(apiLayer->getId()) == 0)
+                continue;
 
-        // All layers are connected, so now they can all be compiled
-        // for (uint32_t i = 0; i < stampedNetwork.trainableLayers.size(); ++i) {
-        for (ThorImplementation::TrainableWeightsBiasesLayer *trainableLayer : stampedNetwork.trainableLayers) {
-            // FIXME: All layer derived classes call parentCompile() at the top of compile
-            //        actually parentCompile is just a bad pattern. all layers call <Super>::compile()
-            trainableLayer->parentCompile();
-            trainableLayer->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward += trainableLayer->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward += trainableLayer->floatingPointOperationsPerExampleForward();
-        }
-        for (ThorImplementation::NetworkInput *input : stampedNetwork.inputs) {
-            input->parentCompile();
-            input->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward += input->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward += input->floatingPointOperationsPerExampleForward();
-        }
-        for (ThorImplementation::NetworkOutput *output : stampedNetwork.outputs) {
-            output->parentCompile();
-            output->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward += output->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward += output->floatingPointOperationsPerExampleForward();
-        }
-        for (ThorImplementation::Layer *layer : stampedNetwork.otherLayers) {
-            layer->parentCompile();
-            layer->compile();
-            stampedNetwork.floatingPointOperationsPerExampleForward += layer->floatingPointOperationsPerExampleForward();
-            stampedNetwork.floatingPointOperationsPerExampleBackward += layer->floatingPointOperationsPerExampleBackward();
+            shared_ptr<ThorImplementation::Layer> implementationLayer = stampedNetwork.apiLayerToPhysicalLayerShared[apiLayer->getId()];
+            apiLayer->compile(implementationLayer);
+            stampedNetwork.floatingPointOperationsPerExampleForward += implementationLayer->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward += implementationLayer->floatingPointOperationsPerExampleForward();
         }
 
-        // Now that all layers are compiled, stamp the optimizers onto the trainable layers
-        for (const std::shared_ptr<TrainableWeightsBiasesLayer> &apiTrainableLayer : allTrainableLayersInNetwork) {
-            shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.apiLayerToPhysicalLayerShared[apiTrainableLayer->getId()];
-            shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer =
-                dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-            bool isInferenceOnly = physicalTrainableLayer->isInferenceOnly();
-            if (!isInferenceOnly) {
-                // A trainable layer should either
-                //   1. be inference only or
-                //   2. have a back-prop error path that has not been pruned.
-                apiTrainableLayer->stampOptimizer(physicalTrainableLayer);
+        // Now that all layers are constructed, connected and compiled, initialize all layers
+        // (that in turn initialize their optimizers)
+        for (shared_ptr<Layer> layer : allLayersInNetworkList) {
+            shared_ptr<ThorImplementation::Layer> implementationLayer = stampedNetwork.apiLayerToPhysicalLayerShared[layer->getId()];
+            shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layer);
+            if (trainableLayer != nullptr) {
+                shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
+                    dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
+                vector<Event> layerEvents =
+                    trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
+                initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
+            } else {
+                vector<Event> layerEvents = layer->initialize(implementationLayer);
+                initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
             }
         }
 
@@ -206,8 +188,18 @@ Network::StatusCode Network::place(uint32_t batchSize,
         }
     }
 
+    StatusCode dagStatus = createDagAndFreeze();
+    if (dagStatus != StatusCode::SUCCESS) {
+        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString((int)dagStatus).c_str());
+        fflush(stdout);
+    }
+    assert(dagStatus == StatusCode::SUCCESS);
+
+    // FIXME: pull preOptimize into initialize
     for (uint32_t i = 0; i < devices.size(); ++i) {
         preOptimize(devices[i], batchSize);
+    }
+    for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
             statusCode = stampNetwork(devices[i], initDoneEvents, batchSize);
             if (statusCode != StatusCode::SUCCESS) {
@@ -586,7 +578,6 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
         printf("stamped network input\n");
         fflush(stdout);
     }
-    networkInput->initialize(implementationNetworkInput);
     stampedNetwork.inputsShared.push_back(implementationNetworkInput);
     stampedNetwork.inputs.push_back(implementationNetworkInput.get());
     stampedNetwork.inputNamedShared[implementationNetworkInput->getName()] = implementationNetworkInput;
@@ -692,11 +683,11 @@ void Network::attachOptimizerToLayers(bool replaceIfExisting) {
     }
 }
 
-vector<Event> Network::stampLayer(Tensor inputTensor,
-                                  const shared_ptr<Thor::Layer> layer,
-                                  uint32_t gpuNum,
-                                  uint32_t batchSize,
-                                  ThorImplementation::StampedNetwork &stampedNetwork) {
+void Network::stampLayer(Tensor inputTensor,
+                         const shared_ptr<Thor::Layer> layer,
+                         uint32_t gpuNum,
+                         uint32_t batchSize,
+                         ThorImplementation::StampedNetwork &stampedNetwork) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
     shared_ptr<Thor::Layer> apiDrivingLayer =
@@ -741,7 +732,7 @@ vector<Event> Network::stampLayer(Tensor inputTensor,
     // Stamp the layer
     // Unless it was previously stamped on a prior pass, if so just connect the tensor.
     shared_ptr<ThorImplementation::Layer> implementationLayer = nullptr;
-    vector<Event> initializationReadyEvents;
+    // vector<Event> initializationReadyEvents;
     bool layerPreviouslyStamped = (stampedNetwork.apiLayerToPhysicalLayer.count(layer->getId()) == 1);
     // In case of a tensor fanout, there is no apiLayer...
     if (layerPreviouslyStamped) {
@@ -768,20 +759,6 @@ vector<Event> Network::stampLayer(Tensor inputTensor,
         }
     }
     Layer::connectTwoLayers(physicalDrivingLayer, implementationLayer, apiDrivingLayer, layer, inputTensor);
-    if (!layerPreviouslyStamped) {
-        shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = dynamic_pointer_cast<TrainableWeightsBiasesLayer>(layer);
-        shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> implementationTrainableLayer =
-            dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(implementationLayer);
-        if (trainableLayer != nullptr) {
-            vector<Event> layerEvents = trainableLayer->initialize(implementationTrainableLayer, true, nullptr, Optional<Event>::empty());
-            initializationReadyEvents.insert(
-                initializationReadyEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
-        } else {
-            vector<Event> layerEvents = layer->initialize(implementationLayer);
-            initializationReadyEvents.insert(
-                initializationReadyEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
-        }
-    }
 
     vector<Tensor> apiOutputTensors = layer->getAllOutputTensors();
     for (uint32_t i = 0; i < apiOutputTensors.size(); ++i) {
@@ -801,7 +778,7 @@ vector<Event> Network::stampLayer(Tensor inputTensor,
         }
     }
 
-    return initializationReadyEvents;
+    // eturn initializationReadyEvents;
 }
 
 void Network::stampNetworkOutput(Tensor inputTensor,
@@ -843,7 +820,6 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     shared_ptr<ThorImplementation::NetworkOutput> implementationNetworkOutput =
         dynamic_pointer_cast<ThorImplementation::NetworkOutput>(implementationLayer);
     Layer::connectTwoLayers(physicalDrivingLayer, implementationNetworkOutput, apiDrivingLayer, networkOutput, inputTensor);
-    networkOutput->initialize(implementationNetworkOutput);
     assert(implementationNetworkOutput != nullptr);
     stampedNetwork.outputsShared.push_back(implementationNetworkOutput);
     stampedNetwork.outputs.push_back(implementationNetworkOutput.get());

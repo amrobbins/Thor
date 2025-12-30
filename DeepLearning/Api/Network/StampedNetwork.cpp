@@ -133,25 +133,21 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
 void StampedNetwork::clear() {
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         inputs[i]->cleanup();
-        inputs[i]->parentCleanup();
     }
     inputs.clear();
 
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         outputs[i]->cleanup();
-        outputs[i]->parentCleanup();
     }
     outputs.clear();
 
     for (uint32_t i = 0; i < trainableLayers.size(); ++i) {
         trainableLayers[i]->cleanup();
-        trainableLayers[i]->parentCleanup();
     }
     trainableLayers.clear();
 
     for (uint32_t i = 0; i < otherLayers.size(); ++i) {
         otherLayers[i]->cleanup();
-        otherLayers[i]->parentCleanup();
     }
     otherLayers.clear();
 

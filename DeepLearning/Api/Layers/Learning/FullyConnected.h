@@ -103,9 +103,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         //  with multiple connections, it would just share weights, etc.
         std::shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected =
             std::make_shared<ThorImplementation::FullyConnected>(numOutputFeatures, hasBias, getId());
-        // Too early here, that phys layer constructor does nothing. Need to set the optimizer, but the phys layer later compiles it.
-        if (hasOptimizer())
-            physicalFullyConnected->setOptimizer(optimizer->stamp(physicalFullyConnected));
+        stampOptimizer(physicalFullyConnected);
 
         return physicalFullyConnected;
     }

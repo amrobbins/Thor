@@ -13,7 +13,8 @@ MeanAbsoluteError::~MeanAbsoluteError() {}
 
 MeanAbsoluteError::MeanAbsoluteError(TensorDescriptor::DataType lossDataType) : Loss(lossDataType) {}
 
-void MeanAbsoluteError::compile() {
+void MeanAbsoluteError::compileImpl() {
+    Layer::compileImpl();
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
     assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);

@@ -20,6 +20,16 @@ class Optimizer {
    public:
     virtual ~Optimizer();
 
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
+        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) = 0;
+    virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer) { physicalOptimizer->compile(); }
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                                          bool isFirstStamp,
+                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
+                                          Optional<Event> sisterOptimizerLoadedEvent) {
+        return {};
+    };
+
     /*
      * returns a map of updated parameters
      */
@@ -42,14 +52,6 @@ class Optimizer {
     using Deserializer = std::function<std::shared_ptr<Optimizer>(const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
     static void registerLayer(std::string name, Deserializer fn);
-
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
-        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) = 0;
-
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                                          bool isFirstStamp,
-                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent) = 0;
 
     std::string getVersion() const;
 

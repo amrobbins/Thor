@@ -183,8 +183,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         return errorOutput;
     }
 
-    virtual void parentCompile() {
-        MultiConnectionLayer::parentCompile();
+    virtual void compileImpl() {
+        MultiConnectionLayer::compileImpl();
 
         if (!isInferenceOnly()) {
             assert(!featureInputs.empty());

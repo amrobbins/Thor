@@ -14,7 +14,7 @@ class Softmax : public Activation {
 
     virtual Optional<Tensor> createFeatureOutputTensor();
 
-    virtual void compile();
+    virtual void postCompile();
 
     void cleanup();
 

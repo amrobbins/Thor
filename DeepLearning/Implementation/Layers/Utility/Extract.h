@@ -30,7 +30,8 @@ class Extract : public Layer {
                       TensorDescriptor(featureInput.get().getDescriptor().getDataType(), outputTensorDimensions));
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        Layer::compileImpl();
         assert(featureInput.isPresent());
         assert(featureOutput.isPresent());
 

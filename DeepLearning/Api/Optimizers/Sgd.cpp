@@ -124,19 +124,6 @@ shared_ptr<Optimizer> Sgd::deserialize(const json &j) {
     return sgd.clone();
 }
 
-vector<Event> Sgd::initialize(shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                              bool isFirstStamp,
-                              shared_ptr<ThorImplementation::Optimizer> sisterPhysicalOptimizer,
-                              Optional<Event> sisterOptimizerLoadedEvent) {
-    shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
-    assert(physicalSgd != nullptr);
-    physicalSgd->compile();
-
-    // SGD has no weights and its parameters are set as arguments to the constructor during stamp.
-
-    return {};
-}
-
 }  // namespace Thor
 
 namespace {

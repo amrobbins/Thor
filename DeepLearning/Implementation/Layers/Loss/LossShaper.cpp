@@ -27,7 +27,8 @@ Optional<Tensor> LossShaper::createFeatureOutputTensor() {
     return outputTensor;
 }
 
-void LossShaper::compile() {
+void LossShaper::compileImpl() {
+    Layer::compileImpl();
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
 

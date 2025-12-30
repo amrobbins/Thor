@@ -46,7 +46,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         }
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        TrainableWeightsBiasesLayer::compileImpl();
         int gpuNum;
         assert(!featureInputs.empty());
         assert(featureInputs[0].isPresent());
@@ -54,8 +55,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(!streams.empty());
         gpuNum = featureInputs[0].get().getPlacement().getDeviceNum();
         ScopedGpu scopedGpu(gpuNum);
-
-        TrainableWeightsBiasesLayer::compile();
 
         batchSize = featureInputs[0].get().getDescriptor().getDimensions()[0];
         numInputFeatures = featureInputs[0].get().getDescriptor().getDimensions()[1];

@@ -105,16 +105,16 @@ class Layer {
     Optional<Tensor> featureInput;
     Optional<Tensor> featureOutput;
 
-    // Note: The final API typed parameters are needed to choose from multiple types of output connections and input connections for
-    // physical layers that are direct replacements for API layers.
+    // stamp (constructor) -> connect (by Network) -> compile (allocate) -> initialize (set state async)
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                              std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                              std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                              Thor::Tensor connectingApiTensor) const = 0;
 
-    // initialize() is called for a layer after it has been stamped, the first connection that is made to the layer.
-    // often layers will not need initialize() at all.
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> layer) { return {}; }
+    virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) { physicalLayer->compile(); }
+
+    // initialize() is called for a layer after it has been stamped, connected and then compiled.
+    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Layer> physicalLayer) { return {}; }
 
     virtual void addToNetwork(Network *network);
 

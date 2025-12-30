@@ -88,6 +88,7 @@ class Metric : public Layer {
     virtual ~Metric() {}
 
     virtual void initialize() {
+        Layer::initialize();
         featureInputReceived = false;
         labelsReceived = false;
     }

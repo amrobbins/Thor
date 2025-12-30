@@ -17,7 +17,7 @@ Optional<Tensor> Softmax::createFeatureOutputTensor() {
     return featureInput.get().clone();
 }
 
-void Softmax::compile() {
+void Softmax::postCompile() {
     cudnnTensorDescriptor =
         createCudnnTensorDescriptor(featureInput.get().getDescriptor().getDimensions(), featureInput.get().getDescriptor().getDataType());
 
@@ -29,6 +29,7 @@ void Softmax::compile() {
         }
         errorOutput = errorInput;
     }
+    Layer::postCompile();
 }
 
 void Softmax::cleanup() {
