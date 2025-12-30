@@ -212,7 +212,8 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
                                          bool isFirstStamp,
                                          shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
                                          Optional<Event> sisterPhysicalLayerLoadedEvent) {
-    vector<Event> initDoneEvents;
+    vector<Event> initDoneEvents =
+        TrainableWeightsBiasesLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
 
     // Weights are set right now, based on 1 of 3 methods:
     // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp

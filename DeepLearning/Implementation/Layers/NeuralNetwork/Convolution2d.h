@@ -90,8 +90,8 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                       TensorDescriptor(TensorDescriptor::DataType::FP16, {batchSize, numOutputChannels, numOutputRows, numOutputColumns}));
     }
 
-    virtual void compile() {
-        TrainableWeightsBiasesLayer::compile();
+    virtual void compileImpl() {
+        TrainableWeightsBiasesLayer::compileImpl();
 
         int gpuNum;
         assert(!featureInputs.empty());

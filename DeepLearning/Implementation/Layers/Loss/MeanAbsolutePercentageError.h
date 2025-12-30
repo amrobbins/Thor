@@ -20,7 +20,7 @@ class MeanAbsolutePercentageError : public Loss {
                                 float epsilon = 0.0001,
                                 float maxMagnitude = 1000.0f);
 
-    virtual void compile();
+    virtual void compileImpl();
 
     virtual void cleanup() {}
 

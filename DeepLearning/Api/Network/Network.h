@@ -119,8 +119,9 @@ class Network {
     uint64_t firstInstanceBytes;
     uint64_t nonFirstInstanceBytes;
 
+    virtual StatusCode createDagAndFreeze();
+    virtual void preOptimize(uint32_t gpuNum, uint32_t batchSize);
     virtual StatusCode stampNetwork(uint32_t gpuNum, std::vector<Event> &initDoneEvents, uint32_t batchSize);
-    virtual StatusCode preOptimize(uint32_t gpuNum, uint32_t batchSize);
 
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForDuplicateInOutPortNames();
@@ -138,11 +139,11 @@ class Network {
                                     uint32_t gpuNum,
                                     uint32_t batchSize,
                                     ThorImplementation::StampedNetwork &stampedNetwork);
-    virtual std::vector<Event> stampLayer(Tensor inputTensor,
-                                          const std::shared_ptr<Thor::Layer> layer,
-                                          uint32_t gpuNum,
-                                          uint32_t batchSize,
-                                          ThorImplementation::StampedNetwork &stampedNetwork);
+    virtual void stampLayer(Tensor inputTensor,
+                            const std::shared_ptr<Thor::Layer> layer,
+                            uint32_t gpuNum,
+                            uint32_t batchSize,
+                            ThorImplementation::StampedNetwork &stampedNetwork);
 
     void createBatchDimensions(std::vector<uint64_t> &batchDimensions, std::vector<uint64_t> tensorDimensions, uint32_t batchSize);
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <boost/interprocess/offset_ptr.hpp>
+
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 
@@ -24,21 +26,11 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
-    virtual void stampOptimizer(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalLayer) const {
-        // FIXME: when mutiple stamps are supported, optimizer and layer will need to know if there is already one stamped
-        //        for that layer on that GPU, to share things like weights, gradientUpdateStream's.
-        assert(physicalLayer->isCompiled());
-        if (hasOptimizer()) {
-            std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalLayer);
-            physicalLayer->setOptimizer(physicalOptimizer);
-        }
-    }
-
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,
                                           Optional<Event> sisterLayerLoadedEvent) {
-        return {};
+        return MultiConnectionLayer::initialize(layer);
     }
 
     void attachOptimizer(std::shared_ptr<Optimizer> optimizer) { this->optimizer = optimizer; }
@@ -48,6 +40,34 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     void removeOptimizer();
 
    protected:
+    // Helper function to call stamp() on the optimizer and then associate it with the physical layer
+    virtual void stampOptimizer(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer) const {
+        // FIXME: when mutiple stamps are supported, optimizer and layer will need to know if there is already one stamped
+        //        for that layer on that GPU, to share things like weights, gradientUpdateStream's.
+        if (!physicalTrainableLayer->isInferenceOnly())
+            assert(hasOptimizer());
+        if (hasOptimizer()) {
+            std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = optimizer->stamp(physicalTrainableLayer);
+            physicalTrainableLayer->setOptimizer(physicalOptimizer);
+        }
+    }
+
+    virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) {
+        if (!physicalLayer->isInferenceOnly())
+            assert(hasOptimizer());
+        if (hasOptimizer()) {
+            assert(physicalLayer != nullptr);
+            std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer =
+                dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+            assert(physicalTrainableLayer != nullptr);
+            std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalTrainableLayer->getOptimizer();
+            assert(physicalOptimizer != nullptr);
+            optimizer->compile(physicalOptimizer);
+        }
+
+        MultiConnectionLayer::compile(physicalLayer);
+    }
+
     Tensor weights;
     Optional<Tensor> biases;
     Optional<Tensor> weightsGradient;

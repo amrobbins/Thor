@@ -17,7 +17,8 @@ MeanAbsolutePercentageError::MeanAbsolutePercentageError(TensorDescriptor::DataT
     this->maxMagnitude = maxMagnitude;
 }
 
-void MeanAbsolutePercentageError::compile() {
+void MeanAbsolutePercentageError::compileImpl() {
+    Layer::compileImpl();
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
     assert(featureInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);

@@ -158,7 +158,6 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
                                Optional<Event> sisterOptimizerLoadedEvent) {
     shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
     assert(physicalAdam != nullptr);
-    physicalAdam->compile();
 
     ThorImplementation::Tensor m = physicalAdam->getM();
     ThorImplementation::Tensor v = physicalAdam->getV();

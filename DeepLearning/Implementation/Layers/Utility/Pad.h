@@ -31,7 +31,8 @@ class Pad : public Layer {
                       TensorDescriptor(featureInput.get().getDescriptor().getDataType(), paddedDimensions));
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        Layer::compileImpl();
         assert(featureInput.isPresent());
         assert(featureOutput.isPresent());
 

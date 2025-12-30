@@ -125,6 +125,8 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
                                              bool isFirstStamp,
                                              shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterPhysicalLayer,
                                              Optional<Event> sisterPhysicalLayerLoadedEvent) {
+    vector<Event> initDoneEvents =
+        TrainableWeightsBiasesLayer::initialize(physicalLayer, isFirstStamp, sisterPhysicalLayer, sisterPhysicalLayerLoadedEvent);
     shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNorm =
         dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
     shared_ptr<ThorImplementation::BatchNormalization> sisterPhysicalBatchNorm =
@@ -159,7 +161,7 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
         physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
 
-        return {stream.putEvent(false, true)};
+        initDoneEvents.emplace_back(false, true);
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
@@ -181,11 +183,10 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
         physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
 
-        return {stream.putEvent(false, true)};
+        initDoneEvents.emplace_back(false, true);
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
         Optional<Event> initDoneEvent;
-        vector<Event> initDoneEvents;
 
         UniformRandom::Builder onesInitializerBuilder = UniformRandom::Builder().minValue(1.0).maxValue(1.0);
 
@@ -244,9 +245,9 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
             for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
                 initDoneEvents.push_back(optimizerInitDoneEvents[i]);
         }
-
-        return initDoneEvents;
     }
+
+    return initDoneEvents;
 }
 
 }  // namespace Thor

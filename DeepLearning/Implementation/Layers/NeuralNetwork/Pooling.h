@@ -31,7 +31,8 @@ class Pooling : public Layer {
         assert(horizontalStride > 0);
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        Layer::compileImpl();
         cudnnStatus_t cudnnStatus;
 
         assert(featureInput.isPresent());

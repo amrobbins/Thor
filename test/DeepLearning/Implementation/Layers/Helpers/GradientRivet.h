@@ -16,8 +16,6 @@ class GradientRivet : public Layer {
         return featureOutput;
     }
 
-    virtual void compile() {}
-
     virtual void replaceErrorInput(Optional<Tensor> oldErrorInput, Optional<Tensor> newErrorInput) {}
 
     virtual void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) {

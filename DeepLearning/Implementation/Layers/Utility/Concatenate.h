@@ -78,7 +78,8 @@ class Concatenate : public MultiConnectionLayer {
         return Tensor(featureInputs[0].get().getPlacement(), outputDescriptor);
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        MultiConnectionLayer::compileImpl();
         assert(featureOutputs.size() == 1);
         assert(featureOutputs[0].isPresent());
         assert(nextLayers.size() == 1);
@@ -164,7 +165,10 @@ class Concatenate : public MultiConnectionLayer {
             allFeatureInputTensorIds.insert(featureInputs[i].get().getTensorId());
     }
 
-    virtual void initialize() { stillWaitingForFeatureInputTensors = allFeatureInputTensorIds; }
+    virtual void initialize() {
+        MultiConnectionLayer::initialize();
+        stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
+    }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) {}
 

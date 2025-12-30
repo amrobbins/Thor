@@ -69,11 +69,10 @@ class Layer {
     Layer(const Layer &) = delete;
 
     // allocate anything needed for execution, choose optimal kernels, etc.
-    virtual void compile() {}
-
-    virtual void parentCompile() {
-        assert(!compiled);
-        compiled = true;
+    virtual void compile() final {
+        preCompile();
+        compileImpl();
+        postCompile();
     }
 
     virtual ~Layer() {}
@@ -86,19 +85,14 @@ class Layer {
     virtual std::string getName() const { return name; }
 
     // initialize weights using the configured initializer. In general set any initial values.
-    virtual void initialize() {}
-
-    // Initialization needed by the Layer parent object
-    virtual void parentInitialize() {
+    virtual void initialize() {
         assert(compiled);
         assert(!running);
         running = true;
     }
 
     // release any resources that are used for execution and need to be released
-    virtual void cleanup() {}
-
-    virtual void parentCleanup() {
+    virtual void cleanup() {
         compiled = false;
         running = false;
     }
@@ -350,6 +344,13 @@ class Layer {
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) = 0;
 
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) = 0;
+
+    // Layers can override preCompile() and must first call <Super>::preCompile()
+    // Layers can override compileImpl() and must call <Super>::compileImpl() at any point during the function, usually first.
+    // Layers can override postCompile() and must call <Super>::postCompile() last
+    virtual void preCompile() { assert(!compiled); }
+    virtual void compileImpl() {};
+    virtual void postCompile() { compiled = true; }
 
     bool running;
     bool compiled;

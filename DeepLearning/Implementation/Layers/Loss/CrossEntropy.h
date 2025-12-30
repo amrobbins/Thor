@@ -22,7 +22,7 @@ class CrossEntropy : public Loss {
 
     CrossEntropy(bool indexLabels);
 
-    virtual void compile();
+    virtual void compileImpl();
 
     virtual void cleanup() {}
 

@@ -35,8 +35,8 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
         std::shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormalization =
             std::make_shared<ThorImplementation::BatchNormalization>(true, getId(), exponentialRunningAverageFactor, epsilon);
-        if (hasOptimizer())
-            physicalBatchNormalization->setOptimizer(optimizer->stamp(physicalBatchNormalization));
+        stampOptimizer(physicalBatchNormalization);
+
         return physicalBatchNormalization;
     }
 

@@ -18,7 +18,7 @@ class Sigmoid : public Activation {
         return featureInput.get().clone();
     }
 
-    virtual void compile() {
+    virtual void postCompile() {
         if (backwardComputedExternally) {
             // ErrorInput to the previous layer is the errorInput coming to this layer,
             // then backProp is a no op
@@ -27,6 +27,7 @@ class Sigmoid : public Activation {
             }
             errorOutput = errorInput;
         }
+        Layer::postCompile();
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {

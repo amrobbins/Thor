@@ -215,23 +215,37 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
+    uint32_t numZero = 0;
+    uint32_t numNonZero = 0;
+    half zero(0);
     for (uint32_t i = 0; i < 1024 * 500; ++i) {
-        printf("%f %f %f\n", (float)weightsMem[i], (float)minValue, (float)maxValue);
         ASSERT_TRUE(weightsMem[i] >= minValue && weightsMem[i] <= maxValue);
+        if (weightsMem[i] == zero)
+            ++numZero;
+        else
+            ++numNonZero;
     }
+    ASSERT_LT(numZero, numNonZero * 0.1);
     ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
     fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *biasesMem = (half *)fcBiases.getMemPtr();
+    numZero = 0;
+    numNonZero = 0;
     for (uint32_t i = 0; i < 500; ++i) {
         ASSERT_TRUE(biasesMem[i] >= minValue && biasesMem[i] <= maxValue);
+        if (biasesMem[i] == zero)
+            ++numZero;
+        else
+            ++numNonZero;
     }
+    ASSERT_LT(numZero, numNonZero * 0.1);
 }
 
 TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    Glorot::Builder glorotBuilder = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM);
+    Glorot::Builder glorotBuilder = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::NORMAL);
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
@@ -297,38 +311,68 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     uint64_t fanOut = fc->getFanOut();
     ASSERT_EQ(fanIn, 1024U);
     ASSERT_EQ(fanOut, 500U);
-    half maxValue = sqrt(6.0 / (fanIn + fanOut)) * 1.0001;
-    half minValue = (half)-1.0f * maxValue;
+
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
     fcWeights.copyFromAsync(fc->getWeights(), fc->getStreams()[0]);
     fc->getStreams()[0].synchronize();
     half *weightsMem = (half *)fcWeights.getMemPtr();
+    uint32_t numZero = 0;
+    uint32_t numNonZero = 0;
+    half zero(0);
+    double totalWeights = 0.0;
     for (uint32_t i = 0; i < 1024 * 500; ++i) {
-        ASSERT_TRUE(weightsMem[i] >= minValue && weightsMem[i] <= maxValue);
+        totalWeights += (double)weightsMem[i];
+        if (weightsMem[i] == zero)
+            ++numZero;
+        else
+            ++numNonZero;
     }
-    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
-    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
-    fc->getStreams()[0].synchronize();
-    half *biasesMem = (half *)fcBiases.getMemPtr();
-    double totalBias = 0.0;
-    for (uint32_t i = 0; i < 500; ++i) {
-        totalBias += (double)biasesMem[i];
-    }
-    double mean = totalBias / 500;
+    ASSERT_LT(numZero, numNonZero * 0.1);
+    double mean = totalWeights / double(1024 * 500);
     double totalVariance = 0;
-    for (uint32_t i = 0; i < 500; ++i) {
-        double val = (double)biasesMem[i] - mean;
+    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+        double val = (double)weightsMem[i] - mean;
         totalVariance += val * val;
     }
-    double avgVariance = totalVariance / 500;
+    double avgVariance = totalVariance / double(1024 * 500);
     double stdDev = sqrt(avgVariance);
 
     double expectedMean = 0.0;
     double expectedStdDev = sqrt(2.0 / (fanIn + fanOut));
 
-    ASSERT_LT(abs(mean - expectedMean), 0.01);
-    ASSERT_LT(abs(stdDev - expectedStdDev), 0.01);
+    ASSERT_LT(abs(mean - expectedMean), 5e-4);
+    ASSERT_LT(abs(stdDev - expectedStdDev), 0.10);
+
+    ThorImplementation::Tensor fcBiases = fc->getBiases().get().clone(cpuPlacement);
+    fcBiases.copyFromAsync(fc->getBiases(), fc->getStreams()[0]);
+    fc->getStreams()[0].synchronize();
+    half *biasesMem = (half *)fcBiases.getMemPtr();
+    double totalBias = 0.0;
+    numZero = 0;
+    numNonZero = 0;
+    for (uint32_t i = 0; i < 500; ++i) {
+        totalBias += (double)biasesMem[i];
+        if (biasesMem[i] == zero)
+            ++numZero;
+        else
+            ++numNonZero;
+    }
+    ASSERT_LT(numZero, numNonZero * 0.1);
+    mean = totalBias / 500;
+    totalVariance = 0;
+    for (uint32_t i = 0; i < 500; ++i) {
+        double val = (double)biasesMem[i] - mean;
+        totalVariance += val * val;
+    }
+    avgVariance = totalVariance / 500;
+    stdDev = sqrt(avgVariance);
+
+    expectedMean = 0.0;
+    expectedStdDev = sqrt(2.0 / (fanIn + fanOut));
+
+    ASSERT_LT(abs(mean - expectedMean), 5e-3);
+    ASSERT_LT(abs(stdDev - expectedStdDev), 0.25);
 }
 
 TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {

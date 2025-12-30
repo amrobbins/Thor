@@ -44,7 +44,8 @@ class Map : public Layer {
         return Tensor(featureInput.get().getPlacement(), newDescriptor);
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        Layer::compileImpl();
         assert(featureInput.isPresent());
         assert(featureInput.get().getDescriptor().getDimensions() == sourceDimensions);
 

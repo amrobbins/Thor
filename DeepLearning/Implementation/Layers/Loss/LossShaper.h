@@ -28,7 +28,7 @@ class LossShaper : public Layer {
     virtual ~LossShaper();
 
     virtual Optional<Tensor> createFeatureOutputTensor();
-    virtual void compile();
+    virtual void compileImpl();
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream);
     virtual void backward(Optional<Tensor> errorInput);
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream);

@@ -63,7 +63,8 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
         }
     }
 
-    return performCopy(buffer, tensorToInitialize, streams);
+    Event tensorInitializedEvent = performCopy(buffer, tensorToInitialize, streams);
+    return tensorInitializedEvent;
 }
 
 shared_ptr<Initializer> UniformRandom::clone() { return make_shared<UniformRandom>(*this); }

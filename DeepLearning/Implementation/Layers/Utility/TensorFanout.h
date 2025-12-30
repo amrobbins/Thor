@@ -46,7 +46,8 @@ class TensorFanout : public MultiConnectionLayer {
     virtual Optional<Tensor> createFeatureOutputTensor() { return Optional<Tensor>::empty(); }
 
     // allocate anything needed for execution, choose optimal kernels, etc.
-    virtual void compile() {
+    virtual void compileImpl() {
+        MultiConnectionLayer::compileImpl();
         assert(featureInputs.size() == 1);
         assert(featureInputs[0].isPresent());
         TensorPlacement placement = featureInputs[0].get().getPlacement();
@@ -105,9 +106,6 @@ class TensorFanout : public MultiConnectionLayer {
         }
         assert(replacementHappend);
     }
-
-    // initialize weights using the configured initializer. In general set any initial values.
-    virtual void initialize() {}
 
     // release any resources that are used for execution and need to be released
     virtual void cleanup() {

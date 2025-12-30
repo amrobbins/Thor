@@ -32,13 +32,14 @@ class Flatten : public Layer {
         return outputTensor;
     }
 
-    virtual void compile() {
+    virtual void postCompile() {
         // ErrorInput to the previous layer is the errorInput coming to this layer,
         // then backProp is a no op
         if (errorInput.isPresent() && errorOutput.isPresent() && previousLayer.isPresent()) {
             previousLayer.get()->replaceErrorInput(errorOutput, errorInput);
         }
         errorOutput = errorInput;
+        Layer::postCompile();
     }
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) {

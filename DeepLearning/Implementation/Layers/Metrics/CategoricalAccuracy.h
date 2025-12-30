@@ -22,7 +22,8 @@ class CategoricalAccuracy : public Metric {
         return Tensor(placement, TensorDescriptor(TensorDescriptor::DataType::FP32, {1U}));
     }
 
-    virtual void compile() {
+    virtual void compileImpl() {
+        Layer::compileImpl();
         assert(labelsInput.isPresent());
         assert(labelsInput.get().isInitialized());
         assert(labelsInput.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);

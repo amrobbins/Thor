@@ -90,9 +90,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                                                                 numOutputChannels,
                                                                 hasBias,
                                                                 getId());
-
-        if (hasOptimizer())
-            physicalConvolution2d->setOptimizer(optimizer->stamp(physicalConvolution2d));
+        stampOptimizer(physicalConvolution2d);
 
         return physicalConvolution2d;
     }

@@ -17,6 +17,9 @@ class Sgd : public Optimizer {
 
     virtual ~Sgd() = default;
 
+    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
+        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
+
     virtual void setConstantLearningRate(float newCurrentLearningRate);
     virtual void setInitialLearningRate(float newInitialLearningRate);
     virtual float getInitialLearningRate();
@@ -32,15 +35,8 @@ class Sgd : public Optimizer {
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
     static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
-    virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
-                                          bool isFirstStamp,
-                                          std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent);
 
    protected:
-    virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
-        std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
-
     virtual std::shared_ptr<Optimizer> clone() const;
 
     void updateParameters();

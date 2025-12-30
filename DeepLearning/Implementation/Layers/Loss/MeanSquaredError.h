@@ -18,7 +18,7 @@ class MeanSquaredError : public Loss {
 
     MeanSquaredError(TensorDescriptor::DataType lossDataType = TensorDescriptor::DataType::FP32);
 
-    virtual void compile();
+    virtual void compileImpl();
 
     virtual void cleanup() {}
 

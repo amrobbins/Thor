@@ -14,12 +14,10 @@ class LayerTestHelper {
 
     static void initializeNetwork(std::vector<std::shared_ptr<ThorImplementation::Layer>> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
-            layers[i]->parentCompile();
             layers[i]->compile();
         }
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->initialize();
-            layers[i]->parentInitialize();
         }
     }
 
@@ -31,7 +29,6 @@ class LayerTestHelper {
     static void tearDownNetwork(std::vector<std::shared_ptr<ThorImplementation::Layer>> &layers) {
         for (unsigned int i = 0; i < layers.size(); ++i) {
             layers[i]->cleanup();
-            layers[i]->parentCleanup();
         }
         layers.clear();
     }
@@ -44,9 +41,7 @@ class LayerTestHelper {
     }
 
     static void initializeLayer(ThorImplementation::Layer *layer) {
-        layer->parentCompile();
         layer->compile();
-        layer->parentInitialize();
         layer->initialize();
     }
 };
