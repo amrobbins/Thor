@@ -114,8 +114,10 @@ class TensorFanout : public MultiConnectionLayer {
         TensorPlacement placement = featureInputs[0].get().getPlacement();
         assert(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].get().getPlacement().getDeviceNum());
-        cudaError_t cudaStatus = cudaFree(errorInputArray_d);
-        assert(cudaStatus == cudaSuccess);
+        if (errorInputArray_d != nullptr) {
+            cudaError_t cudaStatus = cudaFree(errorInputArray_d);
+            assert(cudaStatus == cudaSuccess);
+        }
         errorInputArray_d = nullptr;
     }
 
@@ -195,7 +197,7 @@ class TensorFanout : public MultiConnectionLayer {
     }
 
    protected:
-    half **errorInputArray_d;
+    half **errorInputArray_d = nullptr;
 };
 
 }  // namespace ThorImplementation

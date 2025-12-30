@@ -143,14 +143,19 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     Tensor latestOutputTensor;
     Glorot::Builder glorotBuilder = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM);
 
+    constexpr uint64_t NUM_INPUTS = 1024;
+    constexpr uint64_t NUM_OUTPUTS = 500;
+    constexpr uint64_t NUM_WEIGHTS = NUM_INPUTS * NUM_OUTPUTS;
+    constexpr uint64_t NUM_BIASES = NUM_OUTPUTS;
+
     NetworkInput networkInput =
-        NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+        NetworkInput::Builder().network(network).name("input").dimensions({NUM_INPUTS}).dataType(Tensor::DataType::FP16).build();
     latestOutputTensor = networkInput.getFeatureOutput();
 
     FullyConnected fullyConnected = FullyConnected::Builder()
                                         .network(network)
                                         .featureInput(latestOutputTensor)
-                                        .numOutputFeatures(500)
+                                        .numOutputFeatures(NUM_OUTPUTS)
                                         .hasBias(true)
                                         .weightsInitializerBuilder(glorotBuilder)
                                         .biasInitializerBuilder(glorotBuilder)
@@ -206,8 +211,8 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     // First check if fanIn and fanOut is correct
     uint64_t fanIn = fc->getFanIn();
     uint64_t fanOut = fc->getFanOut();
-    ASSERT_EQ(fanIn, 1024U);
-    ASSERT_EQ(fanOut, 500U);
+    ASSERT_EQ(fanIn, NUM_INPUTS);
+    ASSERT_EQ(fanOut, NUM_BIASES);
     half maxValue = sqrt(6.0 / (fanIn + fanOut)) * 1.01;
     half minValue = (half)-1.0f * maxValue;
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
@@ -218,7 +223,7 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     uint32_t numZero = 0;
     uint32_t numNonZero = 0;
     half zero(0);
-    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+    for (uint32_t i = 0; i < NUM_WEIGHTS; ++i) {
         ASSERT_TRUE(weightsMem[i] >= minValue && weightsMem[i] <= maxValue);
         if (weightsMem[i] == zero)
             ++numZero;
@@ -232,7 +237,7 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     half *biasesMem = (half *)fcBiases.getMemPtr();
     numZero = 0;
     numNonZero = 0;
-    for (uint32_t i = 0; i < 500; ++i) {
+    for (uint32_t i = 0; i < NUM_BIASES; ++i) {
         ASSERT_TRUE(biasesMem[i] >= minValue && biasesMem[i] <= maxValue);
         if (biasesMem[i] == zero)
             ++numZero;
@@ -247,14 +252,19 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     Tensor latestOutputTensor;
     Glorot::Builder glorotBuilder = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::NORMAL);
 
+    constexpr uint64_t NUM_INPUTS = 1024;
+    constexpr uint64_t NUM_OUTPUTS = 500;
+    constexpr uint64_t NUM_WEIGHTS = NUM_INPUTS * NUM_OUTPUTS;
+    constexpr uint64_t NUM_BIASES = NUM_OUTPUTS;
+
     NetworkInput networkInput =
-        NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
+        NetworkInput::Builder().network(network).name("input").dimensions({NUM_INPUTS}).dataType(Tensor::DataType::FP16).build();
     latestOutputTensor = networkInput.getFeatureOutput();
 
     FullyConnected fullyConnected = FullyConnected::Builder()
                                         .network(network)
                                         .featureInput(latestOutputTensor)
-                                        .numOutputFeatures(500)
+                                        .numOutputFeatures(NUM_OUTPUTS)
                                         .hasBias(true)
                                         .weightsInitializerBuilder(glorotBuilder)
                                         .biasInitializerBuilder(glorotBuilder)
@@ -309,8 +319,8 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     // First check if fanIn and fanOut is correct
     uint64_t fanIn = fc->getFanIn();
     uint64_t fanOut = fc->getFanOut();
-    ASSERT_EQ(fanIn, 1024U);
-    ASSERT_EQ(fanOut, 500U);
+    ASSERT_EQ(fanIn, NUM_INPUTS);
+    ASSERT_EQ(fanOut, NUM_OUTPUTS);
 
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     ThorImplementation::Tensor fcWeights = fc->getWeights().clone(cpuPlacement);
@@ -321,7 +331,7 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     uint32_t numNonZero = 0;
     half zero(0);
     double totalWeights = 0.0;
-    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+    for (uint32_t i = 0; i < NUM_WEIGHTS; ++i) {
         totalWeights += (double)weightsMem[i];
         if (weightsMem[i] == zero)
             ++numZero;
@@ -329,13 +339,13 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
             ++numNonZero;
     }
     ASSERT_LT(numZero, numNonZero * 0.1);
-    double mean = totalWeights / double(1024 * 500);
+    double mean = totalWeights / double(NUM_WEIGHTS);
     double totalVariance = 0;
-    for (uint32_t i = 0; i < 1024 * 500; ++i) {
+    for (uint32_t i = 0; i < NUM_WEIGHTS; ++i) {
         double val = (double)weightsMem[i] - mean;
         totalVariance += val * val;
     }
-    double avgVariance = totalVariance / double(1024 * 500);
+    double avgVariance = totalVariance / double(NUM_WEIGHTS);
     double stdDev = sqrt(avgVariance);
 
     double expectedMean = 0.0;
@@ -351,7 +361,7 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     double totalBias = 0.0;
     numZero = 0;
     numNonZero = 0;
-    for (uint32_t i = 0; i < 500; ++i) {
+    for (uint32_t i = 0; i < NUM_BIASES; ++i) {
         totalBias += (double)biasesMem[i];
         if (biasesMem[i] == zero)
             ++numZero;
@@ -359,13 +369,13 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
             ++numNonZero;
     }
     ASSERT_LT(numZero, numNonZero * 0.1);
-    mean = totalBias / 500;
+    mean = totalBias / NUM_BIASES;
     totalVariance = 0;
-    for (uint32_t i = 0; i < 500; ++i) {
+    for (uint32_t i = 0; i < NUM_BIASES; ++i) {
         double val = (double)biasesMem[i] - mean;
         totalVariance += val * val;
     }
-    avgVariance = totalVariance / 500;
+    avgVariance = totalVariance / NUM_BIASES;
     stdDev = sqrt(avgVariance);
 
     expectedMean = 0.0;
