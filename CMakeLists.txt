@@ -240,6 +240,11 @@ if (THOR_ENABLE_SANITIZERS)
     )
 endif ()
 
+# Tar file support
+find_package(LibArchive REQUIRED)
+target_link_libraries(Thor PRIVATE LibArchive::LibArchive)
+
+
 # ============================================================
 # Dependencies: nlohmann/json, pthread, dl
 # ============================================================
