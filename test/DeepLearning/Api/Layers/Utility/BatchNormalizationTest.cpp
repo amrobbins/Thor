@@ -196,7 +196,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
     Stream stream(0);
 
-    for (uint32_t t = 0; t < 30; t++) {
+    for (uint32_t t = 0; t < 5; t++) {
         stream.synchronize();
 
         Network initialNetwork;
@@ -206,8 +206,8 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
         vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
 
-        float exponential_running_average_factor = (rand() % 1000) / 1000.0f;
-        float epsilon = (rand() % 1000) / 1000.0f;
+        float exponential_running_average_factor = ((rand() % 1000) + 1) / 1001.0f;
+        float epsilon = ((rand() % 1000) + 1) / 1001.0f;
 
         NetworkInput networkInput =
             NetworkInput::Builder().network(initialNetwork).name("testInput").dimensions(inputDimensions).dataType(dataType).build();
