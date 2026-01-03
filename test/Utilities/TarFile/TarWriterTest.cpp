@@ -170,8 +170,8 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
 
     {
         thor_file::TarWriter w(tar_path_prefix, overwrite, shard_limit);
-        w.add_bytes("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.add_bytes("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
+        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
+        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -257,8 +257,8 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
 
     {
         thor_file::TarWriter w(tar_path_prefix, overwrite, shard_limit);
-        w.add_bytes("a.txt", a.data(), a.size(), 0644, time(nullptr));
-        w.add_bytes("b.txt", b.data(), b.size(), 0644, time(nullptr));
+        w.addArchiveFile("a.txt", a.data(), a.size(), 0644, time(nullptr));
+        w.addArchiveFile("b.txt", b.data(), b.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 

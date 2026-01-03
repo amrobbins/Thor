@@ -15,7 +15,8 @@ class TarWriter {
     TarWriter& operator=(const TarWriter&) = delete;
     virtual ~TarWriter();
 
-    void add_bytes(std::string path_in_tar, const void* data, size_t size, int permissions = 0644, std::time_t mtime = std::time(nullptr));
+    void addArchiveFile(
+        std::string path_in_tar, const void* data, size_t size, int permissions = 0644, std::time_t mtime = std::time(nullptr));
 
     void finishArchive();  // appends JSON index + footer to each shard
 
@@ -43,22 +44,5 @@ class TarWriter {
 
     bool finished_ = false;
 };
-
-static void write_u64_le(std::ostream& out, uint64_t v) {
-    uint8_t b[8];
-    for (int i = 0; i < 8; ++i) {
-        b[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
-    }
-    out.write(reinterpret_cast<const char*>(b), 8);
-}
-
-static void write_u32_le(std::ostream& out, uint32_t v) {
-    uint8_t b[4];
-    b[0] = static_cast<uint8_t>((v >> 0) & 0xFF);
-    b[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
-    b[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
-    b[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
-    out.write(reinterpret_cast<const char*>(b), 4);
-}
 
 }  // namespace thor_file

@@ -92,8 +92,8 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
         const bool overwrite = true;
 
         thor_file::TarWriter w(prefix, overwrite, shard_limit);
-        w.add_bytes("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.add_bytes("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
+        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
+        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -133,9 +133,9 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
         const uint64_t shard_limit = 256 * 1024;
 
         thor_file::TarWriter w(prefix, overwrite, shard_limit);
-        w.add_bytes("a.bin", a.data(), a.size(), 0644, time(nullptr));
-        w.add_bytes("b.bin", b.data(), b.size(), 0644, time(nullptr));
-        w.add_bytes("c.bin", c.data(), c.size(), 0644, time(nullptr));
+        w.addArchiveFile("a.bin", a.data(), a.size(), 0644, time(nullptr));
+        w.addArchiveFile("b.bin", b.data(), b.size(), 0644, time(nullptr));
+        w.addArchiveFile("c.bin", c.data(), c.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -394,9 +394,9 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
 
     {
         thor_file::TarWriter w(prefix, overwrite, shard_limit);
-        w.add_bytes("a.bin", a.data(), a.size(), 0644, time(nullptr));
-        w.add_bytes("b.bin", b.data(), b.size(), 0644, time(nullptr));
-        w.add_bytes("c.bin", c.data(), c.size(), 0644, time(nullptr));
+        w.addArchiveFile("a.bin", a.data(), a.size(), 0644, time(nullptr));
+        w.addArchiveFile("b.bin", b.data(), b.size(), 0644, time(nullptr));
+        w.addArchiveFile("c.bin", c.data(), c.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -434,7 +434,7 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
 
     {
         thor_file::TarWriter w(prefix, overwrite, shard_limit);
-        w.add_bytes("x.bin", payload.data(), payload.size(), 0644, time(nullptr));
+        w.addArchiveFile("x.bin", payload.data(), payload.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -520,7 +520,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
             total_written += data.size();
             contents.push_back(std::move(data));
 
-            w.add_bytes(paths.back(), contents.back().data(), contents.back().size(), 0644, time(nullptr));
+            w.addArchiveFile(paths.back(), contents.back().data(), contents.back().size(), 0644, time(nullptr));
         }
         ASSERT_EQ(total_written, kTotalBytes);
 
@@ -567,8 +567,8 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
 
     {
         thor_file::TarWriter w(prefix, overwrite, shard_limit);
-        w.add_bytes("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.add_bytes("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
+        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
+        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -705,8 +705,8 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
 
     {
         thor_file::TarWriter w(prefix, overwrite, shard_limit);
-        w.add_bytes("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.add_bytes("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
+        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
+        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -772,8 +772,8 @@ TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
 
     {
         thor_file::TarWriter w(prefix, shard_limit, overwrite);
-        w.add_bytes("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.add_bytes("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
+        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
+        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
@@ -792,7 +792,7 @@ TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
 
     {
         thor_file::TarWriter w(prefix, shard_limit, overwrite);
-        w.add_bytes("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
+        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 

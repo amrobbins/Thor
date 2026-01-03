@@ -72,6 +72,23 @@ static bool is_valid_shard_filename(const string& base, const string& fname) {
     return true;
 }
 
+static void write_u64_le(std::ostream& out, uint64_t v) {
+    uint8_t b[8];
+    for (int i = 0; i < 8; ++i) {
+        b[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
+    }
+    out.write(reinterpret_cast<const char*>(b), 8);
+}
+
+static void write_u32_le(std::ostream& out, uint32_t v) {
+    uint8_t b[4];
+    b[0] = static_cast<uint8_t>((v >> 0) & 0xFF);
+    b[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    b[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    b[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    out.write(reinterpret_cast<const char*>(b), 4);
+}
+
 TarWriter::TarWriter(string tarPath, bool overwriteIfExists, uint64_t shard_payload_limit_bytes) : prefix_(std::move(tarPath)) {
     shard_payload_limit_ = shard_payload_limit_bytes;
     finished_ = false;
@@ -237,7 +254,7 @@ void TarWriter::closeShard_(uint32_t shard_index) {
     s.closed = true;
 }
 
-void TarWriter::add_bytes(string path_in_tar, const void* data, size_t size, int permissions, time_t mtime) {
+void TarWriter::addArchiveFile(string path_in_tar, const void* data, size_t size, int permissions, time_t mtime) {
     if (finished_)
         throw runtime_error("TarWriter::add_bytes: archive already finished");
 
@@ -396,6 +413,7 @@ void TarWriter::finishArchive() {
             throw runtime_error("finishArchive: flush failed: " + shards_[shard_idx].path);
     }
 
+    // Ensure no files in the way, right before attempting move
     for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
         string temp_path = shards_[shard_idx].path;
         string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete");
@@ -406,6 +424,14 @@ void TarWriter::finishArchive() {
             if (ec)
                 throw runtime_error("finishArchive: failed to rename file " + temp_path + " to: " + permanent_path);
         }
+    }
+
+    // Move files to their permanent names
+    for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
+        string temp_path = shards_[shard_idx].path;
+        string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete");
+
+        std::error_code ec;
         filesystem::rename(temp_path, permanent_path, ec);
         if (ec) {
             throw std::runtime_error("finishArchive: rename failed: " + temp_path + " -> " + permanent_path + " (" + ec.message() + ")");
