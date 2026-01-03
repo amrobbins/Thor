@@ -26,12 +26,13 @@
 namespace thor_file {
 
 static constexpr char kFooterMagic[8] = {'T', 'H', 'O', 'R', 'I', 'D', 'X', '1'};
-static constexpr size_t kFooterSize = 16;
+static constexpr size_t kFooterSize = 24;
 
 struct EntryInfo {
     uint32_t shard = 0;
     uint64_t data_offset = 0;
     uint64_t size = 0;
+    uint32_t crc_ieee = 0;
 };
 
 struct ShardState {

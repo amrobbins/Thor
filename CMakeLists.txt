@@ -271,6 +271,38 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 enable_testing()
 
+# For fast CRC
+include(FetchContent)
+
+FetchContent_Declare(zlibng
+        GIT_REPOSITORY https://github.com/zlib-ng/zlib-ng.git
+        GIT_TAG stable
+)
+
+# zlib-ng options (set BEFORE MakeAvailable)
+set(ZLIB_COMPAT OFF CACHE BOOL "" FORCE)
+set(ZLIB_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+
+# These exist and control compiling the CLMUL paths (zlib-ng will still runtime-dispatch):
+set(WITH_PCLMULQDQ ON CACHE BOOL "" FORCE)
+set(WITH_VPCLMULQDQ ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zlibng)
+
+set(ZLIBNG_TARGET "")
+foreach (tgt IN ITEMS zlib-ng::zlib-ng zlibstatic-ng zlib-ng zlibstatic)
+    if (TARGET ${tgt})
+        set(ZLIBNG_TARGET ${tgt})
+        break()
+    endif ()
+endforeach ()
+if (ZLIBNG_TARGET STREQUAL "")
+    message(FATAL_ERROR "Couldn't find zlib-ng CMake target after FetchContent.")
+endif ()
+
+#add_executable(crc_bench Utilities/TarFile/CrcBench.cpp Utilities/TarFile/Crc32.cpp Utilities/TarFile/Crc32c.cpp)
+#target_link_libraries(crc_bench PRIVATE ${ZLIBNG_TARGET} OpenMP::OpenMP_CXX)
+
+
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
@@ -339,6 +371,16 @@ install(FILES
         DESTINATION lib/cmake/Thor
 )
 
+# CRC HW support
+include(CheckCXXCompilerFlag)
+
+check_cxx_compiler_flag("-msse4.2" HAS_MSSE42)
+if (HAS_MSSE42)
+    set_source_files_properties(
+            Utilities/TarFile/Crc32c.cpp
+            PROPERTIES COMPILE_OPTIONS "-msse4.2"
+    )
+endif ()
 
 # ============================================================
 # Build the header generation tool

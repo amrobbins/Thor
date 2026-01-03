@@ -82,6 +82,13 @@ void TarReader::readFile(std::string pathInTar, void* mem, uint64_t fileSize) co
     }
 
     pread_full(s.fd, s.path, mem, e.size, e.data_offset);
+
+    // Validate the CRC on data usage
+    const uint32_t computed_crc = crc32_ieee(0, (uint8_t*)mem, (size_t)e.size);
+    if (computed_crc != e.crc_ieee) {
+        throw std::runtime_error("CRC mismatch for '" + pathInTar + "' expected=" + std::to_string(e.crc_ieee) +
+                                 " got=" + std::to_string(computed_crc));
+    }
 }
 
 auto to_abs_norm = [](const std::string& p) -> std::string {
@@ -102,6 +109,7 @@ FileSliceFd TarReader::getFileSliceFd(std::string pathInTar) const {
     s.shard_index = e.shard;
     s.offset = e.data_offset;
     s.size = e.size;
+    s.crc_ieee = e.crc_ieee;
     return s;
 }
 
@@ -159,6 +167,14 @@ void TarReader::scan() {
     const uint32_t shard_index0 = j0.at("shard_index").get<uint32_t>();
     require(shard_index0 == 0, "shard_index in shard 0 index must be 0");
 
+    require(j0.contains("format_version"), "index JSON missing 'format_version'");
+    const uint32_t ver = j0.at("format_version").get<uint32_t>();
+    require(ver == 1, "unsupported format_version: " + std::to_string(ver));
+
+    require(j0.contains("checksum_alg"), "index JSON missing 'checksum_alg'");
+    const std::string alg = j0.at("checksum_alg").get<std::string>();
+    require(alg == "crc32_ieee", "unsupported checksum_alg: " + alg);
+
     // Compare later ignoring shard_index
     json j0_cmp = j0;
     j0_cmp.erase("shard_index");
@@ -207,7 +223,6 @@ void TarReader::scan() {
         require(ji.contains("archive_id"), "index JSON missing 'archive_id' in shard " + std::to_string(i));
         const std::string jiArchiveId = ji.at("archive_id").get<std::string>();
 
-        // FIXED: ids must MATCH
         require(archive_id == jiArchiveId,
                 "Archive ids mismatch between shards: shard0=" + archive_id + " shard" + std::to_string(i) + "=" + jiArchiveId);
 
@@ -231,11 +246,13 @@ void TarReader::scan() {
         require(info.contains("shard"), "missing 'shard' for: " + path_in_archive);
         require(info.contains("data_offset"), "missing 'data_offset' for: " + path_in_archive);
         require(info.contains("size"), "missing 'size' for: " + path_in_archive);
+        require(info.contains("crc_ieee"), "missing 'size' for: " + path_in_archive);
 
         EntryInfo e{};
         e.shard = info.at("shard").get<uint32_t>();
         e.data_offset = info.at("data_offset").get<uint64_t>();
         e.size = info.at("size").get<uint64_t>();
+        e.crc_ieee = info.at("crc_ieee").get<uint32_t>();
 
         require(e.shard < num_shards_, "entry refers to invalid shard for: " + path_in_archive);
 
@@ -257,6 +274,48 @@ void TarReader::scan() {
         s.fd = open_readonly_fd(s.path, s.size);
 
         shard_fds_.push_back(std::move(s));
+    }
+}
+
+void TarReader::verifyAll() const {
+    if (index_.empty())
+        return;
+
+    // Collect entries and sort by (shard, data_offset) to improve sequentiality.
+    struct Item {
+        std::string path;
+        EntryInfo info;
+    };
+    std::vector<Item> items;
+    items.reserve(index_.size());
+    for (const auto& kv : index_) {
+        items.push_back(Item{kv.first, kv.second});
+    }
+
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.info.shard != b.info.shard)
+            return a.info.shard < b.info.shard;
+        return a.info.data_offset < b.info.data_offset;
+    });
+
+    // Reuse a buffer sized to the largest file we see.
+    uint64_t max_size = 0;
+    for (const auto& it : items) {
+        max_size = std::max(max_size, it.info.size);
+    }
+    std::vector<uint8_t> buf;
+    buf.resize(static_cast<size_t>(max_size));
+
+    // Verify each entry. This leverages your existing validation code path.
+    for (const auto& it : items) {
+        if (it.info.size == 0) {
+            // Still validate the index expectation is "empty" CRC if you care.
+            // Typically crc32("") == 0, which matches your writer usage.
+            continue;
+        }
+
+        // readFile will throw on I/O problems or CRC mismatch
+        readFile(it.path, buf.data(), it.info.size);
     }
 }
 

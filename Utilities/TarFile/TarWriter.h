@@ -10,7 +10,7 @@ void throwArchive(archive* a, const char* what);
 
 class TarWriter {
    public:
-    explicit TarWriter(std::string tarPath, uint64_t shard_payload_limit_bytes, bool overwriteIfExists);
+    explicit TarWriter(std::string tarPath, bool overwriteIfExists, uint64_t shard_payload_limit_bytes = 5e9);
     TarWriter(const TarWriter&) = delete;
     TarWriter& operator=(const TarWriter&) = delete;
     virtual ~TarWriter();
@@ -43,5 +43,22 @@ class TarWriter {
 
     bool finished_ = false;
 };
+
+static void write_u64_le(std::ostream& out, uint64_t v) {
+    uint8_t b[8];
+    for (int i = 0; i < 8; ++i) {
+        b[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
+    }
+    out.write(reinterpret_cast<const char*>(b), 8);
+}
+
+static void write_u32_le(std::ostream& out, uint32_t v) {
+    uint8_t b[4];
+    b[0] = static_cast<uint8_t>((v >> 0) & 0xFF);
+    b[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    b[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    b[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    out.write(reinterpret_cast<const char*>(b), 4);
+}
 
 }  // namespace thor_file
