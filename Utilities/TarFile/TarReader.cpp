@@ -5,6 +5,96 @@ using json = nlohmann::json;
 
 namespace thor_file {
 
+static uint64_t read_u64_le(const uint8_t b[8]) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; --i) {
+        v = (v << 8) | static_cast<uint64_t>(b[i]);
+    }
+    return v;
+}
+
+static uint32_t read_u32_le(const uint8_t b[4]) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+static std::string read_footer_json(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+        throw std::runtime_error("TarReader::scan: failed to open shard: " + path);
+
+    in.seekg(0, std::ios::end);
+    const std::streamoff file_size_off = in.tellg();
+    if (file_size_off < 0)
+        throw std::runtime_error("TarReader::scan: tellg failed: " + path);
+
+    const uint64_t file_size = static_cast<uint64_t>(file_size_off);
+    if (file_size < kFooterSize) {
+        throw std::runtime_error("TarReader::scan: file too small to contain footer: " + path);
+    }
+
+    // Read footer
+    in.seekg(static_cast<std::streamoff>(file_size - kFooterSize), std::ios::beg);
+
+    char magic[8];
+    uint8_t len_bytes[8];
+    uint8_t crc_bytes[4];
+    uint8_t reserved_bytes[4];
+
+    in.read(magic, 8);
+    in.read(reinterpret_cast<char*>(len_bytes), 8);
+    in.read(reinterpret_cast<char*>(crc_bytes), 4);
+    in.read(reinterpret_cast<char*>(reserved_bytes), 4);
+    if (!in)
+        throw std::runtime_error("TarReader::scan: failed to read footer: " + path);
+
+    if (std::memcmp(magic, kFooterMagic, 8) != 0) {
+        throw std::runtime_error("TarReader::scan: footer magic mismatch (no index?): " + path);
+    }
+
+    const uint64_t json_len = read_u64_le(len_bytes);
+    if (json_len == 0) {
+        throw std::runtime_error("TarReader::scan: json_len is 0: " + path);
+    }
+    if (json_len > file_size - kFooterSize) {
+        throw std::runtime_error("TarReader::scan: json_len exceeds file size: " + path);
+    }
+
+    const uint32_t index_crc_expected = read_u32_le(crc_bytes);
+
+    const uint64_t json_start = file_size - kFooterSize - json_len;
+
+    in.seekg(static_cast<std::streamoff>(json_start), std::ios::beg);
+    std::string json_str(json_len, '\0');
+    in.read(json_str.data(), static_cast<std::streamsize>(json_len));
+    if (!in)
+        throw std::runtime_error("TarReader::scan: failed to read json blob: " + path);
+
+    // Compute CRC (IEEE) over JSON bytes exactly as written
+    const uint32_t index_crc_computed = crc32_ieee(0, (uint8_t*)json_str.data(), json_str.size());
+    if (index_crc_computed != index_crc_expected) {
+        throw std::runtime_error("read_footer_json: index CRC mismatch in " + path + " expected=" + std::to_string(index_crc_expected) +
+                                 " got=" + std::to_string(index_crc_computed));
+    }
+
+    return json_str;
+}
+
+static void require(bool cond, const std::string& msg) {
+    if (!cond)
+        throw std::runtime_error("TarReader::scan: " + msg);
+}
+
+static bool is_sha32(std::string_view s) {
+    if (s.size() != 32)
+        return false;
+    for (char c : s) {
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (!ok)
+            return false;
+    }
+    return true;
+}
+
 TarReader::TarReader(string tarPath) : prefix_(std::move(tarPath)) { scan(); }
 
 TarReader::~TarReader() {
@@ -246,7 +336,7 @@ void TarReader::scan() {
         require(info.contains("shard"), "missing 'shard' for: " + path_in_archive);
         require(info.contains("data_offset"), "missing 'data_offset' for: " + path_in_archive);
         require(info.contains("size"), "missing 'size' for: " + path_in_archive);
-        require(info.contains("crc_ieee"), "missing 'size' for: " + path_in_archive);
+        require(info.contains("crc_ieee"), "missing 'crc_ieee' for: " + path_in_archive);
 
         EntryInfo e{};
         e.shard = info.at("shard").get<uint32_t>();
