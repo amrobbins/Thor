@@ -13,10 +13,10 @@ struct Crc32c {
     static constexpr uint32_t kInit = 0xFFFFFFFFu;
 
     // Update a running CRC with new bytes
-    static uint32_t update(uint32_t crc, const void* data, size_t len);
+    static uint32_t update(uint32_t crc, const uint8_t* data, size_t len);
 
     // Convenience: compute CRC32C(data)
-    static uint32_t compute(const void* data, size_t len) { return finalize(update(kInit, data, len)); }
+    static uint32_t compute(const uint8_t* data, size_t len) { return finalize(update(kInit, data, len)); }
 
     // Finalize a streaming CRC
     static uint32_t finalize(uint32_t crc) { return crc ^ 0xFFFFFFFFu; }

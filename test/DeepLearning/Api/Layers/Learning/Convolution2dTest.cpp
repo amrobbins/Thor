@@ -1011,7 +1011,7 @@ TEST(Convolution2d, SerializeDeserialize) {
 
         ASSERT_TRUE(out0.at("id").is_number_integer());
 
-        string file_prefix = "/tmp/layer" + to_string(convolution2d.getId());
+        string file_prefix = "layer" + to_string(convolution2d.getId());
         EXPECT_FALSE(convolution2dJ.at("weights_tensor").get<string>().empty());
         EXPECT_EQ(convolution2dJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
         if (hasBias) {
@@ -1024,18 +1024,18 @@ TEST(Convolution2d, SerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
-        Layer::deserialize(networkInputJ, &newNetwork);
-        Layer::deserialize(labelsInputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", networkInputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", labelsInputJ, &newNetwork);
         if (useBatchNorm)
-            Layer::deserialize(batchNormJ, &newNetwork);
+            Layer::deserialize("testModel", "/tmp", batchNormJ, &newNetwork);
         if (dropProportion > 0.0f)
-            Layer::deserialize(dropOutJ, &newNetwork);
-        Layer::deserialize(convolution2dJ, &newNetwork);
+            Layer::deserialize("testModel", "/tmp", dropOutJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", convolution2dJ, &newNetwork);
         if (useRelu)
-            Layer::deserialize(reluJ, &newNetwork);
-        Layer::deserialize(flattenJ, &newNetwork);
-        Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
-        Layer::deserialize(networkOutputJ, &newNetwork);
+            Layer::deserialize("testModel", "/tmp", reluJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", flattenJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", meanAbsoluteErrorJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
@@ -1090,4 +1090,6 @@ TEST(Convolution2d, SerializeDeserialize) {
             }
         }
     }
+
+    filesystem::remove("/tmp/testModel.thor");
 }

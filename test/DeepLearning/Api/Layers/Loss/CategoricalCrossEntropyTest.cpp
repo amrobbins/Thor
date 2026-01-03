@@ -579,11 +579,11 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     // The softmax output is not loaded, probably it is restamped? Oh it needs to be serialized so that it looks like a single layer or
     // stamping will not work, I did this for FC etc.
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(labelsInputJ, &newNetwork);
-    Layer::deserialize(fullyConnectedJ, &newNetwork);
-    Layer::deserialize(softmaxJ, &newNetwork);
-    Layer::deserialize(categoricalCrossEntropyJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", networkInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", softmaxJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", categoricalCrossEntropyJ, &newNetwork);
     if (lossShaper)
         Layer::deserialize(lossShaperJ, &newNetwork);
     Layer::deserialize(lossOutputJ, &newNetwork);
@@ -658,4 +658,6 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     } else {
         ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
+
+    filesystem::remove("/tmp/testModel.thor");
 }

@@ -14,7 +14,7 @@ namespace Thor {
 class Adam : public Optimizer {
    public:
     class Builder;
-    virtual ~Adam();
+    virtual ~Adam() = default;
 
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
         std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
@@ -35,7 +35,7 @@ class Adam : public Optimizer {
                                      Stream stream,
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
-    static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
+    static std::shared_ptr<Optimizer> deserialize(const std::string &modelName, const std::string &storageDir, const nlohmann::json &j);
 
    protected:
     void updateParameters();
@@ -49,6 +49,7 @@ class Adam : public Optimizer {
     float beta2;
     float epsilon;
 
+    Optional<std::string> storageDir;
     Optional<std::string> mFile;
     Optional<std::string> vFile;
     Optional<std::string> mBiasFile;

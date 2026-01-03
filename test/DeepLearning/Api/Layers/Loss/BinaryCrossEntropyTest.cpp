@@ -342,14 +342,14 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     // The sigmoid output is not loaded, probably it is restamped? Oh it needs to be serialized so that it looks like a single layer or
     // stamping will not work, I did this for FC etc.
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(labelsInputJ, &newNetwork);
-    Layer::deserialize(fullyConnectedJ, &newNetwork);
-    Layer::deserialize(sigmoidJ, &newNetwork);
-    Layer::deserialize(binaryCrossEntropyJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", networkInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", sigmoidJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", binaryCrossEntropyJ, &newNetwork);
     if (lossShaper)
-        Layer::deserialize(lossShaperJ, &newNetwork);
-    Layer::deserialize(lossOutputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp/", lossShaperJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);
@@ -421,4 +421,6 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     } else {
         ASSERT_EQ(stampedBinaryCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
+
+    filesystem::remove("/tmp/testModel.thor");
 }

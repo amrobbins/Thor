@@ -299,10 +299,6 @@ if (ZLIBNG_TARGET STREQUAL "")
     message(FATAL_ERROR "Couldn't find zlib-ng CMake target after FetchContent.")
 endif ()
 
-#add_executable(crc_bench Utilities/TarFile/CrcBench.cpp Utilities/TarFile/Crc32.cpp Utilities/TarFile/Crc32c.cpp)
-#target_link_libraries(crc_bench PRIVATE ${ZLIBNG_TARGET} OpenMP::OpenMP_CXX)
-
-
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
@@ -371,7 +367,6 @@ install(FILES
         DESTINATION lib/cmake/Thor
 )
 
-# CRC HW support
 include(CheckCXXCompilerFlag)
 
 check_cxx_compiler_flag("-msse4.2" HAS_MSSE42)

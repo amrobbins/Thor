@@ -32,7 +32,7 @@ struct EntryInfo {
     uint32_t shard = 0;
     uint64_t data_offset = 0;
     uint64_t size = 0;
-    uint32_t crc_ieee = 0;
+    uint32_t crc = 0;
 };
 
 struct ShardState {

@@ -2,8 +2,9 @@
 
 namespace thor_file {
 
-uint32_t Crc32c::update(uint32_t crc, const void* data, size_t len) {
-    const uint8_t* p = static_cast<const uint8_t*>(data);
+uint32_t Crc32c::update(uint32_t crc, const uint8_t* data, size_t len) {
+    // const uint8_t* p = static_cast<const uint8_t*>(data);
+    const uint8_t* p = data;
     uint64_t c = static_cast<uint64_t>(crc);
 
     // Handle unaligned bytes until 8-byte aligned

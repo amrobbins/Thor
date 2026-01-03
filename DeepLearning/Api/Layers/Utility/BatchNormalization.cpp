@@ -48,22 +48,21 @@ json BatchNormalization::serialize(const string &storageDir, Stream stream) cons
 
     string layerName = string("layer") + to_string(getId());
 
-    filesystem::path weightsFile = dir / (layerName + "_weights.gds");
+    filesystem::path weightsFile = (layerName + "_weights.gds");
     j["weights_tensor"] = weightsFile.string();
-    batchNorm->dumpWeightsToFile(weightsFile.string(), stream);
-    assert(batchNorm->getBiases().isPresent());
+    batchNorm->dumpWeightsToFile((dir / weightsFile).string(), stream);
 
-    filesystem::path biasesFile = dir / (layerName + "_biases.gds");
+    filesystem::path biasesFile = (layerName + "_biases.gds");
     j["biases_tensor"] = biasesFile.string();
-    batchNorm->dumpBiasesToFile(biasesFile.string(), stream);
+    batchNorm->dumpBiasesToFile((dir / biasesFile).string(), stream);
 
-    filesystem::path resultRunningMeanToFile = dir / (layerName + "_means.gds");
+    filesystem::path resultRunningMeanToFile = (layerName + "_means.gds");
     j["means_tensor"] = resultRunningMeanToFile.string();
-    batchNorm->dumpResultRunningMeanToFile(resultRunningMeanToFile.string(), stream);
+    batchNorm->dumpResultRunningMeanToFile(dir / resultRunningMeanToFile.string(), stream);
 
-    filesystem::path resultRunningVarianceToFile = dir / (layerName + "_variances.gds");
+    filesystem::path resultRunningVarianceToFile = (layerName + "_variances.gds");
     j["variances_tensor"] = resultRunningVarianceToFile.string();
-    batchNorm->dumpResultRunningVarianceToFile(resultRunningVarianceToFile.string(), stream);
+    batchNorm->dumpResultRunningVarianceToFile(dir / resultRunningVarianceToFile.string(), stream);
 
     if (hasOptimizer()) {
         j["optimizer"] = optimizer->serialize(storageDir, stream, this, batchNorm);
@@ -72,7 +71,7 @@ json BatchNormalization::serialize(const string &storageDir, Stream stream) cons
     return j;
 }
 
-void BatchNormalization::deserialize(const json &j, Network *network) {
+void BatchNormalization::deserialize(const std::string &modelName, const string &storageDir, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in BatchNormalization::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "batch_normalization")
@@ -107,6 +106,7 @@ void BatchNormalization::deserialize(const json &j, Network *network) {
         batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs.back();
         batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs.back()] = batchNormalization.featureInputs[i];
     }
+    batchNormalization.storageDir = storageDir;
     batchNormalization.weightsFile = weightsFile;
     batchNormalization.biasesFile = biasesFile;
     batchNormalization.runningMeansFile = meansFile;
@@ -115,7 +115,7 @@ void BatchNormalization::deserialize(const json &j, Network *network) {
     batchNormalization.initialized = true;
 
     if (j.contains("optimizer")) {
-        batchNormalization.optimizer = Optimizer::deserialize(j.at("optimizer"));
+        batchNormalization.optimizer = Optimizer::deserialize(modelName, storageDir, j.at("optimizer"));
     }
 
     batchNormalization.addToNetwork(network);
@@ -167,15 +167,16 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
 
-        physicalLayer->loadWeightsFromFile(weightsFile.get(), stream);
+        physicalLayer->loadWeightsFromFile(storageDir.get() + "/" + weightsFile.get(), stream);
         assert(biasesFile.isPresent());
-        physicalLayer->loadBiasesFromFile(biasesFile.get(), stream);
+        physicalLayer->loadBiasesFromFile(storageDir.get() + "/" + biasesFile.get(), stream);
         assert(runningVariancesFile.isPresent());
-        physicalBatchNorm->loadResultRunningVarianceFromFile(runningVariancesFile, stream);
+        physicalBatchNorm->loadResultRunningVarianceFromFile(storageDir.get() + "/" + runningVariancesFile.get(), stream);
         assert(runningMeansFile.isPresent());
-        physicalBatchNorm->loadResultRunningMeanFromFile(runningMeansFile, stream);
+        physicalBatchNorm->loadResultRunningMeanFromFile(storageDir.get() + "/" + runningMeansFile.get(), stream);
 
         // Can't use the file later, it may not still be there
+        storageDir = Optional<string>::empty();
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
         runningVariancesFile = Optional<string>::empty();

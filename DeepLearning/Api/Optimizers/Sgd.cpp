@@ -17,7 +17,7 @@ void Sgd::setConstantLearningRate(float newCurrentLearningRate) {
     setInitialLearningRate(newCurrentLearningRate);
 }
 
-shared_ptr<Optimizer> Sgd::clone() const { return std::make_shared<Sgd>(*this); }
+shared_ptr<Optimizer> Sgd::clone() const { return make_shared<Sgd>(*this); }
 
 /*
  * decay will still apply from epoch 0.
@@ -103,7 +103,7 @@ json Sgd::serialize(const string &storageDir,
     return j;
 }
 
-shared_ptr<Optimizer> Sgd::deserialize(const json &j) {
+shared_ptr<Optimizer> Sgd::deserialize(const string &modelName, const string &storageDir, const json &j) {
     if (j.at("optimizer_type").get<string>() != "sgd")
         throw runtime_error("Layer type mismatch in Sgd::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")

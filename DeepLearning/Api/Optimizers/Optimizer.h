@@ -18,7 +18,7 @@ class TrainableWeightsBiasesLayer;
 
 class Optimizer {
    public:
-    virtual ~Optimizer();
+    virtual ~Optimizer() = default;
 
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
         std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) = 0;
@@ -36,9 +36,6 @@ class Optimizer {
     static void updateHyperParameters(Network *network, uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
     virtual std::unordered_map<std::string, float> getAllHyperParameters();
 
-    virtual void save(std::string filename) { assert(false); /*FIXME*/ };
-    virtual void load(std::string filename) { assert(false); /*FIXME*/ };
-
     uint64_t getId() const { return id; }
     bool operator==(const Optimizer &other) const { return id == other.id; }
 
@@ -48,12 +45,13 @@ class Optimizer {
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
         return nlohmann::json{};
     };
-    static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
-    using Deserializer = std::function<std::shared_ptr<Optimizer>(const nlohmann::json &)>;
+    static std::shared_ptr<Optimizer> deserialize(const std::string &modelName, const std::string &storageDir, const nlohmann::json &j);
+    using Deserializer =
+        std::function<std::shared_ptr<Optimizer>(const std::string &modelName, const std::string &storageDir, const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
     static void registerLayer(std::string name, Deserializer fn);
 
-    std::string getVersion() const;
+    virtual std::string getVersion() const;
 
    protected:
     // Only subclasses can be instantiated

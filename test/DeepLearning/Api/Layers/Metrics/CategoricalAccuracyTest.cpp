@@ -220,10 +220,10 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    NetworkInput::deserialize(predictionsNetworkInputJ, &newNetwork);
-    NetworkInput::deserialize(labelsNetworkInputJ, &newNetwork);
-    CategoricalAccuracy::deserialize(categoricalAccuracyJ, &newNetwork);
-    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", predictionsNetworkInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", labelsNetworkInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", categoricalAccuracyJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);
@@ -265,4 +265,6 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
         ASSERT_EQ(stampedInput1->getFeatureOutput().get(), stampedCategoricalAccuracy->getFeatureInput().get());
     }
     ASSERT_EQ(stampedCategoricalAccuracy->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }

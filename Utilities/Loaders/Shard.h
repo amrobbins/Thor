@@ -38,7 +38,7 @@ struct DataElement {
     std::string fileName;
 
     uint64_t numDataBytes;
-    std::shared_ptr<uint8_t> data;
+    std::shared_ptr<uint8_t[]> data;
 
     ThorImplementation::TensorDescriptor::DataType dataType;
 };

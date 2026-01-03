@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <nlohmann/json.hpp>
-#include "Utilities/TarFile/Crc32.h"
+#include "Utilities/TarFile/Crc32c.h"
 #include "Utilities/TarFile/TarWriter.h"  // adjust include path as needed
 
 #include <unistd.h>
@@ -143,7 +143,7 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
         throw std::runtime_error("failed reading json blob: " + shard_path.string());
 
     // Validate index CRC (IEEE)
-    const uint32_t index_crc_got = crc32_ieee(0, (uint8_t*)json_str.data(), json_str.size());
+    const uint32_t index_crc_got = thor_file::Crc32c::compute((uint8_t*)json_str.data(), json_str.size());
     if (index_crc_got != index_crc_expected) {
         throw std::runtime_error("index CRC mismatch in " + shard_path.string() + " expected=" + std::to_string(index_crc_expected) +
                                  " got=" + std::to_string(index_crc_got));
@@ -165,8 +165,8 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
     std::vector<uint8_t> blob(64 * 1024, 0xAB);
 
     // Precompute expected CRCs (IEEE) for validation
-    const uint32_t hello_crc = crc32_ieee(0, (uint8_t*)hello.data(), hello.size());
-    const uint32_t blob_crc = crc32_ieee(0, (uint8_t*)blob.data(), blob.size());
+    const uint32_t hello_crc = thor_file::Crc32c::compute((uint8_t*)hello.data(), hello.size());
+    const uint32_t blob_crc = thor_file::Crc32c::compute((uint8_t*)blob.data(), blob.size());
 
     {
         thor_file::TarWriter w(tar_path_prefix, overwrite, shard_limit);
@@ -206,8 +206,8 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
         ASSERT_EQ(e["shard"].get<uint32_t>(), 0u);
         const uint64_t off = e["data_offset"].get<uint64_t>();
         const uint64_t sz = e["size"].get<uint64_t>();
-        ASSERT_TRUE(e.contains("crc_ieee"));
-        EXPECT_EQ(e["crc_ieee"].get<uint32_t>(), hello_crc);
+        ASSERT_TRUE(e.contains("crc"));
+        EXPECT_EQ(e["crc"].get<uint32_t>(), hello_crc);
 
         auto payload = read_payload_at(shard0, off, sz);
         EXPECT_EQ(payload.size(), hello.size());
@@ -215,7 +215,7 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
         EXPECT_EQ(got, hello);
 
         // Verify CRC over the payload bytes too
-        EXPECT_EQ(crc32_ieee(0, (uint8_t*)payload.data(), payload.size()), hello_crc);
+        EXPECT_EQ(thor_file::Crc32c::compute((uint8_t*)payload.data(), payload.size()), hello_crc);
     }
 
     // Read back blob via offsets + validate per-entry CRC
@@ -224,15 +224,15 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
         ASSERT_EQ(e["shard"].get<uint32_t>(), 0u);
         const uint64_t off = e["data_offset"].get<uint64_t>();
         const uint64_t sz = e["size"].get<uint64_t>();
-        ASSERT_TRUE(e.contains("crc_ieee"));
-        EXPECT_EQ(e["crc_ieee"].get<uint32_t>(), blob_crc);
+        ASSERT_TRUE(e.contains("crc"));
+        EXPECT_EQ(e["crc"].get<uint32_t>(), blob_crc);
 
         auto payload = read_payload_at(shard0, off, sz);
         ASSERT_EQ(payload.size(), blob.size());
         EXPECT_EQ(std::memcmp(payload.data(), blob.data(), blob.size()), 0);
 
         // Verify CRC over the payload bytes too
-        EXPECT_EQ(crc32_ieee(0, (uint8_t*)payload.data(), payload.size()), blob_crc);
+        EXPECT_EQ(thor_file::Crc32c::compute((uint8_t*)payload.data(), payload.size()), blob_crc);
     }
 
     cleanup_prefix_files(prefix);
@@ -252,8 +252,8 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     const std::string a = "AAA";
     const std::string b = "BBB";
 
-    const uint32_t a_crc = crc32_ieee(0, (uint8_t*)a.data(), a.size());
-    const uint32_t b_crc = crc32_ieee(0, (uint8_t*)b.data(), b.size());
+    const uint32_t a_crc = thor_file::Crc32c::compute((uint8_t*)a.data(), a.size());
+    const uint32_t b_crc = thor_file::Crc32c::compute((uint8_t*)b.data(), b.size());
 
     {
         thor_file::TarWriter w(tar_path_prefix, overwrite, shard_limit);
@@ -298,15 +298,15 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     ASSERT_TRUE(files1.contains("a.txt"));
     ASSERT_TRUE(files1.contains("b.txt"));
 
-    // Random-access read using the shard specified by the index + validate per-entry crc_ieee
+    // Random-access read using the shard specified by the index + validate per-entry crc32c
     auto check_file = [&](const nlohmann::json& files, const std::string& path, const std::string& expected, uint32_t expected_crc) {
         const auto& e = files[path];
         const uint32_t shard = e["shard"].get<uint32_t>();
         const uint64_t off = e["data_offset"].get<uint64_t>();
         const uint64_t sz = e["size"].get<uint64_t>();
 
-        ASSERT_TRUE(e.contains("crc_ieee")) << "missing crc_ieee for " << path;
-        EXPECT_EQ(e["crc_ieee"].get<uint32_t>(), expected_crc) << "crc_ieee mismatch in index for " << path;
+        ASSERT_TRUE(e.contains("crc")) << "missing crc for " << path;
+        EXPECT_EQ(e["crc"].get<uint32_t>(), expected_crc) << "crc mismatch in index for " << path;
 
         fs::path shard_path = (shard == 0) ? shard0 : shard1;
         auto payload = read_payload_at(shard_path, off, sz);
@@ -314,7 +314,8 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
         EXPECT_EQ(got, expected);
 
         // Validate payload CRC too
-        EXPECT_EQ(crc32_ieee(0, (uint8_t*)payload.data(), payload.size()), expected_crc) << "payload crc mismatch for " << path;
+        EXPECT_EQ(thor_file::Crc32c::compute((uint8_t*)payload.data(), payload.size()), expected_crc)
+            << "payload crc mismatch for " << path;
     };
 
     // Check using shard0's index (they're identical except shard_index anyway)
