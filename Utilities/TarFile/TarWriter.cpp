@@ -1,5 +1,7 @@
 #include "Utilities/TarFile/TarWriter.h"
 
+#include "Crc32.h"
+
 using namespace std;
 
 namespace thor_file {
@@ -70,7 +72,7 @@ static bool is_valid_shard_filename(const string& base, const string& fname) {
     return true;
 }
 
-TarWriter::TarWriter(string tarPath, uint64_t shard_payload_limit_bytes, bool overwriteIfExists) : prefix_(std::move(tarPath)) {
+TarWriter::TarWriter(string tarPath, bool overwriteIfExists, uint64_t shard_payload_limit_bytes) : prefix_(std::move(tarPath)) {
     shard_payload_limit_ = shard_payload_limit_bytes;
     finished_ = false;
     cur_ = 0;
@@ -148,14 +150,6 @@ static string shard_temp_path(const string& prefix, uint32_t shard_idx) {
     char buf[64];
     snprintf(buf, sizeof(buf), ".%06u.thor.incomplete", shard_idx);
     return prefix + string(buf);
-}
-
-static void write_u64_le(ostream& out, uint64_t v) {
-    uint8_t b[8];
-    for (int i = 0; i < 8; ++i) {
-        b[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xFF);
-    }
-    out.write(reinterpret_cast<const char*>(b), 8);
 }
 
 la_ssize_t TarWriter::write_cb(archive*, void* client_data, const void* buffer, size_t length) {
@@ -249,6 +243,8 @@ void TarWriter::add_bytes(string path_in_tar, const void* data, size_t size, int
 
     path_in_tar = cleanTarPath(path_in_tar);
 
+    uint32_t data_crc = crc32_ieee(0, (uint8_t*)data, size);
+
     // Shard rollover policy:
     // With PAX, header overhead varies (extra 512B blocks for extended headers), so we estimate
     // conservatively. Offsets are still exact because we track actual bytes written.
@@ -328,6 +324,7 @@ void TarWriter::add_bytes(string path_in_tar, const void* data, size_t size, int
     info.shard = cur_;
     info.data_offset = data_off_after_header;
     info.size = static_cast<uint64_t>(size);
+    info.crc_ieee = data_crc;
 
     index_[path_in_tar] = info;
 }
@@ -355,6 +352,8 @@ void TarWriter::finishArchive() {
     // Build base JSON (same across shards except shard_index)
     // Use ordered_json to keep key ordering stable if you ever compare strings.
     nlohmann::ordered_json base;
+    base["format_version"] = 1;
+    base["checksum_alg"] = "crc32_ieee";
     base["archive_id"] = archive_id_;  // 32-char “sha-like”
     base["num_shards"] = num_shards;
 
@@ -362,7 +361,7 @@ void TarWriter::finishArchive() {
     for (const auto& kv : index_) {
         const string& path = kv.first;
         const EntryInfo& e = kv.second;
-        files[path] = {{"shard", e.shard}, {"data_offset", e.data_offset}, {"size", e.size}};
+        files[path] = {{"shard", e.shard}, {"data_offset", e.data_offset}, {"size", e.size}, {"crc_ieee", e.crc_ieee}};
     }
     base["files"] = std::move(files);
 
@@ -372,6 +371,7 @@ void TarWriter::finishArchive() {
         j["shard_index"] = shard_idx;  // per-shard field differs
 
         const string json_str = j.dump();  // UTF-8
+        uint32_t index_crc = crc32_ieee(0, (uint8_t*)json_str.c_str(), json_str.size());
 
         ofstream out(shards_[shard_idx].path, ios::binary | ios::app);
         if (!out)
@@ -385,6 +385,9 @@ void TarWriter::finishArchive() {
         // Write footer: magic + json_len (LE)
         out.write(kFooterMagic, 8);
         write_u64_le(out, static_cast<uint64_t>(json_str.size()));
+        write_u32_le(out, index_crc);
+        write_u32_le(out, 0u);  // reserved for future (version/flags/etc)
+
         if (!out)
             throw runtime_error("finishArchive: failed writing footer to: " + shards_[shard_idx].path);
 
@@ -398,6 +401,11 @@ void TarWriter::finishArchive() {
         string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete");
 
         std::error_code ec;
+        if (filesystem::exists(permanent_path)) {
+            filesystem::remove(permanent_path, ec);
+            if (ec)
+                throw runtime_error("finishArchive: failed to rename file " + temp_path + " to: " + permanent_path);
+        }
         filesystem::rename(temp_path, permanent_path, ec);
         if (ec) {
             throw std::runtime_error("finishArchive: rename failed: " + temp_path + " -> " + permanent_path + " (" + ec.message() + ")");

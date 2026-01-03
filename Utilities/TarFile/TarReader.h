@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Crc32.h"
 #include "Utilities/TarFile/TarArchive.h"
 
 namespace thor_file {
@@ -21,6 +22,7 @@ struct FileSliceFd {
     uint32_t shard_index = 0;
     uint64_t offset = 0;
     uint64_t size = 0;
+    uint32_t crc_ieee = 0;
 };
 
 inline uint64_t read_u64_le(const uint8_t b[8]) {
@@ -29,6 +31,10 @@ inline uint64_t read_u64_le(const uint8_t b[8]) {
         v = (v << 8) | static_cast<uint64_t>(b[i]);
     }
     return v;
+}
+
+inline uint32_t read_u32_le(const uint8_t b[4]) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
 }
 
 inline std::string read_footer_json(const std::string& path) {
@@ -40,8 +46,8 @@ inline std::string read_footer_json(const std::string& path) {
     const std::streamoff file_size_off = in.tellg();
     if (file_size_off < 0)
         throw std::runtime_error("TarReader::scan: tellg failed: " + path);
-    const uint64_t file_size = static_cast<uint64_t>(file_size_off);
 
+    const uint64_t file_size = static_cast<uint64_t>(file_size_off);
     if (file_size < kFooterSize) {
         throw std::runtime_error("TarReader::scan: file too small to contain footer: " + path);
     }
@@ -51,8 +57,13 @@ inline std::string read_footer_json(const std::string& path) {
 
     char magic[8];
     uint8_t len_bytes[8];
+    uint8_t crc_bytes[4];
+    uint8_t reserved_bytes[4];
+
     in.read(magic, 8);
     in.read(reinterpret_cast<char*>(len_bytes), 8);
+    in.read(reinterpret_cast<char*>(crc_bytes), 4);
+    in.read(reinterpret_cast<char*>(reserved_bytes), 4);
     if (!in)
         throw std::runtime_error("TarReader::scan: failed to read footer: " + path);
 
@@ -68,15 +79,24 @@ inline std::string read_footer_json(const std::string& path) {
         throw std::runtime_error("TarReader::scan: json_len exceeds file size: " + path);
     }
 
+    const uint32_t index_crc_expected = read_u32_le(crc_bytes);
+
     const uint64_t json_start = file_size - kFooterSize - json_len;
 
     in.seekg(static_cast<std::streamoff>(json_start), std::ios::beg);
-    std::string json(json_len, '\0');
-    in.read(json.data(), static_cast<std::streamsize>(json_len));
+    std::string json_str(json_len, '\0');
+    in.read(json_str.data(), static_cast<std::streamsize>(json_len));
     if (!in)
         throw std::runtime_error("TarReader::scan: failed to read json blob: " + path);
 
-    return json;
+    // Compute CRC (IEEE) over JSON bytes exactly as written
+    const uint32_t index_crc_computed = crc32_ieee(0, (uint8_t*)json_str.data(), json_str.size());
+    if (index_crc_computed != index_crc_expected) {
+        throw std::runtime_error("read_footer_json: index CRC mismatch in " + path + " expected=" + std::to_string(index_crc_expected) +
+                                 " got=" + std::to_string(index_crc_computed));
+    }
+
+    return json_str;
 }
 
 inline void require(bool cond, const std::string& msg) {
@@ -117,6 +137,9 @@ class TarReader {
     // Random-access read of the whole file (works because archive is uncompressed and contiguous).
     void readFile(std::string pathInTar, void* mem, uint64_t fileSize) const;
     FileSliceFd getFileSliceFd(std::string pathInTar) const;
+
+    // Verifies every entry's payload CRC. Throws on first failure.
+    void verifyAll() const;
 
    private:
     void scan();
