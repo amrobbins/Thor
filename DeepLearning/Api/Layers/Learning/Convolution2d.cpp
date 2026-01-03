@@ -139,13 +139,13 @@ json Convolution2d::serialize(const string &storageDir, Stream stream) const {
     }
 
     string layerName = string("layer") + to_string(getId());
-    filesystem::path weightsFile = dir / (layerName + "_weights.gds");
+    filesystem::path weightsFile = (layerName + "_weights.gds");
     j["weights_tensor"] = weightsFile.string();
-    twbLayer->dumpWeightsToFile(weightsFile.string(), stream);
+    twbLayer->dumpWeightsToFile((dir / weightsFile).string(), stream);
     if (hasBias) {
-        filesystem::path biasesFile = dir / (layerName + "_biases.gds");
+        filesystem::path biasesFile = (layerName + "_biases.gds");
         j["biases_tensor"] = biasesFile.string();
-        twbLayer->dumpBiasesToFile(biasesFile.string(), stream);
+        twbLayer->dumpBiasesToFile((dir / biasesFile).string(), stream);
     }
 
     if (hasOptimizer()) {
@@ -155,7 +155,7 @@ json Convolution2d::serialize(const string &storageDir, Stream stream) const {
     return j;
 }
 
-void Convolution2d::deserialize(const json &j, Network *network) {
+void Convolution2d::deserialize(const std::string &modelName, const string &storageDir, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in Convolution2d::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "convolution_2d")
@@ -206,12 +206,13 @@ void Convolution2d::deserialize(const json &j, Network *network) {
         convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs.back();
         convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs.back()] = convolution2d.featureInputs[i];
     }
+    convolution2d.storageDir = storageDir;
     convolution2d.weightsFile = weightsFile;
     if (hasBias)
         convolution2d.biasesFile = biasesFile;
 
     if (j.contains("optimizer")) {
-        convolution2d.optimizer = Optimizer::deserialize(j.at("optimizer"));
+        convolution2d.optimizer = Optimizer::deserialize(modelName, storageDir, j.at("optimizer"));
     }
 
     convolution2d.initialized = true;
@@ -253,13 +254,14 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         assert(biasInitializerBuilder.get() == nullptr);
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
-        physicalLayer->loadWeightsFromFile(weightsFile.get(), stream);
+        physicalLayer->loadWeightsFromFile(storageDir.get() + "/" + weightsFile.get(), stream);
         if (hasBias) {
             assert(biasesFile.isPresent());
-            physicalLayer->loadBiasesFromFile(biasesFile.get(), stream);
+            physicalLayer->loadBiasesFromFile(storageDir.get() + "/" + biasesFile.get(), stream);
         }
 
         // Can't use the file later, it may not still be there
+        storageDir = Optional<string>::empty();
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
 

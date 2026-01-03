@@ -84,7 +84,8 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     if (!success)
         return output;
 
-    unique_ptr<uint8_t> data(new uint8_t[outputTensorSizeInBytes()]);
+    // unique_ptr<uint8_t> data(new uint8_t[]);
+    unique_ptr<uint8_t[]> data = std::make_unique<uint8_t[]>(outputTensorSizeInBytes());
 
     if (bytesPerPixelChannel == 1) {
         output.dataType = ThorImplementation::TensorDescriptor::DataType::UINT8;
@@ -121,6 +122,6 @@ DataElement ImageProcessor::operator()(DataElement &input) {
     }
 
     output.numDataBytes = outputTensorSizeInBytes();
-    output.data.reset(data.release());
+    output.data.reset(data.release(), std::default_delete<uint8_t[]>());
     return output;
 }

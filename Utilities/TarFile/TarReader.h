@@ -22,7 +22,7 @@ struct FileSliceFd {
     uint32_t shard_index = 0;
     uint64_t offset = 0;
     uint64_t size = 0;
-    uint32_t crc_ieee = 0;
+    uint32_t crc = 0;
 };
 
 class TarReader {

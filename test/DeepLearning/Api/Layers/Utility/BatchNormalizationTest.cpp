@@ -382,7 +382,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         EXPECT_FALSE(batchNormalizationJ.at("means_tensor").get<string>().empty());
         EXPECT_FALSE(batchNormalizationJ.at("variances_tensor").get<string>().empty());
 
-        string file_prefix = "/tmp/layer" + to_string(batchNormalization.getId());
+        string file_prefix = "layer" + to_string(batchNormalization.getId());
         EXPECT_EQ(batchNormalizationJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
         EXPECT_EQ(batchNormalizationJ.at("biases_tensor").get<string>(), file_prefix + "_biases.gds");
         EXPECT_EQ(batchNormalizationJ.at("means_tensor").get<string>(), file_prefix + "_means.gds");
@@ -401,11 +401,11 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
-        Layer::deserialize(networkInputJ, &newNetwork);
-        Layer::deserialize(labelsInputJ, &newNetwork);
-        Layer::deserialize(batchNormalizationJ, &newNetwork);
-        Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
-        Layer::deserialize(networkOutputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", networkInputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", labelsInputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", batchNormalizationJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", meanAbsoluteErrorJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
@@ -482,4 +482,6 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
             EXPECT_EQ(variancesCpuMemDes[i], half(i * i + 14));
         }
     }
+
+    filesystem::remove("/tmp/testModel.thor");
 }

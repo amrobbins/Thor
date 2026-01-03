@@ -21,8 +21,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> getBiasesGradient() const { return biasesGradient; }
 
     virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
-    static void deserialize(const nlohmann::json &j, Network *network);
-    using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
+    static void deserialize(const std::string &modelName, const std::string &storageDir, const nlohmann::json &j, Network *network);
+    using Deserializer =
+        std::function<void(const std::string &modelName, const std::string &storageDir, const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
@@ -74,6 +75,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> biasesGradient;
     std::shared_ptr<Optimizer> optimizer;
 
+    Optional<std::string> storageDir;
     Optional<std::string> weightsFile;
     Optional<std::string> biasesFile;
 };

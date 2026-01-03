@@ -564,7 +564,7 @@ TEST(Sgd, SerializeDeserialize) {
 
     ASSERT_TRUE(out0.at("id").is_number_integer());
 
-    string file_prefix = "/tmp/layer" + to_string(fullyConnected.getId());
+    string file_prefix = "layer" + to_string(fullyConnected.getId());
     EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<string>().empty());
     EXPECT_EQ(fullyConnectedJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
     if (hasBias) {
@@ -594,11 +594,11 @@ TEST(Sgd, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(labelsInputJ, &newNetwork);
-    Layer::deserialize(fullyConnectedJ, &newNetwork);
-    Layer::deserialize(crossEntropyJ, &newNetwork);
-    Layer::deserialize(networkOutputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", networkInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", crossEntropyJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     statusCode = newNetwork.place(batchSize, initDoneEvents);
@@ -623,4 +623,6 @@ TEST(Sgd, SerializeDeserialize) {
     ASSERT_EQ(stampedSgd->getDecay(), decay);
     ASSERT_EQ(stampedSgd->getMomentum(), momentum);
     ASSERT_EQ(stampedSgd->getUseNesterovMomentum(), useNesterovMomentum);
+
+    filesystem::remove("/tmp/testModel.thor");
 }

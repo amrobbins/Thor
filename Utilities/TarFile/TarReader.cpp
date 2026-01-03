@@ -1,5 +1,7 @@
 #include "Utilities/TarFile/TarReader.h"
 
+#include "Crc32c.h"
+
 using namespace std;
 using json = nlohmann::json;
 
@@ -69,8 +71,8 @@ static std::string read_footer_json(const std::string& path) {
     if (!in)
         throw std::runtime_error("TarReader::scan: failed to read json blob: " + path);
 
-    // Compute CRC (IEEE) over JSON bytes exactly as written
-    const uint32_t index_crc_computed = crc32_ieee(0, (uint8_t*)json_str.data(), json_str.size());
+    // Compute CRC over JSON bytes exactly as written
+    const uint32_t index_crc_computed = Crc32c::compute((uint8_t*)json_str.data(), json_str.size());
     if (index_crc_computed != index_crc_expected) {
         throw std::runtime_error("read_footer_json: index CRC mismatch in " + path + " expected=" + std::to_string(index_crc_expected) +
                                  " got=" + std::to_string(index_crc_computed));
@@ -174,9 +176,9 @@ void TarReader::readFile(std::string pathInTar, void* mem, uint64_t fileSize) co
     pread_full(s.fd, s.path, mem, e.size, e.data_offset);
 
     // Validate the CRC on data usage
-    const uint32_t computed_crc = crc32_ieee(0, (uint8_t*)mem, (size_t)e.size);
-    if (computed_crc != e.crc_ieee) {
-        throw std::runtime_error("CRC mismatch for '" + pathInTar + "' expected=" + std::to_string(e.crc_ieee) +
+    const uint32_t computed_crc = Crc32c::compute((uint8_t*)mem, (size_t)e.size);
+    if (computed_crc != e.crc) {
+        throw std::runtime_error("CRC mismatch for '" + pathInTar + "' expected=" + std::to_string(e.crc) +
                                  " got=" + std::to_string(computed_crc));
     }
 }
@@ -199,7 +201,7 @@ FileSliceFd TarReader::getFileSliceFd(std::string pathInTar) const {
     s.shard_index = e.shard;
     s.offset = e.data_offset;
     s.size = e.size;
-    s.crc_ieee = e.crc_ieee;
+    s.crc = e.crc;
     return s;
 }
 
@@ -263,7 +265,7 @@ void TarReader::scan() {
 
     require(j0.contains("checksum_alg"), "index JSON missing 'checksum_alg'");
     const std::string alg = j0.at("checksum_alg").get<std::string>();
-    require(alg == "crc32_ieee", "unsupported checksum_alg: " + alg);
+    require(alg == "crc32c", "unsupported checksum_alg: " + alg);
 
     // Compare later ignoring shard_index
     json j0_cmp = j0;
@@ -336,13 +338,13 @@ void TarReader::scan() {
         require(info.contains("shard"), "missing 'shard' for: " + path_in_archive);
         require(info.contains("data_offset"), "missing 'data_offset' for: " + path_in_archive);
         require(info.contains("size"), "missing 'size' for: " + path_in_archive);
-        require(info.contains("crc_ieee"), "missing 'crc_ieee' for: " + path_in_archive);
+        require(info.contains("crc"), "missing 'crc' for: " + path_in_archive);
 
         EntryInfo e{};
         e.shard = info.at("shard").get<uint32_t>();
         e.data_offset = info.at("data_offset").get<uint64_t>();
         e.size = info.at("size").get<uint64_t>();
-        e.crc_ieee = info.at("crc_ieee").get<uint32_t>();
+        e.crc = info.at("crc").get<uint32_t>();
 
         require(e.shard < num_shards_, "entry refers to invalid shard for: " + path_in_archive);
 

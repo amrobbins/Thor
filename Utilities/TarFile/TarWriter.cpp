@@ -1,6 +1,7 @@
 #include "Utilities/TarFile/TarWriter.h"
 
 #include "Crc32.h"
+#include "Crc32c.h"
 
 using namespace std;
 
@@ -260,7 +261,7 @@ void TarWriter::addArchiveFile(string path_in_tar, const void* data, size_t size
 
     path_in_tar = cleanTarPath(path_in_tar);
 
-    uint32_t data_crc = crc32_ieee(0, (uint8_t*)data, size);
+    uint32_t data_crc = Crc32c::compute((uint8_t*)data, size);
 
     // Shard rollover policy:
     // With PAX, header overhead varies (extra 512B blocks for extended headers), so we estimate
@@ -341,7 +342,7 @@ void TarWriter::addArchiveFile(string path_in_tar, const void* data, size_t size
     info.shard = cur_;
     info.data_offset = data_off_after_header;
     info.size = static_cast<uint64_t>(size);
-    info.crc_ieee = data_crc;
+    info.crc = data_crc;
 
     index_[path_in_tar] = info;
 }
@@ -370,7 +371,7 @@ void TarWriter::finishArchive() {
     // Use ordered_json to keep key ordering stable if you ever compare strings.
     nlohmann::ordered_json base;
     base["format_version"] = 1;
-    base["checksum_alg"] = "crc32_ieee";
+    base["checksum_alg"] = "crc32c";
     base["archive_id"] = archive_id_;  // 32-char “sha-like”
     base["num_shards"] = num_shards;
 
@@ -378,7 +379,7 @@ void TarWriter::finishArchive() {
     for (const auto& kv : index_) {
         const string& path = kv.first;
         const EntryInfo& e = kv.second;
-        files[path] = {{"shard", e.shard}, {"data_offset", e.data_offset}, {"size", e.size}, {"crc_ieee", e.crc_ieee}};
+        files[path] = {{"shard", e.shard}, {"data_offset", e.data_offset}, {"size", e.size}, {"crc", e.crc}};
     }
     base["files"] = std::move(files);
 
@@ -388,7 +389,7 @@ void TarWriter::finishArchive() {
         j["shard_index"] = shard_idx;  // per-shard field differs
 
         const string json_str = j.dump();  // UTF-8
-        uint32_t index_crc = crc32_ieee(0, (uint8_t*)json_str.c_str(), json_str.size());
+        uint32_t index_crc = Crc32c::compute((uint8_t*)json_str.c_str(), json_str.size());
 
         ofstream out(shards_[shard_idx].path, ios::binary | ios::app);
         if (!out)

@@ -34,7 +34,7 @@ class Sgd : public Optimizer {
                                      Stream stream,
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
-    static std::shared_ptr<Optimizer> deserialize(const nlohmann::json &j);
+    static std::shared_ptr<Optimizer> deserialize(const std::string &modelName, const std::string &storageDir, const nlohmann::json &j);
 
    protected:
     virtual std::shared_ptr<Optimizer> clone() const;

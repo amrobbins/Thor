@@ -805,7 +805,7 @@ class Tensor : private ReferenceCounted {
     void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);
 
     TensorPlacement placement;
-    void *mem;
+    void *mem = nullptr;
 
     unsigned long instanceId;
 

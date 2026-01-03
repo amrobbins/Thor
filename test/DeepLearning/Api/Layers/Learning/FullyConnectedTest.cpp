@@ -9,6 +9,7 @@
 #include <nlohmann/json.hpp>
 
 #include <stdio.h>
+#include <filesystem>
 #include <memory>
 
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
@@ -449,7 +450,7 @@ TEST(FullyConnected, SerializeDeserialize) {
 
         ASSERT_TRUE(out0.at("id").is_number_integer());
 
-        string file_prefix = "/tmp/layer" + to_string(fullyConnected.getId());
+        string file_prefix = "layer" + to_string(fullyConnected.getId());
         EXPECT_FALSE(fullyConnectedJ.at("weights_tensor").get<string>().empty());
         EXPECT_EQ(fullyConnectedJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
         if (hasBias) {
@@ -463,17 +464,18 @@ TEST(FullyConnected, SerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
-        Layer::deserialize(networkInputJ, &newNetwork);
-        Layer::deserialize(labelsInputJ, &newNetwork);
+        // I will need to use thor-file to create the testModel archive first, with overwrite set to true
+        Layer::deserialize("testModel", "/tmp", networkInputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", labelsInputJ, &newNetwork);
         if (useBatchNorm)
-            Layer::deserialize(batchNormJ, &newNetwork);
+            Layer::deserialize("testModel", "/tmp", batchNormJ, &newNetwork);
         if (dropProportion > 0.0f)
-            Layer::deserialize(dropOutJ, &newNetwork);
-        Layer::deserialize(fullyConnectedJ, &newNetwork);
+            Layer::deserialize("testModel", "/tmp", dropOutJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", fullyConnectedJ, &newNetwork);
         if (useRelu)
-            Layer::deserialize(reluJ, &newNetwork);
-        Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
-        Layer::deserialize(networkOutputJ, &newNetwork);
+            Layer::deserialize("testModel", "/tmp", reluJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", meanAbsoluteErrorJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp", networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
@@ -567,4 +569,6 @@ TEST(FullyConnected, SerializeDeserialize) {
             }
         }
     }
+
+    filesystem::remove("/tmp/testModel.thor");
 }

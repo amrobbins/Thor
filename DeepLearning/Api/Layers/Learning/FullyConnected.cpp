@@ -142,13 +142,13 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
         throw runtime_error("Storage path is not a directory: " + dir.string());
     }
 
-    filesystem::path weightsFile = dir / (layerName + "_weights.gds");
+    filesystem::path weightsFile = (layerName + "_weights.gds");
     j["weights_tensor"] = weightsFile.string();
-    twbLayer->dumpWeightsToFile(weightsFile.string(), stream);
+    twbLayer->dumpWeightsToFile((dir / weightsFile).string(), stream);
     if (hasBias) {
-        filesystem::path biasesFile = dir / (layerName + "_biases.gds");
+        filesystem::path biasesFile = (layerName + "_biases.gds");
         j["biases_tensor"] = biasesFile.string();
-        twbLayer->dumpBiasesToFile(biasesFile.string(), stream);
+        twbLayer->dumpBiasesToFile((dir / biasesFile).string(), stream);
     }
 
     if (hasOptimizer()) {
@@ -158,7 +158,7 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
     return j;
 }
 
-void FullyConnected::deserialize(const json &j, Network *network) {
+void FullyConnected::deserialize(const std::string &modelName, const string &storageDir, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "fully_connected")
@@ -195,6 +195,7 @@ void FullyConnected::deserialize(const json &j, Network *network) {
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
     }
+    fullyConnected.storageDir = storageDir;
     fullyConnected.weightsFile = weightsFile;
     if (hasBias)
         fullyConnected.biasesFile = biasesFile;
@@ -202,7 +203,7 @@ void FullyConnected::deserialize(const json &j, Network *network) {
     fullyConnected.initialized = true;
 
     if (j.contains("optimizer")) {
-        fullyConnected.optimizer = Optimizer::deserialize(j.at("optimizer"));
+        fullyConnected.optimizer = Optimizer::deserialize(modelName, storageDir, j.at("optimizer"));
     }
 
     fullyConnected.addToNetwork(network);
@@ -242,13 +243,14 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         assert(biasInitializerBuilder.get() == nullptr);
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
-        physicalLayer->loadWeightsFromFile(weightsFile.get(), stream);
+        physicalLayer->loadWeightsFromFile(storageDir.get() + "/" + weightsFile.get(), stream);
         if (hasBias) {
             assert(biasesFile.isPresent());
-            physicalLayer->loadBiasesFromFile(biasesFile.get(), stream);
+            physicalLayer->loadBiasesFromFile(storageDir.get() + "/" + biasesFile.get(), stream);
         }
 
         // Can't use the file later, it may not still be there
+        storageDir = Optional<string>::empty();
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
 

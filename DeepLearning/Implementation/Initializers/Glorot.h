@@ -4,6 +4,8 @@
 
 #include <math.h>
 
+#include <nlohmann/json.hpp>
+
 namespace ThorImplementation {
 
 class Glorot : public Initializer {
@@ -24,5 +26,11 @@ class Glorot : public Initializer {
 
     const Mode mode;
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(Glorot::Mode,
+                             {
+                                 {Glorot::Mode::UNIFORM, "uniform"},
+                                 {Glorot::Mode::NORMAL, "normal"},
+                             })
 
 }  // namespace ThorImplementation

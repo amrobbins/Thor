@@ -255,13 +255,13 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    Layer::deserialize(predictionsInputJ, &newNetwork);
-    Layer::deserialize(labelsInputJ, &newNetwork);
-    Layer::deserialize(fullyConnectedJ, &newNetwork);
-    Layer::deserialize(meanAbsoluteErrorJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", predictionsInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", meanAbsoluteErrorJ, &newNetwork);
     if (lossShaper)
-        Layer::deserialize(lossShaperJ, &newNetwork);
-    Layer::deserialize(lossOutputJ, &newNetwork);
+        Layer::deserialize("testModel", "/tmp/", lossShaperJ, &newNetwork);
+    Layer::deserialize("testModel", "/tmp/", lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);
@@ -325,4 +325,6 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     } else {
         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
+
+    filesystem::remove("/tmp/testModel.thor");
 }

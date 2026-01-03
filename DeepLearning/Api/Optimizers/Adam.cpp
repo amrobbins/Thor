@@ -5,8 +5,6 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-Adam::~Adam() {}
-
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
     return make_shared<ThorImplementation::Adam>(trainableLayer, alpha, beta1, beta2, epsilon);
 }
@@ -112,7 +110,7 @@ json Adam::serialize(const string &storageDir,
     return j;
 }
 
-shared_ptr<Optimizer> Adam::deserialize(const json &j) {
+shared_ptr<Optimizer> Adam::deserialize(const string &modelName, const string &storageDir, const json &j) {
     if (j.at("optimizer_type").get<string>() != "adam")
         throw runtime_error("Layer type mismatch in Adam::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")
@@ -145,6 +143,7 @@ shared_ptr<Optimizer> Adam::deserialize(const json &j) {
     adam.beta1 = beta1;
     adam.beta2 = beta2;
     adam.epsilon = epsilon;
+    adam.storageDir = storageDir;
     adam.mFile = mFile;
     adam.vFile = vFile;
     adam.mBiasFile = mBiasFile;
@@ -191,26 +190,32 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
             assert(vBiasFile.isPresent());
         }
 
-        if (m.getAttachedFilename() != mFile.get())
-            m.attachFile(mFile, 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
+        filesystem::path mFilePath = filesystem::path(storageDir.get()) / filesystem::path(mFile.get());
+        if (filesystem::path(m.getAttachedFilename()) != mFilePath)
+            m.attachFile(mFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
         m.loadFromFile(stream);
-        if (v.getAttachedFilename() != vFile.get())
-            v.attachFile(vFile, 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
+
+        filesystem::path vFilePath = filesystem::path(storageDir.get()) / filesystem::path(vFile.get());
+        if (filesystem::path(v.getAttachedFilename()) != vFilePath)
+            v.attachFile(vFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
         v.loadFromFile(stream);
 
         if (mBias.isPresent()) {
             assert(mBiasFile.isPresent());
             assert(vBiasFile.isPresent());
 
-            if (mBias.get().getAttachedFilename() != mBiasFile.get())
-                mBias.get().attachFile(mFile, 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
+            filesystem::path mBiasFilePath = filesystem::path(storageDir.get()) / filesystem::path(mBiasFile.get());
+            if (filesystem::path(mBias.get().getAttachedFilename()) != mBiasFilePath)
+                mBias.get().attachFile(mBiasFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
             mBias.get().loadFromFile(stream);
-            if (vBias.get().getAttachedFilename() != vBiasFile.get())
-                vBias.get().attachFile(vBiasFile, 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
+            filesystem::path vBiasFilePath = filesystem::path(storageDir.get()) / filesystem::path(vBiasFile.get());
+            if (filesystem::path(vBias.get().getAttachedFilename()) != vBiasFilePath)
+                vBias.get().attachFile(vBiasFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
             vBias.get().loadFromFile(stream);
         }
 
         // Can't use the files later, they may not still be there
+        storageDir.clear();
         mFile.clear();
         vFile.clear();
         mBiasFile.clear();

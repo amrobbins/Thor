@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "Utilities/TarFile/Crc32.h"
+#include "Utilities/TarFile/Crc32c.h"
 #include "Utilities/TarFile/TarReader.h"
 #include "Utilities/TarFile/TarWriter.h"
 
@@ -70,8 +70,8 @@ void read_and_expect(thor_file::TarReader& r, const std::string& path, const std
     ASSERT_EQ(got.size(), expected.size());
     ASSERT_EQ(std::memcmp(got.data(), expected.data(), expected.size()), 0) << "payload mismatch for " << path;
 
-    const uint32_t crc_expected = crc32_ieee(0, (uint8_t*)expected.data(), expected.size());
-    EXPECT_EQ(info.crc_ieee, crc_expected) << "index crc_ieee mismatch for " << path;
+    const uint32_t crc_expected = thor_file::Crc32c::compute((uint8_t*)expected.data(), expected.size());
+    EXPECT_EQ(info.crc, crc_expected) << "index crc32c mismatch for " << path;
 }
 
 // -----------------------------------------------------------------------------
@@ -274,7 +274,7 @@ static void corrupt_archive_id_in_shard_and_fix_index_crc(const fs::path& shard_
         // We'll update in-memory then recompute.
         fi.json.replace(id_pos, 32, new_id);
 
-        const uint32_t new_index_crc = crc32_ieee(0, (uint8_t*)fi.json.data(), fi.json.size());
+        const uint32_t new_index_crc = thor_file::Crc32c::compute((uint8_t*)fi.json.data(), fi.json.size());
 
         // Patch footer index_crc field
         write_u32_le(io, fi.index_crc_off, new_index_crc);
@@ -678,7 +678,7 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
     }
 
     // Validate index CRC (IEEE CRC-32)
-    const uint32_t index_crc_got = crc32_ieee(0, (uint8_t*)json_str.data(), json_str.size());
+    const uint32_t index_crc_got = thor_file::Crc32c::compute((uint8_t*)json_str.data(), json_str.size());
     if (index_crc_got != index_crc_expected) {
         throw std::runtime_error("load_footer_index_json: index CRC mismatch in " + shard_path.string() +
                                  " expected=" + std::to_string(index_crc_expected) + " got=" + std::to_string(index_crc_got));
@@ -719,12 +719,15 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     ASSERT_TRUE(j0.contains("files"));
     const auto& files = j0["files"];
     ASSERT_TRUE(files.contains("data/blob.bin"));
+    ASSERT_TRUE(j0.contains("checksum_alg"));
+    const auto& checksum_alg = j0.at("checksum_alg").get<std::string>();
+    ASSERT_TRUE(checksum_alg == "crc32c");
 
     const auto& e = files["data/blob.bin"];
     const uint64_t off = e["data_offset"].get<uint64_t>();
     const uint64_t sz = e["size"].get<uint64_t>();
     ASSERT_GT(sz, 16u) << "blob too small for corruption test";
-    ASSERT_TRUE(e.contains("crc_ieee"));
+    ASSERT_TRUE(e.contains("crc"));
 
     // Corrupt a single bit somewhere inside the payload (not in the header / footer).
     // We'll flip the lowest bit of one byte near the middle.

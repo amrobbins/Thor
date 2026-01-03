@@ -289,10 +289,10 @@ void ShardedRawDatasetCreator::loadExamples(WorkQueueUnordered<DataElement, Data
 
                             // read file
                             file.seekg(0, std::ios::beg);
-                            unique_ptr<uint8_t> buffer(new uint8_t[fileSizeInBytes]);
+                            unique_ptr<uint8_t[]> buffer = std::make_unique<uint8_t[]>(fileSizeInBytes);
                             if (file.read((char*)buffer.get(), fileSizeInBytes)) {
                                 DataElement rawDataElement;
-                                rawDataElement.data = std::shared_ptr<uint8_t>((uint8_t*)buffer.release());
+                                rawDataElement.data = std::shared_ptr<uint8_t[]>(buffer.release(), std::default_delete<uint8_t[]>());
                                 rawDataElement.numDataBytes = fileSizeInBytes;
                                 rawDataElement.exampleType = type;
                                 rawDataElement.className = className;

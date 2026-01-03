@@ -38,13 +38,16 @@ void Layer::connectTwoLayers(shared_ptr<ThorImplementation::Layer> drivingLayer,
     drivingLayer->connectToNextLayer(loadingLayer.get(), drivingLayerConnectionType, loadingLayerConnectionType);
 }
 
-void Layer::deserialize(const nlohmann::json& j, Network* network) {
+// FIXME: Goes away:
+void Layer::deserialize(const nlohmann::json& j, Network* network) { deserialize("FIXME", "FIXME", j, network); }
+
+void Layer::deserialize(const std::string& modelName, const string& storageDir, const nlohmann::json& j, Network* network) {
     string factory = j.at("factory").get<string>();
     if (factory == Factory::Activation) {
         Activation::deserialize(j, network);
         return;
     } else if (factory == Factory::Learning) {
-        TrainableWeightsBiasesLayer::deserialize(j, network);
+        TrainableWeightsBiasesLayer::deserialize(modelName, storageDir, j, network);
         return;
     } else if (factory == Factory::Loss) {
         Loss::deserialize(j, network);

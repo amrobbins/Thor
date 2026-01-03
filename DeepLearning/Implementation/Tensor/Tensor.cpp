@@ -542,39 +542,48 @@ struct PerformReadParams : HostFunctionArgsBase {
     const int32_t fileDescriptor;
 };
 
+static void read_exact_at(int fd, uint8_t *p, size_t total, off_t offset, const std::string &fileName) {
+    size_t left = total;
+
+    while (left > 0) {
+        ssize_t n = pread(fd, p, left, offset);
+
+        if (n > 0) {
+            p += static_cast<size_t>(n);
+            left -= static_cast<size_t>(n);
+            offset += static_cast<off_t>(n);
+            continue;
+        }
+
+        if (n == 0) {
+            throw std::runtime_error("EOF reading " + fileName + " (wanted " + std::to_string(total) + " bytes, got " +
+                                     std::to_string(total - left) + ")");
+        }
+
+        int e = errno;
+        if (e == EINTR)
+            continue;
+        if (e == EAGAIN)
+            continue;
+
+        throw std::runtime_error("pread failed for " + fileName + " at offset " + std::to_string(static_cast<long long>(offset)) +
+                                 " (wanted " + std::to_string(left) + " bytes): " + std::string(strerror(e)));
+    }
+}
+
 void performRead(void *params) {
     HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
     assert(baseParams != nullptr);
     PerformReadParams *performReadParams = dynamic_cast<PerformReadParams *>(baseParams);
     assert(performReadParams != nullptr);
 
-    const void *memPtr = performReadParams->memPtr;
+    uint8_t *memPtr = (uint8_t *)performReadParams->memPtr;
     const size_t totalBytesToRead = performReadParams->totalBytesToRead;
     const string fileName = performReadParams->fileName;
     const off_t fileOffset = performReadParams->fileOffset;
     const int32_t fileDescriptor = performReadParams->fileDescriptor;
 
-    ssize_t bytesRead = 0;
-    size_t bytesLeftToRead = totalBytesToRead;
-    if (lseek(fileDescriptor, fileOffset, SEEK_SET) < 0) {
-        string errorString = "Error seeking to " + to_string(fileOffset) + " in file " + fileName;
-        throw runtime_error(errorString);
-    }
-
-    uint8_t *runningMemPtr = (uint8_t *)memPtr;
-    while (bytesLeftToRead > 0) {
-        bytesRead = read(fileDescriptor, runningMemPtr, bytesLeftToRead);
-
-        if (bytesRead <= 0 || (size_t)bytesRead > bytesLeftToRead) {
-            close(fileDescriptor);
-            string errorString = "read failed for file " + fileName + ", requesting " + to_string(bytesLeftToRead) + " bytes at offset " +
-                                 to_string(totalBytesToRead - bytesLeftToRead) + ".  bytesRead value " + to_string(bytesRead);
-            throw runtime_error(errorString);
-        }
-
-        bytesLeftToRead -= bytesRead;
-        runningMemPtr += bytesRead;
-    }
+    read_exact_at(fileDescriptor, memPtr, totalBytesToRead, fileOffset, fileName);
 }
 
 struct PerformWriteParams : HostFunctionArgsBase {
