@@ -293,21 +293,15 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         Optional<Event> initDoneEvent;
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
-        weightsInitializerBuilderClone->tensorToInitialize(physicalLayer->getWeights());
-        weightsInitializerBuilderClone->layerThatOwnsTensor(physicalLayer.get());
         shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilderClone->build();
-        weightsInitializer->initialize();
-        initDoneEvent = weightsInitializer->getInitDoneEvent();
+        initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         if (physicalLayer->getBiases().isPresent()) {
             shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
-            biasInitializerBuilderClone->tensorToInitialize(physicalLayer->getBiases().get());
-            biasInitializerBuilderClone->layerThatOwnsTensor(physicalLayer.get());
             shared_ptr<Initializer> biasInitializer = biasInitializerBuilderClone->build();
-            biasInitializer->initialize();
-            initDoneEvent = biasInitializer->getInitDoneEvent();
+            initDoneEvent = biasInitializer->initialize(physicalLayer->getBiases().get(), physicalLayer.get());
             if (initDoneEvent.isPresent())
                 initDoneEvents.push_back(initDoneEvent);
         }

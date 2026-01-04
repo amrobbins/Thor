@@ -2,14 +2,19 @@
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
+#include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
 #include <assert.h>
 #include <memory>
+#include <string>
+#include <unordered_map>
+
+#include <nlohmann/json.hpp>
 
 namespace Thor {
-
-// struct StampedNetwork;
 
 class Initializer {
    public:
@@ -24,18 +29,26 @@ class Initializer {
     // Referring to the initializer object, not the tensor that gets initialized:
     bool isInitialized() { return initialized; }
 
-    virtual void initialize() {
-        assert(tensorToInitialize.isPresent());
+    virtual void stamp() = 0;
+
+    virtual Event initialize(ThorImplementation::Tensor tensorToInitialize, ThorImplementation::Layer *layerThatOwnsTensor) {
+        stamp();
+        assert(implementationInitializer != nullptr);
         assert(layerThatOwnsTensor != nullptr);
         initDoneEvent = implementationInitializer->initialize(layerThatOwnsTensor, tensorToInitialize);
+        return initDoneEvent;
     }
 
-    Optional<Event> getInitDoneEvent() { return initDoneEvent; }
+    virtual nlohmann::json serialize(Stream stream) const = 0;
+    static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
+    using Deserializer = std::function<std::shared_ptr<Initializer>(const nlohmann::json &)>;
+    static std::unordered_map<std::string, Deserializer> &getRegistry();
+    static void registerLayer(std::string name, Deserializer fn);
+
+    virtual std::string getVersion() const;
 
    protected:
     std::shared_ptr<ThorImplementation::Initializer> implementationInitializer;
-    Optional<ThorImplementation::Tensor> tensorToInitialize;
-    ThorImplementation::Layer *layerThatOwnsTensor;
     Optional<Event> initDoneEvent;
 
     // Referring to the initializer object, not the tensor that gets initialized:
@@ -47,8 +60,6 @@ class Initializer {
 class Initializer::Builder {
    public:
     virtual ~Builder() {}
-    virtual void tensorToInitialize(ThorImplementation::Tensor _tensorToInitialize) = 0;
-    virtual void layerThatOwnsTensor(ThorImplementation::Layer *_layerThatOwnsTensor) = 0;
     virtual std::shared_ptr<Initializer> build() = 0;
     virtual std::shared_ptr<Builder> clone() = 0;
 };
