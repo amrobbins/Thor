@@ -159,10 +159,12 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json categoricalAccuracyJ = categoricalAccuracy.serialize("/tmp/", stream);
-    json predictionsNetworkInputJ = predictionsNetworkInput.serialize("/tmp/", stream);
-    json labelsNetworkInputJ = labelsNetworkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json categoricalAccuracyJ = categoricalAccuracy.serialize(archiveWriter, stream);
+    json predictionsNetworkInputJ = predictionsNetworkInput.serialize(archiveWriter, stream);
+    json labelsNetworkInputJ = labelsNetworkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // printf("%s\n", predictionsNetworkInputJ.dump(4).c_str());
     // printf("%s\n", labelsNetworkInputJ.dump(4).c_str());
@@ -175,7 +177,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &categoricalAccuracy;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(categoricalAccuracyJ, fromLayerJ);
 
     EXPECT_TRUE(categoricalAccuracyJ.contains("predictions"));
@@ -220,10 +222,13 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    Layer::deserialize("testModel", "/tmp/", predictionsNetworkInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", labelsNetworkInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", categoricalAccuracyJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, predictionsNetworkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, labelsNetworkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, categoricalAccuracyJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);

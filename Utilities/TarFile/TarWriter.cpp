@@ -90,29 +90,26 @@ static void write_u32_le(std::ostream& out, uint32_t v) {
     out.write(reinterpret_cast<const char*>(b), 4);
 }
 
-TarWriter::TarWriter(string tarPath, bool overwriteIfExists, uint64_t shard_payload_limit_bytes) : prefix_(std::move(tarPath)) {
+TarWriter::TarWriter(string archiveName, filesystem::path archiveDirectory, bool overwriteIfExists, uint64_t shard_payload_limit_bytes) {
     shard_payload_limit_ = shard_payload_limit_bytes;
     finished_ = false;
     cur_ = 0;
     index_.clear();
     shards_.clear();
 
-    // Prefix decomposition: "path/to/MyModel" => dir="path/to", base="MyModel"
-    filesystem::path prefixPath(prefix_);
-    filesystem::path dir = prefixPath.parent_path();
-    if (dir.empty())
-        dir = filesystem::path(".");
-    const string base = prefixPath.filename().string();
-
-    if (!filesystem::exists(dir)) {
-        filesystem::create_directories(dir);
+    if (archiveDirectory.empty())
+        archiveDirectory = filesystem::path(".");
+    if (!filesystem::exists(archiveDirectory)) {
+        filesystem::create_directories(archiveDirectory);
     }
+
+    prefix_ = (archiveDirectory / archiveName).string();
 
     // Scan for any existing shard *paths* matching this prefix (any type: file/dir/symlink/etc.)
     vector<filesystem::path> matches;
-    for (const auto& dir_entry : filesystem::directory_iterator(dir)) {
+    for (const auto& dir_entry : filesystem::directory_iterator(archiveDirectory)) {
         const string fname = dir_entry.path().filename().string();
-        if (!is_valid_shard_filename(base, fname))
+        if (!is_valid_shard_filename(archiveName, fname))
             continue;
 
         // Anything that exists here is a conflict.

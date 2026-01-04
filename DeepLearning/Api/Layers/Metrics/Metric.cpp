@@ -25,7 +25,7 @@ void Metric::deserialize(const nlohmann::json &j, Network *network) {
     deserializer(j, network);
 }
 
-json Metric::serialize(const string &storageDir, Stream stream) const {
+json Metric::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     json j;
     j["factory"] = Layer::Factory::Metric.value();
     j["version"] = getLayerVersion();

@@ -6,6 +6,8 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/Optional.h"
+#include "Utilities/TarFile/TarReader.h"
+#include "Utilities/TarFile/TarWriter.h"
 
 namespace ThorImplementation {
 
@@ -241,6 +243,13 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         weights.loadFromFile(stream);
     }
 
+    void loadWeightsFromArchiveFile(thor_file::TarReader *archiveReader, std::string filename, Stream stream) {
+        assert(archiveReader != nullptr);
+        thor_file::FileSliceFd fileFd = archiveReader->getFileSliceFd(filename);
+        weights.attachFile(filename, fileFd.offset, Tensor::FileAccess::READ_ONLY, fileFd.fd);
+        weights.loadFromFile(stream, fileFd.crc);
+    }
+
     void dumpBiasesToFile(std::string filename, Stream stream) {
         assert(hasBias);
         assert(biases.isPresent());
@@ -261,6 +270,14 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         biases.get().loadFromFile(stream);
     }
 
+    void loadBiasesFromArchiveFile(thor_file::TarReader *archiveReader, std::string filename, Stream stream) {
+        assert(archiveReader != nullptr);
+        assert(hasBias);
+        thor_file::FileSliceFd fileFd = archiveReader->getFileSliceFd(filename);
+        biases.get().attachFile(filename, fileFd.offset, Tensor::FileAccess::READ_ONLY, fileFd.fd);
+        biases.get().loadFromFile(stream, fileFd.crc);
+    }
+
     virtual std::string getType() { return "TrainableWeightsBiases"; }
 
    protected:
@@ -271,6 +288,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> biases;
 
     // Note: not virtual, layers need to implement infer(..., weights, biases)
+    // FIXME: They should have different names then.
     void infer(
         Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber, bool validationPass) {
         if (projectedWeights.isPresent() && !isInferenceOnly() && !validationPass)

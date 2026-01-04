@@ -125,13 +125,15 @@ TEST(Activations, ReluSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json reluJ = relu->serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json reluJ = relu->serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = relu.get();
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(reluJ, fromLayerJ);
 
     ASSERT_EQ(reluJ["factory"], "activation");
@@ -203,6 +205,8 @@ TEST(Activations, ReluSerializeDeserialize) {
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedRelu->getFeatureInput().get());
     ASSERT_EQ(stampedRelu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }
 
 TEST(Activations, ReluRegistered) {
@@ -230,10 +234,11 @@ TEST(Activations, ReluRegistered) {
 
     ASSERT_TRUE(relu->isInitialized());
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
     Stream stream(0);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json reluJ = relu->serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json reluJ = relu->serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
     Network newNetwork;
@@ -257,4 +262,6 @@ TEST(Activations, ReluRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::Relu> stampedRelu = dynamic_pointer_cast<ThorImplementation::Relu>(otherLayers[0]);
     ASSERT_NE(stampedRelu, nullptr);
+
+    filesystem::remove("/tmp/testModel.thor");
 }

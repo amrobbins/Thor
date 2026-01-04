@@ -153,10 +153,12 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json binaryAccuracyJ = binaryAccuracy.serialize("/tmp/", stream);
-    json predictionsNetworkInputJ = predictionsNetworkInput.serialize("/tmp/", stream);
-    json labelsNetworkInputJ = labelsNetworkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json binaryAccuracyJ = binaryAccuracy.serialize(archiveWriter, stream);
+    json predictionsNetworkInputJ = predictionsNetworkInput.serialize(archiveWriter, stream);
+    json labelsNetworkInputJ = labelsNetworkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // printf("%s\n", predictionsNetworkInputJ.dump(4).c_str());
     // printf("%s\n", labelsNetworkInputJ.dump(4).c_str());
@@ -169,7 +171,7 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &binaryAccuracy;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(binaryAccuracyJ, fromLayerJ);
 
     EXPECT_TRUE(binaryAccuracyJ.contains("predictions"));
@@ -208,10 +210,13 @@ TEST(Activations, BinaryAccuracySerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    NetworkInput::deserialize(predictionsNetworkInputJ, &newNetwork);
-    NetworkInput::deserialize(labelsNetworkInputJ, &newNetwork);
-    BinaryAccuracy::deserialize(binaryAccuracyJ, &newNetwork);
-    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, predictionsNetworkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, labelsNetworkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, binaryAccuracyJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);

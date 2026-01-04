@@ -125,13 +125,15 @@ TEST(Activations, TanhSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json tanhJ = tanh->serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json tanhJ = tanh->serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = tanh.get();
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(tanhJ, fromLayerJ);
 
     ASSERT_EQ(tanhJ["factory"], "activation");
@@ -203,6 +205,8 @@ TEST(Activations, TanhSerializeDeserialize) {
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedTanh->getFeatureInput().get());
     ASSERT_EQ(stampedTanh->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }
 
 TEST(Activations, TanhRegistered) {
@@ -230,10 +234,11 @@ TEST(Activations, TanhRegistered) {
 
     ASSERT_TRUE(tanh->isInitialized());
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
     Stream stream(0);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json tanhJ = tanh->serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json tanhJ = tanh->serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
     Network newNetwork;
@@ -257,4 +262,6 @@ TEST(Activations, TanhRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::Tanh> stampedTanh = dynamic_pointer_cast<ThorImplementation::Tanh>(otherLayers[0]);
     ASSERT_NE(stampedTanh, nullptr);
+
+    filesystem::remove("/tmp/testModel.thor");
 }

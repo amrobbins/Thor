@@ -9,7 +9,7 @@ namespace Thor {
 Stub::Stub() = default;
 Stub::~Stub() = default;
 
-json Stub::serialize(const string &storageDir, Stream stream) const {
+json Stub::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isEmpty());

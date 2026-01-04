@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json Loss::serialize(const string &storageDir, Stream stream) const {
+json Loss::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     json j;
     j["factory"] = Factory::Loss.value();
     j["version"] = getLayerVersion();

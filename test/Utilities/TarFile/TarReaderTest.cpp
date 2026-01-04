@@ -86,12 +86,15 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
     const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
     const std::vector<uint8_t> blob = make_pattern_bytes(256 * 1024, 42);  // 256 KiB
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     // Write single shard (no rollover)
     {
         const uint64_t shard_limit = 0;  // 0 => no rollover
         const bool overwrite = true;
 
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
         w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
@@ -102,7 +105,7 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
     EXPECT_FALSE(fs::exists(prefix + ".000000.thor"));
 
     // Read back and validate content
-    thor_file::TarReader r(prefix);
+    thor_file::TarReader r(archiveName, archiveDir);
     read_and_expect(r, "docs/hello.txt", hello);
     read_and_expect(r, "data/blob.bin", blob);
 
@@ -119,6 +122,9 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     const std::string prefix = make_tmp_prefix("thor_tar_multi");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     // Make files large enough to require rollover under a small-ish shard limit.
     // Note: your TarWriter uses PAX + conservative slack, so pick a limit that definitely rolls.
     const std::vector<uint8_t> a = make_pattern_bytes(512 * 1024, 1);  // 512 KiB
@@ -132,7 +138,7 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
         // 256 KiB is almost guaranteed to roll with your 4 KiB pax slack + tar padding.
         const uint64_t shard_limit = 256 * 1024;
 
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("a.bin", a.data(), a.size(), 0644, time(nullptr));
         w.addArchiveFile("b.bin", b.data(), b.size(), 0644, time(nullptr));
         w.addArchiveFile("c.bin", c.data(), c.size(), 0644, time(nullptr));
@@ -145,7 +151,7 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     EXPECT_FALSE(fs::exists(prefix + ".thor"));
 
     // Read back using TarReader's scan+index+pread
-    thor_file::TarReader r(prefix);
+    thor_file::TarReader r(archiveName, archiveDir);
 
     read_and_expect(r, "a.bin", a);
     read_and_expect(r, "b.bin", b);
@@ -385,6 +391,9 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
     const std::string prefix = make_tmp_prefix("thor_tar_corrupt_id");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     const uint64_t shard_limit = 256 * 1024;  // 256 KiB
     const bool overwrite = true;
 
@@ -393,7 +402,7 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
     const auto c = make_bytes(512 * 1024, 0xC3);
 
     {
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("a.bin", a.data(), a.size(), 0644, time(nullptr));
         w.addArchiveFile("b.bin", b.data(), b.size(), 0644, time(nullptr));
         w.addArchiveFile("c.bin", c.data(), c.size(), 0644, time(nullptr));
@@ -414,7 +423,7 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
 
     // Now TarReader should refuse to open due to archive_id mismatch.
     try {
-        thor_file::TarReader r(prefix);
+        thor_file::TarReader r(archiveName, archiveDir);
         FAIL() << "Expected TarReader to throw due to archive_id mismatch, but it constructed successfully.";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
@@ -427,13 +436,16 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
     const std::string prefix = make_tmp_prefix("thor_tar_bad_magic");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
     const auto payload = make_bytes(64 * 1024, 0x5A);
 
     {
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("x.bin", payload.data(), payload.size(), 0644, time(nullptr));
         w.finishArchive();
     }
@@ -452,7 +464,7 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
 
     // Reader should reject due to wrong magic.
     try {
-        thor_file::TarReader r(prefix);
+        thor_file::TarReader r(archiveName, archiveDir);
         FAIL() << "Expected TarReader to throw due to wrong footer magic, but it constructed successfully.";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
@@ -465,6 +477,9 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
 TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     const std::string prefix = make_tmp_prefix("thor_tar_100files");
     CleanupGuard guard{prefix};
+
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
 
     const uint64_t shard_limit = 1ull * 1024 * 1024;  // 1 MiB
     const bool overwrite = true;
@@ -508,7 +523,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     contents.reserve(kNumFiles);
 
     {
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
 
         uint64_t total_written = 0;
         for (uint32_t i = 0; i < kNumFiles; ++i) {
@@ -532,7 +547,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     ASSERT_TRUE(fs::exists(prefix + ".000000.thor")) << "expected multi-shard output";
 
     // Read back and verify all files via TarReader (pread path).
-    thor_file::TarReader r(prefix);
+    thor_file::TarReader r(archiveName, archiveDir);
 
     for (uint32_t i = 0; i < kNumFiles; ++i) {
         read_and_expect(r, paths[i], contents[i]);
@@ -558,6 +573,9 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     const std::string prefix = make_tmp_prefix("thor_tar_bad_index_crc");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
@@ -566,7 +584,7 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     const std::vector<uint8_t> blob = make_pattern_bytes(256 * 1024, 123);  // 256 KiB
 
     {
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
         w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
@@ -619,7 +637,7 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     }
 
     // Now TarReader should reject due to index CRC mismatch.
-    EXPECT_THROW({ thor_file::TarReader r(prefix); }, std::runtime_error);
+    EXPECT_THROW({ thor_file::TarReader r(archiveName, archiveDir); }, std::runtime_error);
 }
 
 inline uint32_t read_u32_le(const uint8_t b[4]) {
@@ -696,6 +714,8 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     const std::string prefix = make_tmp_prefix("thor_tar_corrupt_payload_bit");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
@@ -704,7 +724,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     const std::vector<uint8_t> blob = make_pattern_bytes(256 * 1024, 999);  // 256 KiB deterministic
 
     {
-        thor_file::TarWriter w(prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
         w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
@@ -756,7 +776,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     }
 
     // Now reading with validate=true should throw due to CRC mismatch.
-    thor_file::TarReader r(prefix);
+    thor_file::TarReader r(archiveName, archiveDir);
 
     std::vector<uint8_t> out(sz);
     EXPECT_THROW({ r.readFile("data/blob.bin", out.data(), sz); }, std::runtime_error);
@@ -766,6 +786,9 @@ TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
     const std::string prefix = make_tmp_prefix("thor_tar_verifyall_ok");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
@@ -774,13 +797,13 @@ TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
     const std::vector<uint8_t> blob = make_pattern_bytes(512 * 1024, 7);  // 512 KiB
 
     {
-        thor_file::TarWriter w(prefix, shard_limit, overwrite);
+        thor_file::TarWriter w(archiveName, archiveDir, shard_limit, overwrite);
         w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
         w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
 
-    thor_file::TarReader r(prefix);
+    thor_file::TarReader r(archiveName, archiveDir);
     EXPECT_NO_THROW(r.verifyAll());
 }
 
@@ -788,13 +811,16 @@ TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
     const std::string prefix = make_tmp_prefix("thor_tar_verifyall_bad");
     CleanupGuard guard{prefix};
 
+    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(prefix).filename().string();
+
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
     const std::vector<uint8_t> blob = make_pattern_bytes(512 * 1024, 123);  // 512 KiB
 
     {
-        thor_file::TarWriter w(prefix, shard_limit, overwrite);
+        thor_file::TarWriter w(archiveName, archiveDir, shard_limit, overwrite);
         w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
     }
@@ -837,6 +863,6 @@ TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
         ASSERT_TRUE(io.good());
     }
 
-    thor_file::TarReader r(prefix);
+    thor_file::TarReader r(archiveName, archiveDir);
     EXPECT_THROW(r.verifyAll(), std::runtime_error);
 }

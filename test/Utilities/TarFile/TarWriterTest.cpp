@@ -157,6 +157,8 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
     cleanup_prefix_files(prefix);
 
     const std::string tar_path_prefix = prefix;
+    const std::filesystem::path archiveDir = std::filesystem::path(tar_path_prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(tar_path_prefix).filename().string();
     const uint64_t shard_limit = 0;  // no rollover
     const bool overwrite = true;
 
@@ -169,7 +171,7 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
     const uint32_t blob_crc = thor_file::Crc32c::compute((uint8_t*)blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(tar_path_prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
         w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
         w.finishArchive();
@@ -243,6 +245,8 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     cleanup_prefix_files(prefix);
 
     const std::string tar_path_prefix = prefix;
+    const std::filesystem::path archiveDir = std::filesystem::path(tar_path_prefix).remove_filename();
+    const std::string archiveName = std::filesystem::path(tar_path_prefix).filename().string();
     const bool overwrite = true;
 
     // Use a very small limit to *force* rollover on the second add_bytes()
@@ -256,7 +260,7 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     const uint32_t b_crc = thor_file::Crc32c::compute((uint8_t*)b.data(), b.size());
 
     {
-        thor_file::TarWriter w(tar_path_prefix, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
         w.addArchiveFile("a.txt", a.data(), a.size(), 0644, time(nullptr));
         w.addArchiveFile("b.txt", b.data(), b.size(), 0644, time(nullptr));
         w.finishArchive();

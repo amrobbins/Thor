@@ -29,7 +29,7 @@ void NetworkOutput::buildSupportLayersAndAddToNetwork() {
     featureOutput = currentFeatureInput;
 }
 
-json NetworkOutput::serialize(const std::string &storageDir, Stream stream) const {
+json NetworkOutput::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     return json{{"factory", Layer::Factory::Layer.value()},
                 {"version", "1.0.0"},
                 {"layer_type", "network_output"},

@@ -125,13 +125,15 @@ TEST(Activations, SwishSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json swishJ = swish->serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json swishJ = swish->serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = swish.get();
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(swishJ, fromLayerJ);
 
     ASSERT_EQ(swishJ["factory"], "activation");
@@ -203,6 +205,8 @@ TEST(Activations, SwishSerializeDeserialize) {
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSwish->getFeatureInput().get());
     ASSERT_EQ(stampedSwish->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }
 
 TEST(Activations, SwishRegistered) {
@@ -230,10 +234,11 @@ TEST(Activations, SwishRegistered) {
 
     ASSERT_TRUE(swish->isInitialized());
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
     Stream stream(0);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json swishJ = swish->serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json swishJ = swish->serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
     Network newNetwork;
@@ -257,4 +262,6 @@ TEST(Activations, SwishRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::Swish> stampedSwish = dynamic_pointer_cast<ThorImplementation::Swish>(otherLayers[0]);
     ASSERT_NE(stampedSwish, nullptr);
+
+    filesystem::remove("/tmp/testModel.thor");
 }

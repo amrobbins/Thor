@@ -99,7 +99,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json FullyConnected::serialize(const string &storageDir, Stream stream) const {
+json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
@@ -126,6 +126,9 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
     }
     j["outputs"] = outputs;
 
+    ThorImplementation::TensorPlacement cpuPlacement =
+        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
     // Dump the weights to a file and record its name
     assert(network->getNumStamps() >= 1);
     ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
@@ -134,31 +137,37 @@ json FullyConnected::serialize(const string &storageDir, Stream stream) const {
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
     assert(twbLayer != nullptr);
 
-    filesystem::path dir(storageDir);
-    if (!filesystem::exists(dir)) {
-        throw runtime_error("Storage directory does not exist: " + dir.string());
-    }
-    if (!filesystem::is_directory(dir)) {
-        throw runtime_error("Storage path is not a directory: " + dir.string());
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesBuffer;
+    string biasesFile;
+    if (hasBias) {
+        biasesFile = (layerName + "_biases.gds");
+        j["biases_tensor"] = biasesFile;
+        biases = twbLayer->getBiases().get();
+        biasesBuffer = biases.clone(cpuPlacement);
+        biasesBuffer.copyFromAsync(biases, stream);
     }
 
-    filesystem::path weightsFile = (layerName + "_weights.gds");
-    j["weights_tensor"] = weightsFile.string();
-    twbLayer->dumpWeightsToFile((dir / weightsFile).string(), stream);
-    if (hasBias) {
-        filesystem::path biasesFile = (layerName + "_biases.gds");
-        j["biases_tensor"] = biasesFile.string();
-        twbLayer->dumpBiasesToFile((dir / biasesFile).string(), stream);
-    }
+    string weightsFile = (layerName + "_weights.gds");
+    j["weights_tensor"] = weightsFile;
+    ThorImplementation::Tensor weights = twbLayer->getWeights();
+    ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
+    weightsBuffer.copyFromAsync(weights, stream);
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(storageDir, stream, this, twbLayer);
+        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer);
     }
+
+    stream.synchronize();
+
+    archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
+    if (hasBias)
+        archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
 
     return j;
 }
 
-void FullyConnected::deserialize(const std::string &modelName, const string &storageDir, const json &j, Network *network) {
+void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "fully_connected")
@@ -195,7 +204,7 @@ void FullyConnected::deserialize(const std::string &modelName, const string &sto
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
     }
-    fullyConnected.storageDir = storageDir;
+    fullyConnected.archiveReader = &archiveReader;
     fullyConnected.weightsFile = weightsFile;
     if (hasBias)
         fullyConnected.biasesFile = biasesFile;
@@ -203,7 +212,7 @@ void FullyConnected::deserialize(const std::string &modelName, const string &sto
     fullyConnected.initialized = true;
 
     if (j.contains("optimizer")) {
-        fullyConnected.optimizer = Optimizer::deserialize(modelName, storageDir, j.at("optimizer"));
+        fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
     }
 
     fullyConnected.addToNetwork(network);
@@ -239,22 +248,34 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         initDoneEvents.push_back(stream.putEvent(false, true));
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
+        assert(archiveReader != nullptr);
         assert(weightsInitializerBuilder.get() == nullptr);
         assert(biasInitializerBuilder.get() == nullptr);
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
-        physicalLayer->loadWeightsFromFile(storageDir.get() + "/" + weightsFile.get(), stream);
+
+        ThorImplementation::TensorPlacement cpuPlacement =
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+        ThorImplementation::Tensor weights = physicalLayer->getWeights();
+        ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
+        archiveReader->readFile(weightsFile.get(), weightsBuffer.getMemPtr<void>(), weights.getArraySizeInBytes());
+        weights.copyFromAsync(weightsBuffer, stream);
         if (hasBias) {
             assert(biasesFile.isPresent());
-            physicalLayer->loadBiasesFromFile(storageDir.get() + "/" + biasesFile.get(), stream);
+            ThorImplementation::Tensor biases = physicalLayer->getBiases().get();
+            ThorImplementation::Tensor biasesBuffer = biases.clone(cpuPlacement);
+            archiveReader->readFile(biasesFile.get(), biasesBuffer.getMemPtr<void>(), biases.getArraySizeInBytes());
+            biases.copyFromAsync(biasesBuffer, stream);
         }
 
         // Can't use the file later, it may not still be there
-        storageDir = Optional<string>::empty();
+        archiveReader = nullptr;
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
 
-        initDoneEvents.push_back(stream.putEvent(false, true));
+        // I need to synchronize here to keep bounce buffer alive
+        stream.synchronize();
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
         Optional<Event> initDoneEvent;

@@ -1,6 +1,8 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+#include "Utilities/TarFile/TarReader.h"
+#include "Utilities/TarFile/TarWriter.h"
 
 #include <nlohmann/json.hpp>
 
@@ -39,15 +41,14 @@ class Optimizer {
     uint64_t getId() const { return id; }
     bool operator==(const Optimizer &other) const { return id == other.id; }
 
-    virtual nlohmann::json serialize(const std::string &storageDir,
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
         return nlohmann::json{};
     };
-    static std::shared_ptr<Optimizer> deserialize(const std::string &modelName, const std::string &storageDir, const nlohmann::json &j);
-    using Deserializer =
-        std::function<std::shared_ptr<Optimizer>(const std::string &modelName, const std::string &storageDir, const nlohmann::json &)>;
+    static std::shared_ptr<Optimizer> deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j);
+    using Deserializer = std::function<std::shared_ptr<Optimizer>(thor_file::TarReader &archiveReader, const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
     static void registerLayer(std::string name, Deserializer fn);
 

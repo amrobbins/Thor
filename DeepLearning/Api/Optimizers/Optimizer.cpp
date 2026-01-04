@@ -65,7 +65,7 @@ unordered_map<string, Optimizer::Deserializer> &Optimizer::getRegistry() {
 
 void Optimizer::registerLayer(string name, Deserializer fn) { getRegistry().emplace(std::move(name), std::move(fn)); }
 
-shared_ptr<Optimizer> Optimizer::deserialize(const string &modelName, const string &storageDir, const json &j) {
+shared_ptr<Optimizer> Optimizer::deserialize(thor_file::TarReader &archiveReader, const json &j) {
     assert(j.contains("optimizer_type"));
     string optimizerType = j.at("optimizer_type").get<string>();
 
@@ -75,7 +75,7 @@ shared_ptr<Optimizer> Optimizer::deserialize(const string &modelName, const stri
         throw runtime_error("Unknown optimizer type: " + optimizerType);
 
     Deserializer deserializer = it->second;
-    return deserializer(modelName, storageDir, j);
+    return deserializer(archiveReader, j);
 }
 
 }  // namespace Thor

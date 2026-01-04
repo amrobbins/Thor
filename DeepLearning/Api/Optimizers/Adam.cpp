@@ -61,7 +61,7 @@ void Adam::updateParameters() {
     }
 }
 
-json Adam::serialize(const string &storageDir,
+json Adam::serialize(thor_file::TarWriter &archiveWriter,
                      Stream stream,
                      TrainableWeightsBiasesLayer const *owningLayer,
                      shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
@@ -80,37 +80,58 @@ json Adam::serialize(const string &storageDir,
     j["beta2"] = physicalAdam->getBeta2();
     j["epsilon"] = physicalAdam->getEpsilon();
 
-    filesystem::path dir(storageDir);
-    if (!filesystem::exists(dir)) {
-        throw runtime_error("Storage directory does not exist: " + dir.string());
-    }
-    if (!filesystem::is_directory(dir)) {
-        throw runtime_error("Storage path is not a directory: " + dir.string());
-    }
+    ThorImplementation::TensorPlacement cpuPlacement =
+        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
-    // Hmm, looks like I am storing the save to dir and recording that as though I will be loading from there.
-    // I need to not include the dir - think fixed it here, but its wrong elsewhere
     string optimizerName = string("layer") + to_string(owningLayer->getId()) + "_adam";
-    filesystem::path mFile = optimizerName + "_m.gds";
-    filesystem::path vFile = optimizerName + "_v.gds";
-    j["m_tensor"] = mFile.string();
-    j["v_tensor"] = vFile.string();
-    physicalAdam->dumpMToFile((dir / mFile).string(), stream);
-    physicalAdam->dumpVToFile((dir / vFile).string(), stream);
+    string mFile = optimizerName + "_m.gds";
+    string vFile = optimizerName + "_v.gds";
+    j["m_tensor"] = mFile;
+    j["v_tensor"] = vFile;
+
+    ThorImplementation::Tensor m = physicalAdam->getM();
+    ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
+    mBuffer.copyFromAsync(m, stream);
+
+    ThorImplementation::Tensor v = physicalAdam->getM();
+    ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
+    vBuffer.copyFromAsync(v, stream);
+
+    ThorImplementation::Tensor mBias;
+    ThorImplementation::Tensor mBiasBuffer;
+    ThorImplementation::Tensor vBias;
+    ThorImplementation::Tensor vBiasBuffer;
+    string mBiasFile;
+    string vBiasFile;
     if (physicalAdam->getMBias().isPresent()) {
         assert(physicalAdam->getVBias().isPresent());
-        filesystem::path mBiasFile = optimizerName + "_m_bias.gds";
-        filesystem::path vBiasFile = optimizerName + "_v_bias.gds";
-        j["m_bias_tensor"] = mBiasFile.string();
-        j["v_bias_tensor"] = vBiasFile.string();
-        physicalAdam->dumpMBiasToFile((dir / mBiasFile).string(), stream);
-        physicalAdam->dumpVBiasToFile((dir / vBiasFile).string(), stream);
+        mBiasFile = optimizerName + "_m_bias.gds";
+        vBiasFile = optimizerName + "_v_bias.gds";
+        j["m_bias_tensor"] = mBiasFile;
+        j["v_bias_tensor"] = vBiasFile;
+
+        mBias = physicalAdam->getMBias();
+        mBiasBuffer = mBias.clone(cpuPlacement);
+        mBiasBuffer.copyFromAsync(mBias, stream);
+
+        vBias = physicalAdam->getVBias();
+        vBiasBuffer = vBias.clone(cpuPlacement);
+        vBiasBuffer.copyFromAsync(vBias, stream);
+    }
+
+    stream.synchronize();
+
+    archiveWriter.addArchiveFile(mFile, mBuffer.getMemPtr(), m.getArraySizeInBytes());
+    archiveWriter.addArchiveFile(vFile, vBuffer.getMemPtr(), v.getArraySizeInBytes());
+    if (physicalAdam->getMBias().isPresent()) {
+        archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer.getMemPtr(), mBias.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer.getMemPtr(), vBias.getArraySizeInBytes());
     }
 
     return j;
 }
 
-shared_ptr<Optimizer> Adam::deserialize(const string &modelName, const string &storageDir, const json &j) {
+shared_ptr<Optimizer> Adam::deserialize(thor_file::TarReader &archiveReader, const json &j) {
     if (j.at("optimizer_type").get<string>() != "adam")
         throw runtime_error("Layer type mismatch in Adam::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")
@@ -143,7 +164,7 @@ shared_ptr<Optimizer> Adam::deserialize(const string &modelName, const string &s
     adam.beta1 = beta1;
     adam.beta2 = beta2;
     adam.epsilon = epsilon;
-    adam.storageDir = storageDir;
+    adam.archiveReader = &archiveReader;
     adam.mFile = mFile;
     adam.vFile = vFile;
     adam.mBiasFile = mBiasFile;
@@ -168,7 +189,7 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
     // 1. Copy from another optimizer whose parameters have already been set - when stamping more than one stamp
     //      * So this is once per GPU since multiple stamps on the same GPU share the weights
     // 2. Copy from a file - when loading a saved network with a saved optimizer
-    // 3. Run an initializer to set the weights - on an untrained network or when there the optimizer has not been saved
+    // 3. Run an initializer to set the weights - on an untrained network or when the optimizer has not been saved
     if (!isFirstStamp) {
         // 1. Copy from another layer whose weights have already been set - when stamping more than one stamp
         assert(sisterPhysicalOptimizer != nullptr);
@@ -185,41 +206,45 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
         }
     } else if (mFile.isPresent()) {
         assert(vFile.isPresent());
+        assert(archiveReader != nullptr);
         if (physicalAdam->getMBias().isPresent()) {
             assert(mBiasFile.isPresent());
             assert(vBiasFile.isPresent());
         }
 
-        filesystem::path mFilePath = filesystem::path(storageDir.get()) / filesystem::path(mFile.get());
-        if (filesystem::path(m.getAttachedFilename()) != mFilePath)
-            m.attachFile(mFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
-        m.loadFromFile(stream);
+        ThorImplementation::TensorPlacement cpuPlacement =
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
-        filesystem::path vFilePath = filesystem::path(storageDir.get()) / filesystem::path(vFile.get());
-        if (filesystem::path(v.getAttachedFilename()) != vFilePath)
-            v.attachFile(vFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
-        v.loadFromFile(stream);
+        ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
+        archiveReader->readFile(mFile.get(), mBuffer.getMemPtr<void>(), m.getArraySizeInBytes());
+        m.copyFromAsync(mBuffer, stream);
+
+        ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
+        archiveReader->readFile(vFile.get(), vBuffer.getMemPtr<void>(), v.getArraySizeInBytes());
+        v.copyFromAsync(vBuffer, stream);
 
         if (mBias.isPresent()) {
             assert(mBiasFile.isPresent());
             assert(vBiasFile.isPresent());
 
-            filesystem::path mBiasFilePath = filesystem::path(storageDir.get()) / filesystem::path(mBiasFile.get());
-            if (filesystem::path(mBias.get().getAttachedFilename()) != mBiasFilePath)
-                mBias.get().attachFile(mBiasFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
-            mBias.get().loadFromFile(stream);
-            filesystem::path vBiasFilePath = filesystem::path(storageDir.get()) / filesystem::path(vBiasFile.get());
-            if (filesystem::path(vBias.get().getAttachedFilename()) != vBiasFilePath)
-                vBias.get().attachFile(vBiasFilePath.string(), 0, ThorImplementation::Tensor::FileAccess::READ_WRITE, false);
-            vBias.get().loadFromFile(stream);
+            ThorImplementation::Tensor mBiasBuffer = mBias.get().clone(cpuPlacement);
+            archiveReader->readFile(mBiasFile.get(), mBiasBuffer.getMemPtr<void>(), mBias.get().getArraySizeInBytes());
+            mBias.get().copyFromAsync(mBiasBuffer, stream);
+
+            ThorImplementation::Tensor vBiasBuffer = vBias.get().clone(cpuPlacement);
+            archiveReader->readFile(vBiasFile.get(), vBiasBuffer.getMemPtr<void>(), vBias.get().getArraySizeInBytes());
+            vBias.get().copyFromAsync(vBiasBuffer, stream);
         }
 
         // Can't use the files later, they may not still be there
-        storageDir.clear();
+        archiveReader = nullptr;
         mFile.clear();
         vFile.clear();
         mBiasFile.clear();
         vBiasFile.clear();
+
+        // I need to synchronize here to keep bounce buffer alive
+        stream.synchronize();
     } else {
         m.memsetAsync(stream, 0);
         v.memsetAsync(stream, 0);

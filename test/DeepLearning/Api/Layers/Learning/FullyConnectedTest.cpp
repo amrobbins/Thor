@@ -310,10 +310,12 @@ TEST(FullyConnected, SerializeDeserialize) {
             biases.copyFromAsync(biasesCpu, stream);
         }
 
-        json meanAbsoluteErrorJ = meanAbsoluteError.serialize("/tmp/", stream);
-        json networkInputJ = networkInput.serialize("/tmp/", stream);
-        json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-        json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+        json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
+        json networkInputJ = networkInput.serialize(archiveWriter, stream);
+        json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
+        json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
         // The network attached the optimizer to its copy of the FC layer
         json fullyConnectedJ;
@@ -323,7 +325,7 @@ TEST(FullyConnected, SerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
             if (initalNetworkFC) {
-                fullyConnectedJ = initalNetworkFC->serialize("/tmp", stream);
+                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
                 fcFound = true;
                 break;
             }
@@ -339,7 +341,7 @@ TEST(FullyConnected, SerializeDeserialize) {
                 shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
                 batchNorm = dynamic_pointer_cast<BatchNormalization>(layer);
                 if (batchNorm) {
-                    batchNormJ = batchNorm->serialize("/tmp", stream);
+                    batchNormJ = batchNorm->serialize(archiveWriter, stream);
                     bnFound = true;
                     break;
                 }
@@ -356,7 +358,7 @@ TEST(FullyConnected, SerializeDeserialize) {
                 shared_ptr<Layer> layer = initialNetwork.getLayer(i);
                 relu = dynamic_pointer_cast<Relu>(layer);
                 if (relu) {
-                    reluJ = relu->serialize("/tmp", stream);
+                    reluJ = relu->serialize(archiveWriter, stream);
                     reluFound = true;
                     break;
                 }
@@ -373,7 +375,7 @@ TEST(FullyConnected, SerializeDeserialize) {
                 shared_ptr<Layer> layer = initialNetwork.getLayer(i);
                 dropOut = dynamic_pointer_cast<DropOut>(layer);
                 if (dropOut) {
-                    dropOutJ = dropOut->serialize("/tmp", stream);
+                    dropOutJ = dropOut->serialize(archiveWriter, stream);
                     dropOutFound = true;
                     break;
                 }
@@ -396,7 +398,7 @@ TEST(FullyConnected, SerializeDeserialize) {
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkFC;
-        json fromLayerJ = layer->serialize("/tmp/", stream);
+        json fromLayerJ = layer->serialize(archiveWriter, stream);
         ASSERT_EQ(fullyConnectedJ, fromLayerJ);
 
         ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
@@ -464,18 +466,21 @@ TEST(FullyConnected, SerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
+        archiveWriter.finishArchive();
+        thor_file::TarReader archiveReader("testModel", "/tmp/");
+
         // I will need to use thor-file to create the testModel archive first, with overwrite set to true
-        Layer::deserialize("testModel", "/tmp", networkInputJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", labelsInputJ, &newNetwork);
+        Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+        Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
         if (useBatchNorm)
-            Layer::deserialize("testModel", "/tmp", batchNormJ, &newNetwork);
+            Layer::deserialize(archiveReader, batchNormJ, &newNetwork);
         if (dropProportion > 0.0f)
-            Layer::deserialize("testModel", "/tmp", dropOutJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", fullyConnectedJ, &newNetwork);
+            Layer::deserialize(archiveReader, dropOutJ, &newNetwork);
+        Layer::deserialize(archiveReader, fullyConnectedJ, &newNetwork);
         if (useRelu)
-            Layer::deserialize("testModel", "/tmp", reluJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", meanAbsoluteErrorJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", networkOutputJ, &newNetwork);
+            Layer::deserialize(archiveReader, reluJ, &newNetwork);
+        Layer::deserialize(archiveReader, meanAbsoluteErrorJ, &newNetwork);
+        Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);

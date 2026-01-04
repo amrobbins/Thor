@@ -271,8 +271,31 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
         cuFileError = cuFileHandleRegister(&gpuDirectStorageCuFileHandle, &cuFileDescriptor);
         assert(cuFileError.err == CU_FILE_SUCCESS);
     }
+    ownsFileDescriptor = true;
 
     // GpuDirect Storage takes pointers to its parameters:
+    this->gpuDirectStorageFileOffset = fileOffset;
+    this->gpuDirectStorageSize = getArraySizeInBytes();
+}
+
+// With existing file descriptor
+void Tensor::attachFile(const std::string &fileName,
+                        const off_t fileOffset,
+                        const FileAccess fileAccessRequirement,
+                        int32_t fileDescriptor) {
+    assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
+           getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    if (!this->fileName.empty())
+        detachFile();
+    assert(this->fileName.empty());
+    this->fileName = fileName;
+
+    this->fileAccessRequirement = fileAccessRequirement;
+
+    this->fileDescriptor = fileDescriptor;
+    ownsFileDescriptor = false;
+
     this->gpuDirectStorageFileOffset = fileOffset;
     this->gpuDirectStorageSize = getArraySizeInBytes();
 }
@@ -286,7 +309,8 @@ void Tensor::detachFile() {
         cuFileHandleDeregister(gpuDirectStorageCuFileHandle);
     }
 
-    close(fileDescriptor);
+    if (ownsFileDescriptor)
+        close(fileDescriptor);
 
     fileName.clear();
 }
@@ -635,7 +659,9 @@ void performWrite(void *params) {
     }
 }
 
-void Tensor::loadFromFile(Stream stream) {
+void Tensor::loadFromFile(Stream stream, Optional<uint32_t> crc) {
+    assert(crc.isEmpty());  // Need to solve for this. Not using GDS now so not solving it. ArchiveReader checks crc internally now.
+
     assert(!uninitialized());
     assert(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
            getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);

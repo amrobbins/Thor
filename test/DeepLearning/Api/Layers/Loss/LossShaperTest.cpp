@@ -174,13 +174,15 @@ TEST(LossShaper, SerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json lossShaperJ = lossShaper.serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json lossShaperJ = lossShaper.serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &lossShaper;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(lossShaperJ, fromLayerJ);
 
     // printf("%s\n", networkInputJ.dump(4).c_str());
@@ -222,9 +224,12 @@ TEST(LossShaper, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    NetworkInput::deserialize(networkInputJ, &newNetwork);
-    LossShaper::deserialize(lossShaperJ, &newNetwork);
-    NetworkOutput::deserialize(networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, lossShaperJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);

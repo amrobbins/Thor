@@ -12,7 +12,7 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
 
-json Activation::serialize(const std::string& storageDir, Stream stream) const {
+json Activation::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());

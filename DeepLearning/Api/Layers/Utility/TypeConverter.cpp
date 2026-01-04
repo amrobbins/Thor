@@ -9,7 +9,7 @@ namespace Thor {
 TypeConverter::TypeConverter() = default;
 TypeConverter::~TypeConverter() = default;
 
-json TypeConverter::serialize(const string &storageDir, Stream stream) const {
+json TypeConverter::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());

@@ -9,7 +9,7 @@ namespace Thor {
 Reshape::Reshape() = default;
 Reshape::~Reshape() = default;
 
-json Reshape::serialize(const string &storageDir, Stream stream) const {
+json Reshape::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());

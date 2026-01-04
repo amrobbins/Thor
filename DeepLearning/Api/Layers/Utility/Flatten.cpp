@@ -6,7 +6,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json Flatten::serialize(const string &storageDir, Stream stream) const {
+json Flatten::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());

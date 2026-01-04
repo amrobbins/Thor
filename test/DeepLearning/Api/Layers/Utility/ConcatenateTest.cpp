@@ -163,19 +163,21 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    json concatenateJ = concatenate.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json concatenateJ = concatenate.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &concatenate;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(concatenateJ, fromLayerJ);
 
     vector<json> networkInputJs;
     for (uint32_t t = 0; t < numTensors; ++t) {
-        json networkInputJ = networkInputs[t].serialize("/tmp/", stream);
+        json networkInputJ = networkInputs[t].serialize(archiveWriter, stream);
         networkInputJs.push_back(networkInputJ);
     }
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     ASSERT_EQ(concatenateJ["factory"], Layer::Factory::Layer.value());
     ASSERT_EQ(concatenateJ["version"], "1.0.0");
@@ -224,7 +226,10 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
     for (uint32_t t = 0; t < numTensors; ++t)
         NetworkInput::deserialize(networkInputJs[t], &newNetwork);
 
-    Layer::deserialize(concatenateJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, concatenateJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);
 
     uint32_t batchSize = 1 + (rand() % 16);

@@ -140,19 +140,21 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // printf("%s\n", networkInputJ.dump(4).c_str());
     // printf("%s\n", networkOutputJ.dump(4).c_str());
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &networkInput;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(networkInputJ, fromLayerJ);
 
     layer = &networkOutput;
-    fromLayerJ = layer->serialize("/tmp/", stream);
+    fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(networkOutputJ, fromLayerJ);
 
     ASSERT_EQ(networkInputJ["factory"], Layer::Factory::Layer.value());
@@ -175,8 +177,11 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     ////////////////////////////
     Network newNetwork;
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;

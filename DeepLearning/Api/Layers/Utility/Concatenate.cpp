@@ -9,7 +9,7 @@ namespace Thor {
 Concatenate::Concatenate() = default;
 Concatenate::~Concatenate() = default;
 
-json Concatenate::serialize(const string &storageDir, Stream stream) const {
+json Concatenate::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     assert(initialized);
     assert(featureInputs.size() > 0);
     assert(featureOutputs.size() > 0);
