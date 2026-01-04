@@ -10,7 +10,10 @@ void throwArchive(archive* a, const char* what);
 
 class TarWriter {
    public:
-    explicit TarWriter(std::string tarPath, bool overwriteIfExists, uint64_t shard_payload_limit_bytes = 5e9);
+    explicit TarWriter(std::string archiveName,
+                       std::filesystem::path archiveDirectory,
+                       bool overwriteIfExists,
+                       uint64_t shard_payload_limit_bytes = 5e9);
     TarWriter(const TarWriter&) = delete;
     TarWriter& operator=(const TarWriter&) = delete;
     virtual ~TarWriter();

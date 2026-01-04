@@ -101,17 +101,19 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    json dropOutJ = dropOut.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json dropOutJ = dropOut.serialize(archiveWriter, stream);
 
     // printf("%s\n", dropOutJ.dump(4).c_str());
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &dropOut;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(dropOutJ, fromLayerJ);
 
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     ASSERT_EQ(dropOutJ["factory"], Layer::Factory::Layer.value());
     ASSERT_EQ(dropOutJ["version"], "1.0.0");
@@ -135,9 +137,11 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
     ////////////////////////////
     Network newNetwork;
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(dropOutJ, &newNetwork);
-    Layer::deserialize(networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, dropOutJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;

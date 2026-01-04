@@ -81,7 +81,7 @@ float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
 
-json Sgd::serialize(const string &storageDir,
+json Sgd::serialize(thor_file::TarWriter &archiveWriter,
                     Stream stream,
                     TrainableWeightsBiasesLayer const *owningLayer,
                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
@@ -103,7 +103,7 @@ json Sgd::serialize(const string &storageDir,
     return j;
 }
 
-shared_ptr<Optimizer> Sgd::deserialize(const string &modelName, const string &storageDir, const json &j) {
+shared_ptr<Optimizer> Sgd::deserialize(thor_file::TarReader &archiveReader, const json &j) {
     if (j.at("optimizer_type").get<string>() != "sgd")
         throw runtime_error("Layer type mismatch in Sgd::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")

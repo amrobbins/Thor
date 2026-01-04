@@ -125,13 +125,15 @@ TEST(Activations, SoftPlusSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json softPlusJ = softPlus->serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json softPlusJ = softPlus->serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = softPlus.get();
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(softPlusJ, fromLayerJ);
 
     ASSERT_EQ(softPlusJ["factory"], "activation");
@@ -203,6 +205,8 @@ TEST(Activations, SoftPlusSerializeDeserialize) {
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSoftPlus->getFeatureInput().get());
     ASSERT_EQ(stampedSoftPlus->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }
 
 TEST(Activations, SoftPlusRegistered) {
@@ -230,10 +234,11 @@ TEST(Activations, SoftPlusRegistered) {
 
     ASSERT_TRUE(softPlus->isInitialized());
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
     Stream stream(0);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json softPlusJ = softPlus->serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json softPlusJ = softPlus->serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
     Network newNetwork;
@@ -257,4 +262,6 @@ TEST(Activations, SoftPlusRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::SoftPlus> stampedSoftPlus = dynamic_pointer_cast<ThorImplementation::SoftPlus>(otherLayers[0]);
     ASSERT_NE(stampedSoftPlus, nullptr);
+
+    filesystem::remove("/tmp/testModel.thor");
 }

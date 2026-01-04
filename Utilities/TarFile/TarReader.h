@@ -27,7 +27,7 @@ struct FileSliceFd {
 
 class TarReader {
    public:
-    explicit TarReader(std::string tarPath);
+    explicit TarReader(std::string archiveName, std::filesystem::path archiveDirectory);
     virtual ~TarReader();
     const std::unordered_map<std::string, EntryInfo>& entries() const;
     bool contains(std::string pathInTar) const;

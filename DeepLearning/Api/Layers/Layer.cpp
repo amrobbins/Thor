@@ -20,7 +20,7 @@ unordered_map<string, Layer::Deserializer>& Layer::get_registry() {
     return registry;
 }
 
-void Layer::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
+void Layer::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
 void Layer::addToNetwork(Network* network) {
     assert(isInitialized());
@@ -38,16 +38,13 @@ void Layer::connectTwoLayers(shared_ptr<ThorImplementation::Layer> drivingLayer,
     drivingLayer->connectToNextLayer(loadingLayer.get(), drivingLayerConnectionType, loadingLayerConnectionType);
 }
 
-// FIXME: Goes away:
-void Layer::deserialize(const nlohmann::json& j, Network* network) { deserialize("FIXME", "FIXME", j, network); }
-
-void Layer::deserialize(const std::string& modelName, const string& storageDir, const nlohmann::json& j, Network* network) {
+void Layer::deserialize(thor_file::TarReader& archiveReader, const nlohmann::json& j, Network* network) {
     string factory = j.at("factory").get<string>();
     if (factory == Factory::Activation) {
         Activation::deserialize(j, network);
         return;
     } else if (factory == Factory::Learning) {
-        TrainableWeightsBiasesLayer::deserialize(modelName, storageDir, j, network);
+        TrainableWeightsBiasesLayer::deserialize(archiveReader, j, network);
         return;
     } else if (factory == Factory::Loss) {
         Loss::deserialize(j, network);

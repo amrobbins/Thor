@@ -22,7 +22,7 @@ class Loss : public Layer {
     Loss() { numInputConnectionsMade = 0; }
     virtual ~Loss() {}
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
     static void deserialize(const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();

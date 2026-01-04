@@ -97,7 +97,10 @@ static bool is_sha32(std::string_view s) {
     return true;
 }
 
-TarReader::TarReader(string tarPath) : prefix_(std::move(tarPath)) { scan(); }
+TarReader::TarReader(std::string archiveName, std::filesystem::path archiveDirectory) {
+    prefix_ = (archiveDirectory / archiveName).string();
+    scan();
+}
 
 TarReader::~TarReader() {
     for (ShardFd& s : shard_fds_) {

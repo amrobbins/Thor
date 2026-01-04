@@ -486,6 +486,8 @@ TEST(Sgd, SerializeDeserialize) {
         biases.copyFromAsync(biasesCpu, stream);
     }
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
     // The network attached the optimizer to its copy of the FC layer
     json fullyConnectedJ;
     bool fcFound = false;
@@ -494,24 +496,24 @@ TEST(Sgd, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize("/tmp", stream);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
             fcFound = true;
             break;
         }
     }
     ASSERT_TRUE(fcFound);
 
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
-    json crossEntropyJ = meanAbsoluteError.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
+    json crossEntropyJ = meanAbsoluteError.serialize(archiveWriter, stream);
 
     ThorImplementation::StampedNetwork &initial_stamped_network = initialNetwork.getStampedNetwork(0);
     shared_ptr<ThorImplementation::Layer> initial_phys_layer = initial_stamped_network.getPhysicalLayerFromApiLayer(fullyConnected.getId());
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> initial_phys_twb =
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(initial_phys_layer);
     assert(initial_phys_twb != nullptr);
-    json sgdJ = sgd->serialize("/tmp/", stream, &fullyConnected, initial_phys_twb);
+    json sgdJ = sgd->serialize(archiveWriter, stream, &fullyConnected, initial_phys_twb);
 
     ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
     ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");
@@ -594,11 +596,14 @@ TEST(Sgd, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    Layer::deserialize("testModel", "/tmp/", networkInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", crossEntropyJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, fullyConnectedJ, &newNetwork);
+    Layer::deserialize(archiveReader, crossEntropyJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     statusCode = newNetwork.place(batchSize, initDoneEvents);

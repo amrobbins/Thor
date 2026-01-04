@@ -32,7 +32,7 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json BinaryCrossEntropy::serialize(const string &storageDir, Stream stream) const {
+json BinaryCrossEntropy::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     // The thing that is deserialized must be just the base layer, any helper layers
     // are themselves deserialized. So loss_shape set to LossShape::ELEMENTWISE
 

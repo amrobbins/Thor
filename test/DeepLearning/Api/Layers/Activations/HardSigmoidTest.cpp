@@ -125,13 +125,15 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json hardSigmoidJ = hardSigmoid->serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json hardSigmoidJ = hardSigmoid->serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = hardSigmoid.get();
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(hardSigmoidJ, fromLayerJ);
 
     ASSERT_EQ(hardSigmoidJ["factory"], "activation");
@@ -203,6 +205,8 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedHardSigmoid->getFeatureInput().get());
     ASSERT_EQ(stampedHardSigmoid->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }
 
 TEST(Activations, HardSigmoidRegistered) {
@@ -230,10 +234,11 @@ TEST(Activations, HardSigmoidRegistered) {
 
     ASSERT_TRUE(hardSigmoid->isInitialized());
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
     Stream stream(0);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json hardSigmoidJ = hardSigmoid->serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json hardSigmoidJ = hardSigmoid->serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
     Network newNetwork;
@@ -257,4 +262,6 @@ TEST(Activations, HardSigmoidRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::HardSigmoid> stampedHardSigmoid = dynamic_pointer_cast<ThorImplementation::HardSigmoid>(otherLayers[0]);
     ASSERT_NE(stampedHardSigmoid, nullptr);
+
+    filesystem::remove("/tmp/testModel.thor");
 }

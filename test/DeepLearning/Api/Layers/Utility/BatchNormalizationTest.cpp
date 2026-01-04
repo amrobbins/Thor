@@ -309,10 +309,12 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
         stream.synchronize();
 
-        json meanAbsoluteErrorJ = meanAbsoluteError.serialize("/tmp/", stream);
-        json networkInputJ = networkInput.serialize("/tmp/", stream);
-        json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-        json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+        json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
+        json networkInputJ = networkInput.serialize(archiveWriter, stream);
+        json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
+        json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
         // The network attached the optimizer to its copy of the BN layer
         json batchNormalizationJ;
@@ -322,7 +324,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkBN = dynamic_pointer_cast<BatchNormalization>(layer);
             if (initalNetworkBN) {
-                batchNormalizationJ = initalNetworkBN->serialize("/tmp", stream);
+                batchNormalizationJ = initalNetworkBN->serialize(archiveWriter, stream);
                 bnFound = true;
                 break;
             }
@@ -331,7 +333,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkBN;
-        json fromLayerJ = layer->serialize("/tmp/", stream);
+        json fromLayerJ = layer->serialize(archiveWriter, stream);
         ASSERT_EQ(batchNormalizationJ, fromLayerJ);
 
         ASSERT_EQ(batchNormalizationJ["version"], "1.0.0");
@@ -401,11 +403,14 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
-        Layer::deserialize("testModel", "/tmp", networkInputJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", labelsInputJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", batchNormalizationJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", meanAbsoluteErrorJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", networkOutputJ, &newNetwork);
+        archiveWriter.finishArchive();
+        thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+        Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+        Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
+        Layer::deserialize(archiveReader, batchNormalizationJ, &newNetwork);
+        Layer::deserialize(archiveReader, meanAbsoluteErrorJ, &newNetwork);
+        Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);

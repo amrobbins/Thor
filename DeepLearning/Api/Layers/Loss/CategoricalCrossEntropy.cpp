@@ -45,7 +45,7 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json CategoricalCrossEntropy::serialize(const string &storageDir, Stream stream) const {
+json CategoricalCrossEntropy::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     json j;
     j["factory"] = Layer::Factory::Loss.value();
     j["version"] = getLayerVersion();

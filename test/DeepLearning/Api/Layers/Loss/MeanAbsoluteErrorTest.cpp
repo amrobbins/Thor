@@ -186,11 +186,13 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
     Layer *layer = &meanAbsoluteError;
-    json meanAbsoluteErrorJ = layer->serialize("/tmp/", stream);
-    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-    json predictionsInputJ = predictionsInput.serialize("/tmp/", stream);
-    json lossOutputJ = lossOutput.serialize("/tmp/", stream);
+    json meanAbsoluteErrorJ = layer->serialize(archiveWriter, stream);
+    json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
+    json predictionsInputJ = predictionsInput.serialize(archiveWriter, stream);
+    json lossOutputJ = lossOutput.serialize(archiveWriter, stream);
 
     ASSERT_EQ(meanAbsoluteErrorJ["factory"], "loss");
     ASSERT_EQ(meanAbsoluteErrorJ["version"], "1.0.0");
@@ -222,7 +224,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize("/tmp", stream);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
             fcFound = true;
             break;
         }
@@ -239,7 +241,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     ASSERT_EQ(lossShaper == nullptr, lossShape == 3);
     json lossShaperJ;
     if (lossShaper)
-        lossShaperJ = lossShaper->serialize("/tmp", stream);
+        lossShaperJ = lossShaper->serialize(archiveWriter, stream);
 
     // printf("%s\n", predictionsInputJ.dump(4).c_str());
     // printf("%s\n", labelsInputJ.dump(4).c_str());
@@ -255,13 +257,15 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    Layer::deserialize("testModel", "/tmp/", predictionsInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", meanAbsoluteErrorJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+    Layer::deserialize(archiveReader, predictionsInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, fullyConnectedJ, &newNetwork);
+    Layer::deserialize(archiveReader, meanAbsoluteErrorJ, &newNetwork);
     if (lossShaper)
-        Layer::deserialize("testModel", "/tmp/", lossShaperJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", lossOutputJ, &newNetwork);
+        Layer::deserialize(archiveReader, lossShaperJ, &newNetwork);
+    Layer::deserialize(archiveReader, lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);

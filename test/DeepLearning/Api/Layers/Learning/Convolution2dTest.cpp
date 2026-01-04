@@ -843,11 +843,13 @@ TEST(Convolution2d, SerializeDeserialize) {
             biases.copyFromAsync(biasesCpu, stream);
         }
 
-        json flattenJ = flatten.serialize("/tmp/", stream);
-        json meanAbsoluteErrorJ = meanAbsoluteError.serialize("/tmp/", stream);
-        json networkInputJ = networkInput.serialize("/tmp/", stream);
-        json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-        json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+        json flattenJ = flatten.serialize(archiveWriter, stream);
+        json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
+        json networkInputJ = networkInput.serialize(archiveWriter, stream);
+        json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
+        json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
         // The network attached the optimizer to its copy of the conv layer
         json convolution2dJ;
@@ -857,7 +859,7 @@ TEST(Convolution2d, SerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkConv = dynamic_pointer_cast<Convolution2d>(layer);
             if (initalNetworkConv) {
-                convolution2dJ = initalNetworkConv->serialize("/tmp", stream);
+                convolution2dJ = initalNetworkConv->serialize(archiveWriter, stream);
                 convFound = true;
                 break;
             }
@@ -873,7 +875,7 @@ TEST(Convolution2d, SerializeDeserialize) {
                 shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
                 batchNorm = dynamic_pointer_cast<BatchNormalization>(layer);
                 if (batchNorm) {
-                    batchNormJ = batchNorm->serialize("/tmp", stream);
+                    batchNormJ = batchNorm->serialize(archiveWriter, stream);
                     bnFound = true;
                     break;
                 }
@@ -890,7 +892,7 @@ TEST(Convolution2d, SerializeDeserialize) {
                 shared_ptr<Layer> layer = initialNetwork.getLayer(i);
                 relu = dynamic_pointer_cast<Relu>(layer);
                 if (relu) {
-                    reluJ = relu->serialize("/tmp", stream);
+                    reluJ = relu->serialize(archiveWriter, stream);
                     reluFound = true;
                     break;
                 }
@@ -907,7 +909,7 @@ TEST(Convolution2d, SerializeDeserialize) {
                 shared_ptr<Layer> layer = initialNetwork.getLayer(i);
                 dropOut = dynamic_pointer_cast<DropOut>(layer);
                 if (dropOut) {
-                    dropOutJ = dropOut->serialize("/tmp", stream);
+                    dropOutJ = dropOut->serialize(archiveWriter, stream);
                     dropOutFound = true;
                     break;
                 }
@@ -931,7 +933,7 @@ TEST(Convolution2d, SerializeDeserialize) {
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkConv;
-        json convolution2dFromLayer = layer->serialize("/tmp/", stream);
+        json convolution2dFromLayer = layer->serialize(archiveWriter, stream);
         ASSERT_EQ(convolution2dJ, convolution2dFromLayer);
 
         ASSERT_EQ(convolution2dJ["version"], "1.0.0");
@@ -1024,18 +1026,21 @@ TEST(Convolution2d, SerializeDeserialize) {
         // Verify that the layer gets added to the network and that its weights are set to the correct values
         Network newNetwork;
 
-        Layer::deserialize("testModel", "/tmp", networkInputJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", labelsInputJ, &newNetwork);
+        archiveWriter.finishArchive();
+        thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+        Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+        Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
         if (useBatchNorm)
-            Layer::deserialize("testModel", "/tmp", batchNormJ, &newNetwork);
+            Layer::deserialize(archiveReader, batchNormJ, &newNetwork);
         if (dropProportion > 0.0f)
-            Layer::deserialize("testModel", "/tmp", dropOutJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", convolution2dJ, &newNetwork);
+            Layer::deserialize(archiveReader, dropOutJ, &newNetwork);
+        Layer::deserialize(archiveReader, convolution2dJ, &newNetwork);
         if (useRelu)
-            Layer::deserialize("testModel", "/tmp", reluJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", flattenJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", meanAbsoluteErrorJ, &newNetwork);
-        Layer::deserialize("testModel", "/tmp", networkOutputJ, &newNetwork);
+            Layer::deserialize(archiveReader, reluJ, &newNetwork);
+        Layer::deserialize(archiveReader, flattenJ, &newNetwork);
+        Layer::deserialize(archiveReader, meanAbsoluteErrorJ, &newNetwork);
+        Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);

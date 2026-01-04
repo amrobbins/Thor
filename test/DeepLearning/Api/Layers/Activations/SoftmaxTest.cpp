@@ -125,13 +125,15 @@ TEST(Activations, SoftmaxSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    json softmaxJ = softmax->serialize("/tmp/", stream);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json softmaxJ = softmax->serialize(archiveWriter, stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = softmax.get();
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(softmaxJ, fromLayerJ);
 
     ASSERT_EQ(softmaxJ["factory"], "activation");
@@ -203,6 +205,8 @@ TEST(Activations, SoftmaxSerializeDeserialize) {
     ASSERT_TRUE(stampedOutput->getFeatureOutput().isPresent());
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSoftmax->getFeatureInput().get());
     ASSERT_EQ(stampedSoftmax->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor");
 }
 
 TEST(Activations, SoftmaxRegistered) {
@@ -230,10 +234,12 @@ TEST(Activations, SoftmaxRegistered) {
 
     ASSERT_TRUE(softmax->isInitialized());
 
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
     Stream stream(0);
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json softmaxJ = softmax->serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json softmaxJ = softmax->serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
     Network newNetwork;
@@ -257,4 +263,5 @@ TEST(Activations, SoftmaxRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::Softmax> stampedSoftmax = dynamic_pointer_cast<ThorImplementation::Softmax>(otherLayers[0]);
     ASSERT_NE(stampedSoftmax, nullptr);
+    filesystem::remove("/tmp/testModel.thor");
 }

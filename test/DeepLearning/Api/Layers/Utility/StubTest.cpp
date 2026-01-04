@@ -71,16 +71,18 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
     Stub stub = Stub::Builder().network(initialNetwork).inputTensor(networkInput.getFeatureOutput().get()).build();
     ASSERT_TRUE(stub.isInitialized());
 
-    json stubJ = stub.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json stubJ = stub.serialize(archiveWriter, stream);
 
     // printf("%s\n", stubJ.dump(4).c_str());
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &stub;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(stubJ, fromLayerJ);
 
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
 
     ASSERT_EQ(stubJ["factory"], Layer::Factory::Layer.value());
     ASSERT_EQ(stubJ["version"], "1.0.0");
@@ -97,8 +99,11 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
     ////////////////////////////
     Network newNetwork;
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(stubJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, stubJ, &newNetwork);
 
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;

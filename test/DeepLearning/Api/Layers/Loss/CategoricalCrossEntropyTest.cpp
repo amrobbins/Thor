@@ -502,15 +502,17 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     ASSERT_TRUE(softmaxFound);
     ASSERT_EQ(lossShaperFound, lossShape != 3);
 
-    json labelsInputJ = labelsInput.serialize("/tmp/", stream);
-    json networkInputJ = predictionsInput.serialize("/tmp/", stream);
-    json softmaxJ = softmax->serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
+    json networkInputJ = predictionsInput.serialize(archiveWriter, stream);
+    json softmaxJ = softmax->serialize(archiveWriter, stream);
     Layer *layer = &categoricalCrossEntropy;
-    json categoricalCrossEntropyJ = layer->serialize("/tmp/", stream);
+    json categoricalCrossEntropyJ = layer->serialize(archiveWriter, stream);
     json lossShaperJ;
     if (lossShaper)
-        lossShaperJ = lossShaper->serialize("/tmp/", stream);
-    json lossOutputJ = lossOutput.serialize("/tmp/", stream);
+        lossShaperJ = lossShaper->serialize(archiveWriter, stream);
+    json lossOutputJ = lossOutput.serialize(archiveWriter, stream);
 
     ASSERT_EQ(categoricalCrossEntropyJ["factory"], "loss");
     ASSERT_EQ(categoricalCrossEntropyJ["version"], "1.0.0");
@@ -554,7 +556,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize("/tmp", stream);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
             fcFound = true;
             break;
         }
@@ -576,17 +578,17 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     // Verify that the layer gets added to the network and that its weights are set to the correct values
     Network newNetwork;
 
-    // The softmax output is not loaded, probably it is restamped? Oh it needs to be serialized so that it looks like a single layer or
-    // stamping will not work, I did this for FC etc.
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
 
-    Layer::deserialize("testModel", "/tmp/", networkInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", labelsInputJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", fullyConnectedJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", softmaxJ, &newNetwork);
-    Layer::deserialize("testModel", "/tmp/", categoricalCrossEntropyJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, fullyConnectedJ, &newNetwork);
+    Layer::deserialize(archiveReader, softmaxJ, &newNetwork);
+    Layer::deserialize(archiveReader, categoricalCrossEntropyJ, &newNetwork);
     if (lossShaper)
-        Layer::deserialize(lossShaperJ, &newNetwork);
-    Layer::deserialize(lossOutputJ, &newNetwork);
+        Layer::deserialize(archiveReader, lossShaperJ, &newNetwork);
+    Layer::deserialize(archiveReader, lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
     placementStatus = newNetwork.place(batchSize, initDoneEvents);

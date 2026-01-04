@@ -86,10 +86,14 @@ class Tensor : private ReferenceCounted {
     void moveFromAsync(Tensor source, Stream stream);
 
     enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
-    void attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess accessRequirement, bool createEmptyFile = false);
+    void attachFile(const std::string &fileName,
+                    const off_t fileOffset,
+                    const FileAccess fileAccessRequirement,
+                    bool createEmptyFile = false);
+    void attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess fileAccessRequirement, int32_t fileDescriptor);
     void detachFile();
     std::string getAttachedFilename() { return fileName; }
-    void loadFromFile(Stream stream);
+    void loadFromFile(Stream stream, Optional<uint32_t> crc = Optional<uint32_t>::empty());
     void dumpToFile(Stream stream);
 
     // The values are set at the end of stream
@@ -817,6 +821,7 @@ class Tensor : private ReferenceCounted {
 
     std::string fileName;
     int32_t fileDescriptor = 0;
+    bool ownsFileDescriptor = false;
     FileAccess fileAccessRequirement;
     CUfileHandle_t gpuDirectStorageCuFileHandle = nullptr;
     off_t gpuDirectStorageFileOffset;

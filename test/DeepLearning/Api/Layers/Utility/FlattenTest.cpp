@@ -117,17 +117,19 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    json flattenJ = flatten.serialize("/tmp/", stream);
+    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+
+    json flattenJ = flatten.serialize(archiveWriter, stream);
 
     // printf("%s\n", flattenJ.dump(4).c_str());
 
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = &flatten;
-    json fromLayerJ = layer->serialize("/tmp/", stream);
+    json fromLayerJ = layer->serialize(archiveWriter, stream);
     ASSERT_EQ(flattenJ, fromLayerJ);
 
-    json networkInputJ = networkInput.serialize("/tmp/", stream);
-    json networkOutputJ = networkOutput.serialize("/tmp/", stream);
+    json networkInputJ = networkInput.serialize(archiveWriter, stream);
+    json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     ASSERT_EQ(flattenJ["factory"], Layer::Factory::Layer.value());
     ASSERT_EQ(flattenJ["version"], "1.0.0");
@@ -150,9 +152,11 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
     ////////////////////////////
     Network newNetwork;
 
-    Layer::deserialize(networkInputJ, &newNetwork);
-    Layer::deserialize(flattenJ, &newNetwork);
-    Layer::deserialize(networkOutputJ, &newNetwork);
+    archiveWriter.finishArchive();
+    thor_file::TarReader archiveReader("testModel", "/tmp/");
+    Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
+    Layer::deserialize(archiveReader, flattenJ, &newNetwork);
+    Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;

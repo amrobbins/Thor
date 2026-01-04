@@ -2,6 +2,8 @@
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Common/Optional.h"
+#include "Utilities/TarFile/TarReader.h"
+#include "Utilities/TarFile/TarWriter.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
@@ -73,9 +75,8 @@ class Layer {
 
     virtual std::string getLayerType() const = 0;
 
-    virtual nlohmann::json serialize(const std::string &storageDir, Stream stream) const { return nlohmann::json{}; }
-    static void deserialize(const nlohmann::json &j, Network *network);  // FIXME: This variant goes away
-    static void deserialize(const std::string &modelName, const std::string &storageDir, const nlohmann::json &j, Network *network);
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const { return nlohmann::json{}; }
+    static void deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
