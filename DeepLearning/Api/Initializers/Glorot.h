@@ -11,39 +11,34 @@ class Glorot : public Initializer {
    public:
     class Builder;
 
-    virtual ~Glorot() {}
+    virtual ~Glorot() = default;
+
+    // FIXME: Stamp is problematic can it can only be done once here, since it will be replaced during the second stamping.
+    //        Normally stamped stuff is added into a container.
+    virtual void stamp() { implementationInitializer = ThorImplementation::Glorot(mode).clone(); }
 
     virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<Glorot>(*this); }
+
+    virtual nlohmann::json serialize(Stream stream) const;
+    static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
+    ThorImplementation::Glorot::Mode getMode() const { return mode; }
+
+   protected:
+    ThorImplementation::Glorot::Mode mode;
 };
 
 class Glorot::Builder : public Initializer::Builder {
    public:
-    virtual ~Builder() { _layerThatOwnsTensor = nullptr; }
+    virtual ~Builder() = default;
 
     virtual std::shared_ptr<Initializer> build() {
-        assert(_tensorToInitialize.isPresent());
-
         if (_mode.isEmpty())
             _mode = ThorImplementation::Glorot::Mode::UNIFORM;
 
         Glorot glorotInitializer;
-        glorotInitializer.tensorToInitialize = _tensorToInitialize;
-        glorotInitializer.layerThatOwnsTensor = _layerThatOwnsTensor;
-        glorotInitializer.implementationInitializer = ThorImplementation::Glorot(_mode.get()).clone();
+        glorotInitializer.mode = _mode.get();
         glorotInitializer.initialized = true;
         return glorotInitializer.clone();
-    }
-
-    virtual void tensorToInitialize(ThorImplementation::Tensor _tensorToInitialize) {
-        assert(!_tensorToInitialize.getDescriptor().getDimensions().empty());
-        assert(this->_tensorToInitialize.isEmpty());
-        this->_tensorToInitialize = _tensorToInitialize;
-    }
-
-    virtual void layerThatOwnsTensor(ThorImplementation::Layer *_layerThatOwnsTensor) {
-        assert(_layerThatOwnsTensor != nullptr);
-        assert(this->_layerThatOwnsTensor == nullptr);
-        this->_layerThatOwnsTensor = _layerThatOwnsTensor;
     }
 
     virtual Glorot::Builder &mode(ThorImplementation::Glorot::Mode _mode) {
@@ -55,8 +50,6 @@ class Glorot::Builder : public Initializer::Builder {
     virtual std::shared_ptr<Initializer::Builder> clone() { return std::make_shared<Glorot::Builder>(*this); }
 
    protected:
-    Optional<ThorImplementation::Tensor> _tensorToInitialize;
-    ThorImplementation::Layer *_layerThatOwnsTensor;
     Optional<ThorImplementation::Glorot::Mode> _mode;
 };
 

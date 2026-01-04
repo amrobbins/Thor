@@ -221,21 +221,14 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         UniformRandom::Builder onesInitializerBuilder = UniformRandom::Builder().minValue(1.0).maxValue(1.0);
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
-        // FIXME: builder chaining
-        weightsInitializerBuilder->tensorToInitialize(physicalLayer->getWeights());
-        weightsInitializerBuilder->layerThatOwnsTensor(physicalLayer.get());
         shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
-        weightsInitializer->initialize();
-        initDoneEvent = weightsInitializer->getInitDoneEvent();
+        initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
-        resultRunningVarianceBuilder->tensorToInitialize(physicalBatchNorm->getResultRunningVariance());
-        resultRunningVarianceBuilder->layerThatOwnsTensor(physicalLayer.get());
         shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
-        resultRunningVarianceInitializer->initialize();
-        initDoneEvent = resultRunningVarianceInitializer->getInitDoneEvent();
+        initDoneEvent = resultRunningVarianceInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
@@ -243,20 +236,14 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
         assert(physicalLayer->getBiases().isPresent());
         shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
-        biasInitializerBuilder->tensorToInitialize(physicalLayer->getBiases().get());
-        biasInitializerBuilder->layerThatOwnsTensor(physicalLayer.get());
         shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
-        biasInitializer->initialize();
-        initDoneEvent = biasInitializer->getInitDoneEvent();
+        initDoneEvent = biasInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
-        resultRunningMeanBuilder->tensorToInitialize(physicalBatchNorm->getResultRunningMean());
-        resultRunningMeanBuilder->layerThatOwnsTensor(physicalLayer.get());
         shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
-        resultRunningMeanInitializer->initialize();
-        initDoneEvent = resultRunningMeanInitializer->getInitDoneEvent();
+        initDoneEvent = resultRunningMeanInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
