@@ -20,7 +20,7 @@ using namespace Thor;
 static Network buildNetwork(uint32_t numFCLayers) {
     Network network;
     Tensor latestOutputTensor;
-    UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
+    shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
@@ -34,8 +34,8 @@ static Network buildNetwork(uint32_t numFCLayers) {
                                             .featureInput(latestOutputTensor)
                                             .numOutputFeatures(500)
                                             .hasBias(true)
-                                            .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                                            .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                            .weightsInitializer(uniformRandomInitializer)
+                                            .biasInitializer(uniformRandomInitializer)
                                             .noActivation()
                                             .build();
         latestOutputTensor = fullyConnected.getFeatureOutput();

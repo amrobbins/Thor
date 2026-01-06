@@ -13,13 +13,13 @@ class Glorot : public Initializer {
 
     virtual ~Glorot() = default;
 
-    // FIXME: Stamp is problematic can it can only be done once here, since it will be replaced during the second stamping.
-    //        Normally stamped stuff is added into a container.
-    virtual void stamp() { implementationInitializer = ThorImplementation::Glorot(mode).clone(); }
+    virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) {
+        layerThatOwnsTensor->setInitializer(tensorToInitialize, ThorImplementation::Glorot(mode).clone());
+    }
 
     virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<Glorot>(*this); }
 
-    virtual nlohmann::json serialize(Stream stream) const;
+    virtual nlohmann::json serialize() const;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
     ThorImplementation::Glorot::Mode getMode() const { return mode; }
 

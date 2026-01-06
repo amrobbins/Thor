@@ -30,8 +30,8 @@ void Inception::buildSupportLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .activationBuilder(Relu::Builder());
 
     Convolution2d::Builder convolution3x3ReduceBuilder;
@@ -43,8 +43,8 @@ void Inception::buildSupportLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .activationBuilder(Relu::Builder());
     Convolution2d::Builder convolution3x3Builder;
     convolution3x3Builder.network(*network)
@@ -55,8 +55,8 @@ void Inception::buildSupportLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .activationBuilder(Relu::Builder());
 
     Convolution2d::Builder convolution5x5ReduceBuilder;
@@ -68,8 +68,8 @@ void Inception::buildSupportLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .activationBuilder(Relu::Builder());
     Convolution2d::Builder convolution5x5Builder;
     convolution5x5Builder.network(*network)
@@ -80,8 +80,8 @@ void Inception::buildSupportLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .activationBuilder(Relu::Builder());
 
     Convolution2d::Builder convolutionPoolingReduceBuilder;
@@ -93,8 +93,8 @@ void Inception::buildSupportLayersAndAddToNetwork() {
         .horizontalStride(1)
         .samePadding()
         .hasBias(true)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .activationBuilder(Relu::Builder());
 
     Concatenate::Builder concatenateBuilder;

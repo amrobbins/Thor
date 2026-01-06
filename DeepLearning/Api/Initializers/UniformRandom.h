@@ -14,11 +14,13 @@ class UniformRandom : public Initializer {
 
     virtual ~UniformRandom() = default;
 
-    virtual void stamp() { implementationInitializer = ThorImplementation::UniformRandom(maxValue, minValue).clone(); }
+    virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) {
+        layerThatOwnsTensor->setInitializer(tensorToInitialize, ThorImplementation::UniformRandom(maxValue, minValue).clone());
+    }
 
     virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<UniformRandom>(*this); }
 
-    virtual nlohmann::json serialize(Stream stream) const;
+    virtual nlohmann::json serialize() const;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
 
     double getMinValue() const { return minValue; }

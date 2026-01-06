@@ -37,7 +37,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
     uint32_t numOutputFeatures = 1 + (rand() % 1000);
     bool hasBias = rand() % 2;
 
-    UniformRandom::Builder uniformRandomInitializerBuilder;
+    shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(0.1).maxValue(1.0).build();
     Tanh::Builder tanhBuilder;
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
@@ -49,8 +49,8 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
                                         .featureInput(featureInput)
                                         .numOutputFeatures(numOutputFeatures)
                                         .hasBias(hasBias)
-                                        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                                        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                        .weightsInitializer(uniformRandomInitializer)
+                                        .biasInitializer(uniformRandomInitializer)
                                         .activationBuilder(tanhBuilder)
                                         .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                         .dropOut(dropProportion)

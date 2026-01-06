@@ -9,7 +9,7 @@ Network buildSingleLayerConvolution2d() {
 
     vector<uint64_t> expectedDimensions;
 
-    Glorot::Builder glorot = Glorot::Builder();
+    shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     Tensor latestOutputTensor;
     latestOutputTensor = NetworkInput::Builder()
@@ -32,8 +32,8 @@ Network buildSingleLayerConvolution2d() {
                              .horizontalStride(1)
                              .noPadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .batchNormalization()
                              .build()
@@ -58,8 +58,8 @@ Network buildSingleLayerConvolution2d() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(10)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .noActivation()
                              .build()
                              .getFeatureOutput();

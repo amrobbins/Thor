@@ -16,8 +16,8 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
         .verticalPadding(verticalPadding)
         .horizontalPadding(horizontalPadding)
         .hasBias(hasBias)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .noActivation();
 
     vector<Tensor> currentFeatureInputs;
@@ -152,6 +152,13 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
     ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
     weightsBuffer.copyFromAsync(weights, stream);
 
+    if (weightsInitializer != nullptr) {
+        j["weights_initializer"] = weightsInitializer->serialize();
+    }
+    if (biasInitializer != nullptr) {
+        j["biases_initializer"] = biasInitializer->serialize();
+    }
+
     if (hasOptimizer()) {
         j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer);
     }
@@ -221,6 +228,13 @@ void Convolution2d::deserialize(thor_file::TarReader &archiveReader, const json 
     if (hasBias)
         convolution2d.biasesFile = biasesFile;
 
+    if (j.contains("weights_initializer")) {
+        convolution2d.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
+    }
+    if (j.contains("biases_initializer")) {
+        convolution2d.biasInitializer = Initializer::deserialize(j.at("biases_initializer"));
+    }
+
     if (j.contains("optimizer")) {
         convolution2d.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
     }
@@ -261,8 +275,6 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
         assert(archiveReader != nullptr);
-        assert(weightsInitializerBuilder.get() == nullptr);
-        assert(biasInitializerBuilder.get() == nullptr);
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
 
@@ -290,17 +302,17 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         stream.synchronize();
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
+        assert(weightsInitializer != nullptr);
+        if (hasBias)
+            assert(biasInitializer != nullptr);
+
         Optional<Event> initDoneEvent;
 
-        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
-        shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilderClone->build();
         initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         if (physicalLayer->getBiases().isPresent()) {
-            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
-            shared_ptr<Initializer> biasInitializer = biasInitializerBuilderClone->build();
             initDoneEvent = biasInitializer->initialize(physicalLayer->getBiases().get(), physicalLayer.get());
             if (initDoneEvent.isPresent())
                 initDoneEvents.push_back(initDoneEvent);

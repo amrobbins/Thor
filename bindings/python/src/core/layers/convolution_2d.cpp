@@ -45,8 +45,8 @@ void bind_convolution_2d(nb::module_ &m) {
                bool horizontalSamePadding,
                bool hasBias,
                optional<Activation::Builder *> activation,
-               Initializer::Builder *weights_initializer,
-               Initializer::Builder *biases_initializer,
+               shared_ptr<Initializer> weights_initializer,
+               shared_ptr<Initializer> biases_initializer,
                bool add_drop_out,
                float drop_proportion,
                bool add_batch_normalization,
@@ -68,9 +68,9 @@ void bind_convolution_2d(nb::module_ &m) {
                     builder.activationBuilder(*(activation.value()));
 
                 if (weights_initializer != nullptr)
-                    builder.weightsInitializerBuilder(*weights_initializer);
+                    builder.weightsInitializer(weights_initializer);
                 if (biases_initializer != nullptr)
-                    builder.biasInitializerBuilder(*biases_initializer);
+                    builder.biasInitializer(biases_initializer);
 
                 if (add_drop_out)
                     builder.dropOut(drop_proportion);
