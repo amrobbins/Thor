@@ -7,7 +7,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
     Tensor latestOutputTensor;
 
     vector<uint64_t> expectedDimensions;
-    Glorot::Builder glorot = Glorot::Builder();
+    shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -20,8 +20,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalPadding(2)
                              .verticalPadding(2)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -39,8 +39,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -72,8 +72,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -105,8 +105,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -124,8 +124,8 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .horizontalStride(1)
                              .samePadding()
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -156,7 +156,7 @@ Network buildAlexNet() {
 
     vector<uint64_t> expectedDimensions;
 
-    Glorot::Builder glorot = Glorot::Builder();
+    shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     // All tensors are converted to FP16 at the output of a network input
     // For the ImageNet dataset, the average pixel values are subtracted from each color channel during dataset
@@ -188,8 +188,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .build()
                              .getFeatureOutput();
 
@@ -202,8 +202,8 @@ Network buildAlexNet() {
                              .numOutputFeatures(4096)
                              .hasBias(true)
                              .dropOut(0.5)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .build()
                              .getFeatureOutput();
 
@@ -212,8 +212,8 @@ Network buildAlexNet() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(NUM_CLASSES)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .noActivation()
                              .build()
                              .getFeatureOutput();

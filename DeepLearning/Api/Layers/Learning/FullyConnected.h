@@ -34,7 +34,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     FullyConnected() {}
 
-    virtual ~FullyConnected() {}
+    virtual ~FullyConnected() = default;
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
 
@@ -147,8 +147,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    private:
     uint32_t numOutputFeatures;
     bool hasBias;
-    std::shared_ptr<Initializer::Builder> weightsInitializerBuilder;
-    std::shared_ptr<Initializer::Builder> biasInitializerBuilder;
+    std::shared_ptr<Initializer> weightsInitializer;
+    std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation::Builder> activationBuilder;
 
     std::shared_ptr<Layer> activation;
@@ -182,10 +182,10 @@ class FullyConnected::Builder {
         assert(_numOutputFeatures.isPresent());
         if (_hasBias.isEmpty())
             _hasBias = false;
-        if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
-        if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
+        if (_weightsInitializer == nullptr)
+            _weightsInitializer = Glorot::Builder().build();
+        if (_biasInitializer == nullptr)
+            _biasInitializer = Glorot::Builder().build();
         if (!_activationBuilder && !_activationExplicitlyRemoved)
             _activationBuilder = std::make_shared<Relu::Builder>(Relu::Builder());
         if (_dropProportion.isEmpty())
@@ -201,8 +201,8 @@ class FullyConnected::Builder {
         fullyConnected.numOutputFeatures = _numOutputFeatures;
 
         fullyConnected.hasBias = _hasBias;
-        fullyConnected.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
-        fullyConnected.biasInitializerBuilder = _biasInitializerBuilder->clone();
+        fullyConnected.weightsInitializer = _weightsInitializer->clone();
+        fullyConnected.biasInitializer = _biasInitializer->clone();
         if (_activationBuilder != nullptr)
             fullyConnected.activationBuilder = _activationBuilder->clone();
         fullyConnected.dropProportion = _dropProportion;
@@ -260,27 +260,27 @@ class FullyConnected::Builder {
         return *this;
     }
 
-    virtual FullyConnected::Builder &weightsInitializerBuilder(Initializer::Builder &_weightsInitializerBuilder) {
-        assert(this->_weightsInitializerBuilder == nullptr);
-        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+    virtual FullyConnected::Builder &weightsInitializer(std::shared_ptr<Initializer> &_weightsInitializer) {
+        assert(this->_weightsInitializer == nullptr);
+        this->_weightsInitializer = _weightsInitializer->clone();
         return *this;
     }
 
-    virtual FullyConnected::Builder &weightsInitializerBuilder(Initializer::Builder &&_weightsInitializerBuilder) {
-        assert(this->_weightsInitializerBuilder == nullptr);
-        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+    virtual FullyConnected::Builder &weightsInitializer(std::shared_ptr<Initializer> &&_weightsInitializer) {
+        assert(this->_weightsInitializer == nullptr);
+        this->_weightsInitializer = _weightsInitializer->clone();
         return *this;
     }
 
-    virtual FullyConnected::Builder &biasInitializerBuilder(Initializer::Builder &_biasInitializerBuilder) {
-        assert(this->_biasInitializerBuilder == nullptr);
-        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+    virtual FullyConnected::Builder &biasInitializer(std::shared_ptr<Initializer> &_biasInitializer) {
+        assert(this->_biasInitializer == nullptr);
+        this->_biasInitializer = _biasInitializer->clone();
         return *this;
     }
 
-    virtual FullyConnected::Builder &biasInitializerBuilder(Initializer::Builder &&_biasInitializerBuilder) {
-        assert(this->_biasInitializerBuilder == nullptr);
-        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+    virtual FullyConnected::Builder &biasInitializer(std::shared_ptr<Initializer> &&_biasInitializer) {
+        assert(this->_biasInitializer == nullptr);
+        this->_biasInitializer = _biasInitializer->clone();
         return *this;
     }
 
@@ -332,8 +332,8 @@ class FullyConnected::Builder {
     std::vector<Tensor> _featureInputs;
     Optional<uint32_t> _numOutputFeatures;
     Optional<bool> _hasBias;
-    std::shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
-    std::shared_ptr<Initializer::Builder> _biasInitializerBuilder;
+    std::shared_ptr<Initializer> _weightsInitializer;
+    std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Activation::Builder> _activationBuilder;
     bool _activationExplicitlyRemoved;
 

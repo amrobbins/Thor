@@ -62,8 +62,8 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     fullyConnectedBuilder.network(*network)
         .numOutputFeatures(numOutputFeatures)
         .hasBias(hasBias)
-        .weightsInitializerBuilder(*weightsInitializerBuilder)
-        .biasInitializerBuilder(*biasInitializerBuilder)
+        .weightsInitializer(weightsInitializer)
+        .biasInitializer(biasInitializer)
         .noActivation();
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
@@ -155,6 +155,13 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
     weightsBuffer.copyFromAsync(weights, stream);
 
+    if (weightsInitializer != nullptr) {
+        j["weights_initializer"] = weightsInitializer->serialize();
+    }
+    if (biasInitializer != nullptr) {
+        j["biases_initializer"] = biasInitializer->serialize();
+    }
+
     if (hasOptimizer()) {
         j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer);
     }
@@ -212,6 +219,13 @@ void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json
 
     fullyConnected.initialized = true;
 
+    if (j.contains("weights_initializer")) {
+        fullyConnected.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
+    }
+    if (j.contains("biases_initializer")) {
+        fullyConnected.biasInitializer = Initializer::deserialize(j.at("biases_initializer"));
+    }
+
     if (j.contains("optimizer")) {
         fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
     }
@@ -250,8 +264,6 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
     } else if (weightsFile.isPresent()) {
         // 2. Copy from a file - when loading a saved network
         assert(archiveReader != nullptr);
-        assert(weightsInitializerBuilder.get() == nullptr);
-        assert(biasInitializerBuilder.get() == nullptr);
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
 
@@ -279,17 +291,17 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         stream.synchronize();
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
+        assert(weightsInitializer != nullptr);
+        if (hasBias)
+            assert(biasInitializer != nullptr);
+
         Optional<Event> initDoneEvent;
 
-        shared_ptr<Initializer::Builder> weightsInitializerBuilderClone = weightsInitializerBuilder->clone();
-        shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilderClone->build();
         initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         if (physicalLayer->getBiases().isPresent()) {
-            shared_ptr<Initializer::Builder> biasInitializerBuilderClone = biasInitializerBuilder->clone();
-            shared_ptr<Initializer> biasInitializer = biasInitializerBuilderClone->build();
             initDoneEvent = biasInitializer->initialize(physicalLayer->getBiases().get(), physicalLayer.get());
             if (initDoneEvent.isPresent())
                 initDoneEvents.push_back(initDoneEvent);

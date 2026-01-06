@@ -27,7 +27,7 @@ using namespace Thor;
 TEST(Network, SimplestNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
+    shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
@@ -38,8 +38,8 @@ TEST(Network, SimplestNetworkProperlyFormed) {
                                         .featureInput(latestOutputTensor)
                                         .numOutputFeatures(1)
                                         .hasBias(true)
-                                        .weightsInitializerBuilder(uniformRandomInitializerBuilder)
-                                        .biasInitializerBuilder(uniformRandomInitializerBuilder)
+                                        .weightsInitializer(uniformRandomInitializer)
+                                        .biasInitializer(uniformRandomInitializer)
                                         .noActivation()
                                         .build();
     latestOutputTensor = fullyConnected.getFeatureOutput();
@@ -141,7 +141,7 @@ TEST(Network, SimplestNetworkProperlyFormed) {
 TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    Glorot::Builder glorotBuilder = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM);
+    shared_ptr<Initializer> glorot = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM).build();
 
     constexpr uint64_t NUM_INPUTS = 1024;
     constexpr uint64_t NUM_OUTPUTS = 500;
@@ -157,8 +157,8 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
                                         .featureInput(latestOutputTensor)
                                         .numOutputFeatures(NUM_OUTPUTS)
                                         .hasBias(true)
-                                        .weightsInitializerBuilder(glorotBuilder)
-                                        .biasInitializerBuilder(glorotBuilder)
+                                        .weightsInitializer(glorot)
+                                        .biasInitializer(glorot)
                                         .noActivation()
                                         .build();
     latestOutputTensor = fullyConnected.getFeatureOutput();
@@ -250,7 +250,7 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
 TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    Glorot::Builder glorotBuilder = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::NORMAL);
+    shared_ptr<Initializer> glorot = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM).build();
 
     constexpr uint64_t NUM_INPUTS = 1024;
     constexpr uint64_t NUM_OUTPUTS = 500;
@@ -266,8 +266,8 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
                                         .featureInput(latestOutputTensor)
                                         .numOutputFeatures(NUM_OUTPUTS)
                                         .hasBias(true)
-                                        .weightsInitializerBuilder(glorotBuilder)
-                                        .biasInitializerBuilder(glorotBuilder)
+                                        .weightsInitializer(glorot)
+                                        .biasInitializer(glorot)
                                         .noActivation()
                                         .build();
     latestOutputTensor = fullyConnected.getFeatureOutput();
@@ -388,7 +388,7 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
 TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(2).maxValue(3);
+    shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(2).maxValue(3).build();
 
     Tensor networkInputTensor = NetworkInput::Builder()
                                     .network(network)
@@ -406,7 +406,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
                              .activationBuilder(Relu::Builder())
                              .dropOut(0.5)
                              .batchNormalization()
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializer(uniformRandomInitializer)
                              .build()
                              .getFeatureOutput();
     latestOutputTensor =
@@ -500,7 +500,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
 TEST(Network, BranchedNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
-    UniformRandom::Builder uniformRandomInitializerBuilder = UniformRandom::Builder().minValue(-0.1).maxValue(0.1);
+    shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
     NetworkInput networkInput =
         NetworkInput::Builder().network(network).name("input").dimensions({1024}).dataType(Tensor::DataType::FP16).build();
@@ -513,7 +513,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
                                              .activationBuilder(Relu::Builder())
                                              .dropOut(0.5)
                                              .batchNormalization()
-                                             .weightsInitializerBuilder(uniformRandomInitializerBuilder);
+                                             .weightsInitializer(uniformRandomInitializer);
     FullyConnected fc0 = fc0Builder.build();
     FullyConnected fc1 = fc0Builder.build();
 
@@ -526,7 +526,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
                              .activationBuilder(Relu::Builder())
                              .dropOut(0.5)
                              .batchNormalization()
-                             .weightsInitializerBuilder(uniformRandomInitializerBuilder)
+                             .weightsInitializer(uniformRandomInitializer)
                              .build();
 
     GradientRivet gradientRivet = GradientRivet::Builder().network(network).tensor(fc2.getFeatureOutputs()[0]).build();

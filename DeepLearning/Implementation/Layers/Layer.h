@@ -26,6 +26,7 @@
 #include <vector>
 
 namespace ThorImplementation {
+class Initializer;
 
 class Tensor;
 class TensorDescriptor;
@@ -331,6 +332,23 @@ class Layer {
     }
 
     virtual bool isCompiled() { return compiled; }
+
+    virtual void setInitializer(Tensor target, std::shared_ptr<ThorImplementation::Initializer> initializer) {
+        // Should not be called on a layer that does not override it.
+        assert(false);
+    }
+
+    virtual bool hasInitializer(Tensor target) {
+        // Should not be called on a layer that does not override it.
+        assert(false);
+        return false;
+    }
+
+    virtual Event initializeTensor(Tensor target) {
+        // Should not be called on a layer that does not override it.
+        assert(false);
+        return Event();
+    }
 
    protected:
     Optional<Tensor> featureInput;

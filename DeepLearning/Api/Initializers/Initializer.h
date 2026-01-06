@@ -29,17 +29,15 @@ class Initializer {
     // Referring to the initializer object, not the tensor that gets initialized:
     bool isInitialized() { return initialized; }
 
-    virtual void stamp() = 0;
+    virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) = 0;
 
     virtual Event initialize(ThorImplementation::Tensor tensorToInitialize, ThorImplementation::Layer *layerThatOwnsTensor) {
-        stamp();
-        assert(implementationInitializer != nullptr);
-        assert(layerThatOwnsTensor != nullptr);
-        initDoneEvent = implementationInitializer->initialize(layerThatOwnsTensor, tensorToInitialize);
+        stamp(layerThatOwnsTensor, tensorToInitialize);
+        initDoneEvent = layerThatOwnsTensor->initializeTensor(tensorToInitialize);
         return initDoneEvent;
     }
 
-    virtual nlohmann::json serialize(Stream stream) const = 0;
+    virtual nlohmann::json serialize() const = 0;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
     using Deserializer = std::function<std::shared_ptr<Initializer>(const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
@@ -48,7 +46,6 @@ class Initializer {
     virtual std::string getVersion() const;
 
    protected:
-    std::shared_ptr<ThorImplementation::Initializer> implementationInitializer;
     Optional<Event> initDoneEvent;
 
     // Referring to the initializer object, not the tensor that gets initialized:

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
@@ -280,12 +281,45 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual std::string getType() { return "TrainableWeightsBiases"; }
 
+    virtual void setWeightsInitializer(std::shared_ptr<ThorImplementation::Initializer> initializer) { weightsInitializer = initializer; }
+    virtual void setBiasesInitializer(std::shared_ptr<ThorImplementation::Initializer> initializer) { biasesInitializer = initializer; }
+    virtual void setInitializer(Tensor target, std::shared_ptr<ThorImplementation::Initializer> initializer) {
+        if (target == weights)
+            weightsInitializer = initializer;
+        else if (hasBias && target == biases.get())
+            biasesInitializer = initializer;
+        else
+            assert(false);
+    }
+    virtual bool hasWeightsInitializer() { return weightsInitializer != nullptr; }
+    virtual bool hasBiasesInitializer() { return weightsInitializer != nullptr; }
+    virtual bool hasInitializer(Tensor target) {
+        if (target == weights)
+            return hasWeightsInitializer();
+        else if (hasBias && target == biases.get())
+            return hasBiasesInitializer();
+        else
+            assert(false);
+    }
+
+    virtual Event initializeTensor(Tensor target) {
+        if (target == weights)
+            return weightsInitializer->initialize(this, weights);
+        else if (hasBias && target == biases.get())
+            return biasesInitializer->initialize(this, biases.get());
+        else
+            assert(false);
+    }
+
    protected:
     const bool hasBias;
     const bool usingSharedWeights;
 
     Tensor weights;
     Optional<Tensor> biases;
+
+    std::shared_ptr<ThorImplementation::Initializer> weightsInitializer = nullptr;
+    std::shared_ptr<ThorImplementation::Initializer> biasesInitializer = nullptr;
 
     // Note: not virtual, layers need to implement infer(..., weights, biases)
     // FIXME: They should have different names then.

@@ -9,7 +9,7 @@ Network buildSingleLayerFullyConnected() {
 
     vector<uint64_t> expectedDimensions;
 
-    Glorot::Builder glorot = Glorot::Builder();
+    shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     Tensor latestOutputTensor = NetworkInput::Builder()
                                     .network(singleLayerFullyConnected)
@@ -24,8 +24,8 @@ Network buildSingleLayerFullyConnected() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(128)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .activationBuilder(Relu::Builder())
                              .build()
                              .getFeatureOutput();
@@ -37,8 +37,8 @@ Network buildSingleLayerFullyConnected() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(10)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .noActivation()
                              .build()
                              .getFeatureOutput();

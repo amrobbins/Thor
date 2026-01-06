@@ -54,8 +54,8 @@ class Inception : public TrainableWeightsBiasesLayer {
     uint32_t outputChannels5x5;
     uint32_t outputChannelsPooling;
 
-    std::shared_ptr<Initializer::Builder> weightsInitializerBuilder;
-    std::shared_ptr<Initializer::Builder> biasInitializerBuilder;
+    std::shared_ptr<Initializer> weightsInitializer;
+    std::shared_ptr<Initializer> biasInitializer;
 };
 
 class Inception::Builder {
@@ -70,10 +70,10 @@ class Inception::Builder {
         assert(_outputChannels5x5.isPresent());
         assert(_outputChannelsPooling.isPresent());
 
-        if (_weightsInitializerBuilder == nullptr)
-            _weightsInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
-        if (_biasInitializerBuilder == nullptr)
-            _biasInitializerBuilder = std::make_shared<Glorot::Builder>(Glorot::Builder());
+        if (_weightsInitializer == nullptr)
+            _weightsInitializer = Glorot::Builder().build();
+        if (_biasInitializer == nullptr)
+            _biasInitializer = Glorot::Builder().build();
 
         Inception inception;
         inception.network = _network;
@@ -85,8 +85,8 @@ class Inception::Builder {
         inception.outputChannels5x5 = _outputChannels5x5;
         inception.outputChannelsPooling = _outputChannelsPooling;
 
-        inception.weightsInitializerBuilder = _weightsInitializerBuilder->clone();
-        inception.biasInitializerBuilder = _biasInitializerBuilder->clone();
+        inception.weightsInitializer = _weightsInitializer->clone();
+        inception.biasInitializer = _biasInitializer->clone();
 
         inception.initialized = true;
 
@@ -154,27 +154,27 @@ class Inception::Builder {
         return *this;
     }
 
-    virtual Inception::Builder &weightsInitializerBuilder(Initializer::Builder &_weightsInitializerBuilder) {
-        assert(this->_weightsInitializerBuilder == nullptr);
-        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+    virtual Inception::Builder &weightsInitializer(std::shared_ptr<Initializer> &_weightsInitializer) {
+        assert(this->_weightsInitializer == nullptr);
+        this->_weightsInitializer = _weightsInitializer->clone();
         return *this;
     }
 
-    virtual Inception::Builder &weightsInitializerBuilder(Initializer::Builder &&_weightsInitializerBuilder) {
-        assert(this->_weightsInitializerBuilder == nullptr);
-        this->_weightsInitializerBuilder = _weightsInitializerBuilder.clone();
+    virtual Inception::Builder &weightsInitializer(std::shared_ptr<Initializer> &&_weightsInitializer) {
+        assert(this->_weightsInitializer == nullptr);
+        this->_weightsInitializer = _weightsInitializer->clone();
         return *this;
     }
 
-    virtual Inception::Builder &biasInitializerBuilder(Initializer::Builder &_biasInitializerBuilder) {
-        assert(this->_biasInitializerBuilder == nullptr);
-        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+    virtual Inception::Builder &biasInitializer(std::shared_ptr<Initializer> &_biasInitializer) {
+        assert(this->_biasInitializer == nullptr);
+        this->_biasInitializer = _biasInitializer->clone();
         return *this;
     }
 
-    virtual Inception::Builder &biasInitializerBuilder(Initializer::Builder &&_biasInitializerBuilder) {
-        assert(this->_biasInitializerBuilder == nullptr);
-        this->_biasInitializerBuilder = _biasInitializerBuilder.clone();
+    virtual Inception::Builder &biasInitializer(std::shared_ptr<Initializer> &&_biasInitializer) {
+        assert(this->_biasInitializer == nullptr);
+        this->_biasInitializer = _biasInitializer->clone();
         return *this;
     }
 
@@ -188,8 +188,8 @@ class Inception::Builder {
     Optional<uint32_t> _outputChannels5x5;
     Optional<uint32_t> _outputChannelsPooling;
 
-    std::shared_ptr<Initializer::Builder> _weightsInitializerBuilder;
-    std::shared_ptr<Initializer::Builder> _biasInitializerBuilder;
+    std::shared_ptr<Initializer> _weightsInitializer;
+    std::shared_ptr<Initializer> _biasInitializer;
 };
 
 }  // namespace Thor

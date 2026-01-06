@@ -9,7 +9,7 @@ Network buildDeepFullyConnected() {
 
     vector<uint64_t> expectedDimensions;
 
-    Glorot::Builder glorot = Glorot::Builder();
+    shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     NetworkInput imagesInput = NetworkInput::Builder()
                                    .network(deepFullyConnected)
@@ -26,8 +26,8 @@ Network buildDeepFullyConnected() {
                              .featureInput(imagesInput.getFeatureOutput())
                              .numOutputFeatures(512)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {512};
@@ -39,8 +39,8 @@ Network buildDeepFullyConnected() {
                                  .featureInput(latestOutputTensor)
                                  .numOutputFeatures(8192)
                                  .hasBias(true)
-                                 .weightsInitializerBuilder(glorot)
-                                 .biasInitializerBuilder(glorot)
+                                 .weightsInitializer(glorot)
+                                 .biasInitializer(glorot)
                                  .build()
                                  .getFeatureOutput();
         expectedDimensions = {8192};
@@ -52,8 +52,8 @@ Network buildDeepFullyConnected() {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(1000)
                              .hasBias(true)
-                             .weightsInitializerBuilder(glorot)
-                             .biasInitializerBuilder(glorot)
+                             .weightsInitializer(glorot)
+                             .biasInitializer(glorot)
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {1000};
