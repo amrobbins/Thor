@@ -27,6 +27,11 @@ void Layer::addToNetwork(Network* network) {
     network->addToNetwork(this);
 }
 
+// void Layer::addTemplateLayerToNetwork(Network* network) {
+//     assert(isInitialized());
+//     network->addTemplateLayerToNetwork(this, nextId.fetch_add(1));
+// }
+
 void Layer::connectTwoLayers(shared_ptr<ThorImplementation::Layer> drivingLayer,
                              shared_ptr<ThorImplementation::Layer> loadingLayer,
                              const shared_ptr<Thor::Layer> drivingApiLayer,

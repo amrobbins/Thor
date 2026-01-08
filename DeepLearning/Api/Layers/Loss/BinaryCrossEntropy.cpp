@@ -9,8 +9,8 @@ namespace Thor {
 
 void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     assert(!sigmoidAddedToNetwork);
-    shared_ptr<Layer> sigmoid = Sigmoid::Builder().network(*network).featureInput(predictionsTensor).backwardComputedExternally().build();
-    sigmoidOutput = sigmoid->getFeatureOutput();
+    shared_ptr<Activation> sigmoid = Sigmoid::Builder().backwardComputedExternally().build();
+    sigmoidOutput = sigmoid->addToNetwork(predictionsTensor, network);
 
     BinaryCrossEntropy::Builder binaryCrossEntropyBuilder = BinaryCrossEntropy::Builder()
                                                                 .network(*network)

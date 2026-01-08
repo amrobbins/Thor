@@ -59,13 +59,9 @@ TEST(Activations, ReluBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(relu->getId(), clone->getId());
+    ASSERT_NE(relu->getId(), clone->getId());
     ASSERT_GT(relu->getId(), 1u);
 
-    ASSERT_TRUE(*relu == *clone);
-    ASSERT_FALSE(*relu != *clone);
-    ASSERT_FALSE(*relu > *clone);
-    ASSERT_FALSE(*relu < *clone);
 }
 
 TEST(Activations, ReluSerializeDeserialize) {

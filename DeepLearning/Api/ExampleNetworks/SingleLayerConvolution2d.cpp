@@ -9,6 +9,7 @@ Network buildSingleLayerConvolution2d() {
 
     vector<uint64_t> expectedDimensions;
 
+    shared_ptr<Activation> relu = Relu::Builder().build();
     shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     Tensor latestOutputTensor;
@@ -34,7 +35,7 @@ Network buildSingleLayerConvolution2d() {
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .batchNormalization()
                              .build()
                              .getFeatureOutput();

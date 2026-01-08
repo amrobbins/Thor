@@ -67,13 +67,9 @@ TEST(Activations, EluBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(elu->getId(), clone->getId());
+    ASSERT_NE(elu->getId(), clone->getId());
     ASSERT_GT(elu->getId(), 1u);
 
-    ASSERT_TRUE(*elu == *clone);
-    ASSERT_FALSE(*elu != *clone);
-    ASSERT_FALSE(*elu > *clone);
-    ASSERT_FALSE(*elu < *clone);
 }
 
 TEST(Activations, EluSerializeDeserialize) {

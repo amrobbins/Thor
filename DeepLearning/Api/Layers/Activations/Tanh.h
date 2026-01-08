@@ -12,7 +12,11 @@ class Tanh : public Activation {
 
     virtual ~Tanh() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Tanh>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Tanh> myClone = std::make_shared<Tanh>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Tanh"; }
 
@@ -55,16 +59,21 @@ class Tanh : public Activation {
 
 class Tanh::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<Tanh> tanh = std::make_shared<Tanh>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            tanh->featureInput = _featureInput;
+            tanh->featureOutput = _featureInput.get().clone();
+            tanh->initialized = true;
+            tanh->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            tanh->initialized = true;
+        }
 
-        Tanh tanh;
-        tanh.featureInput = _featureInput;
-        tanh.featureOutput = _featureInput.get().clone();
-        tanh.initialized = true;
-        tanh.addToNetwork(_network.get());
-        return tanh.clone();
+        return tanh;
     }
 
     virtual Tanh::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class Tanh::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Tanh::Builder>(*this); }
 };
 
 }  // namespace Thor

@@ -59,13 +59,9 @@ TEST(Activations, SoftSignBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(softSign->getId(), clone->getId());
+    ASSERT_NE(softSign->getId(), clone->getId());
     ASSERT_GT(softSign->getId(), 1u);
 
-    ASSERT_TRUE(*softSign == *clone);
-    ASSERT_FALSE(*softSign != *clone);
-    ASSERT_FALSE(*softSign > *clone);
-    ASSERT_FALSE(*softSign < *clone);
 }
 
 TEST(Activations, SoftSignSerializeDeserialize) {

@@ -120,6 +120,8 @@ class Layer {
 
     virtual void addToNetwork(Network *network);
 
+    // virtual void addTemplateLayerToNetwork(Network* network);
+
     static void connectTwoLayers(std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                  std::shared_ptr<ThorImplementation::Layer> loadingLayer,
                                  const std::shared_ptr<Thor::Layer> drivingApiLayer = nullptr,

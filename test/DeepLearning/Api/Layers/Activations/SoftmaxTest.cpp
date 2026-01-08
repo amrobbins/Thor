@@ -59,13 +59,9 @@ TEST(Activations, SoftmaxBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(softmax->getId(), clone->getId());
+    ASSERT_NE(softmax->getId(), clone->getId());
     ASSERT_GT(softmax->getId(), 1u);
 
-    ASSERT_TRUE(*softmax == *clone);
-    ASSERT_FALSE(*softmax != *clone);
-    ASSERT_FALSE(*softmax > *clone);
-    ASSERT_FALSE(*softmax < *clone);
 }
 
 TEST(Activations, SoftmaxSerializeDeserialize) {

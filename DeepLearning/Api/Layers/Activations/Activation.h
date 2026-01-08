@@ -16,9 +16,20 @@ class Activation : public Layer {
     Activation() {}
     virtual ~Activation() {}
 
+    // Layer::addToNetwork is used during deserialization when an activation is an actual attached layer - or when the activation
+    // is used as a standalone layer.
+    // Activation::addToNetwork is used when an attached layer is added to the network as templated by that particular activation.
+    using Layer::addToNetwork;
+    // Activation template version
+    virtual Tensor addToNetwork(Tensor inputTensor, Network* network);
+
     virtual std::string getLayerType() const = 0;
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
+    // Standalone layer version
+    virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter, Stream stream) const;
+    // Activation template version
+    virtual nlohmann::json serialize(Tensor inputTensor, Tensor outputTensor) const;
+
     static void deserialize(const nlohmann::json& j, Network* network);
     using Deserializer = std::function<void(const nlohmann::json&, Network*)>;
     static std::unordered_map<std::string, Deserializer>& get_registry();
@@ -40,10 +51,7 @@ class Activation::Builder {
         return *this;
     }
 
-    virtual std::shared_ptr<Layer> build() = 0;
-    // You can clone a builder to instantiate multiple distinct instances because the id is only generated when build() is called.
-    // So each builder that is built into an activation will have its own unique id.
-    virtual std::shared_ptr<Builder> clone() = 0;
+    virtual std::shared_ptr<Activation> build() = 0;
 
    protected:
     Optional<Network*> _network;

@@ -69,16 +69,12 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         currentFeatureInputs[i] = standaloneLayerFeatureOutputs[i];
 
-    if (activationBuilder) {
+    if (activation != nullptr) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            shared_ptr<Activation::Builder> activationBuilderClone = activationBuilder->clone();
-            activationBuilderClone->network(*network);
-            activationBuilderClone->featureInput(currentFeatureInputs[i]);
-            // Since activation may be one of many classes, the base class is built and its virtual build function is used.
-            shared_ptr<Layer> activation = activationBuilderClone->build();
-            currentFeatureInputs[i] = activation->getFeatureOutput();
+            currentFeatureInputs[i] = activation->addToNetwork(currentFeatureInputs[i], network);
         }
     }
+    activation = nullptr;
 
     // Replace the outputs on the compound layer to be the outputs of the last stage
     // i.e. tunnel the actual inputs to actual outputs of the compound layer,

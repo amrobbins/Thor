@@ -42,7 +42,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
    protected:
     virtual bool isMultiLayer() const {
-        return useBatchNormalization || dropProportion > 0.0f || activationBuilder ||
+        return useBatchNormalization || dropProportion > 0.0f || activation ||
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
     virtual void buildSupportLayersAndAddToNetwork();
@@ -135,7 +135,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     bool hasBias;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
-    std::shared_ptr<Activation::Builder> activationBuilder;
+    std::shared_ptr<Activation> activation;
 
     float dropProportion;
 
@@ -176,8 +176,8 @@ class Convolution2d::Builder {
             _weightsInitializer = Glorot::Builder().build();
         if (_biasInitializer == nullptr)
             _biasInitializer = Glorot::Builder().build();
-        if (!_activationBuilder && !_activationExplicitlyRemoved)
-            _activationBuilder = std::make_shared<Relu::Builder>(Relu::Builder());
+        if (!_activation && !_activationExplicitlyRemoved)
+            _activation = Relu::Builder().build();
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
@@ -223,8 +223,8 @@ class Convolution2d::Builder {
         convolution2d.hasBias = _hasBias;
         convolution2d.weightsInitializer = _weightsInitializer->clone();
         convolution2d.biasInitializer = _biasInitializer->clone();
-        if (_activationBuilder != nullptr)
-            convolution2d.activationBuilder = _activationBuilder->clone();
+        if (_activation != nullptr)
+            convolution2d.activation = _activation;
         convolution2d.dropProportion = _dropProportion;
         convolution2d.useBatchNormalization = _useBatchNormalization;
         convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
@@ -380,22 +380,22 @@ class Convolution2d::Builder {
     }
 
     // Adds an activation layer after this Convolution2d layer
-    virtual Convolution2d::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
-        assert(this->_activationBuilder == nullptr);
+    virtual Convolution2d::Builder &activation(std::shared_ptr<Activation> &_activation) {
+        assert(this->_activation == nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder.clone();
+        this->_activation = _activation;
         return *this;
     }
 
-    virtual Convolution2d::Builder &activationBuilder(Activation::Builder &&_activationBuilder) {
-        assert(this->_activationBuilder == nullptr);
+    virtual Convolution2d::Builder &activation(std::shared_ptr<Activation> &&_activation) {
+        assert(this->_activation == nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder.clone();
+        this->_activation = _activation;
         return *this;
     }
 
     virtual Convolution2d::Builder &noActivation() {
-        assert(!this->_activationBuilder);
+        assert(!this->_activation);
 
         _activationExplicitlyRemoved = true;
         return *this;
@@ -453,7 +453,7 @@ class Convolution2d::Builder {
     Optional<bool> _hasBias;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
-    std::shared_ptr<Activation::Builder> _activationBuilder;
+    std::shared_ptr<Activation> _activation;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

@@ -59,13 +59,9 @@ TEST(Activations, ExponentialBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(exponential->getId(), clone->getId());
+    ASSERT_NE(exponential->getId(), clone->getId());
     ASSERT_GT(exponential->getId(), 1u);
 
-    ASSERT_TRUE(*exponential == *clone);
-    ASSERT_FALSE(*exponential != *clone);
-    ASSERT_FALSE(*exponential > *clone);
-    ASSERT_FALSE(*exponential < *clone);
 }
 
 TEST(Activations, ExponentialSerializeDeserialize) {

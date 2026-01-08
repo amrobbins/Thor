@@ -59,13 +59,9 @@ TEST(Activations, HardSigmoidBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(hardSigmoid->getId(), clone->getId());
+    ASSERT_NE(hardSigmoid->getId(), clone->getId());
     ASSERT_GT(hardSigmoid->getId(), 1u);
 
-    ASSERT_TRUE(*hardSigmoid == *clone);
-    ASSERT_FALSE(*hardSigmoid != *clone);
-    ASSERT_FALSE(*hardSigmoid > *clone);
-    ASSERT_FALSE(*hardSigmoid < *clone);
 }
 
 TEST(Activations, HardSigmoidSerializeDeserialize) {

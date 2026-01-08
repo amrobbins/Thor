@@ -21,9 +21,9 @@ using namespace Thor;
 
 using DataType = Thor::Tensor::DataType;
 
-Activation::Builder *getDefaultConvActivation() {
-    static Relu::Builder defaultActivation;
-    return &defaultActivation;
+shared_ptr<Activation> getDefaultConvActivation() {
+    static shared_ptr<Relu> defaultActivation = make_shared<Relu>();
+    return defaultActivation;
 }
 
 void bind_convolution_2d(nb::module_ &m) {
@@ -44,7 +44,7 @@ void bind_convolution_2d(nb::module_ &m) {
                bool verticalSamePadding,
                bool horizontalSamePadding,
                bool hasBias,
-               optional<Activation::Builder *> activation,
+               shared_ptr<Activation> activation,
                shared_ptr<Initializer> weights_initializer,
                shared_ptr<Initializer> biases_initializer,
                bool add_drop_out,
@@ -62,10 +62,11 @@ void bind_convolution_2d(nb::module_ &m) {
                     .horizontalStride(horizontalStride)
                     .hasBias(hasBias);
 
-                if (!activation.has_value())
-                    builder.noActivation();  // Explicitly no activation applied
+                if (activation == nullptr)
+                    // Explicitly no activation applied -> was explicitly set to None -> because the parameter defaults to Relu
+                    builder.noActivation();
                 else
-                    builder.activationBuilder(*(activation.value()));
+                    builder.activation(activation);
 
                 if (weights_initializer != nullptr)
                     builder.weightsInitializer(weights_initializer);

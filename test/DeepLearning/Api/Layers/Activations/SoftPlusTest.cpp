@@ -59,13 +59,9 @@ TEST(Activations, SoftPlusBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(softPlus->getId(), clone->getId());
+    ASSERT_NE(softPlus->getId(), clone->getId());
     ASSERT_GT(softPlus->getId(), 1u);
 
-    ASSERT_TRUE(*softPlus == *clone);
-    ASSERT_FALSE(*softPlus != *clone);
-    ASSERT_FALSE(*softPlus > *clone);
-    ASSERT_FALSE(*softPlus < *clone);
 }
 
 TEST(Activations, SoftPlusSerializeDeserialize) {

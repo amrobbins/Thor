@@ -8,11 +8,15 @@ namespace Thor {
 class Elu : public Activation {
    public:
     class Builder;
-    Elu() {}
+    Elu(float alpha) : alpha(alpha) {}
 
     virtual ~Elu() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Elu>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Elu> myClone = std::make_shared<Elu>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Elu"; }
 
@@ -35,8 +39,7 @@ class Elu : public Activation {
 
         Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
 
-        Elu elu;
-        elu.alpha = alpha;
+        Elu elu(alpha);
         elu.featureInput = featureInput;
         elu.featureOutput = featureOutput;
         elu.initialized = true;
@@ -60,25 +63,37 @@ class Elu : public Activation {
         return batchSize * (featureOutput.get().getTotalSizeInBytes() + featureInput.get().getTotalSizeInBytes());
     }
 
-    float alpha;
+    const float alpha;
 };
 
 class Elu::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
-
-        Elu elu;
-        elu.featureInput = _featureInput;
-        elu.featureOutput = _featureInput.get().clone();
+    virtual std::shared_ptr<Activation> build() {
+        float alpha = 1.0f;
         if (_alpha.isPresent())
-            elu.alpha = _alpha;
-        else
-            elu.alpha = 1.0f;
-        elu.initialized = true;
-        elu.addToNetwork(_network.get());
-        return elu.clone();
+            alpha = _alpha;
+
+        std::shared_ptr<Elu> elu = std::make_shared<Elu>(alpha);
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            elu->featureInput = _featureInput;
+            elu->featureOutput = _featureInput.get().clone();
+            elu->initialized = true;
+            elu->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            elu->initialized = true;
+        }
+
+        return elu;
+    }
+
+    virtual Elu::Builder &alpha(float _alpha) {
+        assert(!this->_alpha.isPresent());
+        assert(_alpha >= 0);
+        this->_alpha = _alpha;
+        return *this;
     }
 
     virtual Elu::Builder &network(Network &_network) {
@@ -90,15 +105,6 @@ class Elu::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual Elu::Builder &alpha(float _alpha) {
-        assert(!this->_alpha.isPresent());
-        assert(_alpha >= 0);
-        this->_alpha = _alpha;
-        return *this;
-    }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Elu::Builder>(*this); }
 
    private:
     Optional<float> _alpha;

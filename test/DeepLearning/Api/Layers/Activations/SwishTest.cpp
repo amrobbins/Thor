@@ -59,13 +59,9 @@ TEST(Activations, SwishBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(swish->getId(), clone->getId());
+    ASSERT_NE(swish->getId(), clone->getId());
     ASSERT_GT(swish->getId(), 1u);
 
-    ASSERT_TRUE(*swish == *clone);
-    ASSERT_FALSE(*swish != *clone);
-    ASSERT_FALSE(*swish > *clone);
-    ASSERT_FALSE(*swish < *clone);
 }
 
 TEST(Activations, SwishSerializeDeserialize) {

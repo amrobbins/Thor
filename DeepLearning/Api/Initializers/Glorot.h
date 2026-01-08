@@ -11,6 +11,8 @@ class Glorot : public Initializer {
    public:
     class Builder;
 
+    Glorot(ThorImplementation::Glorot::Mode mode) : mode(mode) { initialized = true; }
+
     virtual ~Glorot() = default;
 
     virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) {
@@ -24,7 +26,7 @@ class Glorot : public Initializer {
     ThorImplementation::Glorot::Mode getMode() const { return mode; }
 
    protected:
-    ThorImplementation::Glorot::Mode mode;
+    const ThorImplementation::Glorot::Mode mode;
 };
 
 class Glorot::Builder : public Initializer::Builder {
@@ -35,9 +37,7 @@ class Glorot::Builder : public Initializer::Builder {
         if (_mode.isEmpty())
             _mode = ThorImplementation::Glorot::Mode::UNIFORM;
 
-        Glorot glorotInitializer;
-        glorotInitializer.mode = _mode.get();
-        glorotInitializer.initialized = true;
+        Glorot glorotInitializer(_mode);
         return glorotInitializer.clone();
     }
 

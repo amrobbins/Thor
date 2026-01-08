@@ -20,8 +20,7 @@ shared_ptr<Initializer> Glorot::deserialize(const json &j) {
         throw runtime_error("Unsupported version in Glorot::deserialize: " + j["version"].get<string>());
 
     ThorImplementation::Glorot::Mode mode = j.at("mode").get<ThorImplementation::Glorot::Mode>();
-    Glorot glorot;
-    glorot.mode = mode;
+    Glorot glorot(mode);
     glorot.initialized = true;
     return glorot.clone();
 }

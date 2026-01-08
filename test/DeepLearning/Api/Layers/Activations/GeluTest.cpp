@@ -59,13 +59,9 @@ TEST(Activations, GeluBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(gelu->getId(), clone->getId());
+    ASSERT_NE(gelu->getId(), clone->getId());
     ASSERT_GT(gelu->getId(), 1u);
 
-    ASSERT_TRUE(*gelu == *clone);
-    ASSERT_FALSE(*gelu != *clone);
-    ASSERT_FALSE(*gelu > *clone);
-    ASSERT_FALSE(*gelu < *clone);
 }
 
 TEST(Activations, GeluSerializeDeserialize) {

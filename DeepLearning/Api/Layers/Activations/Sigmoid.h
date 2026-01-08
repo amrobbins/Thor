@@ -14,7 +14,11 @@ class Sigmoid : public Activation {
 
     virtual ~Sigmoid() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Sigmoid>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Sigmoid> myClone = std::make_shared<Sigmoid>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Sigmoid"; }
 
@@ -59,20 +63,24 @@ class Sigmoid : public Activation {
 
 class Sigmoid::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
-
-        Sigmoid sigmoid;
-        sigmoid.featureInput = _featureInput;
-        sigmoid.featureOutput = _featureInput.get().clone();
-        if (_backwardComputedExternally.isPresent() && _backwardComputedExternally.get() == true)
-            sigmoid.backwardComputedExternally = true;
-        else
-            sigmoid.backwardComputedExternally = false;
-        sigmoid.initialized = true;
-        sigmoid.addToNetwork(_network.get());
-        return sigmoid.clone();
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<Sigmoid> sigmoid = std::make_shared<Sigmoid>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            sigmoid->featureInput = _featureInput;
+            sigmoid->featureOutput = _featureInput.get().clone();
+            sigmoid->initialized = true;
+            if (_backwardComputedExternally.isPresent() && _backwardComputedExternally.get() == true)
+                sigmoid->backwardComputedExternally = true;
+            else
+                sigmoid->backwardComputedExternally = false;
+            sigmoid->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            sigmoid->initialized = true;
+        }
+        return sigmoid;
     }
 
     virtual Sigmoid::Builder &network(Network &_network) {
@@ -84,8 +92,6 @@ class Sigmoid::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Sigmoid::Builder>(*this); }
 
    protected:
     virtual Sigmoid::Builder &backwardComputedExternally() {
