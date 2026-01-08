@@ -388,6 +388,7 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
 TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
+    shared_ptr<Activation> reluAct = Relu::Builder().build();
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(2).maxValue(3).build();
 
     Tensor networkInputTensor = NetworkInput::Builder()
@@ -403,7 +404,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
                              .featureInput(latestOutputTensor)
                              .numOutputFeatures(800)
                              .hasBias(false)
-                             .activationBuilder(Relu::Builder())
+                             .activation(reluAct)
                              .dropOut(0.5)
                              .batchNormalization()
                              .weightsInitializer(uniformRandomInitializer)
@@ -500,6 +501,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
 TEST(Network, BranchedNetworkProperlyFormed) {
     Network network;
     Tensor latestOutputTensor;
+    shared_ptr<Activation> relu = Relu::Builder().build();
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
     NetworkInput networkInput =
@@ -510,7 +512,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
                                              .featureInput(networkInput.getFeatureOutput())
                                              .numOutputFeatures(800)
                                              .hasBias(true)
-                                             .activationBuilder(Relu::Builder())
+                                             .activation(relu)
                                              .dropOut(0.5)
                                              .batchNormalization()
                                              .weightsInitializer(uniformRandomInitializer);
@@ -523,7 +525,7 @@ TEST(Network, BranchedNetworkProperlyFormed) {
                              .featureInput(fc1.getFeatureOutput())
                              .numOutputFeatures(200)
                              .hasBias(true)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .dropOut(0.5)
                              .batchNormalization()
                              .weightsInitializer(uniformRandomInitializer)

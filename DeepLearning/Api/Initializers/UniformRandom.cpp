@@ -20,9 +20,10 @@ shared_ptr<Initializer> UniformRandom::deserialize(const json &j) {
     if (j.at("version").get<string>() != "1.0.0")
         throw runtime_error("Unsupported version in UniformRandom::deserialize: " + j["version"].get<string>());
 
-    UniformRandom uniformRandom;
-    uniformRandom.minValue = j.at("min_value").get<double>();
-    uniformRandom.maxValue = j.at("max_value").get<double>();
+    double minValue = j.at("min_value").get<double>();
+    double maxValue = j.at("max_value").get<double>();
+
+    UniformRandom uniformRandom(minValue, maxValue);
     uniformRandom.initialized = true;
     return uniformRandom.clone();
 }

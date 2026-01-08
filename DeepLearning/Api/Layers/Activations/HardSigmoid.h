@@ -12,7 +12,11 @@ class HardSigmoid : public Activation {
 
     virtual ~HardSigmoid() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<HardSigmoid>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<HardSigmoid> myClone = std::make_shared<HardSigmoid>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "HardSigmoid"; }
 
@@ -55,16 +59,21 @@ class HardSigmoid : public Activation {
 
 class HardSigmoid::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<HardSigmoid> hardSigmoid = std::make_shared<HardSigmoid>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            hardSigmoid->featureInput = _featureInput;
+            hardSigmoid->featureOutput = _featureInput.get().clone();
+            hardSigmoid->initialized = true;
+            hardSigmoid->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            hardSigmoid->initialized = true;
+        }
 
-        HardSigmoid hardSigmoid;
-        hardSigmoid.featureInput = _featureInput;
-        hardSigmoid.featureOutput = _featureInput.get().clone();
-        hardSigmoid.initialized = true;
-        hardSigmoid.addToNetwork(_network.get());
-        return hardSigmoid.clone();
+        return hardSigmoid;
     }
 
     virtual HardSigmoid::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class HardSigmoid::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<HardSigmoid::Builder>(*this); }
 };
 
 }  // namespace Thor

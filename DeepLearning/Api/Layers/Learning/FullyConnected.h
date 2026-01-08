@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/Utility/Reshape.h"
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/Utility/Flatten.h"
@@ -44,7 +45,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
    protected:
     virtual bool isMultiLayer() const {
         assert(featureInputs.size() > 0);
-        return useBatchNormalization || dropProportion > 0.0f || activationBuilder || featureInputs.front().getDimensions().size() > 1 ||
+        return useBatchNormalization || dropProportion > 0.0f || activation || featureInputs.front().getDimensions().size() > 1 ||
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
 
@@ -149,9 +150,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     bool hasBias;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
-    std::shared_ptr<Activation::Builder> activationBuilder;
+    std::shared_ptr<Activation> activation;
 
-    std::shared_ptr<Layer> activation;
     DropOut dropOut;
     BatchNormalization batchNormalization;
 
@@ -186,8 +186,8 @@ class FullyConnected::Builder {
             _weightsInitializer = Glorot::Builder().build();
         if (_biasInitializer == nullptr)
             _biasInitializer = Glorot::Builder().build();
-        if (!_activationBuilder && !_activationExplicitlyRemoved)
-            _activationBuilder = std::make_shared<Relu::Builder>(Relu::Builder());
+        if (!_activation && !_activationExplicitlyRemoved)
+            _activation = Relu::Builder().build();
         if (_dropProportion.isEmpty())
             _dropProportion = 0.0f;
         if (_useBatchNormalization.isEmpty()) {
@@ -203,8 +203,8 @@ class FullyConnected::Builder {
         fullyConnected.hasBias = _hasBias;
         fullyConnected.weightsInitializer = _weightsInitializer->clone();
         fullyConnected.biasInitializer = _biasInitializer->clone();
-        if (_activationBuilder != nullptr)
-            fullyConnected.activationBuilder = _activationBuilder->clone();
+        if (_activation != nullptr)
+            fullyConnected.activation = _activation;
         fullyConnected.dropProportion = _dropProportion;
         fullyConnected.useBatchNormalization = _useBatchNormalization;
         fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
@@ -285,22 +285,22 @@ class FullyConnected::Builder {
     }
 
     // Adds an activation layer after this FullyConnected layer
-    virtual FullyConnected::Builder &activationBuilder(Activation::Builder &_activationBuilder) {
-        assert(this->_activationBuilder == nullptr);
+    virtual FullyConnected::Builder &activation(std::shared_ptr<Activation> &_activation) {
+        assert(this->_activation == nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder.clone();
+        this->_activation = _activation;
         return *this;
     }
 
-    virtual FullyConnected::Builder &activationBuilder(Activation::Builder &&_activationBuilder) {
-        assert(this->_activationBuilder == nullptr);
+    virtual FullyConnected::Builder &activation(std::shared_ptr<Activation> &&_activation) {
+        assert(this->_activation == nullptr);
         assert(!_activationExplicitlyRemoved);
-        this->_activationBuilder = _activationBuilder.clone();
+        this->_activation = _activation;
         return *this;
     }
 
     virtual FullyConnected::Builder &noActivation() {
-        assert(!this->_activationBuilder);
+        assert(!this->_activation);
 
         _activationExplicitlyRemoved = true;
         return *this;
@@ -334,7 +334,7 @@ class FullyConnected::Builder {
     Optional<bool> _hasBias;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
-    std::shared_ptr<Activation::Builder> _activationBuilder;
+    std::shared_ptr<Activation> _activation;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

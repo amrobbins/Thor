@@ -12,7 +12,11 @@ class Swish : public Activation {
 
     virtual ~Swish() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Swish>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Swish> myClone = std::make_shared<Swish>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Swish"; }
 
@@ -55,16 +59,21 @@ class Swish : public Activation {
 
 class Swish::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<Swish> swish = std::make_shared<Swish>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            swish->featureInput = _featureInput;
+            swish->featureOutput = _featureInput.get().clone();
+            swish->initialized = true;
+            swish->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            swish->initialized = true;
+        }
 
-        Swish swish;
-        swish.featureInput = _featureInput;
-        swish.featureOutput = _featureInput.get().clone();
-        swish.initialized = true;
-        swish.addToNetwork(_network.get());
-        return swish.clone();
+        return swish;
     }
 
     virtual Swish::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class Swish::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Swish::Builder>(*this); }
 };
 
 }  // namespace Thor

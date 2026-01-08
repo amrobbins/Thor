@@ -59,13 +59,9 @@ TEST(Activations, TanhBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(tanh->getId(), clone->getId());
+    ASSERT_NE(tanh->getId(), clone->getId());
     ASSERT_GT(tanh->getId(), 1u);
 
-    ASSERT_TRUE(*tanh == *clone);
-    ASSERT_FALSE(*tanh != *clone);
-    ASSERT_FALSE(*tanh > *clone);
-    ASSERT_FALSE(*tanh < *clone);
 }
 
 TEST(Activations, TanhSerializeDeserialize) {

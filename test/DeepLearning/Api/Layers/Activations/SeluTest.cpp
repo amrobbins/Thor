@@ -59,13 +59,9 @@ TEST(Activations, SeluBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(selu->getId(), clone->getId());
+    ASSERT_NE(selu->getId(), clone->getId());
     ASSERT_GT(selu->getId(), 1u);
 
-    ASSERT_TRUE(*selu == *clone);
-    ASSERT_FALSE(*selu != *clone);
-    ASSERT_FALSE(*selu > *clone);
-    ASSERT_FALSE(*selu < *clone);
 }
 
 TEST(Activations, SeluSerializeDeserialize) {

@@ -9,6 +9,7 @@ Network buildSingleLayerFullyConnected() {
 
     vector<uint64_t> expectedDimensions;
 
+    shared_ptr<Activation> relu = Relu::Builder().build();
     shared_ptr<Initializer> glorot = Glorot::Builder().build();
 
     Tensor latestOutputTensor = NetworkInput::Builder()
@@ -26,7 +27,7 @@ Network buildSingleLayerFullyConnected() {
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .build()
                              .getFeatureOutput();
     expectedDimensions = {128};

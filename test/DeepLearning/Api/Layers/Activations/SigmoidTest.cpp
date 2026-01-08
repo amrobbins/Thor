@@ -59,13 +59,9 @@ TEST(Activations, SigmoidBuilds) {
     ASSERT_EQ(cloneOutput.get().getDataType(), dataType);
     ASSERT_EQ(cloneOutput.get().getDimensions(), dimensions);
 
-    ASSERT_EQ(sigmoid->getId(), clone->getId());
+    ASSERT_NE(sigmoid->getId(), clone->getId());
     ASSERT_GT(sigmoid->getId(), 1u);
 
-    ASSERT_TRUE(*sigmoid == *clone);
-    ASSERT_FALSE(*sigmoid != *clone);
-    ASSERT_FALSE(*sigmoid > *clone);
-    ASSERT_FALSE(*sigmoid < *clone);
 }
 
 TEST(Activations, SigmoidSerializeDeserialize) {

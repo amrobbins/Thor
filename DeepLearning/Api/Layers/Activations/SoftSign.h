@@ -12,7 +12,11 @@ class SoftSign : public Activation {
 
     virtual ~SoftSign() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<SoftSign>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<SoftSign> myClone = std::make_shared<SoftSign>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "SoftSign"; }
 
@@ -55,16 +59,21 @@ class SoftSign : public Activation {
 
 class SoftSign::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<SoftSign> softSign = std::make_shared<SoftSign>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            softSign->featureInput = _featureInput;
+            softSign->featureOutput = _featureInput.get().clone();
+            softSign->initialized = true;
+            softSign->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            softSign->initialized = true;
+        }
 
-        SoftSign softSign;
-        softSign.featureInput = _featureInput;
-        softSign.featureOutput = _featureInput.get().clone();
-        softSign.initialized = true;
-        softSign.addToNetwork(_network.get());
-        return softSign.clone();
+        return softSign;
     }
 
     virtual SoftSign::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class SoftSign::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<SoftSign::Builder>(*this); }
 };
 
 }  // namespace Thor

@@ -6,12 +6,8 @@ using json = nlohmann::json;
 namespace Thor {
 void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     assert(!softmaxAddedToNetwork);
-    Softmax::Builder softmaxBuilder = Softmax::Builder();
-    softmaxBuilder.network(*network);
-    softmaxBuilder.featureInput(predictionsTensor);
-    softmaxBuilder.backwardComputedExternally();
-    shared_ptr<Layer> softmax = softmaxBuilder.build();
-    softmaxOutput = softmax->getFeatureOutput();
+    shared_ptr<Activation> softmax = Softmax::Builder().backwardComputedExternally().build();
+    softmaxOutput = softmax->addToNetwork(predictionsTensor, network);
 
     CategoricalCrossEntropy::Builder categoricalCrossEntropyBuilder = CategoricalCrossEntropy::Builder()
                                                                           .network(*network)

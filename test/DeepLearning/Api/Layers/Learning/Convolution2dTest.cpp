@@ -44,7 +44,7 @@ TEST(Convolution2d, SingleFeatureInputNoPaddingBuilds) {
     bool hasBias = rand() % 2;
 
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(0.1).maxValue(1.0).build();
-    Tanh::Builder tanhBuilder;
+    shared_ptr<Activation> tanh = Tanh::Builder().build();
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
     double exponentialRunningAverageFactor = (1 + (rand() % 1000)) / 1000.0f;
@@ -62,7 +62,7 @@ TEST(Convolution2d, SingleFeatureInputNoPaddingBuilds) {
                                       .hasBias(hasBias)
                                       .weightsInitializer(uniformRandomInitializer)
                                       .biasInitializer(uniformRandomInitializer)
-                                      .activationBuilder(tanhBuilder)
+                                      .activation(tanh)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -148,7 +148,7 @@ TEST(Convolution2d, SingleFeatureInputSpecifiedPaddingBuilds) {
     bool hasBias = rand() % 2;
 
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(0.1).maxValue(1.0).build();
-    Tanh::Builder tanhBuilder;
+    shared_ptr<Activation> tanh = Tanh::Builder().build();
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
     double exponentialRunningAverageFactor = (1 + (rand() % 1000)) / 1000.0f;
@@ -167,7 +167,7 @@ TEST(Convolution2d, SingleFeatureInputSpecifiedPaddingBuilds) {
                                       .hasBias(hasBias)
                                       .weightsInitializer(uniformRandomInitializer)
                                       .biasInitializer(uniformRandomInitializer)
-                                      .activationBuilder(tanhBuilder)
+                                      .activation(tanh)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -578,7 +578,7 @@ TEST(Convolution2d, MultipleFeatureInputsBuilds) {
     bool hasBias = rand() % 2;
 
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(0.1).maxValue(1.0).build();
-    Tanh::Builder tanhBuilder;
+    shared_ptr<Activation> tanh = Tanh::Builder().build();
 
     float dropProportion = rand() % 3 == 0 ? 0.0f : (rand() % 1000) / 1000.0f;
     double exponentialRunningAverageFactor = (1 + (rand() % 1000)) / 1000.0f;
@@ -598,7 +598,7 @@ TEST(Convolution2d, MultipleFeatureInputsBuilds) {
                                       .hasBias(hasBias)
                                       .weightsInitializer(uniformRandomInitializer)
                                       .biasInitializer(uniformRandomInitializer)
-                                      .activationBuilder(tanhBuilder)
+                                      .activation(tanh)
                                       .batchNormalization(exponentialRunningAverageFactor, epsilon)
                                       .dropOut(dropProportion)
                                       .build();
@@ -752,7 +752,8 @@ TEST(Convolution2d, SerializeDeserialize) {
             convolution2dBuilder.batchNormalization();
         }
         if (useRelu) {
-            convolution2dBuilder.activationBuilder(Relu::Builder());
+            shared_ptr<Activation> relu = Relu::Builder().build();
+            convolution2dBuilder.activation(relu);
         } else {
             convolution2dBuilder.noActivation();
         }

@@ -8,6 +8,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
 
     vector<uint64_t> expectedDimensions;
     shared_ptr<Initializer> glorot = Glorot::Builder().build();
+    shared_ptr<Activation> relu = Relu::Builder().build();
 
     latestOutputTensor = Convolution2d::Builder()
                              .network(alexNet)
@@ -22,7 +23,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .build()
                              .getFeatureOutput();
 
@@ -41,7 +42,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .build()
                              .getFeatureOutput();
 
@@ -74,7 +75,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .build()
                              .getFeatureOutput();
 
@@ -107,7 +108,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .build()
                              .getFeatureOutput();
 
@@ -126,7 +127,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
-                             .activationBuilder(Relu::Builder())
+                             .activation(relu)
                              .build()
                              .getFeatureOutput();
 

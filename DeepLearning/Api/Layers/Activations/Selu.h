@@ -12,7 +12,11 @@ class Selu : public Activation {
 
     virtual ~Selu() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Selu>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Selu> myClone = std::make_shared<Selu>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Selu"; }
 
@@ -55,16 +59,21 @@ class Selu : public Activation {
 
 class Selu::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<Selu> selu = std::make_shared<Selu>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            selu->featureInput = _featureInput;
+            selu->featureOutput = _featureInput.get().clone();
+            selu->initialized = true;
+            selu->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            selu->initialized = true;
+        }
 
-        Selu selu;
-        selu.featureInput = _featureInput;
-        selu.featureOutput = _featureInput.get().clone();
-        selu.initialized = true;
-        selu.addToNetwork(_network.get());
-        return selu.clone();
+        return selu;
     }
 
     virtual Selu::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class Selu::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Selu::Builder>(*this); }
 };
 
 }  // namespace Thor

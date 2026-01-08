@@ -12,6 +12,8 @@ class UniformRandom : public Initializer {
    public:
     class Builder;
 
+    UniformRandom(double minValue, double maxValue) : minValue(minValue), maxValue(maxValue) { initialized = true; }
+
     virtual ~UniformRandom() = default;
 
     virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) {
@@ -27,8 +29,8 @@ class UniformRandom : public Initializer {
     double getMaxValue() const { return maxValue; }
 
    protected:
-    double minValue;
-    double maxValue;
+    const double minValue;
+    const double maxValue;
 };
 
 class UniformRandom::Builder : public Initializer::Builder {
@@ -36,10 +38,7 @@ class UniformRandom::Builder : public Initializer::Builder {
     virtual ~Builder() = default;
 
     virtual std::shared_ptr<Initializer> build() {
-        UniformRandom uniformRandomInitializer;
-        uniformRandomInitializer.minValue = _minValue;
-        uniformRandomInitializer.maxValue = _maxValue;
-        uniformRandomInitializer.initialized = true;
+        UniformRandom uniformRandomInitializer(_minValue, _maxValue);
         return uniformRandomInitializer.clone();
     }
 

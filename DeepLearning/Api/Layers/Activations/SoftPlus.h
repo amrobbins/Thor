@@ -12,7 +12,11 @@ class SoftPlus : public Activation {
 
     virtual ~SoftPlus() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<SoftPlus>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<SoftPlus> myClone = std::make_shared<SoftPlus>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "SoftPlus"; }
 
@@ -55,16 +59,21 @@ class SoftPlus : public Activation {
 
 class SoftPlus::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<SoftPlus> softPlus = std::make_shared<SoftPlus>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            softPlus->featureInput = _featureInput;
+            softPlus->featureOutput = _featureInput.get().clone();
+            softPlus->initialized = true;
+            softPlus->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            softPlus->initialized = true;
+        }
 
-        SoftPlus softPlus;
-        softPlus.featureInput = _featureInput;
-        softPlus.featureOutput = _featureInput.get().clone();
-        softPlus.initialized = true;
-        softPlus.addToNetwork(_network.get());
-        return softPlus.clone();
+        return softPlus;
     }
 
     virtual SoftPlus::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class SoftPlus::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<SoftPlus::Builder>(*this); }
 };
 
 }  // namespace Thor

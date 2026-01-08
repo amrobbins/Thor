@@ -12,7 +12,11 @@ class Exponential : public Activation {
 
     virtual ~Exponential() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Exponential>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Exponential> myClone = std::make_shared<Exponential>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Exponential"; }
 
@@ -55,16 +59,21 @@ class Exponential : public Activation {
 
 class Exponential::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<Exponential> exponential = std::make_shared<Exponential>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            exponential->featureInput = _featureInput;
+            exponential->featureOutput = _featureInput.get().clone();
+            exponential->initialized = true;
+            exponential->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            exponential->initialized = true;
+        }
 
-        Exponential exponential;
-        exponential.featureInput = _featureInput;
-        exponential.featureOutput = _featureInput.get().clone();
-        exponential.initialized = true;
-        exponential.addToNetwork(_network.get());
-        return exponential.clone();
+        return exponential;
     }
 
     virtual Exponential::Builder &network(Network &_network) {
@@ -76,8 +85,6 @@ class Exponential::Builder : public Activation::Builder {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
-
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Exponential::Builder>(*this); }
 };
 
 }  // namespace Thor

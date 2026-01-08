@@ -75,17 +75,12 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
 
     currentFeatureInputs = standaloneFCFeatureOutputs;
 
-    if (activationBuilder) {
+    if (activation != nullptr) {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            shared_ptr<Activation::Builder> activationBuilderClone = activationBuilder->clone();
-            activationBuilderClone->network(*network);
-            activationBuilderClone->featureInput(currentFeatureInputs[i]);
-            // Since activation may be one of many classes, the base class is built and its virtual build function is used.
-            activation = activationBuilderClone->build();
-            currentFeatureInputs[i] = activation->getFeatureOutput();
+            currentFeatureInputs[i] = dynamic_pointer_cast<Activation>(activation->clone())->addToNetwork(currentFeatureInputs[i], network);
         }
     }
-    activationBuilder = nullptr;
+    activation = nullptr;
 
     // Replace the outputs on the compound layer to be the outputs of the last stage
     // i.e. tunnel the actual inputs to actual outputs of the compound layer,

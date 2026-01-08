@@ -14,7 +14,11 @@ class Softmax : public Activation {
 
     virtual ~Softmax() {}
 
-    virtual std::shared_ptr<Layer> clone() const { return std::make_shared<Softmax>(*this); }
+    virtual std::shared_ptr<Layer> clone() const {
+        std::shared_ptr<Softmax> myClone = std::make_shared<Softmax>(*this);
+        myClone->id = getUnusedId();
+        return myClone;
+    }
 
     virtual std::string getLayerType() const { return "Softmax"; }
 
@@ -59,20 +63,21 @@ class Softmax : public Activation {
 
 class Softmax::Builder : public Activation::Builder {
    public:
-    virtual std::shared_ptr<Layer> build() {
-        assert(_network.isPresent());
-        assert(_featureInput.isPresent());
+    virtual std::shared_ptr<Activation> build() {
+        std::shared_ptr<Softmax> softmax = std::make_shared<Softmax>();
+        if (_featureInput.isPresent()) {
+            // Standalone layer support.
+            assert(_network.isPresent());
+            softmax->featureInput = _featureInput;
+            softmax->featureOutput = _featureInput.get().clone();
+            softmax->initialized = true;
+            softmax->addToNetwork(_network.get());
+        } else {
+            // Template activation support
+            softmax->initialized = true;
+        }
 
-        Softmax softmax;
-        softmax.featureInput = _featureInput;
-        softmax.featureOutput = _featureInput.get().clone();
-        if (_backwardComputedExternally.isPresent() && _backwardComputedExternally.get() == true)
-            softmax.backwardComputedExternally = true;
-        else
-            softmax.backwardComputedExternally = false;
-        softmax.initialized = true;
-        softmax.addToNetwork(_network.get());
-        return softmax.clone();
+        return softmax;
     }
 
     virtual Softmax::Builder &network(Network &_network) {
@@ -85,12 +90,11 @@ class Softmax::Builder : public Activation::Builder {
         return *this;
     }
 
-    virtual std::shared_ptr<Activation::Builder> clone() { return std::make_shared<Softmax::Builder>(*this); }
-
    protected:
-    void backwardComputedExternally() {
+    Softmax::Builder &backwardComputedExternally() {
         assert(!_backwardComputedExternally.isPresent());
         _backwardComputedExternally = true;
+        return *this;
     }
 
    private:
