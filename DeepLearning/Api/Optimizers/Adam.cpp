@@ -150,15 +150,15 @@ shared_ptr<Optimizer> Adam::deserialize(thor_file::TarReader &archiveReader, con
     Optional<string> vFile;
     Optional<string> mBiasFile;
     Optional<string> vBiasFile;
-    if (j.contains("weights_m_file")) {
-        assert(j.contains("weights_v_file"));
-        mFile = j.at("weights_m_file").get<string>();
-        vFile = j.at("weights_v_file").get<string>();
+    if (j.contains("m_tensor")) {
+        assert(j.contains("v_tensor"));
+        mFile = j.at("m_tensor").get<string>();
+        vFile = j.at("v_tensor").get<string>();
     }
-    if (j.contains("biases_m_file")) {
-        assert(j.contains("biases_v_file"));
-        mBiasFile = j.at("biases_m_file").get<string>();
-        vBiasFile = j.at("biases_v_file").get<string>();
+    if (j.contains("m_bias_tensor")) {
+        assert(j.contains("v_bias_tensor"));
+        mBiasFile = j.at("m_bias_tensor").get<string>();
+        vBiasFile = j.at("v_bias_tensor").get<string>();
     }
 
     Adam adam;
