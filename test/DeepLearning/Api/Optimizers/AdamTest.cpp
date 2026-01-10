@@ -310,8 +310,72 @@ TEST(Adam, SerializeDeserialize) {
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
         thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
 
-        // The network attached the optimizer to its copy of the FC layer
+        // Check initialization and if saving state, write some state to check that it got saved and restored
         bool saveOptimizerState = rand() % 2;
+        ThorImplementation::Tensor m = physicalAdam->getM().clone(cpuPlacement);
+        ThorImplementation::Tensor v = physicalAdam->getV().clone(cpuPlacement);
+        m.copyFromAsync(physicalAdam->getM(), stream);
+        v.copyFromAsync(physicalAdam->getV(), stream);
+
+        ASSERT_EQ(physicalAdam->getM().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP16);
+        ASSERT_EQ(physicalAdam->getV().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP16);
+
+        ThorImplementation::Tensor mBias;
+        ThorImplementation::Tensor vBias;
+        if (hasBias) {
+            mBias = physicalAdam->getMBias().get().clone(cpuPlacement);
+            vBias = physicalAdam->getVBias().get().clone(cpuPlacement);
+            mBias.copyFromAsync(physicalAdam->getMBias(), stream);
+            vBias.copyFromAsync(physicalAdam->getVBias(), stream);
+        }
+        stream.synchronize();
+
+        half *mPtr = m.getMemPtr<half>();
+        half *vPtr = v.getMemPtr<half>();
+        half *mBiasPtr;
+        half *vBiasPtr;
+        if (hasBias) {
+            mBiasPtr = mBias.getMemPtr<half>();
+            vBiasPtr = vBias.getMemPtr<half>();
+        }
+
+        for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
+            for (uint32_t out = 0; out < numOutputFeatures; ++out) {
+                uint32_t index = in * numOutputFeatures + out;
+                ASSERT_EQ(float(mPtr[index]), 0.0f);
+                ASSERT_EQ(float(vPtr[index]), 0.0f);
+            }
+        }
+        if (hasBias) {
+            for (uint32_t out = 0; out < numOutputFeatures; ++out) {
+                ASSERT_EQ(float(mBiasPtr[out]), 0.0f);
+                ASSERT_EQ(float(vBiasPtr[out]), 0.0f);
+            }
+        }
+
+        // Let's write some numbers into optimizer state when it is being saved to ensure it is preserved
+        if (saveOptimizerState) {
+            for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
+                for (uint32_t out = 0; out < numOutputFeatures; ++out) {
+                    uint32_t index = in * numOutputFeatures + out;
+                    mPtr[index] = half(randFloat(-2.0f, 2.0f));
+                    vPtr[index] = half(randFloat(-2.0f, 2.0f));
+                }
+            }
+            physicalAdam->getM().copyFromAsync(m, stream);
+            physicalAdam->getV().copyFromAsync(v, stream);
+            if (hasBias) {
+                for (uint32_t out = 0; out < numOutputFeatures; ++out) {
+                    mBiasPtr[out] = half(randFloat(-2.0f, 2.0f));
+                    vBiasPtr[out] = half(randFloat(-2.0f, 2.0f));
+                }
+                physicalAdam->getMBias().get().copyFromAsync(mBias, stream);
+                physicalAdam->getVBias().get().copyFromAsync(vBias, stream);
+            }
+            stream.synchronize();
+        }
+
+        // The network attached the optimizer to its copy of the FC layer
         json fullyConnectedJ;
         bool fcFound = false;
         shared_ptr<FullyConnected> initalNetworkFC;
@@ -355,44 +419,6 @@ TEST(Adam, SerializeDeserialize) {
         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("m_bias_tensor"));
         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("v_bias_tensor"));
 
-        ThorImplementation::Tensor m = physicalAdam->getM().clone(cpuPlacement);
-        ThorImplementation::Tensor v = physicalAdam->getV().clone(cpuPlacement);
-        m.copyFromAsync(physicalAdam->getM(), stream);
-        v.copyFromAsync(physicalAdam->getV(), stream);
-
-        ThorImplementation::Tensor mBias;
-        ThorImplementation::Tensor vBias;
-        if (hasBias) {
-            mBias = physicalAdam->getMBias().get().clone(cpuPlacement);
-            vBias = physicalAdam->getVBias().get().clone(cpuPlacement);
-            mBias.copyFromAsync(physicalAdam->getMBias(), stream);
-            vBias.copyFromAsync(physicalAdam->getVBias(), stream);
-        }
-        stream.synchronize();
-
-        half *mPtr = m.getMemPtr<half>();
-        half *vPtr = v.getMemPtr<half>();
-        half *mBiasPtr;
-        half *vBiasPtr;
-        if (hasBias) {
-            mBiasPtr = mBias.getMemPtr<half>();
-            vBiasPtr = vBias.getMemPtr<half>();
-        }
-
-        for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
-            for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-                uint32_t index = in * numOutputFeatures + out;
-                ASSERT_EQ(float(mPtr[index]), 0.0f);
-                ASSERT_EQ(float(vPtr[index]), 0.0f);
-            }
-        }
-        if (hasBias) {
-            for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-                ASSERT_EQ(float(mBiasPtr[out]), 0.0f);
-                ASSERT_EQ(float(vBiasPtr[out]), 0.0f);
-            }
-        }
-
         archiveWriter.finishArchive();
         thor_file::TarReader archiveReader("testModel", "/tmp/");
         Network newNetwork;
@@ -416,10 +442,10 @@ TEST(Adam, SerializeDeserialize) {
         initDoneEvents.clear();
 
         // Find the FC to find the Adam
-        stampedNetwork = newNetwork.getStampedNetwork(0);
+        ThorImplementation::StampedNetwork &newStampedNetwork = newNetwork.getStampedNetwork(0);
         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes;
-        for (uint32_t i = 0; i < stampedNetwork.getNumTrainableLayers(); ++i) {
-            physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(i));
+        for (uint32_t i = 0; i < newStampedNetwork.getNumTrainableLayers(); ++i) {
+            physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(newStampedNetwork.getTrainableLayer(i));
             if (physicalFCLayerDes != nullptr)
                 break;
         }
@@ -428,41 +454,41 @@ TEST(Adam, SerializeDeserialize) {
         shared_ptr<ThorImplementation::Adam> physicalAdamDes =
             dynamic_pointer_cast<ThorImplementation::Adam>(physicalFCLayerDes->getOptimizer());
 
-        m = physicalAdam->getM().clone(cpuPlacement);
-        v = physicalAdam->getV().clone(cpuPlacement);
-        m.copyFromAsync(physicalAdam->getM(), stream);
-        v.copyFromAsync(physicalAdam->getV(), stream);
+        ThorImplementation::Tensor mDeser = physicalAdamDes->getM().clone(cpuPlacement);
+        ThorImplementation::Tensor vDeser = physicalAdamDes->getV().clone(cpuPlacement);
+        mDeser.copyFromAsync(physicalAdamDes->getM(), stream);
+        vDeser.copyFromAsync(physicalAdamDes->getV(), stream);
 
-        mBias;
-        vBias;
+        ThorImplementation::Tensor mBiasDeser;
+        ThorImplementation::Tensor vBiasDeser;
         if (hasBias) {
-            mBias = physicalAdam->getMBias().get().clone(cpuPlacement);
-            vBias = physicalAdam->getVBias().get().clone(cpuPlacement);
-            mBias.copyFromAsync(physicalAdam->getMBias(), stream);
-            vBias.copyFromAsync(physicalAdam->getVBias(), stream);
+            mBiasDeser = physicalAdamDes->getMBias().get().clone(cpuPlacement);
+            vBiasDeser = physicalAdamDes->getVBias().get().clone(cpuPlacement);
+            mBiasDeser.copyFromAsync(physicalAdamDes->getMBias(), stream);
+            vBiasDeser.copyFromAsync(physicalAdamDes->getVBias(), stream);
         }
         stream.synchronize();
 
-        mPtr = m.getMemPtr<half>();
-        vPtr = v.getMemPtr<half>();
-        mBiasPtr;
-        vBiasPtr;
+        half *mDeserPtr = mDeser.getMemPtr<half>();
+        half *vDeserPtr = vDeser.getMemPtr<half>();
+        half *mBiasDeserPtr;
+        half *vBiasDeserPtr;
         if (hasBias) {
-            mBiasPtr = mBias.getMemPtr<half>();
-            vBiasPtr = vBias.getMemPtr<half>();
+            mBiasDeserPtr = mBiasDeser.getMemPtr<half>();
+            vBiasDeserPtr = vBiasDeser.getMemPtr<half>();
         }
 
         for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
                 uint32_t index = in * numOutputFeatures + out;
-                ASSERT_EQ(float(mPtr[index]), 0.0f);
-                ASSERT_EQ(float(vPtr[index]), 0.0f);
+                ASSERT_EQ(float(mPtr[index]), float(mDeserPtr[index]));
+                ASSERT_EQ(float(vPtr[index]), float(vDeserPtr[index]));
             }
         }
         if (hasBias) {
             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-                ASSERT_EQ(float(mBiasPtr[out]), 0.0f);
-                ASSERT_EQ(float(vBiasPtr[out]), 0.0f);
+                ASSERT_EQ(float(mBiasPtr[out]), float(mBiasDeserPtr[out]));
+                ASSERT_EQ(float(vBiasPtr[out]), float(vBiasDeserPtr[out]));
             }
         }
     }

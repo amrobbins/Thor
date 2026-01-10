@@ -95,7 +95,7 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
         mBuffer.copyFromAsync(m, stream);
 
-        ThorImplementation::Tensor v = physicalAdam->getM();
+        ThorImplementation::Tensor v = physicalAdam->getV();
         ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
         vBuffer.copyFromAsync(v, stream);
 
