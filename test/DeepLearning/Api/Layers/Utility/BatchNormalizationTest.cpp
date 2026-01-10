@@ -324,7 +324,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkBN = dynamic_pointer_cast<BatchNormalization>(layer);
             if (initalNetworkBN) {
-                batchNormalizationJ = initalNetworkBN->serialize(archiveWriter, stream);
+                batchNormalizationJ = initalNetworkBN->serialize(archiveWriter, stream, true);
                 bnFound = true;
                 break;
             }
@@ -333,7 +333,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkBN;
-        json fromLayerJ = layer->serialize(archiveWriter, stream);
+        json fromLayerJ = layer->serialize(archiveWriter, stream, true);
         ASSERT_EQ(batchNormalizationJ, fromLayerJ);
 
         ASSERT_EQ(batchNormalizationJ["version"], "1.0.0");

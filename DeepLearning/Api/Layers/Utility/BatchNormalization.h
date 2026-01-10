@@ -23,7 +23,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual bool isMultiLayer() const { return false; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
     static void deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network);
 
    protected:

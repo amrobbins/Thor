@@ -64,7 +64,8 @@ void Adam::updateParameters() {
 json Adam::serialize(thor_file::TarWriter &archiveWriter,
                      Stream stream,
                      TrainableWeightsBiasesLayer const *owningLayer,
-                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
+                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                     bool saveOptimizerState) const {
     json j;
     j["optimizer_type"] = string("adam");
     j["version"] = getVersion();
@@ -80,52 +81,54 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
     j["beta2"] = physicalAdam->getBeta2();
     j["epsilon"] = physicalAdam->getEpsilon();
 
-    ThorImplementation::TensorPlacement cpuPlacement =
-        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    if (saveOptimizerState) {
+        ThorImplementation::TensorPlacement cpuPlacement =
+            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
-    string optimizerName = string("layer") + to_string(owningLayer->getId()) + "_adam";
-    string mFile = optimizerName + "_m.gds";
-    string vFile = optimizerName + "_v.gds";
-    j["m_tensor"] = mFile;
-    j["v_tensor"] = vFile;
+        string optimizerName = string("layer") + to_string(owningLayer->getId()) + "_adam";
+        string mFile = optimizerName + "_m.gds";
+        string vFile = optimizerName + "_v.gds";
+        j["m_tensor"] = mFile;
+        j["v_tensor"] = vFile;
 
-    ThorImplementation::Tensor m = physicalAdam->getM();
-    ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
-    mBuffer.copyFromAsync(m, stream);
+        ThorImplementation::Tensor m = physicalAdam->getM();
+        ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
+        mBuffer.copyFromAsync(m, stream);
 
-    ThorImplementation::Tensor v = physicalAdam->getM();
-    ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
-    vBuffer.copyFromAsync(v, stream);
+        ThorImplementation::Tensor v = physicalAdam->getM();
+        ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
+        vBuffer.copyFromAsync(v, stream);
 
-    ThorImplementation::Tensor mBias;
-    ThorImplementation::Tensor mBiasBuffer;
-    ThorImplementation::Tensor vBias;
-    ThorImplementation::Tensor vBiasBuffer;
-    string mBiasFile;
-    string vBiasFile;
-    if (physicalAdam->getMBias().isPresent()) {
-        assert(physicalAdam->getVBias().isPresent());
-        mBiasFile = optimizerName + "_m_bias.gds";
-        vBiasFile = optimizerName + "_v_bias.gds";
-        j["m_bias_tensor"] = mBiasFile;
-        j["v_bias_tensor"] = vBiasFile;
+        ThorImplementation::Tensor mBias;
+        ThorImplementation::Tensor mBiasBuffer;
+        ThorImplementation::Tensor vBias;
+        ThorImplementation::Tensor vBiasBuffer;
+        string mBiasFile;
+        string vBiasFile;
+        if (physicalAdam->getMBias().isPresent()) {
+            assert(physicalAdam->getVBias().isPresent());
+            mBiasFile = optimizerName + "_m_bias.gds";
+            vBiasFile = optimizerName + "_v_bias.gds";
+            j["m_bias_tensor"] = mBiasFile;
+            j["v_bias_tensor"] = vBiasFile;
 
-        mBias = physicalAdam->getMBias();
-        mBiasBuffer = mBias.clone(cpuPlacement);
-        mBiasBuffer.copyFromAsync(mBias, stream);
+            mBias = physicalAdam->getMBias();
+            mBiasBuffer = mBias.clone(cpuPlacement);
+            mBiasBuffer.copyFromAsync(mBias, stream);
 
-        vBias = physicalAdam->getVBias();
-        vBiasBuffer = vBias.clone(cpuPlacement);
-        vBiasBuffer.copyFromAsync(vBias, stream);
-    }
+            vBias = physicalAdam->getVBias();
+            vBiasBuffer = vBias.clone(cpuPlacement);
+            vBiasBuffer.copyFromAsync(vBias, stream);
+        }
 
-    stream.synchronize();
+        stream.synchronize();
 
-    archiveWriter.addArchiveFile(mFile, mBuffer.getMemPtr(), m.getArraySizeInBytes());
-    archiveWriter.addArchiveFile(vFile, vBuffer.getMemPtr(), v.getArraySizeInBytes());
-    if (physicalAdam->getMBias().isPresent()) {
-        archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer.getMemPtr(), mBias.getArraySizeInBytes());
-        archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer.getMemPtr(), vBias.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(mFile, mBuffer.getMemPtr(), m.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(vFile, vBuffer.getMemPtr(), v.getArraySizeInBytes());
+        if (physicalAdam->getMBias().isPresent()) {
+            archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer.getMemPtr(), mBias.getArraySizeInBytes());
+            archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer.getMemPtr(), vBias.getArraySizeInBytes());
+        }
     }
 
     return j;

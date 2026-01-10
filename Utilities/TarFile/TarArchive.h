@@ -73,9 +73,9 @@ inline std::string cleanTarPath(const std::string& pathInTar) {
 }
 
 inline std::string shard_filename(const std::string& prefix, uint32_t shard_idx) {
-    // prefix: "path/to/MyModel" -> "path/to/MyModel.000000.thor"
+    // prefix: "path/to/MyModel" -> "path/to/MyModel.000000.thor.tar"
     char buf[64];
-    std::snprintf(buf, sizeof(buf), ".%06u.thor", shard_idx);
+    std::snprintf(buf, sizeof(buf), ".%06u.thor.tar", shard_idx);
     return prefix + std::string(buf);
 }
 

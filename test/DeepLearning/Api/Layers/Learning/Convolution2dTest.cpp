@@ -860,7 +860,7 @@ TEST(Convolution2d, SerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkConv = dynamic_pointer_cast<Convolution2d>(layer);
             if (initalNetworkConv) {
-                convolution2dJ = initalNetworkConv->serialize(archiveWriter, stream);
+                convolution2dJ = initalNetworkConv->serialize(archiveWriter, stream, true);
                 convFound = true;
                 break;
             }
@@ -876,7 +876,7 @@ TEST(Convolution2d, SerializeDeserialize) {
                 shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
                 batchNorm = dynamic_pointer_cast<BatchNormalization>(layer);
                 if (batchNorm) {
-                    batchNormJ = batchNorm->serialize(archiveWriter, stream);
+                    batchNormJ = batchNorm->serialize(archiveWriter, stream, true);
                     bnFound = true;
                     break;
                 }
@@ -934,7 +934,7 @@ TEST(Convolution2d, SerializeDeserialize) {
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkConv;
-        json convolution2dFromLayer = layer->serialize(archiveWriter, stream);
+        json convolution2dFromLayer = layer->serialize(archiveWriter, stream, true);
         ASSERT_EQ(convolution2dJ, convolution2dFromLayer);
 
         ASSERT_EQ(convolution2dJ["version"], "1.0.0");

@@ -44,9 +44,8 @@ class Optimizer {
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      TrainableWeightsBiasesLayer const *owningLayer,
-                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
-        return nlohmann::json{};
-    };
+                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                                     bool saveOptimizerState) const = 0;
     static std::shared_ptr<Optimizer> deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j);
     using Deserializer = std::function<std::shared_ptr<Optimizer>(thor_file::TarReader &archiveReader, const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();

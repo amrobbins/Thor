@@ -34,6 +34,9 @@ class Activation : public Layer {
     using Deserializer = std::function<void(const nlohmann::json&, Network*)>;
     static std::unordered_map<std::string, Deserializer>& get_registry();
     static void register_layer(std::string name, Deserializer fn);
+
+   private:
+    using Layer::serialize;
 };
 
 class Activation::Builder {

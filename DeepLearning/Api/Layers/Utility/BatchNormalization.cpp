@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
@@ -13,6 +13,8 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = "batch_normalization";
+    string layerName = string("layer") + to_string(getId());
+    j["layer_name"] = layerName;
     j["exponential_running_average_factor"] = exponentialRunningAverageFactor;
     j["epsilon"] = epsilon;
 
@@ -34,41 +36,57 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
         ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
     // Dump the weights to a file and record its name
-    assert(network->getNumStamps() >= 1);
-    ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    shared_ptr<ThorImplementation::BatchNormalization> batchNorm =
-        dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
-    assert(batchNorm != nullptr);
+    shared_ptr<ThorImplementation::BatchNormalization> batchNorm;
+    if (network->getNumStamps() >= 1) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+        batchNorm = dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
+        assert(batchNorm != nullptr);
+    }
 
-    string layerName = string("layer") + to_string(getId());
+    ThorImplementation::Tensor weights;
+    ThorImplementation::Tensor weightsBuffer;
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesBuffer;
+    string weightsFile;
+    string biasesFile;
 
-    string weightsFile = (layerName + "_weights.gds");
-    j["weights_tensor"] = weightsFile;
-    ThorImplementation::Tensor weights = batchNorm->getWeights();
-    ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
-    weightsBuffer.copyFromAsync(weights, stream);
+    string resultRunningMeanFile;
+    ThorImplementation::Tensor means;
+    ThorImplementation::Tensor meansBuffer;
 
-    string biasesFile = (layerName + "_biases.gds");
-    j["biases_tensor"] = biasesFile;
-    ThorImplementation::Tensor biases = batchNorm->getBiases().get();
-    ThorImplementation::Tensor biasesBuffer = biases.clone(cpuPlacement);
-    biasesBuffer.copyFromAsync(biases, stream);
+    string resultRunningVarianceFile;
+    ThorImplementation::Tensor variance;
+    ThorImplementation::Tensor varianceBuffer;
 
-    string resultRunningMeanFile = (layerName + "_means.gds");
-    j["means_tensor"] = resultRunningMeanFile;
-    ThorImplementation::Tensor means = batchNorm->getResultRunningMean();
-    ThorImplementation::Tensor meansBuffer = means.clone(cpuPlacement);
-    meansBuffer.copyFromAsync(means, stream);
+    if (batchNorm != nullptr) {
+        weightsFile = (layerName + "_weights.gds");
+        j["weights_tensor"] = weightsFile;
+        weights = batchNorm->getWeights();
+        weightsBuffer = weights.clone(cpuPlacement);
+        weightsBuffer.copyFromAsync(weights, stream);
 
-    string resultRunningVarianceFile = (layerName + "_variances.gds");
-    j["variances_tensor"] = resultRunningVarianceFile;
-    ThorImplementation::Tensor variance = batchNorm->getResultRunningVariance();
-    ThorImplementation::Tensor varianceBuffer = variance.clone(cpuPlacement);
-    varianceBuffer.copyFromAsync(variance, stream);
+        biasesFile = (layerName + "_biases.gds");
+        j["biases_tensor"] = biasesFile;
+        biases = batchNorm->getBiases().get();
+        biasesBuffer = biases.clone(cpuPlacement);
+        biasesBuffer.copyFromAsync(biases, stream);
+
+        resultRunningMeanFile = (layerName + "_means.gds");
+        j["means_tensor"] = resultRunningMeanFile;
+        means = batchNorm->getResultRunningMean();
+        meansBuffer = means.clone(cpuPlacement);
+        meansBuffer.copyFromAsync(means, stream);
+
+        resultRunningVarianceFile = (layerName + "_variances.gds");
+        j["variances_tensor"] = resultRunningVarianceFile;
+        variance = batchNorm->getResultRunningVariance();
+        varianceBuffer = variance.clone(cpuPlacement);
+        varianceBuffer.copyFromAsync(variance, stream);
+    }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, batchNorm);
+        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, batchNorm, saveOptimizerState);
     }
 
     stream.synchronize();
@@ -102,11 +120,6 @@ void BatchNormalization::deserialize(thor_file::TarReader &archiveReader, const 
         featureOutputs.push_back(Tensor::deserialize(output));
     }
 
-    string weightsFile = j.at("weights_tensor").get<string>();
-    string biasesFile = j.at("biases_tensor").get<string>();
-    string meansFile = j.at("means_tensor").get<string>();
-    string variancesFile = j.at("variances_tensor").get<string>();
-
     BatchNormalization batchNormalization = BatchNormalization();
     batchNormalization.exponentialRunningAverageFactor = exponentialRunningAverageFactor;
     batchNormalization.epsilon = epsilon;
@@ -117,17 +130,19 @@ void BatchNormalization::deserialize(thor_file::TarReader &archiveReader, const 
         batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs.back()] = batchNormalization.featureInputs[i];
     }
     batchNormalization.archiveReader = &archiveReader;
-    batchNormalization.weightsFile = weightsFile;
-    batchNormalization.biasesFile = biasesFile;
-    batchNormalization.runningMeansFile = meansFile;
-    batchNormalization.runningVariancesFile = variancesFile;
 
-    batchNormalization.initialized = true;
+    if (j.contains("weights_tensor")) {
+        batchNormalization.weightsFile = j.at("weights_tensor").get<string>();
+        batchNormalization.biasesFile = j.at("biases_tensor").get<string>();
+        batchNormalization.runningMeansFile = j.at("means_tensor").get<string>();
+        batchNormalization.runningVariancesFile = j.at("variances_tensor").get<string>();
+    }
 
     if (j.contains("optimizer")) {
         batchNormalization.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
     }
 
+    batchNormalization.initialized = true;
     batchNormalization.addToNetwork(network);
 }
 

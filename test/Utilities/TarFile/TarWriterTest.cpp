@@ -72,13 +72,13 @@ static std::string make_tmp_prefix(const std::string& stem) {
 }
 
 static void cleanup_prefix_files(const std::string& prefix) {
-    // remove prefix.thor and prefix.000000.thor ... prefix.000010.thor (best effort)
+    // remove prefix.thor.tar and prefix.000000.thor.tar ... prefix.000010.thor.tar (best effort)
     std::error_code ec;
-    fs::remove(prefix + ".thor", ec);
+    fs::remove(prefix + ".thor.tar", ec);
 
     for (int i = 0; i < 32; ++i) {
         char suffix[64];
-        std::snprintf(suffix, sizeof(suffix), ".%06d.thor", i);
+        std::snprintf(suffix, sizeof(suffix), ".%06d.thor.tar", i);
         fs::remove(prefix + std::string(suffix), ec);
     }
 }
@@ -177,11 +177,11 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
         w.finishArchive();
     }
 
-    const fs::path shard0 = prefix + ".thor";
+    const fs::path shard0 = prefix + ".thor.tar";
     ASSERT_TRUE(fs::exists(shard0)) << shard0;
 
     // Should be single shard
-    EXPECT_FALSE(fs::exists(prefix + ".000000.thor"));
+    EXPECT_FALSE(fs::exists(prefix + ".000000.thor.tar"));
 
     // Load footer JSON (and validate its CRC)
     nlohmann::json j0;
@@ -266,13 +266,13 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
         w.finishArchive();
     }
 
-    const fs::path shard0 = prefix + ".000000.thor";
-    const fs::path shard1 = prefix + ".000001.thor";
+    const fs::path shard0 = prefix + ".000000.thor.tar";
+    const fs::path shard1 = prefix + ".000001.thor.tar";
 
-    // Your rule: shard 0 is initially prefix.thor, but once shard 1 is created it renames to .000000
+    // Your rule: shard 0 is initially prefix.thor.tar, but once shard 1 is created it renames to .000000
     ASSERT_TRUE(fs::exists(shard0)) << shard0;
     ASSERT_TRUE(fs::exists(shard1)) << shard1;
-    EXPECT_FALSE(fs::exists(prefix + ".thor")) << "expected prefix.thor to be renamed away";
+    EXPECT_FALSE(fs::exists(prefix + ".thor.tar")) << "expected prefix.thor.tar to be renamed away";
 
     nlohmann::json j0, j1;
     ASSERT_NO_THROW(j0 = load_footer_index_json(shard0));  // validates footer CRC

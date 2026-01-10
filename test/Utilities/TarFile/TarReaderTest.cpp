@@ -32,10 +32,10 @@ std::string make_tmp_prefix(const std::string& stem) {
 
 void cleanup_prefix_files(const std::string& prefix) {
     std::error_code ec;
-    fs::remove(prefix + ".thor", ec);
+    fs::remove(prefix + ".thor.tar", ec);
     for (int i = 0; i < 64; ++i) {
         char suf[64];
-        std::snprintf(suf, sizeof(suf), ".%06d.thor", i);
+        std::snprintf(suf, sizeof(suf), ".%06d.thor.tar", i);
         fs::remove(prefix + std::string(suf), ec);
     }
 }
@@ -101,8 +101,8 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
     }
 
     // Expect the single-file naming convention
-    ASSERT_TRUE(fs::exists(prefix + ".thor"));
-    EXPECT_FALSE(fs::exists(prefix + ".000000.thor"));
+    ASSERT_TRUE(fs::exists(prefix + ".thor.tar"));
+    EXPECT_FALSE(fs::exists(prefix + ".000000.thor.tar"));
 
     // Read back and validate content
     thor_file::TarReader r(archiveName, archiveDir);
@@ -116,7 +116,7 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
 }
 
 // -----------------------------------------------------------------------------
-// Round trip: multi shard + rename shard0 (.thor -> .000000.thor)
+// Round trip: multi shard + rename shard0 (.thor.tar -> .000000.thor.tar)
 // -----------------------------------------------------------------------------
 TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     const std::string prefix = make_tmp_prefix("thor_tar_multi");
@@ -146,9 +146,9 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     }
 
     // Once a 2nd shard exists, shard0 should have been renamed to numbered form.
-    ASSERT_TRUE(fs::exists(prefix + ".000000.thor"));
-    ASSERT_TRUE(fs::exists(prefix + ".000001.thor"));
-    EXPECT_FALSE(fs::exists(prefix + ".thor"));
+    ASSERT_TRUE(fs::exists(prefix + ".000000.thor.tar"));
+    ASSERT_TRUE(fs::exists(prefix + ".000001.thor.tar"));
+    EXPECT_FALSE(fs::exists(prefix + ".thor.tar"));
 
     // Read back using TarReader's scan+index+pread
     thor_file::TarReader r(archiveName, archiveDir);
@@ -409,9 +409,9 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
         w.finishArchive();
     }
 
-    const fs::path s0 = prefix + ".000000.thor";
-    const fs::path s1 = prefix + ".000001.thor";
-    const fs::path s2 = prefix + ".000002.thor";
+    const fs::path s0 = prefix + ".000000.thor.tar";
+    const fs::path s1 = prefix + ".000001.thor.tar";
+    const fs::path s2 = prefix + ".000002.thor.tar";
 
     ASSERT_TRUE(fs::exists(s0));
     ASSERT_TRUE(fs::exists(s1));
@@ -450,7 +450,7 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
         w.finishArchive();
     }
 
-    const fs::path shard0 = prefix + ".thor";
+    const fs::path shard0 = prefix + ".thor.tar";
     ASSERT_TRUE(fs::exists(shard0));
 
     // Patch the footer magic (last 16 bytes = 8 magic + 8 len)
@@ -544,7 +544,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
 
     // The archive should exist (either single or multi; with this size it should be multi)
     // Your TarWriter renames shard0 to numbered form once it creates shard1.
-    ASSERT_TRUE(fs::exists(prefix + ".000000.thor")) << "expected multi-shard output";
+    ASSERT_TRUE(fs::exists(prefix + ".000000.thor.tar")) << "expected multi-shard output";
 
     // Read back and verify all files via TarReader (pread path).
     thor_file::TarReader r(archiveName, archiveDir);
@@ -558,7 +558,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     uint32_t shard_count = 0;
     for (int i = 0; i < 512; ++i) {
         char suf[64];
-        std::snprintf(suf, sizeof(suf), ".%06d.thor", i);
+        std::snprintf(suf, sizeof(suf), ".%06d.thor.tar", i);
         if (fs::exists(prefix + std::string(suf)))
             shard_count++;
         else
@@ -590,7 +590,7 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
         w.finishArchive();
     }
 
-    const fs::path shard0 = prefix + ".thor";
+    const fs::path shard0 = prefix + ".thor.tar";
     ASSERT_TRUE(fs::exists(shard0)) << shard0;
 
     // Footer layout (24 bytes): magic(8) + json_len(8) + index_crc(4) + reserved(4)
@@ -730,7 +730,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
         w.finishArchive();
     }
 
-    const fs::path shard0 = prefix + ".thor";
+    const fs::path shard0 = prefix + ".thor.tar";
     ASSERT_TRUE(fs::exists(shard0)) << shard0;
 
     // Load footer index JSON (validates index CRC) and get offsets for blob
@@ -825,7 +825,7 @@ TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
         w.finishArchive();
     }
 
-    const fs::path shard0 = prefix + ".thor";
+    const fs::path shard0 = prefix + ".thor.tar";
     ASSERT_TRUE(fs::exists(shard0)) << shard0;
 
     // Load index to find payload offset/size

@@ -22,8 +22,12 @@
 #include "DeepLearning/Implementation/Layers/Utility/TypeConversion.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include "Utilities/TarFile/TarReader.h"
+#include "Utilities/TarFile/TarWriter.h"
+
 #include <assert.h>
 #include <deque>
+#include <filesystem>
 #include <set>
 #include <utility>
 #include <vector>
@@ -33,6 +37,16 @@
 // FIXME: at some point, considering the desire to sorta parity with TF, each input connection to say a FC layer creates a new layer
 //        just they share weights. That way feedback back into an FC layer does not create a cycle and topological sort
 //        can still be used to stamp the graph
+//        - or perhaps -
+//        update the api to provide an output tensor each time an input tensor is given very much like tensorflow, then
+//        ensure the topological sort considers the flow of tensors and not layers - so the output of an FC could drive the input
+//        of the same FC no problem. In fact, I am not sure if I tried that today would the network report a cycle or be fine with it.
+//
+//        Actually, this is the doc from network:
+//         * A deadlock cycle occurs when a layer that requires all of its input to arrive before it drives its output
+//         * is connected in a way where there is a path from its output to its input.
+//        So I think I just remembered wrong. I think regular cycles are currently ok, so it is just a question of API:
+//        1 input tensor yields 1 output tensor. Usually (always?) they will need to be the same size.
 
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 
@@ -71,11 +85,8 @@ class Network {
     virtual void setNetworkName(std::string networkName) { this->networkName = networkName; }
     virtual std::string getNetworkName() { return networkName; }
 
-    // FIXME: implement:
-    virtual void save(std::string filename, bool keep_optimizer);
-    virtual void load(std::string filename);
-    virtual void save_as_keras(std::string filename, bool keep_optimizer);
-    virtual void load_from_keras(std::string filename);
+    virtual void save(std::string modelName, std::string directory, bool overwrite, bool saveOptimizerState);
+    virtual std::shared_ptr<Network> load(std::string modelName, std::string directory);
 
     std::shared_ptr<Optimizer> getOptimizer();
     void attachOptimizerToLayers(bool replaceIfExisting);

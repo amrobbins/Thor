@@ -20,7 +20,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> getWeightsGradient() const { return weightsGradient; }
     Optional<Tensor> getBiasesGradient() const { return biasesGradient; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const { return nlohmann::json{}; }
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const final { assert(false); }
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const = 0;
     static void deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(thor_file::TarReader &, const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();

@@ -111,7 +111,7 @@ TarReader::~TarReader() {
     }
 }
 
-const unordered_map<string, EntryInfo>& TarReader::entries() const { return index_; }
+unordered_map<string, EntryInfo> TarReader::entries() const { return index_; }
 
 bool TarReader::contains(string pathInTar) const {
     pathInTar = cleanTarPath(pathInTar);
@@ -226,8 +226,8 @@ static int open_readonly_fd(const std::string& path, uint64_t& size_out) {
 }
 
 static std::string shard0_path_any(const std::string& prefix) {
-    const std::string numbered0 = shard_filename(prefix, 0);  // prefix + ".000000.thor"
-    const std::string single0 = prefix + ".thor";
+    const std::string numbered0 = shard_filename(prefix, 0);  // prefix + ".000000.thor.tar"
+    const std::string single0 = prefix + ".thor.tar";
 
     if (std::filesystem::exists(numbered0))
         return numbered0;
@@ -246,7 +246,7 @@ void TarReader::scan() {
     archive_id_.clear();
     num_shards_ = 0;
 
-    // Step 1: Read index JSON from shard0 (either prefix.000000.thor or prefix.thor)
+    // Step 1: Read index JSON from shard0 (either prefix.000000.thor.tar or prefix.thor.tar)
     const std::string first_path = shard0_path_any(prefix_);
 
     const std::string ref_json_str = read_footer_json(first_path);
@@ -292,8 +292,8 @@ void TarReader::scan() {
     shard_paths_.reserve(num_shards_);
 
     if (num_shards_ == 1) {
-        // single-shard convention is prefix.thor
-        const std::string p0 = prefix_ + ".thor";
+        // single-shard convention is prefix.thor.tar
+        const std::string p0 = prefix_ + ".thor.tar";
         require(fs::exists(p0), "missing single shard: " + p0);
         shard_paths_.push_back(p0);
 

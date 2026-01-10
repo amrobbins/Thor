@@ -496,7 +496,7 @@ TEST(Sgd, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
             fcFound = true;
             break;
         }
@@ -513,7 +513,7 @@ TEST(Sgd, SerializeDeserialize) {
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> initial_phys_twb =
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(initial_phys_layer);
     assert(initial_phys_twb != nullptr);
-    json sgdJ = sgd->serialize(archiveWriter, stream, &fullyConnected, initial_phys_twb);
+    json sgdJ = sgd->serialize(archiveWriter, stream, &fullyConnected, initial_phys_twb, true);
 
     ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
     ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");

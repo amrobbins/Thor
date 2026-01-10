@@ -556,7 +556,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
             fcFound = true;
             break;
         }
