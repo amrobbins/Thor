@@ -95,7 +95,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
@@ -126,29 +126,35 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
         ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
     // Dump the weights to a file and record its name
-    assert(network->getNumStamps() >= 1);
-    ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer =
-        dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-    assert(twbLayer != nullptr);
-
-    ThorImplementation::Tensor biases;
-    ThorImplementation::Tensor biasesBuffer;
-    string biasesFile;
-    if (hasBias) {
-        biasesFile = (layerName + "_biases.gds");
-        j["biases_tensor"] = biasesFile;
-        biases = twbLayer->getBiases().get();
-        biasesBuffer = biases.clone(cpuPlacement);
-        biasesBuffer.copyFromAsync(biases, stream);
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
+    if (network->getNumStamps() >= 1) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+        twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+        assert(twbLayer != nullptr);
     }
 
-    string weightsFile = (layerName + "_weights.gds");
-    j["weights_tensor"] = weightsFile;
-    ThorImplementation::Tensor weights = twbLayer->getWeights();
-    ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
-    weightsBuffer.copyFromAsync(weights, stream);
+    ThorImplementation::Tensor weights;
+    ThorImplementation::Tensor weightsBuffer;
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesBuffer;
+    string weightsFile;
+    string biasesFile;
+    if (twbLayer != nullptr) {
+        if (hasBias) {
+            biasesFile = (layerName + "_biases.gds");
+            j["biases_tensor"] = biasesFile;
+            biases = twbLayer->getBiases().get();
+            biasesBuffer = biases.clone(cpuPlacement);
+            biasesBuffer.copyFromAsync(biases, stream);
+        }
+
+        weightsFile = (layerName + "_weights.gds");
+        j["weights_tensor"] = weightsFile;
+        weights = twbLayer->getWeights();
+        weightsBuffer = weights.clone(cpuPlacement);
+        weightsBuffer.copyFromAsync(weights, stream);
+    }
 
     if (weightsInitializer != nullptr) {
         j["weights_initializer"] = weightsInitializer->serialize();
@@ -158,14 +164,16 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer);
+        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer, saveOptimizerState);
     }
 
     stream.synchronize();
 
-    archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
-    if (hasBias)
-        archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
+    if (twbLayer != nullptr) {
+        archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
+        if (hasBias)
+            archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
+    }
 
     return j;
 }
@@ -191,11 +199,6 @@ void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json
         featureOutputs.push_back(Tensor::deserialize(output));
     }
 
-    string weightsFile = j.at("weights_tensor").get<string>();
-    string biasesFile;
-    if (hasBias)
-        biasesFile = j.at("biases_tensor").get<string>();
-
     FullyConnected fullyConnected = FullyConnected();
     fullyConnected.numOutputFeatures = numOutputFeatures;
     fullyConnected.hasBias = hasBias;
@@ -208,11 +211,11 @@ void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
     }
     fullyConnected.archiveReader = &archiveReader;
-    fullyConnected.weightsFile = weightsFile;
-    if (hasBias)
-        fullyConnected.biasesFile = biasesFile;
-
-    fullyConnected.initialized = true;
+    if (j.contains("weights_tensor")) {
+        fullyConnected.weightsFile = j.at("weights_tensor").get<string>();
+        if (hasBias)
+            fullyConnected.biasesFile = j.at("biases_tensor").get<string>();
+    }
 
     if (j.contains("weights_initializer")) {
         fullyConnected.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
@@ -225,6 +228,7 @@ void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json
         fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
     }
 
+    fullyConnected.initialized = true;
     fullyConnected.addToNetwork(network);
 }
 

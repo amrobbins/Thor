@@ -89,11 +89,13 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = "convolution_2d";
+    string layerName = string("layer") + to_string(getId());
+    j["layer_name"] = layerName;
     j["data_layout"] = "NCHW";
     j["filter_width"] = filterWidth;
     j["filter_height"] = filterHeight;
@@ -122,31 +124,35 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
         ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
     // Dump the weights to a file and record its name
-    assert(network->getNumStamps() >= 1);
-    ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer =
-        dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-    assert(twbLayer != nullptr);
-
-    string layerName = string("layer") + to_string(getId());
-
-    ThorImplementation::Tensor biases;
-    ThorImplementation::Tensor biasesBuffer;
-    string biasesFile;
-    if (hasBias) {
-        biasesFile = (layerName + "_biases.gds");
-        j["biases_tensor"] = biasesFile;
-        biases = twbLayer->getBiases().get();
-        biasesBuffer = biases.clone(cpuPlacement);
-        biasesBuffer.copyFromAsync(biases, stream);
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
+    if (network->getNumStamps() >= 1) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+        twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+        assert(twbLayer != nullptr);
     }
 
-    string weightsFile = (layerName + "_weights.gds");
-    j["weights_tensor"] = weightsFile;
-    ThorImplementation::Tensor weights = twbLayer->getWeights();
-    ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
-    weightsBuffer.copyFromAsync(weights, stream);
+    ThorImplementation::Tensor weights;
+    ThorImplementation::Tensor weightsBuffer;
+    ThorImplementation::Tensor biases;
+    ThorImplementation::Tensor biasesBuffer;
+    string weightsFile;
+    string biasesFile;
+    if (twbLayer != nullptr) {
+        if (hasBias) {
+            biasesFile = (layerName + "_biases.gds");
+            j["biases_tensor"] = biasesFile;
+            biases = twbLayer->getBiases().get();
+            biasesBuffer = biases.clone(cpuPlacement);
+            biasesBuffer.copyFromAsync(biases, stream);
+        }
+
+        weightsFile = (layerName + "_weights.gds");
+        j["weights_tensor"] = weightsFile;
+        weights = twbLayer->getWeights();
+        weightsBuffer = weights.clone(cpuPlacement);
+        weightsBuffer.copyFromAsync(weights, stream);
+    }
 
     if (weightsInitializer != nullptr) {
         j["weights_initializer"] = weightsInitializer->serialize();
@@ -156,7 +162,7 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer);
+        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer, saveOptimizerState);
     }
 
     stream.synchronize();
@@ -197,11 +203,6 @@ void Convolution2d::deserialize(thor_file::TarReader &archiveReader, const json 
         featureOutputs.push_back(Tensor::deserialize(output));
     }
 
-    string weightsFile = j.at("weights_tensor").get<string>();
-    string biasesFile;
-    if (hasBias)
-        biasesFile = j.at("biases_tensor").get<string>();
-
     Convolution2d convolution2d = Convolution2d();
     convolution2d.filterWidth = filterWidth;
     convolution2d.filterHeight = filterHeight;
@@ -220,9 +221,13 @@ void Convolution2d::deserialize(thor_file::TarReader &archiveReader, const json 
         convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs.back()] = convolution2d.featureInputs[i];
     }
     convolution2d.archiveReader = &archiveReader;
-    convolution2d.weightsFile = weightsFile;
-    if (hasBias)
-        convolution2d.biasesFile = biasesFile;
+
+    if (j.contains("weights_tensor")) {
+        convolution2d.weightsFile = j.at("weights_tensor").get<string>();
+        ;
+        if (hasBias)
+            convolution2d.biasesFile = j.at("biases_tensor").get<string>();
+    }
 
     if (j.contains("weights_initializer")) {
         convolution2d.weightsInitializer = Initializer::deserialize(j.at("weights_initializer"));
@@ -236,7 +241,6 @@ void Convolution2d::deserialize(thor_file::TarReader &archiveReader, const json 
     }
 
     convolution2d.initialized = true;
-
     convolution2d.addToNetwork(network);
 }
 

@@ -84,7 +84,8 @@ bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
 json Sgd::serialize(thor_file::TarWriter &archiveWriter,
                     Stream stream,
                     TrainableWeightsBiasesLayer const *owningLayer,
-                    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const {
+                    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                    bool saveOptimizerState) const {
     json j;
     j["optimizer_type"] = string("sgd");
     j["version"] = getVersion();

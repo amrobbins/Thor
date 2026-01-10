@@ -1,10 +1,11 @@
 #include "DeepLearning/Api/Network/Network.h"
 
-using namespace Thor;
 using namespace std;
+using json = nlohmann::json;
 
 using ThorImplementation::TensorPlacement;
 
+namespace Thor {
 string Network::statusCodeToString(int statusCode) {
     if ((StatusCode)statusCode == StatusCode::SUCCESS)
         return "SUCCESS";
@@ -211,44 +212,53 @@ Network::StatusCode Network::place(uint32_t batchSize,
     return StatusCode::SUCCESS;
 }
 
-void Network::save(string filename, bool keep_optimizer) {
+void Network::save(std::string modelName, std::string directory, bool overwrite, bool saveOptimizerState) {
+    thor_file::TarWriter archiveWriter(modelName, directory, overwrite);
+
     // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
     uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
     for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
         Stream::deviceSynchronize(gpu);
 
-    // FIXME:
-    assert(false);
+    // For the initial implementation, I will just force GPU 0.
+    // I will optimize from there, but I need changes elsewhere first anyway.
+    Stream stream = Stream::getNextDownloadStream(0);
+    json modelJson;
+    modelJson["layers"] = json::array();
+    for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
+        // FIXME: Network provides serialize with the stamp to use - to choose the gpu - among other speed ups
+        modelJson["layers"].push_back(layer->serialize(archiveWriter, stream, saveOptimizerState));
+    }
+
+    string qualifiedModelName = modelName + ".thor.json";
+    string jsonDump = modelJson.dump(4);
+    archiveWriter.addArchiveFile(qualifiedModelName, jsonDump.c_str(), jsonDump.size());
 }
 
-void Network::save_as_keras(string filename, bool keep_optimizer) {
-    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
-    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
-        Stream::deviceSynchronize(gpu);
+shared_ptr<Network> Network::load(std::string modelName, std::string directory) {
+    thor_file::TarReader archiveReader(modelName, directory);
+    unordered_map<std::string, thor_file::EntryInfo> archiveEntries = archiveReader.entries();
 
-    // FIXME:
-    assert(false);
-}
+    string modelJsonFileName = modelName + ".thor.json";
+    if (!archiveEntries.contains(modelJsonFileName))
+        throw std::runtime_error("Model file " + modelJsonFileName + " not found in model archive for " + modelName + " in directory " +
+                                 directory);
+    thor_file::EntryInfo modelJsonEntryInfo = archiveEntries[modelName];
+    std::string modelJsonStr;
+    modelJsonStr.resize(modelJsonEntryInfo.size);
+    archiveReader.readFile(modelJsonFileName, modelJsonStr.data(), modelJsonEntryInfo.size);
 
-void Network::load(string filename) {
-    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
-    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
-        Stream::deviceSynchronize(gpu);
+    json modelJson = json::parse(modelJsonStr);
+    const json layers = modelJson["layers"];
+    if (!layers.is_array()) {
+        throw std::runtime_error("\"layers\" is not a JSON array");
+    }
 
-    // FIXME:
-    assert(false);
-}
-
-void Network::load_from_keras(string filename) {
-    // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
-    uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
-    for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
-        Stream::deviceSynchronize(gpu);
-
-    // FIXME:
-    assert(false);
+    shared_ptr<Network> network = make_shared<Network>();
+    for (const json &layerJson : layers) {
+        Layer::deserialize(archiveReader, layerJson, network.get());
+    }
+    return network;
 }
 
 // Determine the graph structure
@@ -295,7 +305,8 @@ Network::StatusCode Network::evaluateGraph() {
         shared_ptr<Loss> loss = dynamic_pointer_cast<Loss>(layer);
         if (loss) {
             // Predictions and Labels in, Loss out
-            // Note: getPredictions() does not return the featureInput tensor when there is an initial transformation layer, like sigmoid
+            // Note: getPredictions() does not return the featureInput tensor when there is an initial transformation layer, like
+            // sigmoid
             Tensor rawPredictionsTensor = loss->getFeatureInput();
             Tensor labelsTensor = loss->getLabels();
             Tensor lossTensor = loss->getLoss();
@@ -847,3 +858,5 @@ Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
     assert(apiTensorByOriginalId.count(originalId) != 0);
     return apiTensorByOriginalId[originalId];
 }
+
+}  // namespace Thor

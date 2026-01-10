@@ -39,7 +39,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
+
     static void deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network);
 
    protected:

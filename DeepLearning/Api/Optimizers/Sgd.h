@@ -33,7 +33,8 @@ class Sgd : public Optimizer {
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      TrainableWeightsBiasesLayer const *owningLayer,
-                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer) const;
+                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                                     bool saveOptimizerState) const;
     static std::shared_ptr<Optimizer> deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j);
 
    protected:

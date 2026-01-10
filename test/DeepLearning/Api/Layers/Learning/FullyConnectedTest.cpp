@@ -326,7 +326,7 @@ TEST(FullyConnected, SerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
             if (initalNetworkFC) {
-                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream);
+                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
                 fcFound = true;
                 break;
             }
@@ -342,7 +342,7 @@ TEST(FullyConnected, SerializeDeserialize) {
                 shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
                 batchNorm = dynamic_pointer_cast<BatchNormalization>(layer);
                 if (batchNorm) {
-                    batchNormJ = batchNorm->serialize(archiveWriter, stream);
+                    batchNormJ = batchNorm->serialize(archiveWriter, stream, true);
                     bnFound = true;
                     break;
                 }
@@ -399,7 +399,7 @@ TEST(FullyConnected, SerializeDeserialize) {
 
         // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
         shared_ptr<Layer> layer = initalNetworkFC;
-        json fromLayerJ = layer->serialize(archiveWriter, stream);
+        json fromLayerJ = layer->serialize(archiveWriter, stream, true);
         ASSERT_EQ(fullyConnectedJ, fromLayerJ);
 
         ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");

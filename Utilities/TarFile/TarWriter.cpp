@@ -46,12 +46,12 @@ static string make_archive_id_sha32() {
 }
 
 static bool is_valid_shard_filename(const string& base, const string& fname) {
-    // patter base.thor
-    if (fname == base + ".thor")
+    // patter base.thor.tar
+    if (fname == base + ".thor.tar")
         return true;
 
-    // pattern: base + "." + 6 digits + ".thor"
-    const string suffix = ".thor";
+    // pattern: base + "." + 6 digits + ".thor.tar"
+    const string suffix = ".thor.tar";
     const size_t base_len = base.size();
     const size_t want_len = base_len + 1 + 6 + suffix.size();
     if (fname.size() != want_len)
@@ -163,7 +163,7 @@ static uint64_t round_up_512(uint64_t n) { return (n + 511ull) & ~511ull; }
 
 static string shard_temp_path(const string& prefix, uint32_t shard_idx) {
     char buf[64];
-    snprintf(buf, sizeof(buf), ".%06u.thor.incomplete", shard_idx);
+    snprintf(buf, sizeof(buf), ".%06u.thor.tar.incomplete", shard_idx);
     return prefix + string(buf);
 }
 
@@ -190,12 +190,12 @@ void TarWriter::openShard_(uint32_t shard_index) {
     ShardState& st = shards_.back();
 
     if (shard_index == 0) {
-        st.path = prefix_ + ".thor.incomplete";
+        st.path = prefix_ + ".thor.tar.incomplete";
     } else {
         if (shard_index == 1) {
             // Now that there will be multiple shards, rename the first one to be a member of the group
-            const filesystem::path old_path = filesystem::path(prefix_ + ".thor.incomplete");
-            const filesystem::path new_path = filesystem::path(prefix_ + ".000000.thor.incomplete");
+            const filesystem::path old_path = filesystem::path(prefix_ + ".thor.tar.incomplete");
+            const filesystem::path new_path = filesystem::path(prefix_ + ".000000.thor.tar.incomplete");
             std::error_code ec;
             shards_[0].path = new_path.string();
             filesystem::rename(old_path, new_path, ec);
