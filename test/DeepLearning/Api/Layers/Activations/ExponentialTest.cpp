@@ -202,7 +202,7 @@ TEST(Activations, ExponentialSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedExponential->getFeatureInput().get());
     ASSERT_EQ(stampedExponential->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, ExponentialRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, ExponentialRegistered) {
     shared_ptr<ThorImplementation::Exponential> stampedExponential = dynamic_pointer_cast<ThorImplementation::Exponential>(otherLayers[0]);
     ASSERT_NE(stampedExponential, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

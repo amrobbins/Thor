@@ -488,5 +488,5 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         }
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

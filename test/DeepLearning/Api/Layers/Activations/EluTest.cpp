@@ -209,7 +209,7 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedElu->getFeatureInput().get());
     ASSERT_EQ(stampedElu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, EluRegistered) {
@@ -266,5 +266,5 @@ TEST(Activations, EluRegistered) {
     ASSERT_NE(stampedElu, nullptr);
     ASSERT_EQ(stampedElu->getAlpha(), alpha);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

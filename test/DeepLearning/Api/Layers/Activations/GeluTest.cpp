@@ -202,7 +202,7 @@ TEST(Activations, GeluSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedGelu->getFeatureInput().get());
     ASSERT_EQ(stampedGelu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, GeluRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, GeluRegistered) {
     shared_ptr<ThorImplementation::Gelu> stampedGelu = dynamic_pointer_cast<ThorImplementation::Gelu>(otherLayers[0]);
     ASSERT_NE(stampedGelu, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

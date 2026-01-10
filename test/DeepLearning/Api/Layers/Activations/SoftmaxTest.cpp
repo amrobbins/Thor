@@ -202,7 +202,7 @@ TEST(Activations, SoftmaxSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSoftmax->getFeatureInput().get());
     ASSERT_EQ(stampedSoftmax->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, SoftmaxRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, SoftmaxRegistered) {
     ASSERT_EQ(otherLayers.size(), 1U);
     shared_ptr<ThorImplementation::Softmax> stampedSoftmax = dynamic_pointer_cast<ThorImplementation::Softmax>(otherLayers[0]);
     ASSERT_NE(stampedSoftmax, nullptr);
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

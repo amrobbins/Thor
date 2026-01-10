@@ -202,7 +202,7 @@ TEST(Activations, HardSigmoidSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedHardSigmoid->getFeatureInput().get());
     ASSERT_EQ(stampedHardSigmoid->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, HardSigmoidRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, HardSigmoidRegistered) {
     shared_ptr<ThorImplementation::HardSigmoid> stampedHardSigmoid = dynamic_pointer_cast<ThorImplementation::HardSigmoid>(otherLayers[0]);
     ASSERT_NE(stampedHardSigmoid, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

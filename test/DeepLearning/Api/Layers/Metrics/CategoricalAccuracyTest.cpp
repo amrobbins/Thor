@@ -271,5 +271,5 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     }
     ASSERT_EQ(stampedCategoricalAccuracy->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

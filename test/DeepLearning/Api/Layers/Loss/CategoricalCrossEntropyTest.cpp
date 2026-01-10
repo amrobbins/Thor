@@ -661,5 +661,5 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
         ASSERT_EQ(stampedCategoricalCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

@@ -202,7 +202,7 @@ TEST(Activations, SeluSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSelu->getFeatureInput().get());
     ASSERT_EQ(stampedSelu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, SeluRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, SeluRegistered) {
     shared_ptr<ThorImplementation::Selu> stampedSelu = dynamic_pointer_cast<ThorImplementation::Selu>(otherLayers[0]);
     ASSERT_NE(stampedSelu, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

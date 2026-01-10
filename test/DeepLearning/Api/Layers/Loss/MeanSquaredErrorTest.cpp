@@ -339,5 +339,5 @@ TEST(MeanSquaredError, SerializeDeserialize) {
         ASSERT_EQ(stampedMeanSquaredError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

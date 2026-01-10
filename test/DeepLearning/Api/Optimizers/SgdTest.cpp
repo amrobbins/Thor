@@ -629,5 +629,5 @@ TEST(Sgd, SerializeDeserialize) {
     ASSERT_EQ(stampedSgd->getMomentum(), momentum);
     ASSERT_EQ(stampedSgd->getUseNesterovMomentum(), useNesterovMomentum);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

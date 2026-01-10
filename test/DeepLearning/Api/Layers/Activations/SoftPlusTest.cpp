@@ -202,7 +202,7 @@ TEST(Activations, SoftPlusSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSoftPlus->getFeatureInput().get());
     ASSERT_EQ(stampedSoftPlus->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, SoftPlusRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, SoftPlusRegistered) {
     shared_ptr<ThorImplementation::SoftPlus> stampedSoftPlus = dynamic_pointer_cast<ThorImplementation::SoftPlus>(otherLayers[0]);
     ASSERT_NE(stampedSoftPlus, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

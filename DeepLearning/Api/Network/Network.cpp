@@ -233,6 +233,8 @@ void Network::save(std::string modelName, std::string directory, bool overwrite,
     string qualifiedModelName = modelName + ".thor.json";
     string jsonDump = modelJson.dump(4);
     archiveWriter.addArchiveFile(qualifiedModelName, jsonDump.c_str(), jsonDump.size());
+
+    archiveWriter.finishArchive();
 }
 
 shared_ptr<Network> Network::load(std::string modelName, std::string directory) {
