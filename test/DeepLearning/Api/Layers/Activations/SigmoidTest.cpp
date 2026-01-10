@@ -202,7 +202,7 @@ TEST(Activations, SigmoidSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSigmoid->getFeatureInput().get());
     ASSERT_EQ(stampedSigmoid->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, SigmoidRegistered) {
@@ -260,5 +260,5 @@ TEST(Activations, SigmoidRegistered) {
     shared_ptr<ThorImplementation::Sigmoid> stampedSigmoid = dynamic_pointer_cast<ThorImplementation::Sigmoid>(otherLayers[0]);
     ASSERT_NE(stampedSigmoid, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

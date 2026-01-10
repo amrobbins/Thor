@@ -331,5 +331,5 @@ TEST(MeanAbsolutePercentageError, SerializeDeserialize) {
         ASSERT_EQ(stampedMeanAbsolutePercentageError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

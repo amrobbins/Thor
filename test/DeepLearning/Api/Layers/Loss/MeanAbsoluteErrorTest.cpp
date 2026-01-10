@@ -330,5 +330,5 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
         ASSERT_EQ(stampedMeanAbsoluteError->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

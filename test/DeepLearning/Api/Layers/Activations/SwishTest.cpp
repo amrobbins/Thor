@@ -202,7 +202,7 @@ TEST(Activations, SwishSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSwish->getFeatureInput().get());
     ASSERT_EQ(stampedSwish->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, SwishRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, SwishRegistered) {
     shared_ptr<ThorImplementation::Swish> stampedSwish = dynamic_pointer_cast<ThorImplementation::Swish>(otherLayers[0]);
     ASSERT_NE(stampedSwish, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

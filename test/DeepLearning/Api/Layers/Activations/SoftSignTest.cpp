@@ -202,7 +202,7 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedSoftSign->getFeatureInput().get());
     ASSERT_EQ(stampedSoftSign->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, SoftSignRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, SoftSignRegistered) {
     shared_ptr<ThorImplementation::SoftSign> stampedSoftSign = dynamic_pointer_cast<ThorImplementation::SoftSign>(otherLayers[0]);
     ASSERT_NE(stampedSoftSign, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

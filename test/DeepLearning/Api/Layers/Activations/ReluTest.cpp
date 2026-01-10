@@ -202,7 +202,7 @@ TEST(Activations, ReluSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedRelu->getFeatureInput().get());
     ASSERT_EQ(stampedRelu->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, ReluRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, ReluRegistered) {
     shared_ptr<ThorImplementation::Relu> stampedRelu = dynamic_pointer_cast<ThorImplementation::Relu>(otherLayers[0]);
     ASSERT_NE(stampedRelu, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

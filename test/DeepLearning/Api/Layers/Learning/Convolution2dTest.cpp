@@ -1097,5 +1097,5 @@ TEST(Convolution2d, SerializeDeserialize) {
         }
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

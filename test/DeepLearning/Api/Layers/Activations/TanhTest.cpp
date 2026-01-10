@@ -202,7 +202,7 @@ TEST(Activations, TanhSerializeDeserialize) {
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedTanh->getFeatureInput().get());
     ASSERT_EQ(stampedTanh->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
 
 TEST(Activations, TanhRegistered) {
@@ -259,5 +259,5 @@ TEST(Activations, TanhRegistered) {
     shared_ptr<ThorImplementation::Tanh> stampedTanh = dynamic_pointer_cast<ThorImplementation::Tanh>(otherLayers[0]);
     ASSERT_NE(stampedTanh, nullptr);
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

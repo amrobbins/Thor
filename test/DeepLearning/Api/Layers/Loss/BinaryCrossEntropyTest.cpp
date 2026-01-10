@@ -427,5 +427,5 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
         ASSERT_EQ(stampedBinaryCrossEntropy->getLossOutput().get(), stampedLossOutput->getFeatureInput().get());
     }
 
-    filesystem::remove("/tmp/testModel.thor");
+    filesystem::remove("/tmp/testModel.thor.tar");
 }
