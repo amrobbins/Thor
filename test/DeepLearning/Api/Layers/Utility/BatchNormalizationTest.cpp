@@ -404,7 +404,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         Network newNetwork;
 
         archiveWriter.finishArchive();
-        thor_file::TarReader archiveReader("testModel", "/tmp/");
+        shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
         Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
         Layer::deserialize(archiveReader, labelsInputJ, &newNetwork);

@@ -81,6 +81,8 @@ float Sgd::getMomentum() { return momentum; }
 
 bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
 
+uint64_t Sgd::getEpoch() { return startResumeEpoch; }
+
 json Sgd::serialize(thor_file::TarWriter &archiveWriter,
                     Stream stream,
                     TrainableWeightsBiasesLayer const *owningLayer,
@@ -90,21 +92,23 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
     j["optimizer_type"] = string("sgd");
     j["version"] = getVersion();
 
-    // Get the params from the physical layer and record them.
-    shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
-    shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
-    assert(physicalSgd != nullptr);
+    j["initial_learning_rate"] = initialLearningRate;
+    j["decay"] = decay;
+    j["momentum"] = momentum;
+    j["use_nesterov"] = useNesterovMomentum;
+    j["epoch"] = 0;
 
-    j["initial_learning_rate"] = physicalSgd->getInitialLearningRate();
-    j["decay"] = physicalSgd->getDecay();
-    j["momentum"] = physicalSgd->getMomentum();
-    j["use_nesterov"] = physicalSgd->getUseNesterovMomentum();
-    j["epoch"] = physicalSgd->getEpoch();
+    if (physicalOwningLayer != nullptr) {
+        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
+        shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
+        assert(physicalSgd != nullptr);
+        j["epoch"] = physicalSgd->getEpoch();
+    }
 
     return j;
 }
 
-shared_ptr<Optimizer> Sgd::deserialize(thor_file::TarReader &archiveReader, const json &j) {
+shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j) {
     if (j.at("optimizer_type").get<string>() != "sgd")
         throw runtime_error("Layer type mismatch in Sgd::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")

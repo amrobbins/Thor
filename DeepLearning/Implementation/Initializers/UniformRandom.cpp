@@ -13,12 +13,6 @@ UniformRandom::UniformRandom(double maxValue, double minValue) : maxValue(maxVal
 Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
 
 Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
-    // There are a few issues here NEED TO FIX THIS NEXT
-    // 1. deserialization initialize branch does not actually call initializer.initialize, and the event is not present
-    // 2. old initialization logic is still there, fighting with the incomplete new implementation, that is the place where initialize()
-    //    is actually being called. See StampedNetwork.cpp line 46. All of this is causing the race issue in BatchNormalization test
-    //    - surprising that I did not see this in other serialize tests, needs to be fixed everywhere weights are initialized.
-
     bool constant = minValue == maxValue;
     if (constant) {
         tensorToInitialize.fill(minValue, streams[0]);

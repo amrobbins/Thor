@@ -46,8 +46,9 @@ class Optimizer {
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
                                      bool saveOptimizerState) const = 0;
-    static std::shared_ptr<Optimizer> deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j);
-    using Deserializer = std::function<std::shared_ptr<Optimizer>(thor_file::TarReader &archiveReader, const nlohmann::json &)>;
+    static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j);
+    using Deserializer =
+        std::function<std::shared_ptr<Optimizer>(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();
     static void registerLayer(std::string name, Deserializer fn);
 

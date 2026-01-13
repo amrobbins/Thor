@@ -223,7 +223,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     Network newNetwork;
 
     archiveWriter.finishArchive();
-    thor_file::TarReader archiveReader("testModel", "/tmp/");
+    shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, predictionsNetworkInputJ, &newNetwork);
     Layer::deserialize(archiveReader, labelsNetworkInputJ, &newNetwork);

@@ -178,7 +178,7 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     return j;
 }
 
-void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json &j, Network *network) {
+void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "fully_connected")
@@ -210,7 +210,7 @@ void FullyConnected::deserialize(thor_file::TarReader &archiveReader, const json
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs.back();
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs.back()] = fullyConnected.featureInputs[i];
     }
-    fullyConnected.archiveReader = &archiveReader;
+    fullyConnected.archiveReader = archiveReader;
     if (j.contains("weights_tensor")) {
         fullyConnected.weightsFile = j.at("weights_tensor").get<string>();
         if (hasBias)

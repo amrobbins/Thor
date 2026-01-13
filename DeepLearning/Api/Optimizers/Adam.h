@@ -36,7 +36,7 @@ class Adam : public Optimizer {
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
                                      bool saveOptimizerState) const;
-    static std::shared_ptr<Optimizer> deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j);
+    static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j);
 
    protected:
     void updateParameters();
@@ -50,7 +50,7 @@ class Adam : public Optimizer {
     float beta2;
     float epsilon;
 
-    thor_file::TarReader *archiveReader = nullptr;
+    std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
     Optional<std::string> mFile;
     Optional<std::string> vFile;
     Optional<std::string> mBiasFile;

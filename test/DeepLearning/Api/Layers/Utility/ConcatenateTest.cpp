@@ -227,7 +227,7 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
         NetworkInput::deserialize(networkInputJs[t], &newNetwork);
 
     archiveWriter.finishArchive();
-    thor_file::TarReader archiveReader("testModel", "/tmp/");
+    shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, concatenateJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);

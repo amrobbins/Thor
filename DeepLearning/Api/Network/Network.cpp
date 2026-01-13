@@ -147,19 +147,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
     return StatusCode::SUCCESS;
 }
 
-Network::StatusCode Network::place(uint32_t batchSize,
-                                   std::vector<Event> &initDoneEvents,
-                                   bool inferenceOnly,
-                                   std::vector<int32_t> forcedDevices,
-                                   uint32_t forcedNumStampsPerGpu) {
-    // FIXME: multiple stamps, multiple gpus
-    // FIXME: smart placement and stamping
-    assert(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
-    vector<int32_t> gpu0 = {0};
-    assert(forcedDevices == gpu0 || forcedDevices.empty());
-
-    StatusCode statusCode;
-
+Network::StatusCode Network::connect(bool inferenceOnly) {
     if (optimizer != nullptr) {
         attachOptimizerToLayers(false);
     }
@@ -175,6 +163,32 @@ Network::StatusCode Network::place(uint32_t batchSize,
         }
     }
 
+    StatusCode dagStatus = createDagAndFreeze();
+    if (dagStatus != StatusCode::SUCCESS) {
+        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString((int)dagStatus).c_str());
+        fflush(stdout);
+    }
+
+    return dagStatus;
+}
+
+Network::StatusCode Network::place(uint32_t batchSize,
+                                   std::vector<Event> &initDoneEvents,
+                                   bool inferenceOnly,
+                                   std::vector<int32_t> forcedDevices,
+                                   uint32_t forcedNumStampsPerGpu) {
+    if (!frozen) {
+        StatusCode dagStatus = connect(inferenceOnly);
+        assert(dagStatus == StatusCode::SUCCESS);
+    }
+    assert(frozen);
+
+    // FIXME: multiple stamps, multiple gpus
+    // FIXME: smart placement and stamping
+    assert(forcedNumStampsPerGpu == 0 || forcedNumStampsPerGpu == 1);
+    vector<int32_t> gpu0 = {0};
+    assert(forcedDevices == gpu0 || forcedDevices.empty());
+
     vector<int32_t> devices;
     vector<uint32_t> numStampsPerDevice;
     if (forcedDevices.empty())
@@ -189,20 +203,13 @@ Network::StatusCode Network::place(uint32_t batchSize,
         }
     }
 
-    StatusCode dagStatus = createDagAndFreeze();
-    if (dagStatus != StatusCode::SUCCESS) {
-        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString((int)dagStatus).c_str());
-        fflush(stdout);
-    }
-    assert(dagStatus == StatusCode::SUCCESS);
-
     // FIXME: pull preOptimize into initialize
     for (uint32_t i = 0; i < devices.size(); ++i) {
         preOptimize(devices[i], batchSize);
     }
     for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
-            statusCode = stampNetwork(devices[i], initDoneEvents, batchSize);
+            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize);
             if (statusCode != StatusCode::SUCCESS) {
                 return statusCode;
             }
@@ -213,6 +220,9 @@ Network::StatusCode Network::place(uint32_t batchSize,
 }
 
 void Network::save(std::string modelName, std::string directory, bool overwrite, bool saveOptimizerState) {
+    if (!frozen)
+        connect(false);
+
     thor_file::TarWriter archiveWriter(modelName, directory, overwrite);
 
     // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
@@ -237,18 +247,18 @@ void Network::save(std::string modelName, std::string directory, bool overwrite,
     archiveWriter.finishArchive();
 }
 
-shared_ptr<Network> Network::load(std::string modelName, std::string directory) {
-    thor_file::TarReader archiveReader(modelName, directory);
-    unordered_map<std::string, thor_file::EntryInfo> archiveEntries = archiveReader.entries();
+void Network::load(std::string modelName, std::string directory) {
+    shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>(modelName, directory);
+    unordered_map<std::string, thor_file::EntryInfo> archiveEntries = archiveReader->entries();
 
     string modelJsonFileName = modelName + ".thor.json";
     if (!archiveEntries.contains(modelJsonFileName))
         throw std::runtime_error("Model file " + modelJsonFileName + " not found in model archive for " + modelName + " in directory " +
                                  directory);
-    thor_file::EntryInfo modelJsonEntryInfo = archiveEntries[modelName];
+    thor_file::EntryInfo modelJsonEntryInfo = archiveEntries[modelJsonFileName];
     std::string modelJsonStr;
     modelJsonStr.resize(modelJsonEntryInfo.size);
-    archiveReader.readFile(modelJsonFileName, modelJsonStr.data(), modelJsonEntryInfo.size);
+    archiveReader->readFile(modelJsonFileName, modelJsonStr.data(), modelJsonEntryInfo.size);
 
     json modelJson = json::parse(modelJsonStr);
     const json layers = modelJson["layers"];
@@ -256,11 +266,10 @@ shared_ptr<Network> Network::load(std::string modelName, std::string directory) 
         throw std::runtime_error("\"layers\" is not a JSON array");
     }
 
-    shared_ptr<Network> network = make_shared<Network>();
     for (const json &layerJson : layers) {
-        Layer::deserialize(archiveReader, layerJson, network.get());
+        // printf("%s\n", layerJson.dump(4).c_str());
+        Layer::deserialize(archiveReader, layerJson, this);
     }
-    return network;
 }
 
 // Determine the graph structure
