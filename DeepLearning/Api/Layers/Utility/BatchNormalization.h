@@ -24,7 +24,7 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     virtual bool isMultiLayer() const { return false; }
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
-    static void deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network);
+    static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
 
    protected:
     virtual std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

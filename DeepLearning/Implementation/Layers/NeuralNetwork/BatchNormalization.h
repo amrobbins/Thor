@@ -155,6 +155,28 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             optimizer.get()->compile();
     }
 
+    virtual void setInitializer(Tensor target, std::shared_ptr<ThorImplementation::Initializer> initializer) {
+        if (target == weights)
+            weightsInitializer = initializer;
+        else if (target == biases.get())
+            biasesInitializer = initializer;
+        else if (target == resultRunningMean)
+            resultRunningMeanInitializer = initializer;
+        else if (target == resultRunningVariance)
+            resultRunningVarianceInitializer = initializer;
+        else
+            assert(false);
+    }
+
+    virtual Event initializeTensor(Tensor target) {
+        if (target == resultRunningMean)
+            return resultRunningMeanInitializer->initialize(this, resultRunningMean);
+        else if (target == resultRunningVariance)
+            return resultRunningVarianceInitializer->initialize(this, resultRunningVariance);
+        else
+            return TrainableWeightsBiasesLayer::initializeTensor(target);
+    }
+
     void cleanup() {
         cudnnStatus_t cudnnStatus;
 
@@ -379,6 +401,10 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
     }
 
     virtual std::string getType() { return "BatchNormalization"; }
+
+   protected:
+    std::shared_ptr<ThorImplementation::Initializer> resultRunningMeanInitializer = nullptr;
+    std::shared_ptr<ThorImplementation::Initializer> resultRunningVarianceInitializer = nullptr;
 
    private:
     static const float ALPHA_NO_SCALE;

@@ -79,7 +79,7 @@ class Layer {
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
         return serialize(archiveWriter, stream);
     }
-    static void deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network);
+    static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);

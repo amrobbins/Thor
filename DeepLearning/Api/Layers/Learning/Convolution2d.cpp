@@ -174,7 +174,7 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
     return j;
 }
 
-void Convolution2d::deserialize(thor_file::TarReader &archiveReader, const json &j, Network *network) {
+void Convolution2d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in Convolution2d::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "convolution_2d")
@@ -220,11 +220,10 @@ void Convolution2d::deserialize(thor_file::TarReader &archiveReader, const json 
         convolution2d.outputTensorFromInputTensor[convolution2d.featureInputs[i]] = convolution2d.featureOutputs.back();
         convolution2d.inputTensorFromOutputTensor[convolution2d.featureOutputs.back()] = convolution2d.featureInputs[i];
     }
-    convolution2d.archiveReader = &archiveReader;
+    convolution2d.archiveReader = archiveReader;
 
     if (j.contains("weights_tensor")) {
         convolution2d.weightsFile = j.at("weights_tensor").get<string>();
-        ;
         if (hasBias)
             convolution2d.biasesFile = j.at("biases_tensor").get<string>();
     }

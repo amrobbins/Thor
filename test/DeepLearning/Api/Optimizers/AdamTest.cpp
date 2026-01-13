@@ -420,7 +420,7 @@ TEST(Adam, SerializeDeserialize) {
         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("v_bias_tensor"));
 
         archiveWriter.finishArchive();
-        thor_file::TarReader archiveReader("testModel", "/tmp/");
+        shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
         Network newNetwork;
 
         // Deserialize everything

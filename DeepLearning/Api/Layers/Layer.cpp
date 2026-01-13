@@ -43,7 +43,7 @@ void Layer::connectTwoLayers(shared_ptr<ThorImplementation::Layer> drivingLayer,
     drivingLayer->connectToNextLayer(loadingLayer.get(), drivingLayerConnectionType, loadingLayerConnectionType);
 }
 
-void Layer::deserialize(thor_file::TarReader& archiveReader, const nlohmann::json& j, Network* network) {
+void Layer::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const nlohmann::json& j, Network* network) {
     string factory = j.at("factory").get<string>();
     if (factory == Factory::Activation) {
         Activation::deserialize(j, network);

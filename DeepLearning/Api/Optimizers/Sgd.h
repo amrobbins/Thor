@@ -29,13 +29,14 @@ class Sgd : public Optimizer {
     virtual float getMomentum();
     virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
     virtual bool getUseNesterovMomentum();
+    virtual uint64_t getEpoch();
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
                                      bool saveOptimizerState) const;
-    static std::shared_ptr<Optimizer> deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j);
+    static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j);
 
    protected:
     virtual std::shared_ptr<Optimizer> clone() const;

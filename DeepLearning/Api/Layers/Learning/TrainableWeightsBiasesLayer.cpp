@@ -12,7 +12,7 @@ unordered_map<string, TrainableWeightsBiasesLayer::Deserializer> &TrainableWeigh
 
 void TrainableWeightsBiasesLayer::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
-void TrainableWeightsBiasesLayer::deserialize(thor_file::TarReader &archiveReader, const nlohmann::json &j, Network *network) {
+void TrainableWeightsBiasesLayer::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network) {
     assert(j.at("factory").get<string>() == Layer::Factory::Learning.value());
     string type = j.at("layer_type").get<string>();
 

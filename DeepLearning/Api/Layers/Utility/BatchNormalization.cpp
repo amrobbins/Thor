@@ -83,23 +83,24 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
         variance = batchNorm->getResultRunningVariance();
         varianceBuffer = variance.clone(cpuPlacement);
         varianceBuffer.copyFromAsync(variance, stream);
+
+        stream.synchronize();
+
+        archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(resultRunningMeanFile, meansBuffer.getMemPtr(), means.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(resultRunningVarianceFile, varianceBuffer.getMemPtr(), variance.getArraySizeInBytes());
     }
 
     if (hasOptimizer()) {
+        // Not stamped so there is no physical optimizer, so then what do I do? Maybe I expect it can be null?
         j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, batchNorm, saveOptimizerState);
     }
-
-    stream.synchronize();
-
-    archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
-    archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
-    archiveWriter.addArchiveFile(resultRunningMeanFile, meansBuffer.getMemPtr(), means.getArraySizeInBytes());
-    archiveWriter.addArchiveFile(resultRunningVarianceFile, varianceBuffer.getMemPtr(), variance.getArraySizeInBytes());
 
     return j;
 }
 
-void BatchNormalization::deserialize(thor_file::TarReader &archiveReader, const json &j, Network *network) {
+void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in BatchNormalization::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "batch_normalization")
@@ -129,7 +130,7 @@ void BatchNormalization::deserialize(thor_file::TarReader &archiveReader, const 
         batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs.back();
         batchNormalization.inputTensorFromOutputTensor[batchNormalization.featureOutputs.back()] = batchNormalization.featureInputs[i];
     }
-    batchNormalization.archiveReader = &archiveReader;
+    batchNormalization.archiveReader = archiveReader;
 
     if (j.contains("weights_tensor")) {
         batchNormalization.weightsFile = j.at("weights_tensor").get<string>();
@@ -237,28 +238,29 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
         shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
         shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
-        initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
+        initDoneEvent = weightsInitializer->initialize(physicalBatchNorm->getWeights(), physicalBatchNorm.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
         shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
-        initDoneEvent = resultRunningVarianceInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
+        initDoneEvent =
+            resultRunningVarianceInitializer->initialize(physicalBatchNorm->getResultRunningVariance(), physicalBatchNorm.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
 
-        assert(physicalLayer->getBiases().isPresent());
+        assert(physicalBatchNorm->getBiases().isPresent());
         shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
         shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
-        initDoneEvent = biasInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
+        initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getBiases(), physicalBatchNorm.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
         shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
         shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
-        initDoneEvent = resultRunningMeanInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
+        initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getResultRunningMean(), physicalBatchNorm.get());
         if (initDoneEvent.isPresent())
             initDoneEvents.push_back(initDoneEvent);
 
@@ -268,9 +270,9 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
         if (hasOptimizer()) {
             // Initialize the optimizer - it will follow the same process as above.
-            shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+            shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalBatchNorm->getOptimizer();
             shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
-                sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+                sisterPhysicalBatchNorm ? sisterPhysicalBatchNorm->getOptimizer() : nullptr;
 
             vector<Event> optimizerInitDoneEvents =
                 optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);

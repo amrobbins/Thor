@@ -65,7 +65,7 @@ unordered_map<string, Optimizer::Deserializer> &Optimizer::getRegistry() {
 
 void Optimizer::registerLayer(string name, Deserializer fn) { getRegistry().emplace(std::move(name), std::move(fn)); }
 
-shared_ptr<Optimizer> Optimizer::deserialize(thor_file::TarReader &archiveReader, const json &j) {
+shared_ptr<Optimizer> Optimizer::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j) {
     assert(j.contains("optimizer_type"));
     string optimizerType = j.at("optimizer_type").get<string>();
 

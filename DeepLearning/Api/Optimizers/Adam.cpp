@@ -72,16 +72,17 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
 
     // Get the params and weights from the physical layer.
     // Record the params and dump the weights to files.
-    shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
-    shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
-    assert(physicalAdam != nullptr);
-    j["t"] = physicalAdam->getT();
-    j["alpha"] = physicalAdam->getAlpha();
-    j["beta1"] = physicalAdam->getBeta1();
-    j["beta2"] = physicalAdam->getBeta2();
-    j["epsilon"] = physicalAdam->getEpsilon();
+    j["t"] = t;
+    j["alpha"] = alpha;
+    j["beta1"] = beta1;
+    j["beta2"] = beta2;
+    j["epsilon"] = epsilon;
 
-    if (saveOptimizerState) {
+    if (saveOptimizerState && physicalOwningLayer != nullptr) {
+        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
+        shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
+        assert(physicalAdam != nullptr);
+
         ThorImplementation::TensorPlacement cpuPlacement =
             ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
@@ -129,12 +130,14 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
             archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer.getMemPtr(), mBias.getArraySizeInBytes());
             archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer.getMemPtr(), vBias.getArraySizeInBytes());
         }
+
+        j["t"] = physicalAdam->getT();
     }
 
     return j;
 }
 
-shared_ptr<Optimizer> Adam::deserialize(thor_file::TarReader &archiveReader, const json &j) {
+shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j) {
     if (j.at("optimizer_type").get<string>() != "adam")
         throw runtime_error("Layer type mismatch in Adam::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")
@@ -167,7 +170,7 @@ shared_ptr<Optimizer> Adam::deserialize(thor_file::TarReader &archiveReader, con
     adam.beta1 = beta1;
     adam.beta2 = beta2;
     adam.epsilon = epsilon;
-    adam.archiveReader = &archiveReader;
+    adam.archiveReader = archiveReader;
     adam.mFile = mFile;
     adam.vFile = vFile;
     adam.mBiasFile = mBiasFile;

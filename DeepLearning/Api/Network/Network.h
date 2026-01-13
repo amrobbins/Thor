@@ -73,6 +73,7 @@ class Network {
 
     virtual std::string statusCodeToString(int statusCode);
 
+    virtual StatusCode connect(bool inferenceOnly);
     virtual StatusCode place(uint32_t batchSize,
                              std::vector<Event> &initDoneEvents,
                              bool inferenceOnly = false,
@@ -86,7 +87,7 @@ class Network {
     virtual std::string getNetworkName() { return networkName; }
 
     virtual void save(std::string modelName, std::string directory, bool overwrite, bool saveOptimizerState);
-    virtual std::shared_ptr<Network> load(std::string modelName, std::string directory);
+    virtual void load(std::string modelName, std::string directory);
 
     std::shared_ptr<Optimizer> getOptimizer();
     void attachOptimizerToLayers(bool replaceIfExisting);
