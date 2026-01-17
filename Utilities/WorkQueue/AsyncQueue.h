@@ -1,29 +1,27 @@
 #pragma once
 
-#include <assert.h>
-#include <stdio.h>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
-#include <memory>
 #include <mutex>
-#include <thread>
-#include <vector>
 
 template <class DataType>
 class AsyncQueue {
    public:
     AsyncQueue();
-    AsyncQueue(uint32_t queueSize);
+    explicit AsyncQueue(uint32_t queueSize);
+    explicit AsyncQueue(std::deque<DataType> &&initialStorage);
     virtual ~AsyncQueue();
     AsyncQueue(const AsyncQueue &) = delete;
     AsyncQueue &operator=(const AsyncQueue &) = delete;
 
-    void resize(uint32_t resize);
+    void resize(uint32_t queueSize);
 
     // Blocking.
     void open();
     void close();
+    void waitForEmpty();
 
     // Blocking API.
     // Returns true on success.
@@ -45,14 +43,15 @@ class AsyncQueue {
     int capacity();
 
    private:
-    bool queueOpen;
-    uint32_t queueSize;
+    bool queueOpen = false;
+    uint32_t queueSize = 0;
 
     std::deque<DataType> storage;
 
     std::mutex mtx;
     std::condition_variable notEmpty;
     std::condition_variable notFull;
+    std::condition_variable becameEmpty;
 };
 
 template <class DataType>
@@ -68,8 +67,28 @@ AsyncQueue<DataType>::AsyncQueue(uint32_t queueSize) {
 }
 
 template <class DataType>
+AsyncQueue<DataType>::AsyncQueue(std::deque<DataType> &&initialStorage) : storage(std::move(initialStorage)) {
+    queueOpen = false;
+    this->queueSize = storage.size();
+}
+
+template <class DataType>
 AsyncQueue<DataType>::~AsyncQueue() {
-    close();
+    bool errorQueueNotClosed = false;
+    {
+        std::unique_lock<std::mutex> lck(mtx);
+        if (queueOpen) {
+            errorQueueNotClosed = true;
+        }
+    }
+    if (errorQueueNotClosed) {
+        // Close queue, wake all, terminate with an error message -> fix the code so you don't hit it.
+        close();
+        sleep(2);
+        std::fprintf(stderr, "FATAL: AsyncQueue destroyed while still open. Close queue and join worker threads before destruction.\n");
+        std::fflush(stderr);
+        std::terminate();
+    }
 }
 
 template <class DataType>
@@ -79,7 +98,6 @@ void AsyncQueue<DataType>::resize(uint32_t queueSize) {
     this->queueSize = queueSize;
 }
 
-// By default the queue opens with num hardware threads - 1, and 4x this number of output buffers
 template <class DataType>
 void AsyncQueue<DataType>::open() {
     std::unique_lock<std::mutex> lck(mtx);
@@ -89,6 +107,7 @@ void AsyncQueue<DataType>::open() {
     queueOpen = true;
 }
 
+// No more pushes
 template <class DataType>
 void AsyncQueue<DataType>::close() {
     std::unique_lock<std::mutex> lck(mtx);
@@ -98,16 +117,23 @@ void AsyncQueue<DataType>::close() {
 
     notFull.notify_all();
     notEmpty.notify_all();
+    becameEmpty.notify_all();
+}
+
+template <class DataType>
+void AsyncQueue<DataType>::waitForEmpty() {
+    std::unique_lock<std::mutex> lck(mtx);
+    while (!storage.empty()) {
+        becameEmpty.wait_for(lck, std::chrono::seconds(5), [&] { return storage.empty(); });
+    }
 }
 
 template <class DataType>
 bool AsyncQueue<DataType>::push(const DataType &element) {
     std::unique_lock<std::mutex> lck(mtx);
 
-    while (storage.size() == queueSize) {
-        if (!queueOpen)
-            break;
-        notFull.wait(lck);
+    while (queueOpen && storage.size() == queueSize) {
+        notFull.wait_for(lck, std::chrono::seconds(5), [&] { return !queueOpen || storage.size() != queueSize; });
     }
     if (!queueOpen)
         return false;
@@ -122,10 +148,8 @@ template <class DataType>
 bool AsyncQueue<DataType>::pop(DataType &element) {
     std::unique_lock<std::mutex> lck(mtx);
 
-    while (storage.empty()) {
-        if (!queueOpen)
-            break;
-        notEmpty.wait(lck);
+    while (queueOpen && storage.empty()) {
+        notEmpty.wait_for(lck, std::chrono::seconds(5), [&] { return !queueOpen || !storage.empty(); });
     }
     if (!queueOpen)
         return false;
@@ -135,6 +159,9 @@ bool AsyncQueue<DataType>::pop(DataType &element) {
 
     notFull.notify_one();
 
+    if (storage.empty())
+        becameEmpty.notify_all();
+
     return true;
 }
 
@@ -142,10 +169,8 @@ template <class DataType>
 bool AsyncQueue<DataType>::peek(DataType &element) {
     std::unique_lock<std::mutex> lck(mtx);
 
-    while (storage.empty()) {
-        if (!queueOpen)
-            break;
-        notEmpty.wait(lck);
+    while (queueOpen && storage.empty()) {
+        notEmpty.wait_for(lck, std::chrono::seconds(5), [&] { return !queueOpen || !storage.empty(); });
     }
     if (!queueOpen)
         return false;
@@ -181,6 +206,10 @@ bool AsyncQueue<DataType>::tryPop(DataType &element) {
         element = storage.front();
         storage.pop_front();
         notFull.notify_one();
+
+        if (storage.empty())
+            becameEmpty.notify_all();
+
         return true;
     }
     return false;
@@ -210,8 +239,6 @@ bool AsyncQueue<DataType>::isFull() {
 template <class DataType>
 bool AsyncQueue<DataType>::isEmpty() {
     std::unique_lock<std::mutex> lck(mtx);
-    // printf("emptyCheck: storageEmpty %d threadsRunning %d storageEmpty %d\n", storage.empty(),
-    // threadsRunning, storage.empty()); fflush(stdout);
     return storage.empty();
 }
 

@@ -47,7 +47,7 @@ namespace ThorImplementation {
 class Tensor : private ReferenceCounted {
    public:
     Tensor();
-    Tensor(TensorPlacement placement, TensorDescriptor descriptor);
+    Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes = 0);
     Tensor(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
     Tensor(const Tensor &tensorInstance);
     Tensor &operator=(const Tensor &tensorInstance);
@@ -56,7 +56,7 @@ class Tensor : private ReferenceCounted {
     bool isInitialized() { return !uninitialized(); }
     bool isUsingExternallyManagedMemory();
 
-    Tensor clone() { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
+    Tensor clone() const { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
     Tensor clone(TensorPlacement newPlacement) { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
     Tensor clone(TensorDescriptor::DataType newDataType) {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
@@ -84,6 +84,8 @@ class Tensor : private ReferenceCounted {
     void copyFromAsync(Tensor source, Stream stream);
 
     void moveFromAsync(Tensor source, Stream stream);
+
+    void downloadSection(Tensor source, Stream stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
 
     enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
     void attachFile(const std::string &fileName,
@@ -829,13 +831,15 @@ class Tensor : private ReferenceCounted {
     off_t gpuDirectStorageBufOffset = 0;
     ssize_t gpuDirectStorageBytesAccessed;
 
+    bool cpuMemPinnedViaRegister = false;
+
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden = false;
     TensorDescriptor overriddenDescriptor;
 
     static std::atomic<unsigned long> nextInstanceId;
 
-    void allocateMemory();
+    void allocateMemory(uint32_t alignmentBytes = 0);
 
     template <typename T>
     void launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
@@ -846,7 +850,7 @@ class Tensor : private ReferenceCounted {
     void overrideDescriptor(TensorDescriptor overrideDescriptor);
     void clearDescriptorOverride();
 
-    void construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
+    void construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes, void *externallyManagedMemory);
     void copyObject(const Tensor &other);
     void destroy();
 };

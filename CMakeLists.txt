@@ -244,6 +244,9 @@ endif ()
 find_package(LibArchive REQUIRED)
 target_link_libraries(Thor PRIVATE LibArchive::LibArchive)
 
+pkg_check_modules(LIBURING REQUIRED IMPORTED_TARGET liburing)
+target_link_libraries(Thor PRIVATE PkgConfig::LIBURING)
+
 
 # ============================================================
 # Dependencies: nlohmann/json, pthread, dl
@@ -314,6 +317,7 @@ target_link_libraries(thor_tests PRIVATE
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_tests PRIVATE Boost::boost)
+target_link_libraries(thor_tests PRIVATE PkgConfig::LIBURING)   # FIXME: I think I can remove this once UringDirect.cpp
 include(GoogleTest)
 gtest_discover_tests(thor_tests)
 
