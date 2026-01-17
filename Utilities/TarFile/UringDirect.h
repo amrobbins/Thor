@@ -239,6 +239,99 @@ class UringDirect {
         return true;
     }
 
+    // Register a shard file for reading via O_DIRECT.
+    // Replaces any previously registered file.
+    void registerReadFile(const std::string& path) {
+        // Unregister/close previous
+        if (fileRegistered_) {
+            int rc = io_uring_unregister_files(&ring_);
+            if (rc < 0) {
+                throw std::runtime_error(std::string("io_uring_unregister_files failed: ") + std::strerror(-rc));
+            }
+            fileRegistered_ = false;
+        }
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+
+        int flags = O_RDONLY | O_CLOEXEC | O_DIRECT;
+        fd_ = open(path.c_str(), flags);
+        if (fd_ < 0) {
+            throw std::runtime_error("open(O_DIRECT, RDONLY) failed for '" + path + "': " + std::strerror(errno));
+        }
+
+        // Optional sanity: regular file
+        struct stat st{};
+        if (::fstat(fd_, &st) != 0) {
+            int e = errno;
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("fstat failed for '" + path + "': " + std::strerror(e));
+        }
+        if (!S_ISREG(st.st_mode)) {
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error("registerReadFile: path is not a regular file: '" + path + "'");
+        }
+
+        // Register as fixed file index 0
+        int fdArr[1] = {fd_};
+        int rc = io_uring_register_files(&ring_, fdArr, 1);
+        if (rc < 0) {
+            int e = -rc;
+            close(fd_);
+            fd_ = -1;
+            throw std::runtime_error(std::string("io_uring_register_files failed: ") + std::strerror(e));
+        }
+        fileRegistered_ = true;
+    }
+
+    // Submit an async read into a registered fixed buffer.
+    //
+    // Returns false if SQ ring is full (caller should submit/drain and retry).
+    bool submitReadFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, std::uint64_t userData) {
+        if (!buffersRegistered_) {
+            throw std::runtime_error("submitReadFixed: no registered buffers");
+        }
+        if (!fileRegistered_) {
+            throw std::runtime_error("submitReadFixed: no registered file");
+        }
+        if (bufIndex >= iovecs_.size()) {
+            throw std::runtime_error("submitReadFixed: bufIndex out of range");
+        }
+        if (lenBytes == 0) {
+            throw std::runtime_error("submitReadFixed: lenBytes is 0");
+        }
+
+        // O_DIRECT alignment constraints (safe choice: 4k)
+        if ((fileOffsetBytes % kAlign) != 0) {
+            throw std::runtime_error("submitReadFixed: fileOffsetBytes not 4k aligned");
+        }
+        if ((static_cast<std::uint64_t>(lenBytes) % kAlign) != 0) {
+            throw std::runtime_error("submitReadFixed: lenBytes not multiple of 4k");
+        }
+        if (static_cast<std::size_t>(lenBytes) > iovecs_[bufIndex].iov_len) {
+            throw std::runtime_error("submitReadFixed: lenBytes exceeds registered buffer length");
+        }
+
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        if (!sqe)
+            return false;
+
+        // Fixed file index 0 + fixed buffer index bufIndex.
+        io_uring_prep_read_fixed(sqe,
+                                 /*fd=*/0,  // fixed-file index 0
+                                 /*buf=*/iovecs_[bufIndex].iov_base,
+                                 /*nbytes=*/lenBytes,
+                                 /*offset=*/static_cast<off_t>(fileOffsetBytes),
+                                 /*buf_index=*/bufIndex);
+        sqe->flags |= IOSQE_FIXED_FILE;
+        sqe->user_data = userData;
+
+        return true;  // caller batches and calls submit()
+    }
+
     int submit() {
         int responseCode = io_uring_submit(&ring_);
         if (responseCode < 0) {
@@ -357,8 +450,6 @@ class UringDirect {
         if (c.responseCode < 0) {
             throw std::runtime_error(std::string("finishDumpedFile: fsync failed: ") + std::strerror(-c.responseCode));
         }
-
-        // posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
 
         return c;
     }
