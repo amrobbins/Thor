@@ -124,10 +124,12 @@ uint64_t Tensor::getThreadIdHash64(uint64_t seed) {
 
 Tensor::Tensor() : ReferenceCounted() {}
 
-Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor) { construct(placement, descriptor, nullptr); }
+Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes) {
+    construct(placement, descriptor, alignmentBytes, nullptr);
+}
 
 Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory) {
-    construct(placement, descriptor, externallyManagedMemory);
+    construct(placement, descriptor, 0, externallyManagedMemory);
 }
 
 Tensor::Tensor(const Tensor &tensorInstance) {
@@ -161,7 +163,7 @@ bool Tensor::operator<(const Tensor &other) const {
     return instanceId < other.instanceId;
 }
 
-void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory) {
+void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes, void *externallyManagedMemory) {
     ReferenceCounted::initialize();
 
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -185,15 +187,20 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, v
     if (usingExternallyManagedMemory) {
         mem = externallyManagedMemory;
     } else {
-        allocateMemory();
+        allocateMemory(alignmentBytes);
     }
 }
 
-void Tensor::allocateMemory() {
+static inline bool isPow2(std::size_t x) { return x && ((x & (x - 1)) == 0); }
+
+void Tensor::allocateMemory(uint32_t alignmentBytes) {
     cudaError_t cudaStatus;
 
     unsigned long numElements = descriptor.getTotalNumElements();
     assert(numElements > 0);
+
+    if (alignmentBytes != 0)
+        assert(isPow2(alignmentBytes));
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
@@ -204,8 +211,25 @@ void Tensor::allocateMemory() {
     memBytes *= 32;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
-        assert(cudaStatus == cudaSuccess);
+        if (alignmentBytes <= 256) {
+            // Cuda gives this natively
+            cudaStatus = cudaHostAlloc(&mem, memBytes, cudaHostAllocPortable);
+            assert(cudaStatus == cudaSuccess);
+        } else {
+            void *p = nullptr;
+            int prc = posix_memalign(&p, alignmentBytes, memBytes);
+            if (prc != 0 || !p) {
+                throw std::runtime_error(std::string("posix_memalign failed: ") + std::strerror(prc));
+            }
+            // Pin it so it still behaves like cudaHostAlloc memory for GPU transfers.
+            cudaStatus = cudaHostRegister(p, memBytes, cudaHostRegisterPortable);
+            if (cudaStatus != cudaSuccess) {
+                free(p);
+                throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(cudaStatus));
+            }
+            mem = p;
+            cpuMemPinnedViaRegister = true;
+        }
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
         cudaStatus = cudaMalloc(&mem, memBytes);
@@ -325,6 +349,7 @@ void Tensor::copyObject(const Tensor &other) {
     descriptor = other.descriptor;
     descriptorOverridden = other.descriptorOverridden;
     overriddenDescriptor = other.overriddenDescriptor;
+    cpuMemPinnedViaRegister = other.cpuMemPinnedViaRegister;
 }
 
 void Tensor::destroy() {
@@ -333,13 +358,20 @@ void Tensor::destroy() {
     if (usingExternallyManagedMemory) {
         // NOP
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        cudaError_t cudaStatus = cudaFreeHost(mem);
-
-        if (cudaStatus != cudaSuccess) {
-            printf("cuda status %d\n", cudaStatus);
-            fflush(stdout);
+        if (cpuMemPinnedViaRegister) {
+            cudaHostUnregister(mem);
+            free(mem);
+            cpuMemPinnedViaRegister = false;
+            mem = nullptr;
+        } else {
+            cudaError_t cudaStatus = cudaFreeHost(mem);
+            mem = nullptr;
+            if (cudaStatus != cudaSuccess) {
+                printf("cuda status %d\n", cudaStatus);
+                fflush(stdout);
+            }
+            assert(cudaStatus == cudaSuccess);
         }
-        assert(cudaStatus == cudaSuccess);
 
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(getPlacement().getDeviceNum());
@@ -513,6 +545,23 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
     if (!devicesInvolved.empty())
         assert(stream.getGpuNum() == devicesInvolved[0] || (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
     copyFromAsync(source, stream, true);
+}
+
+void Tensor::downloadSection(Tensor source, Stream stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
+    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(stream.getGpuNum() == source.getPlacement().getDeviceNum());
+
+    // Check that access is within range
+    uint64_t destArraySizeBytes = descriptor.getArraySizeInBytes();
+    uint64_t sourceArraySizeBytes = source.descriptor.getArraySizeInBytes();
+    assert(destOffset + sizeBytes <= destArraySizeBytes);
+    assert(sourceOffset + sizeBytes <= sourceArraySizeBytes);
+
+    uint8_t *destMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
+    uint8_t *sourceMemBytes = static_cast<uint8_t *>(source.getMemPtr<void>());
+    cudaError_t cudaStatus =
+        cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyDeviceToHost, stream.getStream());
+    assert(cudaStatus == cudaSuccess);
 }
 
 // If the tensor changes datatypes such that the size changes, then stream must be on the device with the larger tensor size.
