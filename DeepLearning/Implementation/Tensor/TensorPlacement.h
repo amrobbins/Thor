@@ -16,8 +16,8 @@ class TensorPlacement {
             assert(deviceNum == 0);
     }
 
-    MemDevices getMemDevice() { return memDevice; }
-    int getDeviceNum() { return deviceNum; }
+    MemDevices getMemDevice() const { return memDevice; }
+    int getDeviceNum() const { return deviceNum; }
 
     bool operator==(const TensorPlacement& rhs) { return memDevice == rhs.memDevice && deviceNum == rhs.deviceNum; }
     bool operator!=(const TensorPlacement& rhs) { return !((*this) == rhs); }

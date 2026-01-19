@@ -206,12 +206,12 @@ TEST(UringDirect, PrefetchWriteLoop) {
     vector<void*> bufferMem = {buffers[0].getMemPtr(), buffers[1].getMemPtr(), buffers[2].getMemPtr(), buffers[3].getMemPtr()};
     uringDirect.registerReusableBuffers(bufferMem, {bufferSize, bufferSize, bufferSize, bufferSize});
 
-    uringDirect.submitWriteFixed(0, 0, sixteenMegs, 123);
-    uringDirect.submitWriteFixed(1, sixteenMegs, sixteenMegs, 456);
-    uringDirect.submitWriteFixed(2, 2 * sixteenMegs, sixteenMegs, 789);
-    uringDirect.submitWriteFixed(3, 3 * sixteenMegs, sixteenMegs, 1011);
+    uringDirect.submitWriteFixed(0, 0, sixteenMegs, 0);
+    uringDirect.submitWriteFixed(1, sixteenMegs, sixteenMegs, 0);
+    uringDirect.submitWriteFixed(2, 2 * sixteenMegs, sixteenMegs, 0);
+    uringDirect.submitWriteFixed(3, 3 * sixteenMegs, sixteenMegs, 0);
     uringDirect.submit();
-    auto comps = uringDirect.waitCompletions(4);
+    auto comps = uringDirect.waitCompletionsInOrder(4);
 
     for (auto& c : comps) {
         ASSERT_GE(c.responseCode, 0) << "write failed: userData=" << c.userData << " res=" << c.responseCode
@@ -221,7 +221,7 @@ TEST(UringDirect, PrefetchWriteLoop) {
     }
     ASSERT_EQ(fileSizeBytes(filename), 4 * sixteenMegs);
 
-    uringDirect.finishDumpedFile(999, false);
+    uringDirect.finishDumpedFile(false);
 
     Tensor verifyBuffer(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {4 * sixteenMegs}));
     readEntireFileInto(verifyBuffer.getMemPtr(), 4 * sixteenMegs, filename);
@@ -276,12 +276,12 @@ TEST(UringDirect, PrefetchReadLoop) {
         std::vector<void*> bufferMem = {buffers[0].getMemPtr(), buffers[1].getMemPtr(), buffers[2].getMemPtr(), buffers[3].getMemPtr()};
         writer.registerReusableBuffers(bufferMem, {bufferSize, bufferSize, bufferSize, bufferSize});
 
-        writer.submitWriteFixed(0, 0, sixteenMegs, 123);
-        writer.submitWriteFixed(1, sixteenMegs, sixteenMegs, 456);
-        writer.submitWriteFixed(2, 2 * sixteenMegs, sixteenMegs, 789);
-        writer.submitWriteFixed(3, 3 * sixteenMegs, sixteenMegs, 1011);
+        writer.submitWriteFixed(0, 0, sixteenMegs, 0);
+        writer.submitWriteFixed(1, sixteenMegs, sixteenMegs, 0);
+        writer.submitWriteFixed(2, 2 * sixteenMegs, sixteenMegs, 0);
+        writer.submitWriteFixed(3, 3 * sixteenMegs, sixteenMegs, 0);
         writer.submit();
-        auto comps = writer.waitCompletions(4);
+        auto comps = writer.waitCompletionsInOrder(4);
 
         for (auto& c : comps) {
             ASSERT_GE(c.responseCode, 0) << "write failed: userData=" << c.userData << " res=" << c.responseCode
@@ -290,7 +290,7 @@ TEST(UringDirect, PrefetchReadLoop) {
         }
 
         ASSERT_EQ(fileSizeBytes(filename), 4 * sixteenMegs);
-        writer.finishDumpedFile(999, false);
+        writer.finishDumpedFile(false);
     }
 
     // Now do the read side using io_uring. We'll read into fresh buffers to be sure.
@@ -307,12 +307,12 @@ TEST(UringDirect, PrefetchReadLoop) {
         readBuffers[0].getMemPtr(), readBuffers[1].getMemPtr(), readBuffers[2].getMemPtr(), readBuffers[3].getMemPtr()};
     reader.registerReusableBuffers(readMem, {bufferSize, bufferSize, bufferSize, bufferSize});
 
-    reader.submitReadFixed(0, 0, sixteenMegs, 111);
-    reader.submitReadFixed(1, sixteenMegs, sixteenMegs, 222);
-    reader.submitReadFixed(2, 2 * sixteenMegs, sixteenMegs, 333);
-    reader.submitReadFixed(3, 3 * sixteenMegs, sixteenMegs, 444);
+    reader.submitReadFixed(0, 0, sixteenMegs, 0);
+    reader.submitReadFixed(1, sixteenMegs, sixteenMegs, 0);
+    reader.submitReadFixed(2, 2 * sixteenMegs, sixteenMegs, 0);
+    reader.submitReadFixed(3, 3 * sixteenMegs, sixteenMegs, 0);
     reader.submit();
-    auto rcomps = reader.waitCompletions(4);
+    auto rcomps = reader.waitCompletionsInOrder(4);
 
     for (auto& c : rcomps) {
         ASSERT_GE(c.responseCode, 0) << "read failed: userData=" << c.userData << " res=" << c.responseCode << " errno=" << -c.responseCode;
@@ -470,17 +470,14 @@ TEST(UringDirectPerf, SequentialWriteRead) {
         {
             const uint64_t warm = std::min<uint64_t>(numChunks, 8);
             for (uint64_t i = 0; i < warm; ++i) {
-                while (!ur.submitWriteFixed(static_cast<unsigned>(i % numBufs),
-                                            i * chunkBytes,
-                                            static_cast<uint32_t>(chunkBytes),
-                                            /*userData=*/i + 1)) {
+                while (!ur.submitWriteFixed(static_cast<unsigned>(i % numBufs), i * chunkBytes, static_cast<uint32_t>(chunkBytes), 0)) {
                     ur.submit();
-                    (void)ur.waitCompletion();
+                    (void)ur.waitCompletionInOrder();
                 }
             }
             ur.submit();
-            (void)ur.waitCompletions(static_cast<std::size_t>(warm));
-            ur.finishDumpedFile(/*userData=*/999, /*dataOnly=*/true);
+            (void)ur.waitCompletionsInOrder(static_cast<std::size_t>(warm));
+            ur.finishDumpedFile(true);
         }
 
         // Main run
@@ -496,7 +493,7 @@ TEST(UringDirectPerf, SequentialWriteRead) {
                 unsigned bufIndex = static_cast<unsigned>(nextChunk % numBufs);
                 uint64_t off = nextChunk * chunkBytes;
 
-                bool queued = ur.submitWriteFixed(bufIndex, off, static_cast<uint32_t>(chunkBytes), nextToken);
+                bool queued = ur.submitWriteFixed(bufIndex, off, static_cast<uint32_t>(chunkBytes), 0);
                 if (!queued)
                     break;  // SQ full, submit/drain below
 
@@ -511,13 +508,13 @@ TEST(UringDirectPerf, SequentialWriteRead) {
             // - we couldn't queue more, or
             // - we're full
             if (!inflight.empty() && (inflight.size() >= qd || nextChunk >= numChunks)) {
-                auto c = ur.waitCompletion();
+                auto c = ur.waitCompletionInOrder();
                 ASSERT_GE(c.responseCode, 0) << "write failed: res=" << c.responseCode << " errno=" << -c.responseCode;
                 ASSERT_EQ(static_cast<uint64_t>(c.responseCode), chunkBytes) << "short write";
                 inflight.pop_front();
             } else {
                 // Opportunistic polling
-                auto v = ur.pollCompletions(32);
+                auto v = ur.pollCompletionsInOrder(32);
                 for (auto& c : v) {
                     ASSERT_GE(c.responseCode, 0) << "write failed: res=" << c.responseCode << " errno=" << -c.responseCode;
                     ASSERT_EQ(static_cast<uint64_t>(c.responseCode), chunkBytes) << "short write";
@@ -527,7 +524,7 @@ TEST(UringDirectPerf, SequentialWriteRead) {
             }
         }
 
-        ur.finishDumpedFile(/*userData=*/1000, /*dataOnly=*/true);
+        ur.finishDumpedFile(true);
 
         double sec = secondsSince(t0);
         std::printf("[WRITE] %.2f GiB/s (%.3f s for %lu GiB)\n", gibPerSec(totalBytes, sec), sec, (unsigned long)totalGB);
@@ -565,16 +562,13 @@ TEST(UringDirectPerf, SequentialWriteRead) {
         {
             const uint64_t warm = std::min<uint64_t>(numChunks, 8);
             for (uint64_t i = 0; i < warm; ++i) {
-                while (!ur.submitReadFixed(static_cast<unsigned>(i % numBufs),
-                                           i * chunkBytes,
-                                           static_cast<uint32_t>(chunkBytes),
-                                           /*userData=*/i + 1)) {
+                while (!ur.submitReadFixed(static_cast<unsigned>(i % numBufs), i * chunkBytes, static_cast<uint32_t>(chunkBytes), 0)) {
                     ur.submit();
-                    (void)ur.waitCompletion();
+                    (void)ur.waitCompletionInOrder();
                 }
             }
             ur.submit();
-            (void)ur.waitCompletions(static_cast<std::size_t>(warm));
+            (void)ur.waitCompletionsInOrder(static_cast<std::size_t>(warm));
         }
 
         std::deque<uint64_t> inflight;
@@ -588,7 +582,7 @@ TEST(UringDirectPerf, SequentialWriteRead) {
                 unsigned bufIndex = static_cast<unsigned>(nextChunk % numBufs);
                 uint64_t off = nextChunk * chunkBytes;
 
-                bool queued = ur.submitReadFixed(bufIndex, off, static_cast<uint32_t>(chunkBytes), nextToken);
+                bool queued = ur.submitReadFixed(bufIndex, off, static_cast<uint32_t>(chunkBytes), 0);
                 if (!queued)
                     break;
 
@@ -600,12 +594,12 @@ TEST(UringDirectPerf, SequentialWriteRead) {
             ur.submit();
 
             if (!inflight.empty() && (inflight.size() >= qd || nextChunk >= numChunks)) {
-                auto c = ur.waitCompletion();
+                auto c = ur.waitCompletionInOrder();
                 ASSERT_GE(c.responseCode, 0) << "read failed: res=" << c.responseCode << " errno=" << -c.responseCode;
                 ASSERT_EQ(static_cast<uint64_t>(c.responseCode), chunkBytes) << "short read";
                 inflight.pop_front();
             } else {
-                auto v = ur.pollCompletions(32);
+                auto v = ur.pollCompletionsInOrder(32);
                 for (auto& c : v) {
                     ASSERT_GE(c.responseCode, 0) << "read failed: res=" << c.responseCode << " errno=" << -c.responseCode;
                     ASSERT_EQ(static_cast<uint64_t>(c.responseCode), chunkBytes) << "short read";
@@ -626,4 +620,71 @@ TEST(UringDirectPerf, SequentialWriteRead) {
     }
 
     std::printf("=== done ===\n");
+}
+
+TEST(UringDirect, FixedBuffer_SubOffsetsWriteDifferentBlocks) {
+    using namespace ThorImplementation;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+
+    constexpr uint32_t kAlign = 4096;
+    constexpr uint32_t kBlocks = 2;
+    constexpr uint32_t kBytes = kBlocks * kAlign;
+
+    TensorDescriptor desc(TensorDescriptor::DataType::UINT8, {kBytes});
+    Tensor buf(cpuPlacement, desc, kAlign);
+    uint8_t* p = buf.getMemPtr<uint8_t>();
+    ASSERT_NE(p, nullptr);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(p) % kAlign, 0u);
+
+    // Fill 2 distinct 4KB blocks
+    for (uint32_t i = 0; i < kAlign; ++i)
+        p[i] = 0xAA;
+    for (uint32_t i = 0; i < kAlign; ++i)
+        p[kAlign + i] = 0x55;
+
+    std::string filename = makeTmpPrefix("uring_fixed_suboffsets");
+    ScopedUnlink cleanup(filename);
+
+    UringDirect uring(64);
+    uring.registerDumpFile(filename);
+    uring.registerReusableBuffers({buf.getMemPtr()}, {kBytes});
+
+    // Two writes at different file offsets, but from different sub-offsets of the same fixed buffer.
+    // This test catches the classic bug: writing always from iovecs_[bufIndex].iov_base (no buf offset).
+    ASSERT_TRUE(uring.submitWriteFixed(/*bufIndex=*/0,
+                                       /*fileOffsetBytes=*/0,
+                                       /*lenBytes=*/kAlign,
+                                       /*bufOffsetBytes=*/0));
+    ASSERT_TRUE(uring.submitWriteFixed(/*bufIndex=*/0,
+                                       /*fileOffsetBytes=*/kAlign,
+                                       /*lenBytes=*/kAlign,
+                                       /*bufOffsetBytes=*/kAlign));
+
+    uring.submit();
+    auto comps = uring.waitCompletionsInOrder(2);
+
+    ASSERT_EQ(comps.size(), 2u);
+    for (auto& c : comps) {
+        ASSERT_GE(c.responseCode, 0) << "write failed: userData=" << c.userData << " res=" << c.responseCode
+                                     << " errno=" << -c.responseCode;
+        ASSERT_EQ(static_cast<uint32_t>(c.responseCode), kAlign) << "short write: userData=" << c.userData;
+    }
+
+    ASSERT_EQ(fileSizeBytes(filename), static_cast<uint64_t>(kBytes));
+
+    // Read back with simple iostream path (not O_DIRECT)
+    Tensor verify(cpuPlacement, TensorDescriptor(TensorDescriptor::DataType::UINT8, {kBytes}));
+    readEntireFileInto(verify.getMemPtr(), kBytes, filename);
+
+    const uint8_t* v = verify.getMemPtr<uint8_t>();
+    ASSERT_NE(v, nullptr);
+
+    // Verify first 4KB is 0xAA and second 4KB is 0x55
+    for (uint32_t i = 0; i < kAlign; ++i) {
+        EXPECT_EQ(v[i], 0xAA) << "mismatch in block0 at i=" << i;
+    }
+    for (uint32_t i = 0; i < kAlign; ++i) {
+        EXPECT_EQ(v[kAlign + i], 0x55) << "mismatch in block1 at i=" << i;
+    }
 }
