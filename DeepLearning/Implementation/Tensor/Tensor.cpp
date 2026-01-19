@@ -547,7 +547,7 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
     copyFromAsync(source, stream, true);
 }
 
-void Tensor::downloadSection(Tensor source, Stream stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
+void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
     assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     assert(stream.getGpuNum() == source.getPlacement().getDeviceNum());
 

@@ -16,7 +16,7 @@
 
 namespace fs = std::filesystem;
 
-std::string make_tmp_prefix(const std::string& stem) {
+static std::string makeTmpPrefix(const std::string& stem) {
     static int counter = 0;
     ++counter;
 
@@ -78,7 +78,7 @@ void read_and_expect(thor_file::TarReader& r, const std::string& path, const std
 // Round trip: single shard
 // -----------------------------------------------------------------------------
 TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
-    const std::string prefix = make_tmp_prefix("thor_tar_single");
+    const std::string prefix = makeTmpPrefix("thor_tar_single");
     CleanupGuard guard{prefix};
 
     // Build some files
@@ -119,7 +119,7 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
 // Round trip: multi shard + rename shard0 (.thor.tar -> .000000.thor.tar)
 // -----------------------------------------------------------------------------
 TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
-    const std::string prefix = make_tmp_prefix("thor_tar_multi");
+    const std::string prefix = makeTmpPrefix("thor_tar_multi");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -388,7 +388,7 @@ static void corrupt_archive_id_in_shard(const fs::path& shard_path) {
 static std::vector<uint8_t> make_bytes(size_t n, uint8_t value) { return std::vector<uint8_t>(n, value); }
 
 TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
-    const std::string prefix = make_tmp_prefix("thor_tar_corrupt_id");
+    const std::string prefix = makeTmpPrefix("thor_tar_corrupt_id");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -433,7 +433,7 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
 }
 
 TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
-    const std::string prefix = make_tmp_prefix("thor_tar_bad_magic");
+    const std::string prefix = makeTmpPrefix("thor_tar_bad_magic");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -475,7 +475,7 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
 }
 
 TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
-    const std::string prefix = make_tmp_prefix("thor_tar_100files");
+    const std::string prefix = makeTmpPrefix("thor_tar_100files");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -570,7 +570,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
 // Corrupt just the footer CRC (index_crc) on a shard, without touching JSON bytes.
 // Then TarReader should throw due to index CRC mismatch.
 TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
-    const std::string prefix = make_tmp_prefix("thor_tar_bad_index_crc");
+    const std::string prefix = makeTmpPrefix("thor_tar_bad_index_crc");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -711,7 +711,7 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
 
 // Corrupt one bit of a file's payload and ensure TarReader throws when validate=true.
 TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
-    const std::string prefix = make_tmp_prefix("thor_tar_corrupt_payload_bit");
+    const std::string prefix = makeTmpPrefix("thor_tar_corrupt_payload_bit");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -783,7 +783,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
 }
 
 TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
-    const std::string prefix = make_tmp_prefix("thor_tar_verifyall_ok");
+    const std::string prefix = makeTmpPrefix("thor_tar_verifyall_ok");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
@@ -808,7 +808,7 @@ TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
 }
 
 TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
-    const std::string prefix = make_tmp_prefix("thor_tar_verifyall_bad");
+    const std::string prefix = makeTmpPrefix("thor_tar_verifyall_bad");
     CleanupGuard guard{prefix};
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();

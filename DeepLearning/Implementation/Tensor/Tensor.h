@@ -68,7 +68,7 @@ class Tensor : private ReferenceCounted {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(getDataType(), newDimensions));
     }
 
-    TensorPlacement getPlacement() { return placement; }
+    TensorPlacement getPlacement() const { return placement; }
     template <typename ElementDataType = void>
     ElementDataType *getMemPtr();
     template <typename ElementDataType>
@@ -85,7 +85,7 @@ class Tensor : private ReferenceCounted {
 
     void moveFromAsync(Tensor source, Stream stream);
 
-    void downloadSection(Tensor source, Stream stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
+    void downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
 
     enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
     void attachFile(const std::string &fileName,

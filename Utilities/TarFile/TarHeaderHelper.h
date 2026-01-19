@@ -307,3 +307,48 @@ static uint32_t createTarSeparator(const std::string& nextPathInTar,
 
     return tailBytesIn + local.totalBytesAppended;
 }
+
+static uint32_t appendTarEndOfArchive(uint64_t lastFileSize, uint32_t tailBytesIn, uint8_t* tailAndTarSeparator, uint32_t scratchCap) {
+    // TAR finalize bytes are:
+    //   A) pad last file payload to 512 boundary
+    //   B) two 512-byte zero blocks (1024 bytes)
+    // For O_DIRECT convenience, we additionally pad so the appended region ends on a 4KB boundary.
+    //
+    // Inputs:
+    // - lastFileSize: payload byte count of the LAST file in the archive (not including its 512 header)
+    // - tailBytesIn: bytes already present in tailAndTarSeparator (carry/tar pieces)
+    //
+    // Returns:
+    // - new tail byte count (tailBytesIn + appended)
+    if (tailBytesIn > scratchCap)
+        throw std::runtime_error("appendTarEndOfArchive: tailBytesIn > scratchCap");
+
+    // A) pad last payload to 512
+    uint32_t pad512 = static_cast<uint32_t>((512 - (lastFileSize % 512)) % 512);
+
+    // B) end-of-archive markers
+    uint32_t eoa = 2 * 512;  // 1024
+
+    // Minimum bytes we must append:
+    uint32_t minAppend = pad512 + eoa;
+
+    // Now choose appendBytes >= minAppend so that (tailBytesIn + appendBytes) % 4096 == 0.
+    // (Assume 4096 is the O_DIRECT alignment you are enforcing.)
+    uint32_t mod = tailBytesIn & (4096 - 1);
+    uint32_t want = (4096 - mod) & (4096 - 1);  // bytes to reach next 4KB boundary (0 if already aligned)
+
+    // If already aligned, we still need minAppend; make want be 4096 so we can add full blocks cleanly.
+    if (want == 0)
+        want = 4096;
+
+    uint32_t appendBytes = want;
+    while (appendBytes < minAppend)
+        appendBytes += 4096;
+
+    if (tailBytesIn + appendBytes > scratchCap) {
+        throw std::runtime_error("appendTarEndOfArchive: scratch buffer too small");
+    }
+
+    std::memset(tailAndTarSeparator + tailBytesIn, 0, appendBytes);
+    return tailBytesIn + appendBytes;
+}

@@ -2,15 +2,7 @@
 // - Simple ustar header (name/prefix split) without PAX
 // - Overlong filenames requiring PAX "path="
 // - Also validates checksum fields and basic 512-block alignment properties
-//
-// Assumes you have the helper functions/types available in the build:
-//
-//   - createTarSeparator(nextPathInTar, nextFileSize, prevFileSize,
-//                        tailBytesIn, tailAndTarSeparator, scratchCap, dbg)
-//   - TarHeader (512 bytes) layout
-//   - tar_split_ustar_name_prefix, tar_checksum/tar_finalize_checksum (implicitly via parsing)
-//
-// If you put the helper in a header, include it here:
+
 #include <gtest/gtest.h>
 
 #include <array>
@@ -345,22 +337,10 @@ static void writeZeros(std::ofstream& out, uint64_t n) {
 
 static uint64_t tarPad512(uint64_t n) { return (TAR_BLOCK - (n % TAR_BLOCK)) % TAR_BLOCK; }
 
-uint32_t createTarSeparator(const std::string& nextPathInTar,
-                            uint64_t nextFileSize,
-                            uint64_t prevFileSize,
-                            uint32_t tailBytesIn,
-                            uint8_t* tailAndTarSeparator,
-                            uint32_t scratchCap,
-                            TarSeparatorBuildResult* dbg);
-
 // ----------------------------------------------
 // The actual interop test
 // ----------------------------------------------
 TEST(TarInterop, TarListsAndExtractsSimpleAndPaxPaths) {
-    // if (!env_bool("RUN_TAR_INTEROP", false)) {
-    //     GTEST_SKIP() << "Set RUN_TAR_INTEROP=1 to run tar interop test";
-    // }
-
     // Verify `tar` exists
     {
         int rc = 0;
@@ -467,5 +447,63 @@ TEST(TarInterop, TarListsAndExtractsSimpleAndPaxPaths) {
         std::string data = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -xOf failed for long pax path\ncmd: " << cmd << "\noutput:\n" << data;
         EXPECT_EQ(data, payload2);
+    }
+}
+
+// It tests appendTarEndOfArchive(lastFileSize, ...) guarantees:
+//  - appends >= (pad512(lastFileSize) + 1024)
+//  - appended bytes are all zero
+//  - final tailBytesOut is 4KB-aligned
+//  - the first (pad512 + 1024) bytes are present (not required to be exactly that many)
+TEST(TarHeaderHelper, AppendTarEndOfArchive_PadsTo512AndAddsEOA_AndAligns4k) {
+    auto pad512 = [](uint64_t n) -> uint32_t { return static_cast<uint32_t>((512 - (n % 512)) % 512); };
+
+    // Try a few combinations that exercise different remainders.
+    struct Case {
+        uint64_t lastFileSize;
+        uint32_t tailIn;
+    };
+    Case cases[] = {
+        {0, 0},
+        {1, 0},
+        {511, 0},
+        {512, 0},
+        {1000, 0},
+        {12345, 7},
+        {12345, 4095},  // near alignment boundary
+        {12345, 4096},  // already aligned
+        {777, 123},     // arbitrary
+    };
+
+    for (const auto& c : cases) {
+        // Big enough scratch. (If you use smaller scratch in your code, tune accordingly.)
+        std::vector<uint8_t> scratch(64 * 1024, 0xCD);
+
+        // Pretend existing tail bytes are non-zero (to ensure we don't overwrite them).
+        for (uint32_t i = 0; i < c.tailIn; ++i)
+            scratch[i] = 0xAB;
+
+        uint32_t out = appendTarEndOfArchive(c.lastFileSize, c.tailIn, scratch.data(), static_cast<uint32_t>(scratch.size()));
+
+        // tail preserved
+        for (uint32_t i = 0; i < c.tailIn; ++i) {
+            ASSERT_EQ(scratch[i], 0xAB) << "tail overwritten at i=" << i;
+        }
+
+        ASSERT_GE(out, c.tailIn) << "tail decreased";
+        uint32_t appended = out - c.tailIn;
+
+        const uint32_t minAppend = pad512(c.lastFileSize) + 1024u;
+        ASSERT_GE(appended, minAppend) << "appended too small: appended=" << appended << " min=" << minAppend
+                                       << " lastFileSize=" << c.lastFileSize << " tailIn=" << c.tailIn;
+
+        // must end on 4KB boundary
+        ASSERT_EQ(out & (4096u - 1u), 0u) << "not 4KB aligned: out=" << out << " lastFileSize=" << c.lastFileSize << " tailIn=" << c.tailIn;
+
+        // appended region must be all zero
+        for (uint32_t i = 0; i < appended; ++i) {
+            ASSERT_EQ(scratch[c.tailIn + i], 0u) << "non-zero appended byte at offset=" << i << " (abs=" << (c.tailIn + i) << ")"
+                                                 << " lastFileSize=" << c.lastFileSize << " tailIn=" << c.tailIn;
+        }
     }
 }

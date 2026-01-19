@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <fcntl.h>
@@ -189,55 +190,106 @@ class UringDirect {
     // Notes:
     // - Completion result will be available via CQE with cqe->user_data == userData.
     // - On completion, cqe->res is bytes written (>=0) or -errno (<0).
-    bool submitWriteFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, std::uint64_t userData) {
-        if (!buffersRegistered_) {
+    bool submitWriteFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, std::uint32_t bufOffsetBytes) {
+        if (!buffersRegistered_)
             throw std::runtime_error("submitWriteFixed: no registered buffers");
-        }
-        if (!fileRegistered_) {
+        if (!fileRegistered_)
             throw std::runtime_error("submitWriteFixed: no registered file");
-        }
-        if (bufIndex >= iovecs_.size()) {
+        if (bufIndex >= iovecs_.size())
             throw std::runtime_error("submitWriteFixed: bufIndex out of range");
-        }
-        if (lenBytes == 0) {
+        if (lenBytes == 0)
             throw std::runtime_error("submitWriteFixed: lenBytes is 0");
-        }
 
-        // O_DIRECT alignment constraints (common safe choice: 4k).
-        if ((fileOffsetBytes % kAlign) != 0) {
+        // O_DIRECT alignment
+        if ((fileOffsetBytes % kAlign) != 0)
             throw std::runtime_error("submitWriteFixed: fileOffsetBytes not 4k aligned");
-        }
-        if ((static_cast<std::uint64_t>(lenBytes) % kAlign) != 0) {
+        if ((uint64_t(lenBytes) % kAlign) != 0)
             throw std::runtime_error("submitWriteFixed: lenBytes not multiple of 4k");
-        }
-        if (static_cast<std::size_t>(lenBytes) > iovecs_[bufIndex].iov_len) {
-            throw std::runtime_error("submitWriteFixed: lenBytes exceeds registered buffer length");
-        }
+        if ((uint64_t(bufOffsetBytes) % kAlign) != 0)
+            throw std::runtime_error("submitWriteFixed: bufOffsetBytes not 4k aligned");
+
+        if (uint64_t(bufOffsetBytes) + uint64_t(lenBytes) > iovecs_[bufIndex].iov_len)
+            throw std::runtime_error("submitWriteFixed: (bufOffset+len) exceeds registered buffer length");
+
+        // pointer INSIDE the registered buffer
+        void* ptr = static_cast<uint8_t*>(iovecs_[bufIndex].iov_base) + bufOffsetBytes;
 
         io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-            return false;  // SQ full; caller should submit/drain and retry
-        }
+        if (!sqe)
+            return false;
 
-        // Use fixed buffer + fixed file.
-        //
-        // Important: io_uring_prep_write_fixed takes:
-        //   (sqe, fd, buf, nbytes, offset, buf_index)
-        //
-        // For fixed file, set IOSQE_FIXED_FILE and use fd=0 (index into registered files).
         io_uring_prep_write_fixed(sqe,
-                                  /*fd=*/0,  // fixed file index 0
-                                  /*buf=*/iovecs_[bufIndex].iov_base,
+                                  /*fd=*/0,
+                                  /*buf=*/ptr,
                                   /*nbytes=*/lenBytes,
                                   /*offset=*/static_cast<off_t>(fileOffsetBytes),
                                   /*buf_index=*/bufIndex);
-        sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = userData;
 
-        // We do NOT call io_uring_submit() here so the caller can batch.
-        // Caller should call submit() / flush()
+        sqe->flags |= IOSQE_FIXED_FILE;
+        sqe->user_data = nextSeq();
         return true;
     }
+
+    // // Submit an async write using:
+    // // - a registered fixed buffer (bufIndex),
+    // // - the registered dump file as a fixed file,
+    // // - O_DIRECT semantics (alignment enforced here).
+    // //
+    // // Returns true if the SQE was queued successfully.
+    // // Returns false if the SQ ring is full (caller should drain completions and retry).
+    // //
+    // // Notes:
+    // // - Completion result will be available via CQE with cqe->user_data == userData.
+    // // - On completion, cqe->res is bytes written (>=0) or -errno (<0).
+    // bool submitWriteFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, ) {
+    //     if (!buffersRegistered_) {
+    //         throw std::runtime_error("submitWriteFixed: no registered buffers");
+    //     }
+    //     if (!fileRegistered_) {
+    //         throw std::runtime_error("submitWriteFixed: no registered file");
+    //     }
+    //     if (bufIndex >= iovecs_.size()) {
+    //         throw std::runtime_error("submitWriteFixed: bufIndex out of range");
+    //     }
+    //     if (lenBytes == 0) {
+    //         throw std::runtime_error("submitWriteFixed: lenBytes is 0");
+    //     }
+    //
+    //     // O_DIRECT alignment constraints (common safe choice: 4k).
+    //     if ((fileOffsetBytes % kAlign) != 0) {
+    //         throw std::runtime_error("submitWriteFixed: fileOffsetBytes not 4k aligned");
+    //     }
+    //     if ((static_cast<std::uint64_t>(lenBytes) % kAlign) != 0) {
+    //         throw std::runtime_error("submitWriteFixed: lenBytes not multiple of 4k");
+    //     }
+    //     if (static_cast<std::size_t>(lenBytes) > iovecs_[bufIndex].iov_len) {
+    //         throw std::runtime_error("submitWriteFixed: lenBytes exceeds registered buffer length");
+    //     }
+    //
+    //     io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+    //     if (!sqe) {
+    //         return false;  // SQ full; caller should submit/drain and retry
+    //     }
+    //
+    //     // Use fixed buffer + fixed file.
+    //     //
+    //     // Important: io_uring_prep_write_fixed takes:
+    //     //   (sqe, fd, buf, nbytes, offset, buf_index)
+    //     //
+    //     // For fixed file, set IOSQE_FIXED_FILE and use fd=0 (index into registered files).
+    //     io_uring_prep_write_fixed(sqe,
+    //                               /*fd=*/0,  // fixed file index 0
+    //                               /*buf=*/iovecs_[bufIndex].iov_base,
+    //                               /*nbytes=*/lenBytes,
+    //                               /*offset=*/static_cast<off_t>(fileOffsetBytes),
+    //                               /*buf_index=*/bufIndex);
+    //     sqe->flags |= IOSQE_FIXED_FILE;
+    //     sqe->user_data = nextSeq();
+    //
+    //     // We do NOT call io_uring_submit() here so the caller can batch.
+    //     // Caller should call submit() / flush()
+    //     return true;
+    // }
 
     // Register a shard file for reading via O_DIRECT.
     // Replaces any previously registered file.
@@ -290,7 +342,7 @@ class UringDirect {
     // Submit an async read into a registered fixed buffer.
     //
     // Returns false if SQ ring is full (caller should submit/drain and retry).
-    bool submitReadFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, std::uint64_t userData) {
+    bool submitReadFixed(unsigned bufIndex, std::uint64_t fileOffsetBytes, std::uint32_t lenBytes, std::uint32_t bufOffsetBytes) {
         if (!buffersRegistered_) {
             throw std::runtime_error("submitReadFixed: no registered buffers");
         }
@@ -319,15 +371,16 @@ class UringDirect {
         if (!sqe)
             return false;
 
-        // Fixed file index 0 + fixed buffer index bufIndex.
+        // Fixed file index 0 + fixed buffer index bufIndex with offset.
+        void* ptr = static_cast<uint8_t*>(iovecs_[bufIndex].iov_base) + bufOffsetBytes;
         io_uring_prep_read_fixed(sqe,
                                  /*fd=*/0,  // fixed-file index 0
-                                 /*buf=*/iovecs_[bufIndex].iov_base,
+                                 /*buf=*/ptr,
                                  /*nbytes=*/lenBytes,
                                  /*offset=*/static_cast<off_t>(fileOffsetBytes),
                                  /*buf_index=*/bufIndex);
         sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = userData;
+        sqe->user_data = nextSeq();
 
         return true;  // caller batches and calls submit()
     }
@@ -345,6 +398,172 @@ class UringDirect {
         int responseCode = 0;  // >=0 bytes written, or -errno
     };
 
+    Completion waitCompletionInOrder() {
+        // Fast path: already have the next one buffered.
+        auto it = pending_.find(nextDeliverSeq_);
+        if (it != pending_.end()) {
+            Completion out = it->second;
+            pending_.erase(it);
+            ++nextDeliverSeq_;
+            return out;
+        }
+
+        // Otherwise, keep pulling CQEs until we see nextDeliverSeq_.
+        while (true) {
+            Completion c = waitCompletion();  // your existing primitive
+
+            // If this is exactly the one we need, deliver it immediately.
+            if (c.userData == nextDeliverSeq_) {
+                ++nextDeliverSeq_;
+                return c;
+            }
+
+            // Otherwise stash it (out-of-order completion).
+            auto [insIt, inserted] = pending_.emplace(c.userData, c);
+            if (!inserted) {
+                // Duplicate userData indicates bug in caller's sequence or reuse while in flight.
+                throw std::runtime_error("waitCompletionInOrder: duplicate completion userData=" + std::to_string(c.userData));
+            }
+
+            // Loop until we can deliver nextDeliverSeq_
+            auto ready = pending_.find(nextDeliverSeq_);
+            if (ready != pending_.end()) {
+                Completion out = ready->second;
+                pending_.erase(ready);
+                ++nextDeliverSeq_;
+                return out;
+            }
+        }
+    }
+
+    // Block until exactly targetCount completions are delivered in order.
+    std::vector<Completion> waitCompletionsInOrder(std::size_t targetCount) {
+        std::vector<Completion> out;
+        out.reserve(targetCount);
+        while (out.size() < targetCount) {
+            out.push_back(waitCompletionInOrder());
+        }
+        return out;
+    }
+
+    // Non-blocking: try to get the next completion in issue order.
+    // Returns nullopt if the next-in-order completion isn't available yet.
+    //
+    // Semantics:
+    // - May consume CQEs out of order and buffer them internally.
+    // - Only returns a completion when userData == nextDeliverSeq_ (the head of line).
+    std::optional<Completion> pollCompletionInOrder() {
+        // Fast-path: already have the next one buffered.
+        if (auto it = pending_.find(nextDeliverSeq_); it != pending_.end()) {
+            Completion out = it->second;
+            pending_.erase(it);
+            ++nextDeliverSeq_;
+            return out;
+        }
+
+        // Pull as many ready CQEs as are currently available (non-blocking)
+        // and stash them in pending_.
+        for (;;) {
+            io_uring_cqe* cqe = nullptr;
+            int rc = io_uring_peek_cqe(&ring_, &cqe);
+
+            if (rc == -EAGAIN || cqe == nullptr) {
+                break;  // no more CQEs ready right now
+            }
+            if (rc < 0) {
+                throw std::runtime_error(std::string("io_uring_peek_cqe failed: ") + std::strerror(-rc));
+            }
+
+            Completion c;
+            c.userData = cqe->user_data;
+            c.responseCode = cqe->res;
+
+            io_uring_cqe_seen(&ring_, cqe);
+
+            // Stash; userData must be unique among in-flight ops.
+            auto [it, inserted] = pending_.emplace(c.userData, c);
+            if (!inserted) {
+                throw std::runtime_error("pollCompletionInOrder: duplicate completion userData=" + std::to_string(c.userData));
+            }
+
+            // If we just received the head-of-line, we can stop early and return it.
+            if (c.userData == nextDeliverSeq_) {
+                break;
+            }
+        }
+
+        // Try again: do we now have the head-of-line?
+        if (auto it = pending_.find(nextDeliverSeq_); it != pending_.end()) {
+            Completion out = it->second;
+            pending_.erase(it);
+            ++nextDeliverSeq_;
+            return out;
+        }
+
+        return std::nullopt;
+    }
+
+    // Non-blocking: return up to maxCount completions that are complete *in order*.
+    // Stops early if the next-in-order completion is not available yet (even if later ones are ready).
+    std::vector<Completion> pollCompletionsInOrder(std::size_t maxCount = SIZE_MAX) {
+        std::vector<Completion> out;
+        if (maxCount == 0)
+            return out;
+
+        out.reserve(maxCount == SIZE_MAX ? 64 : maxCount);
+
+        while (out.size() < maxCount) {
+            auto one = pollCompletionInOrder();
+            if (!one.has_value())
+                break;
+            out.push_back(*one);
+        }
+        return out;
+    }
+
+    // Returns the completion for the fsync op (res == 0 on success, -errno on failure).
+    Completion finishDumpedFile(bool dataOnly = false) {
+        if (!fileRegistered_ || fd_ < 0) {
+            throw std::runtime_error("finishDumpedFile: no registered/open file");
+        }
+
+        // Get an SQE; if full, submit and wait for one completion, then retry once.
+        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
+        if (!sqe) {
+            // push any pending SQEs
+            submit();
+            // wait for any completion to free CQ/SQ pressure
+            (void)waitCompletion();
+            sqe = io_uring_get_sqe(&ring_);
+            if (!sqe) {
+                throw std::runtime_error("finishDumpedFile: SQ ring still full");
+            }
+        }
+
+        unsigned fsyncFlags = dataOnly ? IORING_FSYNC_DATASYNC : 0;
+
+        // Use fixed-file index 0 (since registerDumpFile registers exactly one fd)
+        io_uring_prep_fsync(sqe, /*fd=*/0, fsyncFlags);
+        sqe->flags |= IOSQE_FIXED_FILE;
+        sqe->user_data = nextSeq();
+
+        submit();
+
+        Completion c = waitCompletion();
+        if (c.responseCode < 0) {
+            throw std::runtime_error(std::string("finishDumpedFile: fsync failed: ") + std::strerror(-c.responseCode));
+        }
+
+        return c;
+    }
+
+    // Accessors for later stages (submission/completion code).
+    io_uring* ring() { return &ring_; }
+    int fd() const { return fd_; }
+    bool buffersRegistered() const { return buffersRegistered_; }
+    bool fileRegistered() const { return fileRegistered_; }
+
+   protected:
     // Non-blocking: try to get one completion.
     // Returns std::nullopt if none are available.
     std::optional<Completion> pollCompletion() {
@@ -399,66 +618,20 @@ class UringDirect {
         return out;
     }
 
-    // Block until at least targetCount completions have been collected.
+    // Block until exactly targetCount completions have been collected.
     // This is useful for backpressure: wait until you free enough in-flight slots.
     std::vector<Completion> waitCompletions(std::size_t targetCount) {
+        if (targetCount == 0)
+            return {};
+
         std::vector<Completion> out;
         out.reserve(targetCount);
 
         while (out.size() < targetCount) {
             out.push_back(waitCompletion());
-            // After the first blocking wait, we can greedily drain any extras that arrived.
-            for (;;) {
-                auto one = pollCompletion();
-                if (!one)
-                    break;
-                out.push_back(*one);
-            }
         }
         return out;
     }
-
-    // Returns the completion for the fsync op (res == 0 on success, -errno on failure).
-    Completion finishDumpedFile(std::uint64_t userData = 0, bool dataOnly = false) {
-        if (!fileRegistered_ || fd_ < 0) {
-            throw std::runtime_error("finishDumpedFile: no registered/open file");
-        }
-
-        // Get an SQE; if full, submit and wait for one completion, then retry once.
-        io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-        if (!sqe) {
-            // push any pending SQEs
-            submit();
-            // wait for any completion to free CQ/SQ pressure
-            (void)waitCompletion();
-            sqe = io_uring_get_sqe(&ring_);
-            if (!sqe) {
-                throw std::runtime_error("finishDumpedFile: SQ ring still full");
-            }
-        }
-
-        unsigned fsyncFlags = dataOnly ? IORING_FSYNC_DATASYNC : 0;
-
-        // Use fixed-file index 0 (since registerDumpFile registers exactly one fd)
-        io_uring_prep_fsync(sqe, /*fd=*/0, fsyncFlags);
-        sqe->flags |= IOSQE_FIXED_FILE;
-        sqe->user_data = userData;
-
-        submit();
-
-        Completion c = waitCompletion();
-        if (c.responseCode < 0) {
-            throw std::runtime_error(std::string("finishDumpedFile: fsync failed: ") + std::strerror(-c.responseCode));
-        }
-
-        return c;
-    }
-
-    // Accessors for later stages (submission/completion code).
-    io_uring* ring() { return &ring_; }
-    int fd() const { return fd_; }
-    bool buffersRegistered() const { return buffersRegistered_; }
-    bool fileRegistered() const { return fileRegistered_; }
 
    private:
     static bool isAligned(const void* p, std::size_t align) {
@@ -483,6 +656,8 @@ class UringDirect {
         other.fileRegistered_ = false;
     }
 
+    uint64_t nextSeq() { return nextIssueSeq_++; }
+
     io_uring ring_{};
     bool ringInited_ = false;
 
@@ -491,4 +666,9 @@ class UringDirect {
     std::vector<iovec> iovecs_;
     bool buffersRegistered_ = false;
     bool fileRegistered_ = false;
+
+    std::unordered_map<uint64_t, Completion> pending_;
+    static constexpr uint64_t SEQUENCE_START = 1000;
+    uint64_t nextIssueSeq_ = SEQUENCE_START;
+    uint64_t nextDeliverSeq_ = SEQUENCE_START;
 };
