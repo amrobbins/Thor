@@ -564,6 +564,23 @@ void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffs
     assert(cudaStatus == cudaSuccess);
 }
 
+void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
+    assert(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+    assert(stream.getGpuNum() == dest.getPlacement().getDeviceNum());
+
+    // Check that access is within range
+    uint64_t sourceArraySizeBytes = descriptor.getArraySizeInBytes();
+    uint64_t destArraySizeBytes = dest.descriptor.getArraySizeInBytes();
+    assert(sourceOffset + sizeBytes <= sourceArraySizeBytes);
+    assert(destOffset + sizeBytes <= destArraySizeBytes);
+
+    uint8_t *sourceMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
+    uint8_t *destMemBytes = static_cast<uint8_t *>(dest.getMemPtr<void>());
+    cudaError_t cudaStatus =
+        cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyHostToDevice, stream.getStream());
+    assert(cudaStatus == cudaSuccess);
+}
+
 // If the tensor changes datatypes such that the size changes, then stream must be on the device with the larger tensor size.
 // Otherwise stream may be on either device
 void Tensor::moveFromAsync(Tensor source, Stream stream) {
@@ -795,7 +812,7 @@ void Tensor::dumpToFile(Stream stream) {
     }
 }
 
-TensorDescriptor Tensor::getDescriptor() {
+TensorDescriptor Tensor::getDescriptor() const {
     assert(!uninitialized());
 
     if (descriptorOverridden)

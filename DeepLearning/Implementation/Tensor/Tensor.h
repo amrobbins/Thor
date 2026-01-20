@@ -77,7 +77,7 @@ class Tensor : private ReferenceCounted {
     void setElement(std::vector<unsigned long> dimensionIndex, const ElementDataType &value);
     template <typename ElementDataType = void>
     ElementDataType *getElementPointer(std::vector<unsigned long> dimensionIndex);
-    TensorDescriptor getDescriptor();
+    TensorDescriptor getDescriptor() const;
 
     unsigned long getTensorId() { return instanceId; }
 
@@ -86,6 +86,7 @@ class Tensor : private ReferenceCounted {
     void moveFromAsync(Tensor source, Stream stream);
 
     void downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
+    void uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
 
     enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
     void attachFile(const std::string &fileName,

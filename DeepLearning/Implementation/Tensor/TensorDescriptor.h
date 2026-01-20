@@ -187,10 +187,10 @@ class TensorDescriptor {
         return false;
     }
 
-    DataType getDataType() { return dataType; }
-    std::vector<unsigned long> getDimensions() { return dimensions; }
-    unsigned int getNumDimensions() { return dimensions.size(); }
-    unsigned long getTotalNumElements() { return totalNumElements; }
+    DataType getDataType() const { return dataType; }
+    std::vector<unsigned long> getDimensions() const { return dimensions; }
+    unsigned int getNumDimensions() const { return dimensions.size(); }
+    unsigned long getTotalNumElements() const { return totalNumElements; }
 
     std::string toString() const {
         std::string s = std::string("DataType ") + getElementTypeName(dataType) + "\nDimensions [";

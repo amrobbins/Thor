@@ -293,7 +293,7 @@ class UringDirect {
 
     // Register a shard file for reading via O_DIRECT.
     // Replaces any previously registered file.
-    void registerReadFile(const std::string& path) {
+    void registerLoadFile(const std::string& path) {
         // Unregister/close previous
         if (fileRegistered_) {
             int rc = io_uring_unregister_files(&ring_);

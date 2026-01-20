@@ -301,7 +301,7 @@ TEST(UringDirect, PrefetchReadLoop) {
     }
 
     UringDirect reader;
-    reader.registerReadFile(filename);
+    reader.registerLoadFile(filename);
 
     std::vector<void*> readMem = {
         readBuffers[0].getMemPtr(), readBuffers[1].getMemPtr(), readBuffers[2].getMemPtr(), readBuffers[3].getMemPtr()};
@@ -555,7 +555,7 @@ TEST(UringDirectPerf, SequentialWriteRead) {
             rPtrs.push_back(rbufs[i].getMemPtr());
 
         UringDirect ur(static_cast<unsigned>(ringDepth));
-        ur.registerReadFile(filename);
+        ur.registerLoadFile(filename);
         ur.registerReusableBuffers(rPtrs, std::vector<std::size_t>(numBufs, static_cast<std::size_t>(chunkBytes)));
 
         // Warm-up: a few chunks

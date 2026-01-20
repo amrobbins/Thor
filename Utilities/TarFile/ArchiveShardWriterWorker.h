@@ -1,16 +1,19 @@
 #pragma once
 
-#include "Crc32c.h"
+#include "Crc32.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TarFile/TarArchive.h"
 #include "Utilities/TarFile/TarHeaderHelper.h"
 #include "Utilities/TarFile/UringDirect.h"
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
-#include "TarWriter.h"
 
 /*
- Async read from gpu memory (cuda) and async write to disk (io_uring).
- CRC32C via CPU accelerated msse4.2 instructions.
+ Async read from gpu memory (cuda to pinned cpu buffer) and async write to disk (io_uring in O_DIRECT mode).
+ Double buffered to prefetch.
+ CRC32 zlib-ng zng_crc32_z parallel carryless multiply - it's free not a limiting factor.
+ 5 workers in a thread pool.
+ Can hit upwards of 100 GBPS dumped to disk with memory bandwidth and storage hardware that can handle that.
 
  Other than pipelining async operations, the additional difficulty is that writes
  to disk must be in chunks of exactly 4KB (2^12) bytes (no option to pad) and files
@@ -48,15 +51,13 @@
  | consume0 | consume1 | consume1 | consume0 | payload                 |      1      |
  |       consume1      | consume0 | consume0 | prior tail              |      0      |
  |       consume1      | consume0 | consume0 | prior pad + next header |      0      |
- | consume1 | post     | consume0 | post     | payload                 |      0      |
+ | consume1 | post     | post     | post     | payload                 |      0      |
  |       post          | post     | post     | prior tail              |      0      |
  |       post          | post     | post     | prior pad + tar ending  |      0      |
  -------------------------------------------------------------------------------------
 
-
-
-
  */
+
 struct ArchiveFileWriteParams {
     ThorImplementation::Tensor deviceTensor;
 
@@ -64,12 +65,6 @@ struct ArchiveFileWriteParams {
     uint64_t numBytes;
     std::string path_in_tar;
 };
-
-static constexpr uint32_t fiveHundredMB = (uint32_t(1) << 29);
-static constexpr uint32_t thirtyTwoK = (uint32_t(1) << 15);
-static constexpr uint32_t fourKBAligned = ~((uint32_t(1) << 12) - 1);
-// 500MB for prefetch from GPU. 28kb for tar separators. 4kb for tail-carry.
-static constexpr uint32_t fiveHundredMBPlusTail = fiveHundredMB + thirtyTwoK;
 
 enum class WriterState {
     INITIAL,
@@ -188,8 +183,8 @@ class ArchiveShardWriterWorker {
                                                                      numTailPadAndHeaderBytes);
 
                 // Compute CRC of the payload part of loadedBuffer
-                uint32_t crc = thor_file::Crc32c::compute((uint8_t*)bounceBufferMem[loadedBuffer] + loadedBufferTailPadAndHeaderBytes,
-                                                          plan[i - 1].numBytes);
+                uint32_t crc = crc32_ieee(
+                    0xFFFFFFFF, (uint8_t*)bounceBufferMem[loadedBuffer] + loadedBufferTailPadAndHeaderBytes, plan[i - 1].numBytes);
                 crcs.push_back(crc);
 
                 if (plan.size() == i + 1) {
@@ -235,8 +230,8 @@ class ArchiveShardWriterWorker {
         assert((numTailPadAndHeaderBytes & fourKLeftoverMask) == 0);
 
         // Compute CRC of the payload part of final buffer
-        uint32_t crc = thor_file::Crc32c::compute((uint8_t*)bounceBufferMem[finalFetchingBuffer] + loadedBufferTailPadAndHeaderBytes,
-                                                  plan[plan.size() - 1].numBytes);
+        uint32_t crc = crc32_ieee(
+            0xFFFFFFFF, (uint8_t*)bounceBufferMem[finalFetchingBuffer] + loadedBufferTailPadAndHeaderBytes, plan[plan.size() - 1].numBytes);
         crcs.push_back(crc);
 
         // Wait for dump from prior stage out of free buffer to finish
