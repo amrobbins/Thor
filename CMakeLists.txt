@@ -274,8 +274,9 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 enable_testing()
 
-# For fast CRC
+# For fast CRC (REQUIRE zlib-ng native API)
 include(FetchContent)
+include(CheckCXXSourceCompiles)
 
 FetchContent_Declare(zlibng
         GIT_REPOSITORY https://github.com/zlib-ng/zlib-ng.git
@@ -283,14 +284,16 @@ FetchContent_Declare(zlibng
 )
 
 # zlib-ng options (set BEFORE MakeAvailable)
-set(ZLIB_COMPAT OFF CACHE BOOL "" FORCE)
+set(ZLIB_COMPAT OFF CACHE BOOL "" FORCE)        # want <zlib-ng.h> + zng_* API
 set(ZLIB_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
 
-# These exist and control compiling the CLMUL paths (zlib-ng will still runtime-dispatch):
+# Compile the CLMUL/VPCLMUL codepaths (runtime dispatch still happens)
 set(WITH_PCLMULQDQ ON CACHE BOOL "" FORCE)
 set(WITH_VPCLMULQDQ ON CACHE BOOL "" FORCE)
+
 FetchContent_MakeAvailable(zlibng)
 
+# Find the actual target name exported by zlib-ng
 set(ZLIBNG_TARGET "")
 foreach (tgt IN ITEMS zlib-ng::zlib-ng zlibstatic-ng zlib-ng zlibstatic)
     if (TARGET ${tgt})
@@ -298,9 +301,80 @@ foreach (tgt IN ITEMS zlib-ng::zlib-ng zlibstatic-ng zlib-ng zlibstatic)
         break()
     endif ()
 endforeach ()
+
 if (ZLIBNG_TARGET STREQUAL "")
     message(FATAL_ERROR "Couldn't find zlib-ng CMake target after FetchContent.")
 endif ()
+
+# ---- Hard guarantee at CONFIGURE time (compile-only checks, no linking to CMake targets) ----
+# zlib-ng.h is often generated into the zlib-ng *build* dir, so include both.
+set(THOR_ZLIBNG_INCLUDE_DIRS
+        "${zlibng_BINARY_DIR}"
+        "${zlibng_SOURCE_DIR}"
+)
+
+set(CMAKE_REQUIRED_INCLUDES "${THOR_ZLIBNG_INCLUDE_DIRS}")
+
+# 1) Ensure this really is zlib-ng (recommended compile-time distinguisher)
+check_cxx_source_compiles([=[
+  #include <zlib-ng.h>
+  #ifndef ZLIBNG_VERSION
+  #error "Not zlib-ng"
+  #endif
+  int main() { return 0; }
+]=] THOR_ZLIBNG_HEADER_OK)
+
+if (NOT THOR_ZLIBNG_HEADER_OK)
+    message(FATAL_ERROR
+            "zlib-ng requirement failed: <zlib-ng.h> not from zlib-ng (ZLIBNG_VERSION missing). "
+            "Check include paths; we expect zlib-ng from FetchContent.")
+endif ()
+
+# 2) Prefer zng_crc32_z (size_t len). If not present, accept zng_crc32.
+check_cxx_source_compiles([=[
+  #include <zlib-ng.h>
+  #include <cstddef>
+  #include <cstdint>
+  #ifndef ZLIBNG_VERSION
+  #error "Not zlib-ng"
+  #endif
+  using r = decltype(zng_crc32_z((uint32_t)0, (const uint8_t*)0, (size_t)0));
+  int main() { return 0; }
+]=] THOR_ZLIBNG_HAS_CRC32_Z)
+
+if (NOT THOR_ZLIBNG_HAS_CRC32_Z)
+    check_cxx_source_compiles([=[
+    #include <zlib-ng.h>
+    #include <cstdint>
+    #ifndef ZLIBNG_VERSION
+    #error "Not zlib-ng"
+    #endif
+    using r = decltype(zng_crc32((uint32_t)0, (const uint8_t*)0, (unsigned)0));
+    int main() { return 0; }
+  ]=] THOR_ZLIBNG_HAS_CRC32)
+endif ()
+
+if (NOT THOR_ZLIBNG_HAS_CRC32_Z AND NOT THOR_ZLIBNG_HAS_CRC32)
+    message(FATAL_ERROR
+            "zlib-ng requirement failed: header is zlib-ng, but neither zng_crc32_z nor zng_crc32 is declared.")
+endif ()
+
+# Convert to 0/1 for C/C++ preprocessor
+set(THOR_ZLIBNG_HAS_CRC32_Z_INT 0)
+if (THOR_ZLIBNG_HAS_CRC32_Z)
+    set(THOR_ZLIBNG_HAS_CRC32_Z_INT 1)
+endif ()
+
+target_link_libraries(Thor PRIVATE ${ZLIBNG_TARGET})
+
+target_include_directories(Thor PRIVATE ${THOR_ZLIBNG_INCLUDE_DIRS})
+
+# Hard compile-time contract + feature flag
+target_compile_definitions(Thor PRIVATE
+        THOR_REQUIRE_ZLIBNG=1
+        THOR_ZLIBNG_HAS_CRC32_Z=${THOR_ZLIBNG_HAS_CRC32_Z_INT}
+)
+
 
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})

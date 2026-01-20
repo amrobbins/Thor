@@ -32,7 +32,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
-#include "Utilities/TarFile/Crc32c.h"
+#include "Utilities/TarFile/Crc32.h"
 #include "Utilities/TarFile/UringDirect.h"
 
 #include "Utilities/TarFile/ArchiveShardWriterWorker.h"
@@ -107,7 +107,6 @@ static void fillPattern(uint8_t* p, uint64_t n, uint32_t seed) {
 #pragma omp parallel for schedule(static)
     for (uint64_t i = 0; i < n; ++i) {
         uint32_t x = uint32_t(i) ^ seed;
-        // simple mixing (not crypto, just non-trivial)
         x ^= x >> 16;
         x *= 0x7feb352dU;
         x ^= x >> 15;
@@ -159,24 +158,6 @@ static bool listingHasLine(const std::string& listing, const std::string& needle
 }
 
 TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc) {
-    // if (!env_bool("RUN_TAR_INTEROP", false)) {
-    //     GTEST_SKIP() << "Set RUN_TAR_INTEROP=1 to run tar interop tests";
-    // }
-
-    // Require tar
-    {
-        int rc = 0;
-        (void)runCommandCaptureStdout("tar --version >/dev/null 2>&1", &rc);
-        if (rc != 0)
-            GTEST_SKIP() << "`tar` not available on PATH";
-    }
-
-    // Require CUDA device
-    int devCount = 0;
-    if (cudaGetDeviceCount(&devCount) != cudaSuccess || devCount <= 0) {
-        GTEST_SKIP() << "No CUDA device available";
-    }
-
     using namespace ThorImplementation;
 
     const uint64_t bytes = uint64_t(1) << 24;  // 16 MiB (big enough to force 4K-aligned dumping)
@@ -201,7 +182,7 @@ TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc)
     worker.process(plan, archivePath, crcs);
 
     ASSERT_EQ(crcs.size(), plan.size());
-    EXPECT_EQ(crcs[0], thor_file::Crc32c::compute(expected.data(), bytes));
+    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
 
     // Archive should end 4KB aligned (your appendTarEndOfArchive ensures this)
     ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
@@ -228,24 +209,6 @@ TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc)
 }
 
 TEST(ArchiveShardWriterWorker, MultiFile_IncludingOverlongName_ValidTarAndCorrectPayloadsAndCrcs) {
-    // if (!env_bool("RUN_TAR_INTEROP", false)) {
-    //     GTEST_SKIP() << "Set RUN_TAR_INTEROP=1 to run tar interop tests";
-    // }
-
-    // Require tar
-    {
-        int rc = 0;
-        (void)runCommandCaptureStdout("tar --version >/dev/null 2>&1", &rc);
-        if (rc != 0)
-            GTEST_SKIP() << "`tar` not available on PATH";
-    }
-
-    // Require CUDA device
-    int devCount = 0;
-    if (cudaGetDeviceCount(&devCount) != cudaSuccess || devCount <= 0) {
-        GTEST_SKIP() << "No CUDA device available";
-    }
-
     using namespace ThorImplementation;
 
     const uint64_t bytes = (uint64_t(1) << 24) + 123;  // 16 MiB + 123 (exercises TAR 512 padding)
@@ -287,9 +250,9 @@ TEST(ArchiveShardWriterWorker, MultiFile_IncludingOverlongName_ValidTarAndCorrec
     worker.process(plan, archivePath, crcs);
 
     ASSERT_EQ(crcs.size(), plan.size());
-    EXPECT_EQ(crcs[0], thor_file::Crc32c::compute(expected0.data(), bytes));
-    EXPECT_EQ(crcs[1], thor_file::Crc32c::compute(expected1.data(), bytes));
-    EXPECT_EQ(crcs[2], thor_file::Crc32c::compute(expected2.data(), bytes));
+    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected0.data(), bytes));
+    EXPECT_EQ(crcs[1], crc32_ieee(0xFFFFFFFF, expected1.data(), bytes));
+    EXPECT_EQ(crcs[2], crc32_ieee(0xFFFFFFFF, expected2.data(), bytes));
 
     // 4KB-aligned final size
     ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
@@ -321,24 +284,6 @@ TEST(ArchiveShardWriterWorker, MultiFile_IncludingOverlongName_ValidTarAndCorrec
 }
 
 TEST(ArchiveShardWriterWorker, SingleFile_ExactlyFiveMillionBytes_WritesValidTarAndCorrectPayloadAndCrc) {
-    // if (!env_bool("RUN_TAR_INTEROP", false)) {
-    //     GTEST_SKIP() << "Set RUN_TAR_INTEROP=1 to run tar interop tests";
-    // }
-
-    // Require tar
-    {
-        int rc = 0;
-        (void)runCommandCaptureStdout("tar --version >/dev/null 2>&1", &rc);
-        if (rc != 0)
-            GTEST_SKIP() << "`tar` not available on PATH";
-    }
-
-    // Require CUDA device
-    int devCount = 0;
-    if (cudaGetDeviceCount(&devCount) != cudaSuccess || devCount <= 0) {
-        GTEST_SKIP() << "No CUDA device available";
-    }
-
     using namespace ThorImplementation;
 
     const uint64_t bytes = 5'000'000ULL;  // exactly 5 million bytes (not 512- or 4K-aligned)
@@ -363,7 +308,7 @@ TEST(ArchiveShardWriterWorker, SingleFile_ExactlyFiveMillionBytes_WritesValidTar
     worker.process(plan, archivePath, crcs);
 
     ASSERT_EQ(crcs.size(), 1u);
-    EXPECT_EQ(crcs[0], thor_file::Crc32c::compute(expected.data(), bytes));
+    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
 
     // Your writer should still end on a 4KB boundary due to appendTarEndOfArchive(...)
     ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
@@ -390,24 +335,6 @@ TEST(ArchiveShardWriterWorker, SingleFile_ExactlyFiveMillionBytes_WritesValidTar
 }
 
 TEST(ArchiveShardWriterWorker, TwoFiles_100MB_And_500MB_WritesValidTarAndCorrectPayloadsAndCrcs) {
-    // if (!env_bool("RUN_TAR_INTEROP", false)) {
-    //     GTEST_SKIP() << "Set RUN_TAR_INTEROP=1 to run tar interop tests";
-    // }
-
-    // Require tar
-    {
-        int rc = 0;
-        (void)runCommandCaptureStdout("tar --version >/dev/null 2>&1", &rc);
-        if (rc != 0)
-            GTEST_SKIP() << "`tar` not available on PATH";
-    }
-
-    // Require CUDA device
-    int devCount = 0;
-    if (cudaGetDeviceCount(&devCount) != cudaSuccess || devCount <= 0) {
-        GTEST_SKIP() << "No CUDA device available";
-    }
-
     using namespace ThorImplementation;
 
     const uint64_t oneHundredMB = 100'000'000ULL;
@@ -444,8 +371,8 @@ TEST(ArchiveShardWriterWorker, TwoFiles_100MB_And_500MB_WritesValidTarAndCorrect
     worker.process(plan, archivePath, crcs);
 
     ASSERT_EQ(crcs.size(), 2u);
-    EXPECT_EQ(crcs[0], thor_file::Crc32c::compute(expected0.data(), oneHundredMB));
-    EXPECT_EQ(crcs[1], thor_file::Crc32c::compute(expected1.data(), fiveHundredMB));
+    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected0.data(), oneHundredMB));
+    EXPECT_EQ(crcs[1], crc32_ieee(0xFFFFFFFF, expected1.data(), fiveHundredMB));
 
     // Should end on a 4KB boundary due to appendTarEndOfArchive(...)
     ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);

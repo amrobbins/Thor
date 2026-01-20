@@ -80,3 +80,10 @@ inline std::string shard_filename(const std::string& prefix, uint32_t shard_idx)
 }
 
 }  // namespace thor_file
+
+static constexpr uint32_t fiveHundredMB = (uint32_t(1) << 29);
+static constexpr uint32_t thirtyTwoK = (uint32_t(1) << 15);
+static constexpr uint32_t fourKBMask = (uint32_t(1) << 12) - 1;
+static constexpr uint32_t fourKBAligned = ~fourKBMask;
+// 500MB for payload-ish, plus slack for prefix alignment and safety.
+static constexpr uint32_t fiveHundredMBPlusTail = fiveHundredMB + thirtyTwoK;
