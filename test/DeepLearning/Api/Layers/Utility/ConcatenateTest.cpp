@@ -13,7 +13,7 @@ using json = nlohmann::json;
 TEST(UtilityApiLayers, ConcatenateBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     uint32_t numDimensions = 1 + (rand() % 4);
     uint32_t concatenationAxis = rand() % numDimensions;
@@ -105,7 +105,7 @@ TEST(UtilityApiLayers, ConcatenateBuilds) {
 TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Stream stream(0);
 
     uint32_t numDimensions = 1 + (rand() % 4);
@@ -163,7 +163,7 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json concatenateJ = concatenate.serialize(archiveWriter, stream);
 
@@ -221,12 +221,17 @@ TEST(UtilityApiLayers, ConcatenateSerializeDeserialize) {
     ////////////////////////////
     // Deserialize
     ////////////////////////////
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
     for (uint32_t t = 0; t < numTensors; ++t)
         NetworkInput::deserialize(networkInputJs[t], &newNetwork);
 
-    archiveWriter.finishArchive();
+    // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+    ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
+    archiveWriter.addArchiveFile("dummy", dummyData);
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, concatenateJ, &newNetwork);

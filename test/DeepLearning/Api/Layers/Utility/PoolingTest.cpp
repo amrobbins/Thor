@@ -13,7 +13,7 @@ using json = nlohmann::json;
 TEST(UtilityApiLayers, PoolingNoPaddingBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 3;
@@ -100,7 +100,7 @@ TEST(UtilityApiLayers, DISABLED_PoolingSamePaddingBuilds) {
     srand(time(nullptr));
 
     for (int test = 0; test < 50; ++test) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         int numDimensions = 3;
@@ -194,7 +194,7 @@ TEST(UtilityApiLayers, DISABLED_PoolingSamePaddingBuilds) {
 TEST(UtilityApiLayers, PoolingDefaultPaddingBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 3;
@@ -279,7 +279,7 @@ TEST(UtilityApiLayers, PoolingDefaultPaddingBuilds) {
 TEST(UtilityApiLayers, PoolingSpecifiedPaddingBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 3;
@@ -368,7 +368,7 @@ TEST(UtilityApiLayers, PoolingSpecifiedPaddingBuilds) {
 TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Stream stream(0);
 
     vector<uint64_t> dimensions;
@@ -409,7 +409,7 @@ TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json poolingJ = pooling.serialize(archiveWriter, stream);
 
@@ -455,9 +455,15 @@ TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
     ////////////////////////////
     // Deserialize
     ////////////////////////////
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+    ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
+    archiveWriter.addArchiveFile("dummy", dummyData);
+
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

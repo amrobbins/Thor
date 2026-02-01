@@ -4,8 +4,7 @@ using namespace Thor;
 using namespace std;
 
 Network buildSingleLayerConvolution2d() {
-    Network singleLayerConvolution2d;
-    singleLayerConvolution2d.setNetworkName("singleLayerConvolution2d");
+    Network singleLayerConvolution2d("singleLayerConvolution2d");
 
     vector<uint64_t> expectedDimensions;
 

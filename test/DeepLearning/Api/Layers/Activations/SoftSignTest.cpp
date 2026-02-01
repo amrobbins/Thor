@@ -16,7 +16,7 @@ using json = nlohmann::json;
 TEST(Activations, SoftSignBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
@@ -67,7 +67,7 @@ TEST(Activations, SoftSignBuilds) {
 TEST(Activations, SoftSignSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
@@ -121,7 +121,7 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json softSignJ = softSign->serialize(archiveWriter, stream);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -164,7 +164,7 @@ TEST(Activations, SoftSignSerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
     NetworkInput::deserialize(networkInputJ, &newNetwork);
     SoftSign::deserialize(softSignJ, &newNetwork);
@@ -208,7 +208,7 @@ TEST(Activations, SoftSignSerializeDeserialize) {
 TEST(Activations, SoftSignRegistered) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
@@ -230,14 +230,14 @@ TEST(Activations, SoftSignRegistered) {
 
     ASSERT_TRUE(softSign->isInitialized());
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
     Stream stream(0);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
     json softSignJ = softSign->serialize(archiveWriter, stream);
     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
-    Network newNetwork;
+    Network newNetwork("newNetwork");
     NetworkInput::deserialize(networkInputJ, &newNetwork);
     Activation::deserialize(softSignJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);

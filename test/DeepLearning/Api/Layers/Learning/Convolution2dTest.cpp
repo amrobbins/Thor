@@ -23,7 +23,7 @@ using namespace std;
 TEST(Convolution2d, SingleFeatureInputNoPaddingBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 3;
@@ -124,7 +124,7 @@ TEST(Convolution2d, SingleFeatureInputNoPaddingBuilds) {
 TEST(Convolution2d, SingleFeatureInputSpecifiedPaddingBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 3;
@@ -230,7 +230,7 @@ TEST(Convolution2d, DISABLED_SingleFeatureInputSamePaddingBuilds) {
     srand(time(nullptr));
 
     for (uint32_t test = 0; test < 25; ++test) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         int numDimensions = 3;
@@ -338,7 +338,7 @@ TEST(Convolution2d, DISABLED_SingleFeatureInputDefaultPaddingBuilds) {
     srand(time(nullptr));
 
     for (uint32_t test = 0; test < 25; ++test) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         int numDimensions = 3;
@@ -445,7 +445,7 @@ TEST(Convolution2d, DISABLED_SingleFeatureInputSamePaddingV2Builds) {
     srand(time(nullptr));
 
     for (uint32_t test = 0; test < 25; ++test) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         int numDimensions = 3;
@@ -553,7 +553,7 @@ TEST(Convolution2d, DISABLED_SingleFeatureInputSamePaddingV2Builds) {
 TEST(Convolution2d, MultipleFeatureInputsBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 3;
@@ -713,7 +713,7 @@ TEST(Convolution2d, SerializeDeserialize) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 2; ++t) {
-        Network initialNetwork;
+        Network initialNetwork("initialNetwork");
 
         Tensor::DataType dataType = Tensor::DataType::FP16;
 
@@ -844,7 +844,7 @@ TEST(Convolution2d, SerializeDeserialize) {
             biases.copyFromAsync(biasesCpu, stream);
         }
 
-        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+        thor_file::TarWriter archiveWriter("testModel");
 
         json flattenJ = flatten.serialize(archiveWriter, stream);
         json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
@@ -1025,9 +1025,9 @@ TEST(Convolution2d, SerializeDeserialize) {
         // Deserialize
         ////////////////////////////
         // Verify that the layer gets added to the network and that its weights are set to the correct values
-        Network newNetwork;
+        Network newNetwork("newNetwork");
 
-        archiveWriter.finishArchive();
+        archiveWriter.createArchive("/tmp/", true);
         shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
         Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

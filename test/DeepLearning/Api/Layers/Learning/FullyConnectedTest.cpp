@@ -23,7 +23,7 @@ using namespace std;
 TEST(FullyConnectedSingleFeatureInput, Builds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1;
@@ -97,7 +97,7 @@ TEST(FullyConnectedSingleFeatureInput, Builds) {
 TEST(FullyConnectedMultipleFeatureInputs, Builds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1;
@@ -195,7 +195,7 @@ TEST(FullyConnected, SerializeDeserialize) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 2; ++t) {
-        Network initialNetwork;
+        Network initialNetwork("initialNetwork");
 
         Tensor::DataType dataType = Tensor::DataType::FP16;
 
@@ -311,7 +311,7 @@ TEST(FullyConnected, SerializeDeserialize) {
             biases.copyFromAsync(biasesCpu, stream);
         }
 
-        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+        thor_file::TarWriter archiveWriter("testModel");
 
         json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
         json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -465,9 +465,9 @@ TEST(FullyConnected, SerializeDeserialize) {
         // Deserialize
         ////////////////////////////
         // Verify that the layer gets added to the network and that its weights are set to the correct values
-        Network newNetwork;
+        Network newNetwork("newNetwork");
 
-        archiveWriter.finishArchive();
+        archiveWriter.createArchive("/tmp/", true);
         shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
         // I will need to use thor-file to create the testModel archive first, with overwrite set to true

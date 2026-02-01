@@ -25,7 +25,7 @@ using namespace std;
 using namespace Thor;
 
 TEST(Network, SimplestNetworkProperlyFormed) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
@@ -139,7 +139,7 @@ TEST(Network, SimplestNetworkProperlyFormed) {
 }
 
 TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Initializer> glorot = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM).build();
 
@@ -248,7 +248,7 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
 }
 
 TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Initializer> glorot = Glorot::Builder().mode(ThorImplementation::Glorot::Mode::UNIFORM).build();
 
@@ -386,7 +386,7 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
 }
 
 TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Activation> reluAct = Relu::Builder().build();
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(2).maxValue(3).build();
@@ -499,7 +499,7 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
 }
 
 TEST(Network, BranchedNetworkProperlyFormed) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Activation> relu = Relu::Builder().build();
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();

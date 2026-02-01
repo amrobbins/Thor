@@ -18,7 +18,7 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsBatchLossBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         // API layer does not have a batch dimension
         vector<uint64_t> labelDimensions = {1};
@@ -110,7 +110,7 @@ TEST(CategoricalCrossEntropy, OneHotLabelsClasswiseLossBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         dimensions = {2UL + (rand() % 300)};
@@ -204,7 +204,7 @@ TEST(CategoricalCrossEntropy, OneHotLabelsElementwiseLossBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         dimensions = {2UL + (rand() % 300)};
@@ -299,7 +299,7 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> labelDimensions = {1};
         uint64_t numClasses = 2UL + (rand() % 1000);
@@ -389,7 +389,7 @@ TEST(CategoricalCrossEntropy, ClassIndexLabelsRawLossBuilds) {
 TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType predictionsDataType = Tensor::DataType::FP16;
     uint32_t numClasses = 2 + (rand() % 100);
     vector<uint64_t> inputDimensions = {numClasses};
@@ -502,7 +502,7 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     ASSERT_TRUE(softmaxFound);
     ASSERT_EQ(lossShaperFound, lossShape != 3);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
     json networkInputJ = predictionsInput.serialize(archiveWriter, stream);
@@ -576,9 +576,9 @@ TEST(CategoricalCrossEntropy, SerializeDeserialize) {
     // // Deserialize
     // ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

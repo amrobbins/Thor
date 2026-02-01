@@ -152,8 +152,7 @@ Tensor buildAlexnetConvolutionalPath(Network &alexNet, NetworkInput imagesInput)
 }
 
 Network buildAlexNet() {
-    Network alexNet;
-    alexNet.setNetworkName("AlexNet");
+    Network alexNet("AlexNet");
 
     vector<uint64_t> expectedDimensions;
 

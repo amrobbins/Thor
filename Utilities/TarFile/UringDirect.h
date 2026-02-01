@@ -553,6 +553,7 @@ class UringDirect {
         if (c.responseCode < 0) {
             throw std::runtime_error(std::string("finishDumpedFile: fsync failed: ") + std::strerror(-c.responseCode));
         }
+        ++nextDeliverSeq_;
 
         return c;
     }

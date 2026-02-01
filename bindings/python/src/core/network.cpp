@@ -14,11 +14,11 @@ void bind_network(nb::module_ &m) {
     auto network_class = nb::class_<Network>(m, "Network")
                              .def(
                                  "__init__",
-                                 [](Network *self) {
+                                 [](Network *self, const std::string &name) {
                                      // Create the network in the pre-allocated but uninitialized memory at self
-                                     new (self) Network();
+                                     new (self) Network(name);
                                  },
-
+                                 "name"_a,
                                  nb::sig("def __init__(self) -> None"),
 
                                  R"nbdoc(

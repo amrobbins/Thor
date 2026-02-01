@@ -16,7 +16,7 @@ using json = nlohmann::json;
 TEST(Activations, ExponentialBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
@@ -67,7 +67,7 @@ TEST(Activations, ExponentialBuilds) {
 TEST(Activations, ExponentialSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
@@ -121,7 +121,7 @@ TEST(Activations, ExponentialSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json exponentialJ = exponential->serialize(archiveWriter, stream);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -164,7 +164,7 @@ TEST(Activations, ExponentialSerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
     NetworkInput::deserialize(networkInputJ, &newNetwork);
     Exponential::deserialize(exponentialJ, &newNetwork);
@@ -208,7 +208,7 @@ TEST(Activations, ExponentialSerializeDeserialize) {
 TEST(Activations, ExponentialRegistered) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
@@ -230,14 +230,14 @@ TEST(Activations, ExponentialRegistered) {
 
     ASSERT_TRUE(exponential->isInitialized());
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
     Stream stream(0);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
     json exponentialJ = exponential->serialize(archiveWriter, stream);
     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
-    Network newNetwork;
+    Network newNetwork("newNetwork");
     NetworkInput::deserialize(networkInputJ, &newNetwork);
     Activation::deserialize(exponentialJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);

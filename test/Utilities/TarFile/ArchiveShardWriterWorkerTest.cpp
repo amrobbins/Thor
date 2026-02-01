@@ -4,7 +4,7 @@
 //  - Validates the resulting TAR with system `tar`:
 //      * tar -tf lists entries
 //      * tar -xOf extracts payload bytes exactly matching the source buffers
-//  - Validates returned CRCs match computed CRC32c of each payload
+//  - Validates returned CRCs match computed CRC32 of each payload
 //  - Validates output file ends on 4KB boundary (O_DIRECT-friendly)
 //
 // This test suite SKIPS unless RUN_TAR_INTEROP=1 is set.
@@ -166,30 +166,41 @@ TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc)
     std::vector<uint8_t> expected;
     Tensor deviceTensor = makeGpuTensorWithPayload(bytes, /*seed=*/7, expected);
 
-    std::vector<ArchiveFileWriteParams> plan;
-    plan.push_back(ArchiveFileWriteParams{
+    std::string archivePath = "archive_shard_single_" + std::to_string(::getpid()) + ".tar";
+    std::string absoluteArchivePath = "/tmp/" + archivePath;
+    ScopedUnlink cleanup(absoluteArchivePath);
+
+    std::mutex archiveIndexMutex;
+    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
+    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
+    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = deviceTensor,
         .offsetBytes = 0,
         .numBytes = bytes,  // this shard’s bytes
         .path_in_tar = pathInTar,
     });
+    plan.shardNumber = 3;
 
-    std::string archivePath = "/tmp/archive_shard_single_" + std::to_string(::getpid()) + ".tar";
-    ScopedUnlink cleanup(archivePath);
-
-    ArchiveShardWriterWorker worker;
+    thor_file::ArchiveShardWriterWorker worker(workerContext);
     std::vector<uint32_t> crcs;
-    worker.process(plan, archivePath, crcs);
+    worker.process(plan);
 
-    ASSERT_EQ(crcs.size(), plan.size());
-    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
+    // Verify the index was filled out and that the crc is correct
+    uint32_t expectedCrc = crc32_ieee(0xFFFFFFFF, expected.data(), bytes);
+    ASSERT_TRUE(archiveIndex.contains(pathInTar));
+    thor_file::EntryInfo entry = archiveIndex[pathInTar];
+    ASSERT_EQ(entry.crc, expectedCrc);
+    ASSERT_EQ(entry.shard, 3);
+    ASSERT_EQ(entry.size, bytes);
+    ASSERT_EQ(entry.data_offset, 512);
 
-    // Archive should end 4KB aligned (your appendTarEndOfArchive ensures this)
-    ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
+    // Archive should end 4KB aligned
+    ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
 
     // tar -tf lists entry
     {
-        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(archivePath);
+        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(absoluteArchivePath);
         int rc = 0;
         std::string listing = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -tf failed\ncmd: " << cmd << "\noutput:\n" << listing;
@@ -198,7 +209,7 @@ TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc)
 
     // tar -xOf extracts exact payload
     {
-        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(archivePath) + " " + shellEscapeDoubleQuoted(pathInTar);
+        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(absoluteArchivePath) + " " + shellEscapeDoubleQuoted(pathInTar);
         int rc = 0;
         std::string data = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -xOf failed\ncmd: " << cmd;
@@ -222,44 +233,67 @@ TEST(ArchiveShardWriterWorker, MultiFile_IncludingOverlongName_ValidTarAndCorrec
     Tensor t1 = makeGpuTensorWithPayload(bytes, /*seed=*/22, expected1);
     Tensor t2 = makeGpuTensorWithPayload(bytes, /*seed=*/33, expected2);
 
-    std::vector<ArchiveFileWriteParams> plan;
-    plan.push_back(ArchiveFileWriteParams{
+    std::string archivePath = "archive_shard_multi_" + std::to_string(::getpid()) + ".tar";
+    std::string absoluteArchivePath = "/tmp/" + archivePath;
+    ScopedUnlink cleanup(absoluteArchivePath);
+
+    std::mutex archiveIndexMutex;
+    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
+    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp/");
+    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    plan.shardNumber = 9;
+
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = t0,
         .offsetBytes = 0,
         .numBytes = bytes,
         .path_in_tar = path0,
     });
-    plan.push_back(ArchiveFileWriteParams{
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = t1,
         .offsetBytes = 0,
         .numBytes = bytes,
         .path_in_tar = path1,
     });
-    plan.push_back(ArchiveFileWriteParams{
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = t2,
         .offsetBytes = 0,
         .numBytes = bytes,
         .path_in_tar = path2,
     });
 
-    std::string archivePath = "/tmp/archive_shard_multi_" + std::to_string(::getpid()) + ".tar";
-    ScopedUnlink cleanup(archivePath);
+    thor_file::ArchiveShardWriterWorker worker(workerContext);
+    worker.process(plan);
 
-    ArchiveShardWriterWorker worker;
-    std::vector<uint32_t> crcs;
-    worker.process(plan, archivePath, crcs);
+    // Verify the index was filled out and that the crc is correct
+    thor_file::EntryInfo entry;
+    ASSERT_TRUE(archiveIndex.contains(path0));
+    entry = archiveIndex[path0];
+    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected0.data(), bytes));
+    ASSERT_EQ(entry.shard, 9);
+    ASSERT_EQ(entry.size, bytes);
+    ASSERT_EQ(entry.data_offset, 512);
 
-    ASSERT_EQ(crcs.size(), plan.size());
-    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected0.data(), bytes));
-    EXPECT_EQ(crcs[1], crc32_ieee(0xFFFFFFFF, expected1.data(), bytes));
-    EXPECT_EQ(crcs[2], crc32_ieee(0xFFFFFFFF, expected2.data(), bytes));
+    ASSERT_TRUE(archiveIndex.contains(path0));
+    entry = archiveIndex[path1];
+    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected1.data(), bytes));
+    ASSERT_EQ(entry.shard, 9);
+    ASSERT_EQ(entry.size, bytes);
+    ASSERT_EQ(entry.data_offset, 16779776);
+
+    ASSERT_TRUE(archiveIndex.contains(path2));
+    entry = archiveIndex[path2];
+    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected2.data(), bytes));
+    ASSERT_EQ(entry.shard, 9);
+    ASSERT_EQ(entry.size, bytes);
+    ASSERT_EQ(entry.data_offset, 33558016);
 
     // 4KB-aligned final size
-    ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
+    ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
 
     // tar -tf lists entries (including the PAX long path)
     {
-        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(archivePath);
+        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(absoluteArchivePath);
         int rc = 0;
         std::string listing = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -tf failed\ncmd: " << cmd << "\noutput:\n" << listing;
@@ -270,7 +304,7 @@ TEST(ArchiveShardWriterWorker, MultiFile_IncludingOverlongName_ValidTarAndCorrec
     }
 
     auto extractAndCompare = [&](const std::string& path, const std::vector<uint8_t>& expected) {
-        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(archivePath) + " " + shellEscapeDoubleQuoted(path);
+        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(absoluteArchivePath) + " " + shellEscapeDoubleQuoted(path);
         int rc = 0;
         std::string data = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -xOf failed\ncmd: " << cmd;
@@ -292,30 +326,41 @@ TEST(ArchiveShardWriterWorker, SingleFile_ExactlyFiveMillionBytes_WritesValidTar
     std::vector<uint8_t> expected;
     Tensor deviceTensor = makeGpuTensorWithPayload(bytes, /*seed=*/99, expected);
 
-    std::vector<ArchiveFileWriteParams> plan;
-    plan.push_back(ArchiveFileWriteParams{
+    std::string archivePath = "archive_shard_multi_" + std::to_string(::getpid()) + ".tar";
+    std::string absoluteArchivePath = "/tmp/" + archivePath;
+    ScopedUnlink cleanup(absoluteArchivePath);
+
+    std::mutex archiveIndexMutex;
+    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
+    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
+    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    plan.shardNumber = 0;
+
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = deviceTensor,
         .offsetBytes = 0,
         .numBytes = bytes,
         .path_in_tar = pathInTar,
     });
 
-    std::string archivePath = "/tmp/archive_shard_5m_" + std::to_string(::getpid()) + ".tar";
-    ScopedUnlink cleanup(archivePath);
+    thor_file::ArchiveShardWriterWorker worker(workerContext);
+    worker.process(plan);
 
-    ArchiveShardWriterWorker worker;
-    std::vector<uint32_t> crcs;
-    worker.process(plan, archivePath, crcs);
-
-    ASSERT_EQ(crcs.size(), 1u);
-    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
+    // Verify the index was filled out and that the crc is correct
+    thor_file::EntryInfo entry;
+    ASSERT_TRUE(archiveIndex.contains(pathInTar));
+    entry = archiveIndex[pathInTar];
+    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
+    ASSERT_EQ(entry.shard, 0);
+    ASSERT_EQ(entry.size, bytes);
+    ASSERT_EQ(entry.data_offset, 512);
 
     // Your writer should still end on a 4KB boundary due to appendTarEndOfArchive(...)
-    ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
+    ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
 
     // tar -tf lists entry
     {
-        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(archivePath);
+        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(absoluteArchivePath);
         int rc = 0;
         std::string listing = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -tf failed\ncmd: " << cmd << "\noutput:\n" << listing;
@@ -324,7 +369,7 @@ TEST(ArchiveShardWriterWorker, SingleFile_ExactlyFiveMillionBytes_WritesValidTar
 
     // tar -xOf extracts exact payload (verifies 512-padding correctness too)
     {
-        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(archivePath) + " " + shellEscapeDoubleQuoted(pathInTar);
+        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(absoluteArchivePath) + " " + shellEscapeDoubleQuoted(pathInTar);
         int rc = 0;
         std::string data = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -xOf failed\ncmd: " << cmd;
@@ -349,37 +394,54 @@ TEST(ArchiveShardWriterWorker, TwoFiles_100MB_And_500MB_WritesValidTarAndCorrect
     Tensor t0 = makeGpuTensorWithPayload(oneHundredMB, /*seed=*/17, expected0);
     Tensor t1 = makeGpuTensorWithPayload(fiveHundredMB, /*seed=*/91, expected1);
 
-    std::vector<ArchiveFileWriteParams> plan;
-    plan.push_back(ArchiveFileWriteParams{
+    std::string archivePath = "archive_shard_multi_" + std::to_string(::getpid()) + ".tar";
+    std::string absoluteArchivePath = "/tmp/" + archivePath;
+    ScopedUnlink cleanup(absoluteArchivePath);
+
+    std::mutex archiveIndexMutex;
+    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
+    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
+    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    plan.shardNumber = 0;
+
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = t0,
         .offsetBytes = 0,
         .numBytes = oneHundredMB,
         .path_in_tar = path0,
     });
-    plan.push_back(ArchiveFileWriteParams{
+    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
         .deviceTensor = t1,
         .offsetBytes = 0,
         .numBytes = fiveHundredMB,
         .path_in_tar = path1,
     });
 
-    std::string archivePath = "/tmp/archive_shard_100m_500m_" + std::to_string(::getpid()) + ".tar";
-    ScopedUnlink cleanup(archivePath);
+    thor_file::ArchiveShardWriterWorker worker(workerContext);
+    worker.process(plan);
 
-    ArchiveShardWriterWorker worker;
-    std::vector<uint32_t> crcs;
-    worker.process(plan, archivePath, crcs);
+    // Verify the index was filled out and that the crc is correct
+    thor_file::EntryInfo entry;
+    ASSERT_TRUE(archiveIndex.contains(path0));
+    entry = archiveIndex[path0];
+    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected0.data(), oneHundredMB));
+    ASSERT_EQ(entry.shard, 0);
+    ASSERT_EQ(entry.size, oneHundredMB);
+    ASSERT_EQ(entry.data_offset, 512);
 
-    ASSERT_EQ(crcs.size(), 2u);
-    EXPECT_EQ(crcs[0], crc32_ieee(0xFFFFFFFF, expected0.data(), oneHundredMB));
-    EXPECT_EQ(crcs[1], crc32_ieee(0xFFFFFFFF, expected1.data(), fiveHundredMB));
+    ASSERT_TRUE(archiveIndex.contains(path1));
+    entry = archiveIndex[path1];
+    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected1.data(), fiveHundredMB));
+    ASSERT_EQ(entry.shard, 0);
+    ASSERT_EQ(entry.size, fiveHundredMB);
+    ASSERT_EQ(entry.data_offset, 512 + oneHundredMB + 256 + 512);
 
     // Should end on a 4KB boundary due to appendTarEndOfArchive(...)
-    ASSERT_EQ(fileSizeBytes(archivePath) & (4096u - 1u), 0u);
+    ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
 
     // tar -tf lists both entries
     {
-        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(archivePath);
+        std::string cmd = "tar -tf " + shellEscapeDoubleQuoted(absoluteArchivePath);
         int rc = 0;
         std::string listing = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -tf failed\ncmd: " << cmd << "\noutput:\n" << listing;
@@ -390,7 +452,7 @@ TEST(ArchiveShardWriterWorker, TwoFiles_100MB_And_500MB_WritesValidTarAndCorrect
 
     // tar -xOf extracts exact payloads (this can take a bit for 500MB, so keep it interop-gated)
     auto extractAndCompare = [&](const std::string& path, const std::vector<uint8_t>& expected) {
-        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(archivePath) + " " + shellEscapeDoubleQuoted(path);
+        std::string cmd = "tar -xOf " + shellEscapeDoubleQuoted(absoluteArchivePath) + " " + shellEscapeDoubleQuoted(path);
         int rc = 0;
         std::string data = runCommandCaptureStdout(cmd, &rc);
         ASSERT_EQ(rc, 0) << "tar -xOf failed\ncmd: " << cmd;

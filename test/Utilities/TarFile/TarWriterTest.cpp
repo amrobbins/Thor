@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Utilities/TarFile/Crc32.h"
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -143,7 +145,7 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
         throw std::runtime_error("failed reading json blob: " + shard_path.string());
 
     // Validate index CRC (IEEE)
-    const uint32_t index_crc_got = thor_file::Crc32c::compute((uint8_t*)json_str.data(), json_str.size());
+    const uint32_t index_crc_got = crc32_ieee(0xFFFFFFFF, (uint8_t*)json_str.data(), json_str.size());
     if (index_crc_got != index_crc_expected) {
         throw std::runtime_error("index CRC mismatch in " + shard_path.string() + " expected=" + std::to_string(index_crc_expected) +
                                  " got=" + std::to_string(index_crc_got));
@@ -159,22 +161,32 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
     const std::string tar_path_prefix = prefix;
     const std::filesystem::path archiveDir = std::filesystem::path(tar_path_prefix).remove_filename();
     const std::string archiveName = std::filesystem::path(tar_path_prefix).filename().string();
-    const uint64_t shard_limit = 0;  // no rollover
+    const uint64_t shard_limit = 1'000'000;  // no rollover
     const bool overwrite = true;
+
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
     // Create tiny files
     const std::string hello = "hello from gtest\n";
-    std::vector<uint8_t> blob(64 * 1024, 0xAB);
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello.size()});
+    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
+    memcpy(helloTensor.getMemPtr<void>(), hello.data(), hello.size());
+
+    const uint32_t blobSize = 64 * 1024;
+    std::vector<uint8_t> blob(blobSize, 0xAB);
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobSize});
+    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
+    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     // Precompute expected CRCs (IEEE) for validation
-    const uint32_t hello_crc = thor_file::Crc32c::compute((uint8_t*)hello.data(), hello.size());
-    const uint32_t blob_crc = thor_file::Crc32c::compute((uint8_t*)blob.data(), blob.size());
+    const uint32_t hello_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)hello.data(), hello.size());
+    const uint32_t blob_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("docs/hello.txt", helloTensor);
+        w.addArchiveFile("data/blob.bin", blobTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     const fs::path shard0 = prefix + ".thor.tar";
@@ -217,7 +229,7 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
         EXPECT_EQ(got, hello);
 
         // Verify CRC over the payload bytes too
-        EXPECT_EQ(thor_file::Crc32c::compute((uint8_t*)payload.data(), payload.size()), hello_crc);
+        EXPECT_EQ(crc32_ieee(0xFFFFFFFF, (uint8_t*)payload.data(), payload.size()), hello_crc);
     }
 
     // Read back blob via offsets + validate per-entry CRC
@@ -234,7 +246,7 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
         EXPECT_EQ(std::memcmp(payload.data(), blob.data(), blob.size()), 0);
 
         // Verify CRC over the payload bytes too
-        EXPECT_EQ(thor_file::Crc32c::compute((uint8_t*)payload.data(), payload.size()), blob_crc);
+        EXPECT_EQ(crc32_ieee(0xFFFFFFFF, (uint8_t*)payload.data(), payload.size()), blob_crc);
     }
 
     cleanup_prefix_files(prefix);
@@ -252,18 +264,28 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     // Use a very small limit to *force* rollover on the second add_bytes()
     const uint64_t shard_limit = 1;
 
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
     // Two small files; second should trigger shard 1 creation
     const std::string a = "AAA";
     const std::string b = "BBB";
 
-    const uint32_t a_crc = thor_file::Crc32c::compute((uint8_t*)a.data(), a.size());
-    const uint32_t b_crc = thor_file::Crc32c::compute((uint8_t*)b.data(), b.size());
+    ThorImplementation::TensorDescriptor aDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {a.size()});
+    ThorImplementation::Tensor aTensor(cpuPlacement, aDescriptor);
+    memcpy(aTensor.getMemPtr<void>(), a.data(), a.size());
+
+    ThorImplementation::TensorDescriptor bDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {b.size()});
+    ThorImplementation::Tensor bTensor(cpuPlacement, bDescriptor);
+    memcpy(bTensor.getMemPtr<void>(), b.data(), b.size());
+
+    const uint32_t a_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)a.data(), a.size());
+    const uint32_t b_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)b.data(), b.size());
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("a.txt", a.data(), a.size(), 0644, time(nullptr));
-        w.addArchiveFile("b.txt", b.data(), b.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("a.txt", aTensor);
+        w.addArchiveFile("b.txt", bTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     const fs::path shard0 = prefix + ".000000.thor.tar";
@@ -318,8 +340,7 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
         EXPECT_EQ(got, expected);
 
         // Validate payload CRC too
-        EXPECT_EQ(thor_file::Crc32c::compute((uint8_t*)payload.data(), payload.size()), expected_crc)
-            << "payload crc mismatch for " << path;
+        EXPECT_EQ(crc32_ieee(0xFFFFFFFF, (uint8_t*)payload.data(), payload.size()), expected_crc) << "payload crc mismatch for " << path;
     };
 
     // Check using shard0's index (they're identical except shard_index anyway)

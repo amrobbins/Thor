@@ -219,41 +219,48 @@ Network::StatusCode Network::place(uint32_t batchSize,
     return StatusCode::SUCCESS;
 }
 
-void Network::save(std::string modelName, std::string directory, bool overwrite, bool saveOptimizerState) {
+// FIXME: modelName should be on the constructor. archiveWriter should be saved after first creation.
+void Network::save(const std::string &directory, bool overwrite, bool saveOptimizerState) {
     if (!frozen)
         connect(false);
 
-    thor_file::TarWriter archiveWriter(modelName, directory, overwrite);
+    if (archiveWriter == nullptr) {
+        archiveWriter = make_shared<thor_file::TarWriter>(networkName);
+
+        // For the initial implementation, I will just force GPU 0.
+        // I will optimize from there, but I need changes elsewhere first anyway.
+        Stream stream = Stream::getNextDownloadStream(0);
+        json modelJson;
+        modelJson["layers"] = json::array();
+        for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
+            // FIXME: Network provides serialize with the stamp to use - to choose the gpu - among other speed ups
+            modelJson["layers"].push_back(layer->serialize(*archiveWriter, stream, saveOptimizerState));
+        }
+
+        string qualifiedModelName = networkName + ".thor.json";
+        string jsonDump = modelJson.dump(4);
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {jsonDump.size()});
+        ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
+        memcpy(jsonDumpTensor.getMemPtr<void>(), jsonDump.data(), jsonDump.size());
+        archiveWriter->addArchiveFile(qualifiedModelName, jsonDumpTensor);
+    }
 
     // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
     uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
     for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
         Stream::deviceSynchronize(gpu);
 
-    // For the initial implementation, I will just force GPU 0.
-    // I will optimize from there, but I need changes elsewhere first anyway.
-    Stream stream = Stream::getNextDownloadStream(0);
-    json modelJson;
-    modelJson["layers"] = json::array();
-    for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
-        // FIXME: Network provides serialize with the stamp to use - to choose the gpu - among other speed ups
-        modelJson["layers"].push_back(layer->serialize(archiveWriter, stream, saveOptimizerState));
-    }
-
-    string qualifiedModelName = modelName + ".thor.json";
-    string jsonDump = modelJson.dump(4);
-    archiveWriter.addArchiveFile(qualifiedModelName, jsonDump.c_str(), jsonDump.size());
-
-    archiveWriter.finishArchive();
+    archiveWriter->createArchive(directory, overwrite);
 }
 
-void Network::load(std::string modelName, std::string directory) {
-    shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>(modelName, directory);
+void Network::load(const std::string &directory) {
+    shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>(networkName, directory);
     unordered_map<std::string, thor_file::EntryInfo> archiveEntries = archiveReader->entries();
 
-    string modelJsonFileName = modelName + ".thor.json";
+    string modelJsonFileName = networkName + ".thor.json";
     if (!archiveEntries.contains(modelJsonFileName))
-        throw std::runtime_error("Model file " + modelJsonFileName + " not found in model archive for " + modelName + " in directory " +
+        throw std::runtime_error("Model file " + modelJsonFileName + " not found in model archive for " + networkName + " in directory " +
                                  directory);
     thor_file::EntryInfo modelJsonEntryInfo = archiveEntries[modelJsonFileName];
     std::string modelJsonStr;

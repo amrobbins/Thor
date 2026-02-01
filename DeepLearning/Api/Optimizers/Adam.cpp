@@ -124,11 +124,11 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
 
         stream.synchronize();
 
-        archiveWriter.addArchiveFile(mFile, mBuffer.getMemPtr(), m.getArraySizeInBytes());
-        archiveWriter.addArchiveFile(vFile, vBuffer.getMemPtr(), v.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(mFile, mBuffer);
+        archiveWriter.addArchiveFile(vFile, vBuffer);
         if (physicalAdam->getMBias().isPresent()) {
-            archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer.getMemPtr(), mBias.getArraySizeInBytes());
-            archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer.getMemPtr(), vBias.getArraySizeInBytes());
+            archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer);
+            archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer);
         }
 
         j["t"] = physicalAdam->getT();

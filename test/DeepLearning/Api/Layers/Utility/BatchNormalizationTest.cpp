@@ -16,7 +16,7 @@ using json = nlohmann::json;
 TEST(UtilityApiLayers, BatchNormalizationSingleFeatureInputBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
@@ -90,7 +90,7 @@ TEST(UtilityApiLayers, BatchNormalizationSingleFeatureInputBuilds) {
 TEST(UtilityApiLayers, BatchNormalizationMultipleFeatureInputsBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions0 = 1 + rand() % 6;
@@ -199,7 +199,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
     for (uint32_t t = 0; t < 5; t++) {
         stream.synchronize();
 
-        Network initialNetwork;
+        Network initialNetwork("initialNetwork");
 
         Tensor::DataType dataType = Tensor::DataType::FP16;
         string dataTypeString = dataType == Tensor::DataType::FP32 ? "fp32" : "fp16";
@@ -309,7 +309,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
         stream.synchronize();
 
-        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+        thor_file::TarWriter archiveWriter("testModel");
 
         json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
         json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -401,9 +401,9 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         stream.synchronize();
 
         // Verify that the layer gets added to the network and that its weights are set to the correct values
-        Network newNetwork;
+        Network newNetwork("newNetwork");
 
-        archiveWriter.finishArchive();
+        archiveWriter.createArchive("/tmp/", true);
         shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
         Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

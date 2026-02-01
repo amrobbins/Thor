@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TarFile/TarArchive.h"
 #include "Utilities/TarFile/TarHeaderHelper.h"
+#include "Utilities/TarFile/TarWriter.h"
 #include "Utilities/TarFile/UringDirect.h"
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -55,17 +56,9 @@
  |       post          | post     | post     | prior tail              |      0      |
  |       post          | post     | post     | prior pad + tar ending  |      0      |
  -------------------------------------------------------------------------------------
-
  */
 
-struct ArchiveFileWriteParams {
-    ThorImplementation::Tensor deviceTensor;
-
-    uint64_t offsetBytes;
-    uint64_t numBytes;
-    std::string path_in_tar;
-};
-
+namespace thor_file {
 enum class WriterState {
     INITIAL,
     CONSUME_BUFFER_0,
@@ -75,7 +68,11 @@ enum class WriterState {
 
 class ArchiveShardWriterWorker {
    public:
-    ArchiveShardWriterWorker() : uringDirect(64) {
+    ArchiveShardWriterWorker(WorkerJobContext context)
+        : archiveIndex(context.archiveIndex),
+          archiveIndexMutex(context.archiveIndexMutex),
+          archiveDirectory(context.archiveDirectory),
+          uringDirect(64) {
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
         ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fiveHundredMBPlusTail});
         bounceBuffer[0] = ThorImplementation::Tensor(cpuPlacement, descriptor, 4096);
@@ -86,14 +83,16 @@ class ArchiveShardWriterWorker {
         bounceBufferMem[1] = bounceBuffer[1].getMemPtr<uint8_t>();
     }
 
-    void process(std::vector<ArchiveFileWriteParams>& plan, std::string archiveShardPath, std::vector<uint32_t>& crcs) {
-        assert(plan.size() > 0);
+    // void process(std::vector<ArchiveCreationPlanEntry>& plan, std::string archiveShardPath, std::vector<uint32_t>& crcs) {
+    void process(ArchiveShardCreationPlan job) {
+        std::vector<ArchiveCreationPlanEntry>& plan = job.entries;
+        const std::string& archiveShardPath = (archiveDirectory / job.archiveShardPath).string();
+        const uint32_t shardNumber = job.shardNumber;
+
+        assert(!plan.empty());
         uringDirect.registerDumpFile(archiveShardPath);
         uint32_t numCompletionsToFinish[2] = {0, 0};
         constexpr uint64_t fourKLeftoverMask = 0xFFF;
-
-        crcs.clear();
-        crcs.reserve(plan.size());
 
         uint32_t finalFetchingBuffer;
         dumpedFileOffsetBytes = 0;
@@ -151,9 +150,11 @@ class ArchiveShardWriterWorker {
                 uint32_t totalLoadedBufferBytes = plan[i - 1].numBytes + loadedBufferTailPadAndHeaderBytes;
                 uint32_t fourKAlignedBytes = numFourKAlignedBytes(totalLoadedBufferBytes);
                 uint32_t numTailBytesToForward = totalLoadedBufferBytes - fourKAlignedBytes;
+                const uint64_t fileBase = dumpedFileOffsetBytes;
 
                 // Initiate dump of loadedBuffer to disk
-                numCompletionsToFinish[loadedBuffer] = dumpBufferToArchiveFile(loadedBuffer, fourKAlignedBytes);
+                if (fourKAlignedBytes > 0)
+                    numCompletionsToFinish[loadedBuffer] = dumpBufferToArchiveFile(loadedBuffer, fourKAlignedBytes);
 
                 // Forward the unaligned bytes from the back of loadedBuffer into the tailAndTarSeparator scratch memory
                 if (numTailBytesToForward > 0)
@@ -185,7 +186,15 @@ class ArchiveShardWriterWorker {
                 // Compute CRC of the payload part of loadedBuffer
                 uint32_t crc = crc32_ieee(
                     0xFFFFFFFF, (uint8_t*)bounceBufferMem[loadedBuffer] + loadedBufferTailPadAndHeaderBytes, plan[i - 1].numBytes);
-                crcs.push_back(crc);
+                EntryInfo indexEntry;
+                indexEntry.crc = crc;
+                indexEntry.size = plan[i - 1].numBytes;
+                indexEntry.data_offset = fileBase + loadedBufferTailPadAndHeaderBytes;
+                indexEntry.shard = shardNumber;
+                {
+                    std::lock_guard<std::mutex> guard(archiveIndexMutex);
+                    archiveIndex[plan[i - 1].path_in_tar] = indexEntry;
+                }
 
                 if (plan.size() == i + 1) {
                     finalFetchingBuffer = dumpingBuffer;  // because pre-fetching into it now.
@@ -211,9 +220,11 @@ class ArchiveShardWriterWorker {
         uint32_t totalLoadedBufferBytes = plan.back().numBytes + loadedBufferTailPadAndHeaderBytes;
         uint32_t fourKAlignedBytes = numFourKAlignedBytes(totalLoadedBufferBytes);
         uint32_t numTailBytesToForward = totalLoadedBufferBytes - fourKAlignedBytes;
+        const uint64_t fileBase = dumpedFileOffsetBytes;
 
-        // Initiate dump final buffer to disk
-        numCompletionsToFinish[finalFetchingBuffer] = dumpBufferToArchiveFile(finalFetchingBuffer, fourKAlignedBytes);
+        // Initiate dump of final buffer to disk
+        if (fourKAlignedBytes > 0)
+            numCompletionsToFinish[finalFetchingBuffer] = dumpBufferToArchiveFile(finalFetchingBuffer, fourKAlignedBytes);
 
         // Forward the unaligned bytes from the back of loadedBuffer into the tailAndTarSeparator scratch memory
         if (numTailBytesToForward > 0)
@@ -225,14 +236,21 @@ class ArchiveShardWriterWorker {
         // after the tail bytes that are already at the front of it.
         // Ensuring that the total number of bytes to write is a multiple of 4K, this can be accomplished by increasing the size
         // of the end of tar marker.
-        numTailPadAndHeaderBytes =
-            appendTarEndOfArchive(plan[plan.size() - 1].numBytes, numTailBytesToForward, tailAndTarSeparator, thirtyTwoK);
+        numTailPadAndHeaderBytes = appendTarEndOfArchive(plan.back().numBytes, numTailBytesToForward, tailAndTarSeparator, thirtyTwoK);
         assert((numTailPadAndHeaderBytes & fourKLeftoverMask) == 0);
 
         // Compute CRC of the payload part of final buffer
         uint32_t crc = crc32_ieee(
-            0xFFFFFFFF, (uint8_t*)bounceBufferMem[finalFetchingBuffer] + loadedBufferTailPadAndHeaderBytes, plan[plan.size() - 1].numBytes);
-        crcs.push_back(crc);
+            0xFFFFFFFF, (uint8_t*)bounceBufferMem[finalFetchingBuffer] + loadedBufferTailPadAndHeaderBytes, plan.back().numBytes);
+        EntryInfo indexEntry;
+        indexEntry.crc = crc;
+        indexEntry.size = plan.back().numBytes;
+        indexEntry.data_offset = fileBase + loadedBufferTailPadAndHeaderBytes;
+        indexEntry.shard = shardNumber;
+        {
+            std::lock_guard<std::mutex> guard(archiveIndexMutex);
+            archiveIndex[plan.back().path_in_tar] = indexEntry;
+        }
 
         // Wait for dump from prior stage out of free buffer to finish
         if (numCompletionsToFinish[freeBuffer] > 0)
@@ -244,12 +262,14 @@ class ArchiveShardWriterWorker {
         numCompletionsToFinish[freeBuffer] = dumpBufferToArchiveFile(freeBuffer, numTailPadAndHeaderBytes);
 
         // Wait for dump of both buffers to disk to complete
-        uringDirect.waitCompletionsInOrder(numCompletionsToFinish[finalFetchingBuffer]);
+        if (numCompletionsToFinish[freeBuffer] > 0)
+            uringDirect.waitCompletionsInOrder(numCompletionsToFinish[finalFetchingBuffer]);
         numCompletionsToFinish[finalFetchingBuffer] = 0;
-        uringDirect.waitCompletionsInOrder(numCompletionsToFinish[freeBuffer]);
+        if (numCompletionsToFinish[freeBuffer] > 0)
+            uringDirect.waitCompletionsInOrder(numCompletionsToFinish[freeBuffer]);
         numCompletionsToFinish[freeBuffer] = 0;
 
-        UringDirect::Completion c = uringDirect.finishDumpedFile(5789);
+        UringDirect::Completion c = uringDirect.finishDumpedFile(false);
         if (c.responseCode != 0)
             throw std::runtime_error("io_uring returned responseCode = " + std::to_string(c.responseCode) + "when writing file " +
                                      archiveShardPath);
@@ -313,6 +333,12 @@ class ArchiveShardWriterWorker {
     uint32_t numTailPadAndHeaderBytes;
     uint8_t tailAndTarSeparator[thirtyTwoK];
 
+    std::unordered_map<std::string, EntryInfo>& archiveIndex;
+    std::mutex& archiveIndexMutex;
+    std::filesystem::path archiveDirectory;
+
     UringDirect uringDirect;
     uint64_t dumpedFileOffsetBytes;
 };
+
+}  // namespace thor_file

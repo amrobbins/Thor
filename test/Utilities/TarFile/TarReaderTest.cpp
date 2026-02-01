@@ -70,7 +70,7 @@ void read_and_expect(thor_file::TarReader& r, const std::string& path, const std
     ASSERT_EQ(got.size(), expected.size());
     ASSERT_EQ(std::memcmp(got.data(), expected.data(), expected.size()), 0) << "payload mismatch for " << path;
 
-    const uint32_t crc_expected = thor_file::Crc32c::compute((uint8_t*)expected.data(), expected.size());
+    const uint32_t crc_expected = crc32_ieee(0xFFFFFFFF, (uint8_t*)expected.data(), expected.size());
     EXPECT_EQ(info.crc, crc_expected) << "index crc32c mismatch for " << path;
 }
 
@@ -81,23 +81,32 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
     const std::string prefix = makeTmpPrefix("thor_tar_single");
     CleanupGuard guard{prefix};
 
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
     // Build some files
     const std::string hello_str = "hello from gtest\n";
-    const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
-    const std::vector<uint8_t> blob = make_pattern_bytes(256 * 1024, 42);  // 256 KiB
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
+    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
+
+    uint32_t blobBytes = 256 * 1024;
+    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 42);
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
+    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
     const std::string archiveName = std::filesystem::path(prefix).filename().string();
 
     // Write single shard (no rollover)
     {
-        const uint64_t shard_limit = 0;  // 0 => no rollover
+        const uint64_t shard_limit = 1'000'000;
         const bool overwrite = true;
 
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("docs/hello.txt", helloTensor);
+        w.addArchiveFile("data/blob.bin", blobTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     // Expect the single-file naming convention
@@ -106,6 +115,7 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
 
     // Read back and validate content
     thor_file::TarReader r(archiveName, archiveDir);
+    const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
     read_and_expect(r, "docs/hello.txt", hello);
     read_and_expect(r, "data/blob.bin", blob);
 
@@ -125,11 +135,23 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
     const std::string archiveName = std::filesystem::path(prefix).filename().string();
 
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
     // Make files large enough to require rollover under a small-ish shard limit.
     // Note: your TarWriter uses PAX + conservative slack, so pick a limit that definitely rolls.
-    const std::vector<uint8_t> a = make_pattern_bytes(512 * 1024, 1);  // 512 KiB
-    const std::vector<uint8_t> b = make_pattern_bytes(512 * 1024, 2);  // 512 KiB
-    const std::vector<uint8_t> c = make_pattern_bytes(512 * 1024, 3);  // 512 KiB
+    uint32_t fileSize = 512 * 1024;
+    const std::vector<uint8_t> a = make_pattern_bytes(fileSize, 1);  // 512 KiB
+    const std::vector<uint8_t> b = make_pattern_bytes(fileSize, 2);  // 512 KiB
+    const std::vector<uint8_t> c = make_pattern_bytes(fileSize, 3);  // 512 KiB
+
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fileSize});
+
+    ThorImplementation::Tensor aTensor(cpuPlacement, descriptor);
+    memcpy(aTensor.getMemPtr<void>(), a.data(), fileSize);
+    ThorImplementation::Tensor bTensor(cpuPlacement, descriptor);
+    memcpy(bTensor.getMemPtr<void>(), b.data(), fileSize);
+    ThorImplementation::Tensor cTensor(cpuPlacement, descriptor);
+    memcpy(cTensor.getMemPtr<void>(), c.data(), fileSize);
 
     {
         const bool overwrite = true;
@@ -138,11 +160,11 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
         // 256 KiB is almost guaranteed to roll with your 4 KiB pax slack + tar padding.
         const uint64_t shard_limit = 256 * 1024;
 
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("a.bin", a.data(), a.size(), 0644, time(nullptr));
-        w.addArchiveFile("b.bin", b.data(), b.size(), 0644, time(nullptr));
-        w.addArchiveFile("c.bin", c.data(), c.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("a.bin", aTensor);
+        w.addArchiveFile("b.bin", bTensor);
+        w.addArchiveFile("c.bin", cTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     // Once a 2nd shard exists, shard0 should have been renamed to numbered form.
@@ -280,7 +302,7 @@ static void corrupt_archive_id_in_shard_and_fix_index_crc(const fs::path& shard_
         // We'll update in-memory then recompute.
         fi.json.replace(id_pos, 32, new_id);
 
-        const uint32_t new_index_crc = thor_file::Crc32c::compute((uint8_t*)fi.json.data(), fi.json.size());
+        const uint32_t new_index_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)fi.json.data(), fi.json.size());
 
         // Patch footer index_crc field
         write_u32_le(io, fi.index_crc_off, new_index_crc);
@@ -397,16 +419,27 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
     const uint64_t shard_limit = 256 * 1024;  // 256 KiB
     const bool overwrite = true;
 
-    const auto a = make_bytes(512 * 1024, 0xA1);
-    const auto b = make_bytes(512 * 1024, 0xB2);
-    const auto c = make_bytes(512 * 1024, 0xC3);
+    uint32_t fileSize = 512 * 1024;
+    const auto a = make_bytes(fileSize, 0xA1);
+    const auto b = make_bytes(fileSize, 0xB2);
+    const auto c = make_bytes(fileSize, 0xC3);
+
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fileSize});
+
+    ThorImplementation::Tensor aTensor(cpuPlacement, descriptor);
+    memcpy(aTensor.getMemPtr<void>(), a.data(), fileSize);
+    ThorImplementation::Tensor bTensor(cpuPlacement, descriptor);
+    memcpy(bTensor.getMemPtr<void>(), b.data(), fileSize);
+    ThorImplementation::Tensor cTensor(cpuPlacement, descriptor);
+    memcpy(cTensor.getMemPtr<void>(), c.data(), fileSize);
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("a.bin", a.data(), a.size(), 0644, time(nullptr));
-        w.addArchiveFile("b.bin", b.data(), b.size(), 0644, time(nullptr));
-        w.addArchiveFile("c.bin", c.data(), c.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("a.bin", aTensor);
+        w.addArchiveFile("b.bin", bTensor);
+        w.addArchiveFile("c.bin", cTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     const fs::path s0 = prefix + ".000000.thor.tar";
@@ -442,12 +475,18 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
-    const auto payload = make_bytes(64 * 1024, 0x5A);
+    uint32_t fileSize = 64 * 1024;
+    const auto payload = make_bytes(fileSize, 0x5A);
+
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fileSize});
+    ThorImplementation::Tensor payloadTensor(cpuPlacement, descriptor);
+    memcpy(payloadTensor.getMemPtr<void>(), payload.data(), fileSize);
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("x.bin", payload.data(), payload.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("x.bin", payloadTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     const fs::path shard0 = prefix + ".thor.tar";
@@ -522,8 +561,10 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     std::vector<std::vector<uint8_t>> contents;
     contents.reserve(kNumFiles);
 
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
+        thor_file::TarWriter w(archiveName, shard_limit);
 
         uint64_t total_written = 0;
         for (uint32_t i = 0; i < kNumFiles; ++i) {
@@ -533,13 +574,18 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
 
             auto data = make_pattern_bytes(static_cast<size_t>(sizes[i]), 1000u + i);
             total_written += data.size();
+
+            ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {data.size()});
+            ThorImplementation::Tensor dataTensor(cpuPlacement, descriptor);
+            memcpy(dataTensor.getMemPtr<void>(), data.data(), data.size());
+
             contents.push_back(std::move(data));
 
-            w.addArchiveFile(paths.back(), contents.back().data(), contents.back().size(), 0644, time(nullptr));
+            w.addArchiveFile(paths.back(), dataTensor);
         }
         ASSERT_EQ(total_written, kTotalBytes);
 
-        w.finishArchive();
+        w.createArchive(archiveDir, overwrite);
     }
 
     // The archive should exist (either single or multi; with this size it should be multi)
@@ -576,18 +622,28 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
     const std::string archiveName = std::filesystem::path(prefix).filename().string();
 
-    const uint64_t shard_limit = 0;  // single shard
+    const uint64_t shard_limit = 1'000'000;  // single shard
     const bool overwrite = true;
 
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+    // Build some files
     const std::string hello_str = "hello from gtest\n";
-    const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
-    const std::vector<uint8_t> blob = make_pattern_bytes(256 * 1024, 123);  // 256 KiB
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
+    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
+
+    uint32_t blobBytes = 256 * 1024;
+    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 778);
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
+    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("docs/hello.txt", helloTensor);
+        w.addArchiveFile("data/blob.bin", blobTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     const fs::path shard0 = prefix + ".thor.tar";
@@ -696,7 +752,7 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
     }
 
     // Validate index CRC (IEEE CRC-32)
-    const uint32_t index_crc_got = thor_file::Crc32c::compute((uint8_t*)json_str.data(), json_str.size());
+    const uint32_t index_crc_got = crc32_ieee(0xFFFFFFFF, (uint8_t*)json_str.data(), json_str.size());
     if (index_crc_got != index_crc_expected) {
         throw std::runtime_error("load_footer_index_json: index CRC mismatch in " + shard_path.string() +
                                  " expected=" + std::to_string(index_crc_expected) + " got=" + std::to_string(index_crc_got));
@@ -716,18 +772,28 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
 
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
     const std::string archiveName = std::filesystem::path(prefix).filename().string();
-    const uint64_t shard_limit = 0;  // single shard
+    const uint64_t shard_limit = 1'000'000;  // single shard
     const bool overwrite = true;
 
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+    // Build some files
     const std::string hello_str = "hello from gtest\n";
-    const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
-    const std::vector<uint8_t> blob = make_pattern_bytes(256 * 1024, 999);  // 256 KiB deterministic
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
+    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
+
+    uint32_t blobBytes = 75 * 1024;
+    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 999);
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
+    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, overwrite, shard_limit);
-        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, shard_limit);
+        w.addArchiveFile("docs/hello.txt", helloTensor);
+        w.addArchiveFile("data/blob.bin", blobTensor);
+        w.createArchive(archiveDir, overwrite);
     }
 
     const fs::path shard0 = prefix + ".thor.tar";
@@ -741,7 +807,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     ASSERT_TRUE(files.contains("data/blob.bin"));
     ASSERT_TRUE(j0.contains("checksum_alg"));
     const auto& checksum_alg = j0.at("checksum_alg").get<std::string>();
-    ASSERT_TRUE(checksum_alg == "crc32c");
+    ASSERT_TRUE(checksum_alg == "crc32_ieee");
 
     const auto& e = files["data/blob.bin"];
     const uint64_t off = e["data_offset"].get<uint64_t>();
@@ -789,18 +855,28 @@ TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
     const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
     const std::string archiveName = std::filesystem::path(prefix).filename().string();
 
-    const uint64_t shard_limit = 0;  // single shard
+    const uint64_t shard_limit = 1'000'000;  // single shard
     const bool overwrite = true;
 
-    const std::string hello_str = "hello from verifyAll\n";
-    const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
-    const std::vector<uint8_t> blob = make_pattern_bytes(512 * 1024, 7);  // 512 KiB
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+    // Build some files
+    const std::string hello_str = "hello from gtest\n";
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
+    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
+
+    uint32_t blobBytes = 32 * 1024;
+    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 37);
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
+    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, shard_limit, overwrite);
-        w.addArchiveFile("docs/hello.txt", hello.data(), hello.size(), 0644, time(nullptr));
-        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, overwrite);
+        w.addArchiveFile("docs/hello.txt", helloTensor);
+        w.addArchiveFile("data/blob.bin", blobTensor);
+        w.createArchive(archiveDir, shard_limit);
     }
 
     thor_file::TarReader r(archiveName, archiveDir);
@@ -817,12 +893,24 @@ TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
     const uint64_t shard_limit = 0;  // single shard
     const bool overwrite = true;
 
-    const std::vector<uint8_t> blob = make_pattern_bytes(512 * 1024, 123);  // 512 KiB
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+
+    // Build some files
+    const std::string hello_str = "hello from gtest\n";
+    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
+    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
+    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
+
+    uint32_t blobBytes = 512 * 1024;
+    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 123);
+    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
+    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
+    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, archiveDir, shard_limit, overwrite);
-        w.addArchiveFile("data/blob.bin", blob.data(), blob.size(), 0644, time(nullptr));
-        w.finishArchive();
+        thor_file::TarWriter w(archiveName, overwrite);
+        w.addArchiveFile("data/blob.bin", blobTensor);
+        w.createArchive(archiveDir, shard_limit);
     }
 
     const fs::path shard0 = prefix + ".thor.tar";

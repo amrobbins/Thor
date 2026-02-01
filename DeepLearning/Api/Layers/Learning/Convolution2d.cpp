@@ -167,9 +167,9 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
 
     stream.synchronize();
 
-    archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
+    archiveWriter.addArchiveFile(weightsFile, weightsBuffer);
     if (hasBias)
-        archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(biasesFile, biasesBuffer);
 
     return j;
 }

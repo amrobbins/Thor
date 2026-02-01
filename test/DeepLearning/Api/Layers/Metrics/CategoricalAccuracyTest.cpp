@@ -17,7 +17,7 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> labelDimensions = {1};
         vector<uint64_t> dimensions;
@@ -93,7 +93,7 @@ TEST(CategoricalAccuracy, ClassIndexLabelBuilds) {
 TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
 
     Tensor::DataType predictionsDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     uint64_t numClasses = 2U + (rand() % 20);
@@ -159,7 +159,7 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json categoricalAccuracyJ = categoricalAccuracy.serialize(archiveWriter, stream);
     json predictionsNetworkInputJ = predictionsNetworkInput.serialize(archiveWriter, stream);
@@ -220,9 +220,15 @@ TEST(Activations, CategoricalAccuracySerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+    ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
+    archiveWriter.addArchiveFile("dummy", dummyData);
+
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, predictionsNetworkInputJ, &newNetwork);
