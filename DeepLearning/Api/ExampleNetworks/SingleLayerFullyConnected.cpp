@@ -4,8 +4,7 @@ using namespace Thor;
 using namespace std;
 
 Network buildSingleLayerFullyConnected() {
-    Network singleLayerFullyConnected;
-    singleLayerFullyConnected.setNetworkName("SingleLayerFullyConnected");
+    Network singleLayerFullyConnected("SingleLayerFullyConnected");
 
     vector<uint64_t> expectedDimensions;
 

@@ -11,7 +11,7 @@ using json = nlohmann::json;
 TEST(UtilityApiLayers, NetworkInputBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
@@ -63,7 +63,7 @@ TEST(UtilityApiLayers, NetworkInputBuilds) {
 TEST(UtilityApiLayers, NetworkOutputBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
@@ -116,7 +116,7 @@ TEST(UtilityApiLayers, NetworkOutputBuilds) {
 TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Stream stream(0);
 
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
@@ -140,7 +140,7 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
                                       .dataType(dataType)
                                       .build();
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
@@ -175,9 +175,15 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     ////////////////////////////
     // Deserialize
     ////////////////////////////
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+    ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
+    archiveWriter.addArchiveFile("dummy", dummyData);
+
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

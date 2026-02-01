@@ -548,8 +548,9 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
 }
 
 void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
-    assert(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(stream.getGpuNum() == source.getPlacement().getDeviceNum());
+    if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        assert(stream.getGpuNum() == source.getPlacement().getDeviceNum());
+    }
 
     // Check that access is within range
     uint64_t destArraySizeBytes = descriptor.getArraySizeInBytes();

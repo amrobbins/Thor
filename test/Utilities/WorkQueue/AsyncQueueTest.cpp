@@ -67,6 +67,8 @@ TEST(AsyncQueue, blockingApiWorks) {
 
         ASSERT_EQ(observedNumbers.size(), numIters);
         ASSERT_EQ(queue.capacity(), 100);
+
+        queue.close();
     }
 }
 
@@ -120,5 +122,7 @@ TEST(AsyncQueue, nonBlockingApiWorks) {
 
         ASSERT_EQ(observedNumbers.size(), numIters);
         ASSERT_EQ(queue.capacity(), 100);
+
+        queue.close();
     }
 }

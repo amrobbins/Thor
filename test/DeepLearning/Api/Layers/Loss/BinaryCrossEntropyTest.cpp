@@ -18,7 +18,7 @@ TEST(BinaryCrossEntropy, BatchLossBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         dimensions = {1UL};
@@ -101,7 +101,7 @@ TEST(BinaryCrossEntropy, ElementwiseLossBuilds) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 10; ++t) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         dimensions = {1UL};
@@ -183,7 +183,7 @@ TEST(BinaryCrossEntropy, ElementwiseLossBuilds) {
 TEST(BinaryCrossEntropy, SerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = Tensor::DataType::FP16;
     vector<uint64_t> inputDimensions = {1UL};
     Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
@@ -265,7 +265,7 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     ASSERT_TRUE(sigmoidFound);
     ASSERT_EQ(lossShaperFound, lossShape == 0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json labelsInputJ = labelsInput.serialize(archiveWriter, stream);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -339,12 +339,12 @@ TEST(BinaryCrossEntropy, SerializeDeserialize) {
     // // Deserialize
     // ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
     // The sigmoid output is not loaded, probably it is restamped? Oh it needs to be serialized so that it looks like a single layer or
     // stamping will not work, I did this for FC etc.
 
-    archiveWriter.finishArchive();
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

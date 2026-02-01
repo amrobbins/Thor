@@ -1,170 +1,196 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
-#include <chrono>
-#include <memory>
+#include <cstdint>
 #include <mutex>
-#include <set>
 #include <thread>
+#include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 #include "Utilities/ThreadPool/ThreadPool.h"
 
-using namespace std::chrono_literals;
+// ---------------------------
+// Test scaffolding
+// ---------------------------
 
-// -------------------------
-// 1) Processes N tasks then returns false (normal completion)
-// -------------------------
-struct CountingProcessor {
-    struct State {
-        std::atomic<int> remaining{0};
-        std::atomic<int> processed{0};
-        std::atomic<int> process_calls{0};
-    };
+struct TestContext {
+    // number of Processor(context) constructions (should equal numThreads actually used)
+    std::atomic<int> processor_ctor_calls{0};
 
-    explicit CountingProcessor(std::shared_ptr<State> s) : st(std::move(s)) {}
+    // how many items were processed total
+    std::atomic<int> processed_count{0};
 
-    bool process() {
-        st->process_calls.fetch_add(1, std::memory_order_relaxed);
+    // used to detect duplicates (same item processed twice)
+    std::atomic<int> duplicate_count{0};
 
-        int prev = st->remaining.fetch_sub(1, std::memory_order_relaxed);
-        if (prev <= 0) {
-            // We overshot; restore (optional).
-            st->remaining.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
+    // gate to optionally delay processing (for stop() tests)
+    std::atomic<bool> allow_processing{true};
 
-        st->processed.fetch_add(1, std::memory_order_relaxed);
-        return true;
+    // Record items seen; protected by mutex (vector<bool> isn't atomic-friendly)
+    std::mutex m;
+    std::vector<uint8_t> seen;  // 0/1 flags
+
+    explicit TestContext(size_t n = 0) : seen(n, 0) {}
+
+    void reset(size_t n) {
+        std::lock_guard<std::mutex> g(m);
+        seen.assign(n, 0);
+        processor_ctor_calls.store(0);
+        processed_count.store(0);
+        duplicate_count.store(0);
+        allow_processing.store(true);
     }
-
-    std::shared_ptr<State> st;
 };
 
-TEST(ThreadPool, ProcessesAllWorkAndStopsNaturally) {
-    auto state = std::make_shared<CountingProcessor::State>();
-    state->remaining.store(10'000, std::memory_order_relaxed);
+struct TestProcessor {
+    TestContext& ctx;
 
-    {
-        ThreadPool<CountingProcessor> pool(CountingProcessor(state), /*numThreads=*/4);
-        // Destructor joins. We just let it run to completion.
-    }
+    explicit TestProcessor(TestContext& c) : ctx(c) { ctx.processor_ctor_calls.fetch_add(1, std::memory_order_relaxed); }
 
-    EXPECT_EQ(state->processed.load(), 10'000);
-    EXPECT_GE(state->process_calls.load(), 10'000);  // may be a bit more due to overshoot attempts
-}
+    void process(int item) {
+        // Optional gate to make stop() behavior more observable
+        while (!ctx.allow_processing.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
 
-// -------------------------
-// 2) numThreads==0 coerces to 1 (sanity)
-// -------------------------
-TEST(ThreadPool, ZeroThreadsBecomesOneThread) {
-    auto state = std::make_shared<CountingProcessor::State>();
-    state->remaining.store(1'000, std::memory_order_relaxed);
-
-    {
-        ThreadPool<CountingProcessor> pool(CountingProcessor(state), /*numThreads=*/0);
-    }
-
-    EXPECT_EQ(state->processed.load(), 1'000);
-}
-
-// -------------------------
-// 3) Verify per-thread copy behavior
-//    Each worker thread does: Processor threadsProcessor = processor;
-//    So copy-ctor should run once per worker.
-// -------------------------
-struct CopyTrackingProcessor {
-    struct State {
-        std::atomic<int> remaining{0};
-
-        std::atomic<int> copy_ctor_calls{0};
-
-        std::mutex m;
-        std::set<int> seen_instance_ids;  // unique per threadsProcessor copy
-    };
-
-    explicit CopyTrackingProcessor(std::shared_ptr<State> s) : st(std::move(s)), instance_id(0) {}
-
-    // Copy ctor: assign a unique id to each copy
-    CopyTrackingProcessor(const CopyTrackingProcessor& other) : st(other.st) {
-        instance_id = st->copy_ctor_calls.fetch_add(1, std::memory_order_relaxed) + 1;
-    }
-
-    CopyTrackingProcessor(CopyTrackingProcessor&& other) noexcept : st(std::move(other.st)), instance_id(other.instance_id) {}
-
-    CopyTrackingProcessor& operator=(const CopyTrackingProcessor&) = delete;
-
-    bool process() {
-        // record this instance id at least once
+        // Mark as seen, detect duplicates
         {
-            std::lock_guard<std::mutex> g(st->m);
-            st->seen_instance_ids.insert(instance_id);
+            std::lock_guard<std::mutex> g(ctx.m);
+            if (static_cast<size_t>(item) < ctx.seen.size()) {
+                if (ctx.seen[item] != 0) {
+                    ctx.duplicate_count.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    ctx.seen[item] = 1;
+                }
+            } else {
+                // Out-of-range work item would be a test bug; treat as duplicate-like failure.
+                ctx.duplicate_count.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
-        int prev = st->remaining.fetch_sub(1, std::memory_order_relaxed);
-        if (prev <= 0) {
-            st->remaining.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        return true;
+        ctx.processed_count.fetch_add(1, std::memory_order_relaxed);
+
+        // Add a tiny delay to increase concurrency interleavings (helps catch races)
+        // Keep it small to avoid flaky slow tests.
+        std::this_thread::yield();
     }
-
-    std::shared_ptr<State> st;
-    int instance_id;
 };
 
-TEST(ThreadPool, CreatesOneProcessorCopyPerWorkerThread) {
-    auto state = std::make_shared<CopyTrackingProcessor::State>();
+// ---------------------------
+// Tests
+// ---------------------------
 
-    const size_t numThreads = 6;
-    // ensure at least one task per thread
-    state->remaining.store(static_cast<int>(numThreads * 10), std::memory_order_relaxed);
+TEST(ThreadPool, IsNotCopyable) {
+    using Pool = ThreadPool<TestProcessor, int, TestContext>;
+    static_assert(!std::is_copy_constructible_v<Pool>, "ThreadPool should not be copy-constructible");
+    static_assert(!std::is_copy_assignable_v<Pool>, "ThreadPool should not be copy-assignable");
+}
+
+TEST(ThreadPool, ProcessesAllItemsExactlyOnce) {
+    constexpr int N = 10'000;
+    std::vector<int> items;
+    items.reserve(N);
+    for (int i = 0; i < N; ++i)
+        items.push_back(i);
+
+    TestContext ctx(static_cast<size_t>(N));
 
     {
-        ThreadPool<CopyTrackingProcessor> pool(CopyTrackingProcessor(state), numThreads);
+        ThreadPool<TestProcessor, int, TestContext> pool(std::move(items), ctx, /*numThreads=*/8);
+        pool.wait();
     }
 
-    // copy ctor should have been called once per worker
-    EXPECT_EQ(state->copy_ctor_calls.load(), static_cast<int>(numThreads));
+    // No duplicates
+    EXPECT_EQ(ctx.duplicate_count.load(), 0);
 
-    // and each worker copy should have recorded its unique id
+    // All items processed
+    EXPECT_EQ(ctx.processed_count.load(), N);
+
+    // All seen flags set
     {
-        std::lock_guard<std::mutex> g(state->m);
-        EXPECT_EQ(state->seen_instance_ids.size(), numThreads);
+        std::lock_guard<std::mutex> g(ctx.m);
+        for (int i = 0; i < N; ++i) {
+            ASSERT_EQ(ctx.seen[i], 1) << "missing item " << i;
+        }
     }
 }
 
-// -------------------------
-// 4) Stop() requests stop and joins promptly IF process() is non-blocking.
-//    This test ensures stop can cut work short.
-// -------------------------
-struct SlowButNonBlockingProcessor {
-    struct State {
-        std::atomic<int> processed{0};
-    };
+TEST(ThreadPool, NumThreadsZeroMeansOneThread) {
+    constexpr int N = 1000;
+    std::vector<int> items;
+    items.reserve(N);
+    for (int i = 0; i < N; ++i)
+        items.push_back(i);
 
-    explicit SlowButNonBlockingProcessor(std::shared_ptr<State> s) : st(std::move(s)) {}
+    TestContext ctx(static_cast<size_t>(N));
 
-    bool process() {
-        st->processed.fetch_add(1, std::memory_order_relaxed);
-        std::this_thread::sleep_for(2ms);  // simulate work
-        return true;                       // never naturally finishes
+    {
+        ThreadPool<TestProcessor, int, TestContext> pool(std::move(items), ctx, /*numThreads=*/0);
+        pool.wait();
     }
 
-    std::shared_ptr<State> st;
-};
+    EXPECT_EQ(ctx.processor_ctor_calls.load(), 1) << "Expected exactly one worker when numThreads=0";
+    EXPECT_EQ(ctx.duplicate_count.load(), 0);
+    EXPECT_EQ(ctx.processed_count.load(), N);
+}
 
-TEST(ThreadPool, StopRequestsStopAndJoins) {
-    auto state = std::make_shared<SlowButNonBlockingProcessor::State>();
+TEST(ThreadPool, ConstructsOneProcessorPerWorker) {
+    constexpr int N = 5000;
+    constexpr uint32_t kThreads = 6;
 
-    ThreadPool<SlowButNonBlockingProcessor> pool(SlowButNonBlockingProcessor(state), /*numThreads=*/4);
+    std::vector<int> items;
+    items.reserve(N);
+    for (int i = 0; i < N; ++i)
+        items.push_back(i);
 
-    std::this_thread::sleep_for(20ms);
+    TestContext ctx(static_cast<size_t>(N));
 
-    // stop should return (joins), and processed should be > 0 but not enormous.
+    {
+        ThreadPool<TestProcessor, int, TestContext> pool(std::move(items), ctx, kThreads);
+        pool.wait();
+    }
+
+    EXPECT_EQ(ctx.processor_ctor_calls.load(), static_cast<int>(kThreads));
+    EXPECT_EQ(ctx.duplicate_count.load(), 0);
+    EXPECT_EQ(ctx.processed_count.load(), N);
+}
+
+TEST(ThreadPool, StopRequestsEarlyExit) {
+    // Large enough so "stop" has something to stop.
+    constexpr int N = 200'000;
+    constexpr uint32_t kThreads = 8;
+
+    std::vector<int> items;
+    items.reserve(N);
+    for (int i = 0; i < N; ++i)
+        items.push_back(i);
+
+    TestContext ctx(static_cast<size_t>(N));
+    ctx.allow_processing.store(true);
+
+    ThreadPool<TestProcessor, int, TestContext> pool(std::move(items), ctx, kThreads);
+
+    // Wait until some progress is made (avoid stopping before any thread runs)
+    while (ctx.processed_count.load(std::memory_order_relaxed) < 2000) {
+        std::this_thread::yield();
+    }
+
     pool.stop();
 
-    int processed = state->processed.load(std::memory_order_relaxed);
-    EXPECT_GT(processed, 0);
-    EXPECT_LT(processed, 10'000);  // very loose bound, just to show it didn't run forever
+    const int processed = ctx.processed_count.load();
+    EXPECT_GE(processed, 2000);
+    EXPECT_LT(processed, N) << "stop() should usually prevent processing all items (best-effort)";
+
+    EXPECT_EQ(ctx.duplicate_count.load(), 0);
+
+    // Verify that every processed item is marked seen, and no unprocessed item is incorrectly marked.
+    // (Since we set seen[item]=1 only when processing, this mostly validates internal consistency.)
+    {
+        std::lock_guard<std::mutex> g(ctx.m);
+        int seen_count = 0;
+        for (uint8_t v : ctx.seen)
+            seen_count += (v != 0);
+        EXPECT_EQ(seen_count, processed);
+    }
 }

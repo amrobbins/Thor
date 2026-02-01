@@ -99,7 +99,7 @@ void verifyNetworkOutputApiLevel(shared_ptr<NetworkOutput> layer, Tensor inputTe
 TEST(Network, SaveLoadRoundTripUnstamped) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("TestModel");
 
     Tensor::DataType dataType = Tensor::DataType::FP16;
 
@@ -165,13 +165,13 @@ TEST(Network, SaveLoadRoundTripUnstamped) {
                                       .build();
 
     bool saveOptimizerState = rand() % 2;
-    initialNetwork.save("TestModel", "/tmp", true, saveOptimizerState);
+    initialNetwork.save("/tmp", true, saveOptimizerState);
 
     ///////////////////////////////
     // Load
     ///////////////////////////////
-    Network newNetwork;
-    newNetwork.load("TestModel", "/tmp");
+    Network newNetwork("TestModel");
+    newNetwork.load("/tmp");
 
     // Ensure all the expected layers are in the network and properly connected
     uint32_t expectedNumLayers = 5;
@@ -349,7 +349,7 @@ TEST(Network, SaveLoadRoundTripUnstamped) {
 TEST(Network, SaveLoadRoundTripStamped) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("TestModel");
 
     Tensor::DataType dataType = Tensor::DataType::FP16;
 
@@ -559,13 +559,13 @@ TEST(Network, SaveLoadRoundTripStamped) {
 
     // Save the network
     bool saveOptimizerState = rand() % 2;
-    initialNetwork.save("TestModel", "/tmp", true, saveOptimizerState);
+    initialNetwork.save("/tmp", true, saveOptimizerState);
 
     ///////////////////////////////
     // Load
     ///////////////////////////////
-    Network newNetwork;
-    newNetwork.load("TestModel", "/tmp");
+    Network newNetwork("TestModel");
+    newNetwork.load("/tmp");
 
     // Ensure all the expected layers are in the network and properly connected
     uint32_t expectedNumLayers = 5;

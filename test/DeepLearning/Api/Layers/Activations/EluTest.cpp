@@ -15,7 +15,7 @@ using json = nlohmann::json;
 TEST(Activations, EluBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions;
     int numDimensions = 1 + rand() % 6;
@@ -69,13 +69,12 @@ TEST(Activations, EluBuilds) {
 
     ASSERT_NE(elu->getId(), clone->getId());
     ASSERT_GT(elu->getId(), 1u);
-
 }
 
 TEST(Activations, EluSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
@@ -127,7 +126,7 @@ TEST(Activations, EluSerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json eluJ = elu->serialize(archiveWriter, stream);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -171,7 +170,7 @@ TEST(Activations, EluSerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
     NetworkInput::deserialize(networkInputJ, &newNetwork);
     Elu::deserialize(eluJ, &newNetwork);
@@ -215,7 +214,7 @@ TEST(Activations, EluSerializeDeserialize) {
 TEST(Activations, EluRegistered) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     vector<uint64_t> inputDimensions;
     uint32_t numDimensions = 1 + (rand() % 5);
@@ -235,7 +234,7 @@ TEST(Activations, EluRegistered) {
 
     ASSERT_TRUE(elu->isInitialized());
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     Stream stream(0);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -243,7 +242,7 @@ TEST(Activations, EluRegistered) {
     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
     // Test that it is registered with Activation to deserialize
-    Network newNetwork;
+    Network newNetwork("newNetwork");
     NetworkInput::deserialize(networkInputJ, &newNetwork);
     Activation::deserialize(eluJ, &newNetwork);
     NetworkOutput::deserialize(networkOutputJ, &newNetwork);

@@ -68,7 +68,7 @@ class Network {
 
     const static int32_t CPU = -1;
 
-    Network() : frozen(false) {}
+    Network(std::string networkName) : networkName(networkName), frozen(false) {}
     virtual ~Network();
 
     virtual std::string statusCodeToString(int statusCode);
@@ -83,11 +83,10 @@ class Network {
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork &getStampedNetwork(uint64_t i) { return stampedNetworks[i]; }
 
-    virtual void setNetworkName(std::string networkName) { this->networkName = networkName; }
     virtual std::string getNetworkName() { return networkName; }
 
-    virtual void save(std::string modelName, std::string directory, bool overwrite, bool saveOptimizerState);
-    virtual void load(std::string modelName, std::string directory);
+    virtual void save(const std::string &directory, bool overwrite, bool saveOptimizerState);
+    virtual void load(const std::string &directory);
 
     std::shared_ptr<Optimizer> getOptimizer();
     void attachOptimizerToLayers(bool replaceIfExisting);
@@ -168,12 +167,11 @@ class Network {
 
     std::string networkName;
 
-    // void reorderStampedNetworkForTestability(StampedNetwork &stampedNetwork);
-    // void reorderLayers(StampedNetwork &stampedNetwork, std::vector<Layer*> &layersToReoder, std::vector<Layer*> &destinationStorage);
-
     bool terminatesWithoutHitting(Tensor tensor, std::shared_ptr<Layer> layer);
 
     bool frozen;
+
+    std::shared_ptr<thor_file::TarWriter> archiveWriter = nullptr;
 
     class GpuOutOfMemoryError {};
 

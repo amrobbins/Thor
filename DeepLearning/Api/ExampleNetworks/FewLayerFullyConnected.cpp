@@ -4,8 +4,7 @@ using namespace Thor;
 using namespace std;
 
 Network buildFewLayerFullyConnected() {
-    Network fewLayerFullyConnected;
-    fewLayerFullyConnected.setNetworkName("FewLayerFullyConnected");
+    Network fewLayerFullyConnected("FewLayerFullyConnected");
 
     vector<uint64_t> expectedDimensions;
 

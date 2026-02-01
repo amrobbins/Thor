@@ -86,10 +86,10 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
 
         stream.synchronize();
 
-        archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
-        archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
-        archiveWriter.addArchiveFile(resultRunningMeanFile, meansBuffer.getMemPtr(), means.getArraySizeInBytes());
-        archiveWriter.addArchiveFile(resultRunningVarianceFile, varianceBuffer.getMemPtr(), variance.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(weightsFile, weightsBuffer);
+        archiveWriter.addArchiveFile(biasesFile, biasesBuffer);
+        archiveWriter.addArchiveFile(resultRunningMeanFile, meansBuffer);
+        archiveWriter.addArchiveFile(resultRunningVarianceFile, varianceBuffer);
     }
 
     if (hasOptimizer()) {

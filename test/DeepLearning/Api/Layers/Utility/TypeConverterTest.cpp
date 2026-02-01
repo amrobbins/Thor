@@ -13,7 +13,7 @@ using json = nlohmann::json;
 TEST(UtilityApiLayers, TypeConverterBuilds) {
     srand(time(nullptr));
 
-    Network network;
+    Network network("testNetwork");
 
     vector<uint64_t> dimensions = {2, 6, 4, 1};
     Tensor::DataType inputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
@@ -64,7 +64,7 @@ TEST(UtilityApiLayers, TypeConverterBuilds) {
 TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Stream stream(0);
 
     Tensor::DataType fromDataType = rand() % 2 ? Tensor::DataType::FP32 : Tensor::DataType::FP16;
@@ -96,7 +96,7 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
                                       .dataType(toDataType)
                                       .build();
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json typeConverterJ = typeConverter.serialize(archiveWriter, stream);
 
@@ -133,9 +133,14 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
     ////////////////////////////
     // Deserialize
     ////////////////////////////
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+    ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
+    archiveWriter.addArchiveFile("dummy", dummyData);
+     archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);

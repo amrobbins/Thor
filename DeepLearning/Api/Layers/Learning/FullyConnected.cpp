@@ -170,9 +170,9 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     stream.synchronize();
 
     if (twbLayer != nullptr) {
-        archiveWriter.addArchiveFile(weightsFile, weightsBuffer.getMemPtr(), weights.getArraySizeInBytes());
+        archiveWriter.addArchiveFile(weightsFile, weightsBuffer);
         if (hasBias)
-            archiveWriter.addArchiveFile(biasesFile, biasesBuffer.getMemPtr(), biases.getArraySizeInBytes());
+            archiveWriter.addArchiveFile(biasesFile, biasesBuffer);
     }
 
     return j;

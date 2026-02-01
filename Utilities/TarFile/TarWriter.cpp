@@ -1,5 +1,7 @@
 #include "Utilities/TarFile/TarWriter.h"
 
+#include "Utilities/TarFile/ArchiveShardWriterWorker.h"
+
 #include "Crc32.h"
 #include "Crc32c.h"
 
@@ -46,7 +48,7 @@ static string make_archive_id_sha32() {
 }
 
 static bool is_valid_shard_filename(const string& base, const string& fname) {
-    // patter base.thor.tar
+    // pattern: base.thor.tar
     if (fname == base + ".thor.tar")
         return true;
 
@@ -90,20 +92,123 @@ static void write_u32_le(std::ostream& out, uint32_t v) {
     out.write(reinterpret_cast<const char*>(b), 4);
 }
 
-TarWriter::TarWriter(string archiveName, filesystem::path archiveDirectory, bool overwriteIfExists, uint64_t shard_payload_limit_bytes) {
-    shard_payload_limit_ = shard_payload_limit_bytes;
-    finished_ = false;
-    cur_ = 0;
-    index_.clear();
-    shards_.clear();
+static uint64_t round_up_512(uint64_t n) { return (n + 511ull) & ~511ull; }
 
+static string shard_temp_path(const string& prefix, uint32_t shard_idx) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), ".%06u.thor.tar.incomplete", shard_idx);
+    return prefix + string(buf);
+}
+
+static std::string strip_suffix_or_throw(const std::string& s, const std::string& suffix, uint32_t numShards) {
+    if (s.size() < suffix.size() || s.compare(s.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        throw std::runtime_error("expected suffix '" + suffix + "' on: " + s);
+    }
+    string permanent = s.substr(0, s.size() - suffix.size());
+
+    if (numShards == 1) {
+        // We expect shard 0 naming: "<prefix>.000000.thor.tar"
+        // Strip the ".000000" so it becomes "<prefix>.thor.tar".
+        constexpr const char* kShard0 = ".000000";
+        constexpr const char* kTar = ".thor.tar";
+
+        const std::string expected_tail = std::string(kShard0) + kTar;
+        if (permanent.size() < expected_tail.size() ||
+            permanent.compare(permanent.size() - expected_tail.size(), expected_tail.size(), expected_tail) != 0) {
+            throw std::runtime_error("expected single-shard name to end with '" + expected_tail + "' but got: " + permanent);
+        }
+
+        // Remove ".000000" immediately before ".thor.tar"
+        permanent.erase(permanent.size() - expected_tail.size(), std::strlen(kShard0));
+    }
+
+    return permanent;
+}
+
+static uint32_t usualFileSize(uint64_t fileSize) {
+    // Tar header + round to even 512 byte boundary
+    return 512ull + round_up_512(fileSize);
+}
+
+TarWriter::TarWriter(string archiveName, uint64_t shard_payload_limit_bytes) : SHARD_PAYLOAD_LIMIT(shard_payload_limit_bytes) {
+    this->archiveName = archiveName;
+}
+
+/**
+ * Plan the archive shards adding 1 file at a time
+ */
+void TarWriter::addArchiveFile(const string& pathInTar, ThorImplementation::Tensor& tensor) {
+    string cleanedPathInTar = cleanTarPath(pathInTar);
+
+    constexpr size_t MAX_SHARD_BYTES = size_t(1) << 29;
+    size_t fileSize = tensor.getArraySizeInBytes();
+
+    if (fileSize <= MAX_SHARD_BYTES) {
+        // The file is small enough that it will not be sharded
+
+        // Start a new shard when needed
+        uint64_t wholeFileBytes = usualFileSize(fileSize);
+        if (archiveShardCreationPlan.empty() || archiveShardCreationPlan.back().totalBytes + wholeFileBytes > SHARD_PAYLOAD_LIMIT) {
+            uint32_t nextShardIndex = archiveShardCreationPlan.size();
+            string shardPath = shard_temp_path(archiveName, nextShardIndex);
+            archiveShardCreationPlan.emplace_back(shardPath);
+        }
+
+        // Place the file in the archive shard's plan
+        ArchiveCreationPlanEntry shardPlan = {
+            .deviceTensor = tensor, .offsetBytes = 0UL, .numBytes = fileSize, .path_in_tar = cleanedPathInTar};
+        archiveShardCreationPlan.back().entries.push_back(shardPlan);
+        archiveShardCreationPlan.back().totalBytes += wholeFileBytes;
+        archiveShardCreationPlan.back().shardNumber = archiveShardCreationPlan.size() - 1;
+
+        return;
+    }
+
+    // The file will be sharded in the archive, so its path will be taken to be a directory containing numbered shards in the archive.
+    // Ensure the directory prefix ends with '/'
+    std::string dir = cleanedPathInTar;
+    if (!dir.empty() && dir.back() != '/')
+        dir.push_back('/');
+
+    size_t shardOffset = 0;
+    size_t fileShardNum = 0;
+    while (shardOffset < fileSize) {
+        const size_t remainingBytes = fileSize - shardOffset;
+        const size_t thisShardNumBytes = usualFileSize((remainingBytes > MAX_SHARD_BYTES) ? MAX_SHARD_BYTES : remainingBytes);
+
+        std::string shardPath = dir + "shard" + std::to_string(fileShardNum);
+
+        // Start a new archive shard when necessary
+        if (archiveShardCreationPlan.empty() || archiveShardCreationPlan.back().totalBytes + thisShardNumBytes > SHARD_PAYLOAD_LIMIT) {
+            uint32_t nextShardIndex = archiveShardCreationPlan.size();
+            string shardPath = shard_temp_path(archiveName, nextShardIndex);
+            archiveShardCreationPlan.emplace_back(shardPath);
+        }
+
+        // Place the file shard in the archive shard's plan
+        ArchiveCreationPlanEntry shardPlan = {
+            .deviceTensor = tensor, .offsetBytes = shardOffset, .numBytes = thisShardNumBytes, .path_in_tar = cleanedPathInTar};
+        archiveShardCreationPlan.back().entries.push_back(shardPlan);
+        archiveShardCreationPlan.back().totalBytes += thisShardNumBytes;
+        archiveShardCreationPlan.back().shardNumber = archiveShardCreationPlan.size() - 1;
+
+        shardOffset += thisShardNumBytes;
+        ++fileShardNum;
+    }
+}
+
+string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwriteIfExists) {
+    if (archiveShardCreationPlan.empty())
+        throw runtime_error("Error: Archive creation request received, but no content has been registered to archive " +
+                            archiveDirectory.string() + "/" + archiveName);
+
+    // Create archive id for this run (32 chars, sha-like)
+    string archiveId = make_archive_id_sha32();
     if (archiveDirectory.empty())
         archiveDirectory = filesystem::path(".");
     if (!filesystem::exists(archiveDirectory)) {
         filesystem::create_directories(archiveDirectory);
     }
-
-    prefix_ = (archiveDirectory / archiveName).string();
 
     // Scan for any existing shard *paths* matching this prefix (any type: file/dir/symlink/etc.)
     vector<filesystem::path> matches;
@@ -119,7 +224,7 @@ TarWriter::TarWriter(string archiveName, filesystem::path archiveDirectory, bool
     if (!matches.empty()) {
         if (!overwriteIfExists) {
             // Mention one example match for debugging
-            throw runtime_error("TarWriter: archive already exists for prefix '" + prefix_ +
+            throw runtime_error("TarWriter: archive already exists for prefix '" + archiveName +
                                 "' (found shard file: " + matches.front().string() +
                                 "). Set overwriteIfExists=true to overwrite or move it out of the way or choose a different archive name.");
         }
@@ -142,238 +247,27 @@ TarWriter::TarWriter(string archiveName, filesystem::path archiveDirectory, bool
         }
     }
 
-    // Create archive id for this run (32 chars, sha-like)
-    archive_id_ = make_archive_id_sha32();
+    // global index (same across shards except shard_index in the JSON)
+    std::unordered_map<std::string, EntryInfo> archiveIndex;
 
-    // Open first shard and initialize bookkeeping
-    openShard_(0);
-    cur_ = 0;
-}
+    // Start the thread pool with writer workers, wait for it to finish running.
+    WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, archiveDirectory);
+    ThreadPool<ArchiveShardWriterWorker, ArchiveShardCreationPlan, WorkerJobContext> archiveWriterThreadPool(
+        archiveShardCreationPlan, workerContext, 3);
+    archiveWriterThreadPool.wait();
 
-TarWriter::~TarWriter() {
-    try {
-        if (!finished_ && !shards_.empty())
-            finishArchive();
-    } catch (...) {
-        // swallow (or log)
-    }
-}
-
-static uint64_t round_up_512(uint64_t n) { return (n + 511ull) & ~511ull; }
-
-static string shard_temp_path(const string& prefix, uint32_t shard_idx) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), ".%06u.thor.tar.incomplete", shard_idx);
-    return prefix + string(buf);
-}
-
-la_ssize_t TarWriter::write_cb(archive*, void* client_data, const void* buffer, size_t length) {
-    auto* s = static_cast<ShardState*>(client_data);
-    s->out.write(static_cast<const char*>(buffer), static_cast<streamsize>(length));
-    if (!s->out)
-        return -1;
-    s->pos += static_cast<uint64_t>(length);
-    return static_cast<la_ssize_t>(length);
-}
-
-int TarWriter::close_cb(archive*, void* client_data) {
-    auto* s = static_cast<ShardState*>(client_data);
-    s->out.flush();
-    return s->out ? ARCHIVE_OK : ARCHIVE_FATAL;
-}
-
-void TarWriter::openShard_(uint32_t shard_index) {
-    if (shard_index != shards_.size())
-        throw runtime_error("openShard_: shard_index out of sequence");
-
-    shards_.emplace_back();
-    ShardState& st = shards_.back();
-
-    if (shard_index == 0) {
-        st.path = prefix_ + ".thor.tar.incomplete";
-    } else {
-        if (shard_index == 1) {
-            // Now that there will be multiple shards, rename the first one to be a member of the group
-            const filesystem::path old_path = filesystem::path(prefix_ + ".thor.tar.incomplete");
-            const filesystem::path new_path = filesystem::path(prefix_ + ".000000.thor.tar.incomplete");
-            std::error_code ec;
-            shards_[0].path = new_path.string();
-            filesystem::rename(old_path, new_path, ec);
-            if (ec) {
-                throw std::runtime_error("promoteSingleShardToNumbered_: rename failed: " + old_path.string() + " -> " + new_path.string() +
-                                         " (" + ec.message() + ")");
-            }
-        }
-
-        st.path = shard_temp_path(prefix_, shard_index);
-    }
-    st.out.open(st.path, ios::binary | ios::trunc);
-    if (!st.out)
-        throw runtime_error("failed to open shard for write: " + st.path);
-    // 16 MB IO buffer to support NVMe speeds.
-    st.io_buf.resize(16 * 1024 * 1024);
-    st.out.rdbuf()->pubsetbuf(st.io_buf.data(), static_cast<std::streamsize>(st.io_buf.size()));
-
-    st.a = archive_write_new();
-    if (!st.a)
-        throw runtime_error("archive_write_new failed");
-
-    archive_write_set_format_pax_restricted(st.a);
-    archive_write_set_bytes_per_block(st.a, 0);      // no internal blocking/buffering
-    archive_write_set_bytes_in_last_block(st.a, 1);  // don't pad the final block weirdly
-
-    if (archive_write_open(st.a, &st, /*open*/ nullptr, &TarWriter::write_cb, &TarWriter::close_cb) != ARCHIVE_OK) {
-        const char* err = archive_error_string(st.a);
-        archive_write_free(st.a);
-        st.a = nullptr;
-        throw runtime_error(string("archive_write_open failed: ") + (err ? err : "(unknown)"));
-    }
-}
-
-void TarWriter::closeShard_(uint32_t shard_index) {
-    auto& s = shards_.at(shard_index);
-    if (s.closed)
-        return;
-
-    if (archive_write_close(s.a) != ARCHIVE_OK) {
-        const char* err = archive_error_string(s.a);
-        archive_write_free(s.a);
-        s.a = nullptr;
-        throw runtime_error(string("archive_write_close failed: ") + (err ? err : "(unknown)"));
-    }
-    archive_write_free(s.a);
-    s.a = nullptr;
-
-    s.out.close();
-    if (!s.out)
-        throw runtime_error("failed closing shard output: " + s.path);
-    s.io_buf.clear();
-
-    s.closed = true;
-}
-
-void TarWriter::addArchiveFile(string path_in_tar, const void* data, size_t size, int permissions, time_t mtime) {
-    if (finished_)
-        throw runtime_error("TarWriter::add_bytes: archive already finished");
-
-    path_in_tar = cleanTarPath(path_in_tar);
-
-    uint32_t data_crc = Crc32c::compute((uint8_t*)data, size);
-
-    // Shard rollover policy:
-    // With PAX, header overhead varies (extra 512B blocks for extended headers), so we estimate
-    // conservatively. Offsets are still exact because we track actual bytes written.
-    auto estimated_entry_bytes = [&](uint64_t file_size) -> uint64_t {
-        // 1 tar header block + payload padded to 512
-        uint64_t base = 512ull + round_up_512(file_size);
-
-        // PAX slack: worst-case can be more than 1 block if you have many attrs / long paths.
-        // Adjust if you want tighter. This only affects when we roll shards, not correctness.
-        uint64_t pax_slack = 4096ull;  // 8 blocks of slack
-
-        return base + pax_slack;
-    };
-
-    // Reserve space for end-of-archive marker (2x 512 blocks)
-    const uint64_t end_marker = 1024ull;
-
-    ShardState& s = shards_[cur_];
-
-    if (shard_payload_limit_ > 0 && s.pos > 0) {
-        const uint64_t est = estimated_entry_bytes(static_cast<uint64_t>(size));
-
-        // Note: finishArchive() will append JSON+footer after we close tar;
-        // that will exceed shard_payload_limit_ by (json+footer). If you need strict
-        // on-disk size limits, subtract a reserved trailer budget here.
-        if (s.pos + est + end_marker > shard_payload_limit_) {
-            closeShard_(cur_);
-            openShard_(cur_ + 1);
-            ++cur_;
-        }
-    }
-
-    ShardState& s2 = shards_[cur_];
-
-    archive_entry* entry = archive_entry_new();
-    if (!entry)
-        throw runtime_error("archive_entry_new failed");
-
-    archive_entry_set_pathname(entry, path_in_tar.c_str());
-    archive_entry_set_filetype(entry, AE_IFREG);
-    archive_entry_set_perm(entry, permissions);
-    archive_entry_set_size(entry, static_cast<la_int64_t>(size));
-    archive_entry_set_mtime(entry, static_cast<time_t>(mtime), 0);
-
-    if (archive_write_header(s2.a, entry) != ARCHIVE_OK) {
-        const char* err = archive_error_string(s2.a);
-        archive_entry_free(entry);
-        throw runtime_error(string("archive_write_header failed: ") + (err ? err : "(unknown)"));
-    }
-
-    const uint64_t data_off_after_header = s2.pos;
-
-    // Write payload
-    const uint8_t* p = static_cast<const uint8_t*>(data);
-    size_t remaining = size;
-    while (remaining > 0) {
-        la_ssize_t wrote = archive_write_data(s2.a, p, remaining);
-        if (wrote < 0) {
-            const char* err = archive_error_string(s2.a);
-            archive_entry_free(entry);
-            throw runtime_error(string("archive_write_data failed: ") + (err ? err : "(unknown)"));
-        }
-        p += static_cast<size_t>(wrote);
-        remaining -= static_cast<size_t>(wrote);
-    }
-
-    if (archive_write_finish_entry(s2.a) != ARCHIVE_OK) {
-        const char* err = archive_error_string(s2.a);
-        archive_entry_free(entry);
-        throw runtime_error(string("archive_write_finish_entry failed: ") + (err ? err : "(unknown)"));
-    }
-
-    archive_entry_free(entry);
-
-    // Record in global index. This (shard, data_offset, size) is what your reader needs.
-    EntryInfo info;
-    info.shard = cur_;
-    info.data_offset = data_off_after_header;
-    info.size = static_cast<uint64_t>(size);
-    info.crc = data_crc;
-
-    index_[path_in_tar] = info;
-}
-
-static std::string strip_suffix_or_throw(const std::string& s, const std::string& suffix) {
-    if (s.size() < suffix.size() || s.compare(s.size() - suffix.size(), suffix.size(), suffix) != 0) {
-        throw std::runtime_error("expected suffix '" + suffix + "' on: " + s);
-    }
-    return s.substr(0, s.size() - suffix.size());
-}
-
-void TarWriter::finishArchive() {
-    if (finished_)
-        return;
-    if (shards_.empty())
-        throw runtime_error("TarWriter::finishArchive: no shards to finish");
-
-    // Close all shards (writes tar end markers).
-    for (uint32_t i = 0; i < shards_.size(); ++i) {
-        closeShard_(i);
-    }
-
-    const uint32_t num_shards = static_cast<uint32_t>(shards_.size());
+    uint32_t num_shards = archiveShardCreationPlan.size();
 
     // Build base JSON (same across shards except shard_index)
-    // Use ordered_json to keep key ordering stable if you ever compare strings.
+    // Use ordered_json to keep key ordering stable.
     nlohmann::ordered_json base;
     base["format_version"] = 1;
-    base["checksum_alg"] = "crc32c";
-    base["archive_id"] = archive_id_;  // 32-char “sha-like”
+    base["checksum_alg"] = "crc32_ieee";
+    base["archive_id"] = archiveId;  // 32-char “sha-like”
     base["num_shards"] = num_shards;
 
     nlohmann::ordered_json files = nlohmann::ordered_json::object();
-    for (const auto& kv : index_) {
+    for (const auto& kv : archiveIndex) {
         const string& path = kv.first;
         const EntryInfo& e = kv.second;
         files[path] = {{"shard", e.shard}, {"data_offset", e.data_offset}, {"size", e.size}, {"crc", e.crc}};
@@ -386,16 +280,18 @@ void TarWriter::finishArchive() {
         j["shard_index"] = shard_idx;  // per-shard field differs
 
         const string json_str = j.dump();  // UTF-8
-        uint32_t index_crc = Crc32c::compute((uint8_t*)json_str.c_str(), json_str.size());
+        uint32_t index_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)json_str.c_str(), json_str.size());
 
-        ofstream out(shards_[shard_idx].path, ios::binary | ios::app);
+        // string archiveShardPath = strip_suffix_or_throw(archiveShardCreationPlan[shard_idx].archiveShardPath, ".incomplete", num_shards);
+        string archiveShardPath = (archiveDirectory / archiveShardCreationPlan[shard_idx].archiveShardPath).string();  // + ".incomplete";
+        ofstream out(archiveShardPath, ios::binary | ios::app);
         if (!out)
-            throw runtime_error("finishArchive: failed to reopen shard for append: " + shards_[shard_idx].path);
+            throw runtime_error("createArchive: failed to reopen shard for append: " + archiveShardPath);
 
         // Write JSON bytes
         out.write(json_str.data(), static_cast<streamsize>(json_str.size()));
         if (!out)
-            throw runtime_error("finishArchive: failed writing JSON to: " + shards_[shard_idx].path);
+            throw runtime_error("createArchive: failed writing JSON to: " + archiveShardPath);
 
         // Write footer: magic + json_len (LE)
         out.write(kFooterMagic, 8);
@@ -404,40 +300,39 @@ void TarWriter::finishArchive() {
         write_u32_le(out, 0u);  // reserved for future (version/flags/etc)
 
         if (!out)
-            throw runtime_error("finishArchive: failed writing footer to: " + shards_[shard_idx].path);
+            throw runtime_error("createArchive: failed writing footer to: " + archiveShardPath);
 
         out.flush();
         if (!out)
-            throw runtime_error("finishArchive: flush failed: " + shards_[shard_idx].path);
+            throw runtime_error("createArchive: flush failed: " + archiveShardPath);
     }
 
     // Ensure no files in the way, right before attempting move
     for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
-        string temp_path = shards_[shard_idx].path;
-        string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete");
+        string temp_path = archiveShardCreationPlan[shard_idx].archiveShardPath;
+        string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete", num_shards);
 
         std::error_code ec;
         if (filesystem::exists(permanent_path)) {
             filesystem::remove(permanent_path, ec);
             if (ec)
-                throw runtime_error("finishArchive: failed to rename file " + temp_path + " to: " + permanent_path);
+                throw runtime_error("createArchive: failed to rename file " + temp_path + " to: " + permanent_path);
         }
     }
 
     // Move files to their permanent names
     for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
-        string temp_path = shards_[shard_idx].path;
-        string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete");
+        string temp_path = (archiveDirectory / archiveShardCreationPlan[shard_idx].archiveShardPath).string();
+        string permanent_path = strip_suffix_or_throw(temp_path, ".incomplete", num_shards);
 
         std::error_code ec;
         filesystem::rename(temp_path, permanent_path, ec);
         if (ec) {
-            throw std::runtime_error("finishArchive: rename failed: " + temp_path + " -> " + permanent_path + " (" + ec.message() + ")");
+            throw std::runtime_error("createArchive: rename failed: " + temp_path + " -> " + permanent_path + " (" + ec.message() + ")");
         }
     }
 
-    shards_.clear();
-    finished_ = true;
+    return archiveId;
 }
 
 }  // namespace thor_file

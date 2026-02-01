@@ -22,7 +22,7 @@ using namespace std;
 using namespace Thor;
 
 static Network buildNetwork(uint32_t numFCLayers) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
@@ -240,7 +240,7 @@ TEST(Adam, SerializeDeserialize) {
     srand(time(nullptr));
 
     for (uint32_t t = 0; t < 4; ++t) {
-        Network initialNetwork;
+        Network initialNetwork("initialNetwork");
 
         Tensor::DataType dataType = Tensor::DataType::FP16;
         vector<uint64_t> inputDimensions = {1UL + (rand() % 16)};
@@ -308,7 +308,7 @@ TEST(Adam, SerializeDeserialize) {
         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
 
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-        thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+        thor_file::TarWriter archiveWriter("testModel");
 
         // Check initialization and if saving state, write some state to check that it got saved and restored
         bool saveOptimizerState = rand() % 2;
@@ -419,9 +419,9 @@ TEST(Adam, SerializeDeserialize) {
         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("m_bias_tensor"));
         ASSERT_EQ(saveOptimizerState && hasBias, adamJ.contains("v_bias_tensor"));
 
-        archiveWriter.finishArchive();
+        archiveWriter.createArchive("/tmp/", true);
         shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
-        Network newNetwork;
+        Network newNetwork("newNetwork");
 
         // Deserialize everything
         // place

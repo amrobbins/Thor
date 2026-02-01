@@ -18,7 +18,7 @@ TEST(MeanAbsolutePercentageError, Builds) {
     srand(time(nullptr));
 
     for (uint32_t i = 0; i < 10; ++i) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         dimensions.push_back(1 + (rand() % 1000));
@@ -122,7 +122,8 @@ TEST(MeanAbsolutePercentageError, Builds) {
 TEST(MeanAbsolutePercentageError, SerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
+    ;
     Tensor::DataType dataType = Tensor::DataType::FP16;
     vector<uint64_t> inputDimensions = {1UL};
     Tensor::DataType lossDataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
@@ -186,7 +187,7 @@ TEST(MeanAbsolutePercentageError, SerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     Layer *layer = &meanAbsolutePercentageError;
     json meanAbsolutePercentageErrorJ = layer->serialize(archiveWriter, stream);
@@ -255,9 +256,9 @@ TEST(MeanAbsolutePercentageError, SerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, predictionsInputJ, &newNetwork);

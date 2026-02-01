@@ -16,7 +16,7 @@ TEST(LossShaper, Builds) {
     srand(time(nullptr));
 
     for (uint32_t i = 0; i < 10; ++i) {
-        Network network;
+        Network network("testNetwork");
 
         vector<uint64_t> dimensions;
         dimensions.push_back(2 + (rand() % 1000));
@@ -109,7 +109,7 @@ TEST(LossShaper, Builds) {
 TEST(LossShaper, SerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
     Tensor::DataType dataType = rand() % 2 ? Tensor::DataType::FP16 : Tensor::DataType::FP32;
     uint64_t numClasses = (rand() % 100) + 1;
     vector<uint64_t> inputDimensions = {numClasses};
@@ -174,7 +174,7 @@ TEST(LossShaper, SerializeDeserialize) {
     ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     json lossShaperJ = lossShaper.serialize(archiveWriter, stream);
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
@@ -222,9 +222,15 @@ TEST(LossShaper, SerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    // Write a dummy file with data into the archive since none of the layers wrote anything into it (no weights)
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
+    ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
+    archiveWriter.addArchiveFile("dummy", dummyData);
+
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
@@ -266,4 +272,6 @@ TEST(LossShaper, SerializeDeserialize) {
 
     ASSERT_EQ(stampedInput->getFeatureOutput().get(), stampedLossShaper->getFeatureInput().get());
     ASSERT_EQ(stampedLossShaper->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
+
+    filesystem::remove("/tmp/testModel.thor.tar");
 }

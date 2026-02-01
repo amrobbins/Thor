@@ -4,8 +4,7 @@ using namespace Thor;
 using namespace std;
 
 Network buildDeepFullyConnected() {
-    Network deepFullyConnected;
-    deepFullyConnected.setNetworkName("DeepFullyConnected");
+    Network deepFullyConnected("DeepFullyConnected");
 
     vector<uint64_t> expectedDimensions;
 

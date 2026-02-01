@@ -19,7 +19,7 @@ using json = nlohmann::json;
 using namespace Thor;
 
 static Network buildNetwork(uint32_t numFCLayers) {
-    Network network;
+    Network network("testNetwork");
     Tensor latestOutputTensor;
     shared_ptr<Initializer> uniformRandomInitializer = UniformRandom::Builder().minValue(-0.1).maxValue(0.1).build();
 
@@ -375,7 +375,7 @@ TEST(Sgd, SgdReportsParameters) {
 TEST(Sgd, SerializeDeserialize) {
     srand(time(nullptr));
 
-    Network initialNetwork;
+    Network initialNetwork("initialNetwork");
 
     Tensor::DataType dataType = Tensor::DataType::FP16;
 
@@ -486,7 +486,7 @@ TEST(Sgd, SerializeDeserialize) {
         biases.copyFromAsync(biasesCpu, stream);
     }
 
-    thor_file::TarWriter archiveWriter("testModel", "/tmp/", true);
+    thor_file::TarWriter archiveWriter("testModel");
 
     // The network attached the optimizer to its copy of the FC layer
     json fullyConnectedJ;
@@ -594,9 +594,9 @@ TEST(Sgd, SerializeDeserialize) {
     // Deserialize
     ////////////////////////////
     // Verify that the layer gets added to the network and that its weights are set to the correct values
-    Network newNetwork;
+    Network newNetwork("newNetwork");
 
-    archiveWriter.finishArchive();
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
