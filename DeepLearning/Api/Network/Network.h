@@ -172,6 +172,7 @@ class Network {
     bool frozen;
 
     std::shared_ptr<thor_file::TarWriter> archiveWriter = nullptr;
+    std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
 
     class GpuOutOfMemoryError {};
 

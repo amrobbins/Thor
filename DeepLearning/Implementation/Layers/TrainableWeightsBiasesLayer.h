@@ -245,10 +245,11 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     }
 
     void loadWeightsFromArchiveFile(thor_file::TarReader *archiveReader, std::string filename, Stream stream) {
-        assert(archiveReader != nullptr);
-        thor_file::FileSliceFd fileFd = archiveReader->getFileSliceFd(filename);
-        weights.attachFile(filename, fileFd.offset, Tensor::FileAccess::READ_ONLY, fileFd.fd);
-        weights.loadFromFile(stream, fileFd.crc);
+        // assert(archiveReader != nullptr);
+        // thor_file::FileSliceFd fileFd = archiveReader->getFileSliceFd(filename);
+        // weights.attachFile(filename, fileFd.offset, Tensor::FileAccess::READ_ONLY, fileFd.fd);
+        // weights.loadFromFile(stream, fileFd.crc);
+        assert(false);
     }
 
     void dumpBiasesToFile(std::string filename, Stream stream) {
@@ -272,11 +273,12 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     }
 
     void loadBiasesFromArchiveFile(thor_file::TarReader *archiveReader, std::string filename, Stream stream) {
-        assert(archiveReader != nullptr);
-        assert(hasBias);
-        thor_file::FileSliceFd fileFd = archiveReader->getFileSliceFd(filename);
-        biases.get().attachFile(filename, fileFd.offset, Tensor::FileAccess::READ_ONLY, fileFd.fd);
-        biases.get().loadFromFile(stream, fileFd.crc);
+        // assert(archiveReader != nullptr);
+        // assert(hasBias);
+        // thor_file::FileSliceFd fileFd = archiveReader->getFileSliceFd(filename);
+        // biases.get().attachFile(filename, fileFd.offset, Tensor::FileAccess::READ_ONLY, fileFd.fd);
+        // biases.get().loadFromFile(stream, fileFd.crc);
+        assert(false);
     }
 
     virtual std::string getType() { return "TrainableWeightsBiases"; }

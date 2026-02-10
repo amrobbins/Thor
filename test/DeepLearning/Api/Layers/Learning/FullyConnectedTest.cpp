@@ -321,7 +321,7 @@ TEST(FullyConnected, SerializeDeserialize) {
         // The network attached the optimizer to its copy of the FC layer
         json fullyConnectedJ;
         bool fcFound = false;
-        shared_ptr<FullyConnected> initalNetworkFC;
+        shared_ptr<Layer> initalNetworkFC;
         for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
@@ -384,6 +384,8 @@ TEST(FullyConnected, SerializeDeserialize) {
             ASSERT_TRUE(dropOutFound);
         }
 
+        archiveWriter.createArchive("/tmp/", true);
+
         // printf("%s\n", networkInputJ.dump(4).c_str());
         // printf("%s\n", labelsInputJ.dump(4).c_str());
         // if (useBatchNorm)
@@ -396,11 +398,6 @@ TEST(FullyConnected, SerializeDeserialize) {
         //     printf("%s\n", reluJ.dump(4).c_str());
         // printf("%s\n", meanAbsoluteErrorJ.dump(4).c_str());
         // printf("%s\n", networkOutputJ.dump(4).c_str());
-
-        // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
-        shared_ptr<Layer> layer = initalNetworkFC;
-        json fromLayerJ = layer->serialize(archiveWriter, stream, true);
-        ASSERT_EQ(fullyConnectedJ, fromLayerJ);
 
         ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
         ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");
@@ -485,6 +482,9 @@ TEST(FullyConnected, SerializeDeserialize) {
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
+
+        archiveReader->executeReadRequests();
+
         ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);

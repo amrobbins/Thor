@@ -83,9 +83,6 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
         assert(physicalAdam != nullptr);
 
-        ThorImplementation::TensorPlacement cpuPlacement =
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
         string optimizerName = string("layer") + to_string(owningLayer->getId()) + "_adam";
         string mFile = optimizerName + "_m.gds";
         string vFile = optimizerName + "_v.gds";
@@ -93,17 +90,13 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         j["v_tensor"] = vFile;
 
         ThorImplementation::Tensor m = physicalAdam->getM();
-        ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
-        mBuffer.copyFromAsync(m, stream);
+        archiveWriter.addArchiveFile(mFile, m);
 
         ThorImplementation::Tensor v = physicalAdam->getV();
-        ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
-        vBuffer.copyFromAsync(v, stream);
+        archiveWriter.addArchiveFile(vFile, v);
 
         ThorImplementation::Tensor mBias;
-        ThorImplementation::Tensor mBiasBuffer;
         ThorImplementation::Tensor vBias;
-        ThorImplementation::Tensor vBiasBuffer;
         string mBiasFile;
         string vBiasFile;
         if (physicalAdam->getMBias().isPresent()) {
@@ -114,21 +107,10 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
             j["v_bias_tensor"] = vBiasFile;
 
             mBias = physicalAdam->getMBias();
-            mBiasBuffer = mBias.clone(cpuPlacement);
-            mBiasBuffer.copyFromAsync(mBias, stream);
+            archiveWriter.addArchiveFile(mBiasFile, mBias);
 
             vBias = physicalAdam->getVBias();
-            vBiasBuffer = vBias.clone(cpuPlacement);
-            vBiasBuffer.copyFromAsync(vBias, stream);
-        }
-
-        stream.synchronize();
-
-        archiveWriter.addArchiveFile(mFile, mBuffer);
-        archiveWriter.addArchiveFile(vFile, vBuffer);
-        if (physicalAdam->getMBias().isPresent()) {
-            archiveWriter.addArchiveFile(mBiasFile, mBiasBuffer);
-            archiveWriter.addArchiveFile(vBiasFile, vBiasBuffer);
+            archiveWriter.addArchiveFile(vBiasFile, vBias);
         }
 
         j["t"] = physicalAdam->getT();
@@ -217,29 +199,14 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
             assert(mBiasFile.isPresent());
             assert(vBiasFile.isPresent());
         }
-
-        ThorImplementation::TensorPlacement cpuPlacement =
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
-        ThorImplementation::Tensor mBuffer = m.clone(cpuPlacement);
-        archiveReader->readFile(mFile.get(), mBuffer.getMemPtr<void>(), m.getArraySizeInBytes());
-        m.copyFromAsync(mBuffer, stream);
-
-        ThorImplementation::Tensor vBuffer = v.clone(cpuPlacement);
-        archiveReader->readFile(vFile.get(), vBuffer.getMemPtr<void>(), v.getArraySizeInBytes());
-        v.copyFromAsync(vBuffer, stream);
+        archiveReader->registerReadRequest(mFile.get(), m);
+        archiveReader->registerReadRequest(vFile.get(), v);
 
         if (mBias.isPresent()) {
             assert(mBiasFile.isPresent());
             assert(vBiasFile.isPresent());
-
-            ThorImplementation::Tensor mBiasBuffer = mBias.get().clone(cpuPlacement);
-            archiveReader->readFile(mBiasFile.get(), mBiasBuffer.getMemPtr<void>(), mBias.get().getArraySizeInBytes());
-            mBias.get().copyFromAsync(mBiasBuffer, stream);
-
-            ThorImplementation::Tensor vBiasBuffer = vBias.get().clone(cpuPlacement);
-            archiveReader->readFile(vBiasFile.get(), vBiasBuffer.getMemPtr<void>(), vBias.get().getArraySizeInBytes());
-            vBias.get().copyFromAsync(vBiasBuffer, stream);
+            archiveReader->registerReadRequest(mBiasFile.get(), mBias);
+            archiveReader->registerReadRequest(vBiasFile.get(), vBias);
         }
 
         // Can't use the files later, they may not still be there
@@ -248,9 +215,6 @@ vector<Event> Adam::initialize(shared_ptr<ThorImplementation::Optimizer> physica
         vFile.clear();
         mBiasFile.clear();
         vBiasFile.clear();
-
-        // I need to synchronize here to keep bounce buffer alive
-        stream.synchronize();
     } else {
         m.memsetAsync(stream, 0);
         v.memsetAsync(stream, 0);

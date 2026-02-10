@@ -17,6 +17,8 @@
 #include "Utilities/TarFile/Crc32.h"
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
+using namespace std;
 
 namespace {
 
@@ -216,12 +218,22 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
 
     // Read back hello via offsets + validate per-entry CRC
     {
-        const auto& e = files["docs/hello.txt"];
-        ASSERT_EQ(e["shard"].get<uint32_t>(), 0u);
-        const uint64_t off = e["data_offset"].get<uint64_t>();
-        const uint64_t sz = e["size"].get<uint64_t>();
-        ASSERT_TRUE(e.contains("crc"));
-        EXPECT_EQ(e["crc"].get<uint32_t>(), hello_crc);
+        // printf("%s\n", files.dump(4).c_str());
+
+        const json& entries = files.at("docs/hello.txt");  // array
+        ASSERT_TRUE(entries.is_array());
+        ASSERT_FALSE(entries.empty());
+
+        const json& entry = entries.at(0);  // object (individual entry)
+        ASSERT_TRUE(entry.is_object());
+
+        // printf("%s\n", entry.dump(4).c_str());
+
+        ASSERT_EQ(entry.at("archive_shard").get<uint32_t>(), 0u);
+        const uint64_t off = entry.at("file_data_offset").get<uint64_t>();
+        const uint64_t sz = entry.at("size").get<uint64_t>();
+        ASSERT_TRUE(entry.contains("crc"));
+        EXPECT_EQ(entry.at("crc").get<uint32_t>(), hello_crc);
 
         auto payload = read_payload_at(shard0, off, sz);
         EXPECT_EQ(payload.size(), hello.size());
@@ -234,12 +246,18 @@ TEST(TarWriter, SingleShard_WritesFooterIndexAndOffsetsWork) {
 
     // Read back blob via offsets + validate per-entry CRC
     {
-        const auto& e = files["data/blob.bin"];
-        ASSERT_EQ(e["shard"].get<uint32_t>(), 0u);
-        const uint64_t off = e["data_offset"].get<uint64_t>();
-        const uint64_t sz = e["size"].get<uint64_t>();
-        ASSERT_TRUE(e.contains("crc"));
-        EXPECT_EQ(e["crc"].get<uint32_t>(), blob_crc);
+        const json& entries = files.at("data/blob.bin");  // array
+        ASSERT_TRUE(entries.is_array());
+        ASSERT_FALSE(entries.empty());
+
+        const json& entry = entries.at(0);
+        ASSERT_TRUE(entry.is_object());
+
+        ASSERT_EQ(entry.at("archive_shard").get<uint32_t>(), 0u);
+        const uint64_t off = entry.at("file_data_offset").get<uint64_t>();
+        const uint64_t sz = entry.at("size").get<uint64_t>();
+        ASSERT_TRUE(entry.contains("crc"));
+        EXPECT_EQ(entry.at("crc").get<uint32_t>(), blob_crc);
 
         auto payload = read_payload_at(shard0, off, sz);
         ASSERT_EQ(payload.size(), blob.size());
@@ -325,14 +343,20 @@ TEST(TarWriter, MultiShard_RenamesAndIndexesMatchAcrossShards) {
     ASSERT_TRUE(files1.contains("b.txt"));
 
     // Random-access read using the shard specified by the index + validate per-entry crc32c
-    auto check_file = [&](const nlohmann::json& files, const std::string& path, const std::string& expected, uint32_t expected_crc) {
-        const auto& e = files[path];
-        const uint32_t shard = e["shard"].get<uint32_t>();
-        const uint64_t off = e["data_offset"].get<uint64_t>();
-        const uint64_t sz = e["size"].get<uint64_t>();
+    auto check_file = [&](const json& files, const std::string& path, const std::string& expected, uint32_t expected_crc) {
+        const json& entries = files[path];
+        ASSERT_TRUE(entries.is_array());
+        ASSERT_FALSE(entries.empty());
 
-        ASSERT_TRUE(e.contains("crc")) << "missing crc for " << path;
-        EXPECT_EQ(e["crc"].get<uint32_t>(), expected_crc) << "crc mismatch in index for " << path;
+        const json& entry = entries.at(0);
+        ASSERT_TRUE(entry.is_object());
+
+        const uint32_t shard = entry["archive_shard"].get<uint32_t>();
+        const uint64_t off = entry["file_data_offset"].get<uint64_t>();
+        const uint64_t sz = entry["size"].get<uint64_t>();
+
+        ASSERT_TRUE(entry.contains("crc")) << "missing crc for " << path;
+        EXPECT_EQ(entry["crc"].get<uint32_t>(), expected_crc) << "crc mismatch in index for " << path;
 
         fs::path shard_path = (shard == 0) ? shard0 : shard1;
         auto payload = read_payload_at(shard_path, off, sz);

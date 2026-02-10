@@ -144,6 +144,9 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
 
     stampedNetworks.push_back(stampedNetwork);
 
+    if (archiveReader != nullptr)
+        archiveReader->executeReadRequests();
+
     return StatusCode::SUCCESS;
 }
 
@@ -255,19 +258,19 @@ void Network::save(const std::string &directory, bool overwrite, bool saveOptimi
 }
 
 void Network::load(const std::string &directory) {
-    shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>(networkName, directory);
-    unordered_map<std::string, thor_file::EntryInfo> archiveEntries = archiveReader->entries();
-
+    // Read the model json from the archive
+    archiveReader = make_shared<thor_file::TarReader>(networkName, directory);
     string modelJsonFileName = networkName + ".thor.json";
-    if (!archiveEntries.contains(modelJsonFileName))
-        throw std::runtime_error("Model file " + modelJsonFileName + " not found in model archive for " + networkName + " in directory " +
-                                 directory);
-    thor_file::EntryInfo modelJsonEntryInfo = archiveEntries[modelJsonFileName];
-    std::string modelJsonStr;
-    modelJsonStr.resize(modelJsonEntryInfo.size);
-    archiveReader->readFile(modelJsonFileName, modelJsonStr.data(), modelJsonEntryInfo.size);
+    uint32_t modelJsonNumBytes = archiveReader->getFileSize(modelJsonFileName);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor modelJsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8,
+                                                                   {modelJsonNumBytes});
+    ThorImplementation::Tensor modelJsonStrTensor(cpuPlacement, modelJsonTensorDescriptor);
+    archiveReader->registerReadRequest(modelJsonFileName, modelJsonStrTensor);
+    archiveReader->executeReadRequests();
 
-    json modelJson = json::parse(modelJsonStr);
+    char *jsonStr = modelJsonStrTensor.getMemPtr<char>();  // Not null terminated.
+    json modelJson = json::parse(jsonStr, jsonStr + modelJsonNumBytes);
     const json layers = modelJson["layers"];
     if (!layers.is_array()) {
         throw std::runtime_error("\"layers\" is not a JSON array");

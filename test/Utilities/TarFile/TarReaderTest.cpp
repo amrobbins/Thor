@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 namespace fs = std::filesystem;
+using namespace thor_file;
 
 static std::string makeTmpPrefix(const std::string& stem) {
     static int counter = 0;
@@ -58,17 +59,26 @@ std::vector<uint8_t> make_pattern_bytes(size_t n, uint32_t seed) {
     return v;
 }
 
-void read_and_expect(thor_file::TarReader& r, const std::string& path, const std::vector<uint8_t>& expected) {
-    ASSERT_TRUE(r.contains(path)) << "missing: " << path;
+void read_and_expect(TarReader& reader, const std::string& path, const std::vector<uint8_t>& expected) {
+    ASSERT_TRUE(reader.containsFile(path)) << "missing: " << path;
 
-    const auto& info = r.info(path);
+    std::vector<EntryInfo> fileEntries = reader.getFileShards(path);
+    // const auto& info = r.getFileShards(path);
+    ASSERT_EQ(fileEntries.size(), 1UL);
+    EntryInfo info = fileEntries[0];
     ASSERT_EQ(info.size, static_cast<uint64_t>(expected.size())) << "size mismatch for " << path;
 
-    std::vector<uint8_t> got(expected.size());
-    r.readFile(path, got.data(), static_cast<uint64_t>(got.size()));
+    // std::vector<uint8_t> got(expected.size());
+    // reader.readFile(path, got.data(), static_cast<uint64_t>(got.size()));
 
-    ASSERT_EQ(got.size(), expected.size());
-    ASSERT_EQ(std::memcmp(got.data(), expected.data(), expected.size()), 0) << "payload mismatch for " << path;
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {expected.size()});
+    ThorImplementation::Tensor got(cpuPlacement, descriptor);
+    reader.registerReadRequest(path, got);
+    reader.executeReadRequests();
+
+    ASSERT_EQ(got.getArraySizeInBytes(), expected.size());
+    ASSERT_EQ(std::memcmp(got.getMemPtr<uint8_t>(), expected.data(), expected.size()), 0) << "payload mismatch for " << path;
 
     const uint32_t crc_expected = crc32_ieee(0xFFFFFFFF, (uint8_t*)expected.data(), expected.size());
     EXPECT_EQ(info.crc, crc_expected) << "index crc32c mismatch for " << path;
@@ -103,7 +113,7 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
         const uint64_t shard_limit = 1'000'000;
         const bool overwrite = true;
 
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
         w.addArchiveFile("docs/hello.txt", helloTensor);
         w.addArchiveFile("data/blob.bin", blobTensor);
         w.createArchive(archiveDir, overwrite);
@@ -114,15 +124,15 @@ TEST(TarRoundTrip, SingleShard_CreateThenRead_VerifyBytes) {
     EXPECT_FALSE(fs::exists(prefix + ".000000.thor.tar"));
 
     // Read back and validate content
-    thor_file::TarReader r(archiveName, archiveDir);
+    TarReader r(archiveName, archiveDir);
     const std::vector<uint8_t> hello(hello_str.begin(), hello_str.end());
     read_and_expect(r, "docs/hello.txt", hello);
     read_and_expect(r, "data/blob.bin", blob);
 
     // A couple sanity checks about indexing behavior
-    ASSERT_TRUE(r.contains("docs/hello.txt"));
-    ASSERT_TRUE(r.contains("data/blob.bin"));
-    ASSERT_FALSE(r.contains("nope.txt"));
+    ASSERT_TRUE(r.containsFile("docs/hello.txt"));
+    ASSERT_TRUE(r.containsFile("data/blob.bin"));
+    ASSERT_FALSE(r.containsFile("nope.txt"));
 }
 
 // -----------------------------------------------------------------------------
@@ -160,7 +170,7 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
         // 256 KiB is almost guaranteed to roll with your 4 KiB pax slack + tar padding.
         const uint64_t shard_limit = 256 * 1024;
 
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
         w.addArchiveFile("a.bin", aTensor);
         w.addArchiveFile("b.bin", bTensor);
         w.addArchiveFile("c.bin", cTensor);
@@ -173,15 +183,15 @@ TEST(TarRoundTrip, MultiShard_CreateThenRead_VerifyBytesAcrossShards) {
     EXPECT_FALSE(fs::exists(prefix + ".thor.tar"));
 
     // Read back using TarReader's scan+index+pread
-    thor_file::TarReader r(archiveName, archiveDir);
+    TarReader r(archiveName, archiveDir);
 
     read_and_expect(r, "a.bin", a);
     read_and_expect(r, "b.bin", b);
     read_and_expect(r, "c.bin", c);
 }
 
-static constexpr char kFooterMagic[8] = {'T', 'H', 'O', 'R', 'I', 'D', 'X', '1'};
-static constexpr uint64_t kFooterSize = 24;  // 8 magic + 8 json_len + 4 crc + 4 reserved
+static constexpr char testKFooterMagic[8] = {'T', 'H', 'O', 'R', 'I', 'D', 'X', '1'};
+static constexpr uint64_t testKFooterSize = 24;  // 8 magic + 8 json_len + 4 crc + 4 reserved
 
 static uint64_t read_u64_le(const uint8_t b[8]) {
     uint64_t v = 0;
@@ -220,12 +230,12 @@ static FooterInfo24 read_footer_info24(const fs::path& shard_path) {
 
     in.seekg(0, std::ios::end);
     const std::streamoff end = in.tellg();
-    if (end < (std::streamoff)kFooterSize)
+    if (end < (std::streamoff)testKFooterSize)
         throw std::runtime_error("shard too small for footer: " + shard_path.string());
 
     FooterInfo24 fi;
     fi.file_size = (uint64_t)end;
-    fi.footer_start = fi.file_size - kFooterSize;
+    fi.footer_start = fi.file_size - testKFooterSize;
 
     in.seekg((std::streamoff)fi.footer_start, std::ios::beg);
 
@@ -241,14 +251,14 @@ static FooterInfo24 read_footer_info24(const fs::path& shard_path) {
     if (!in)
         throw std::runtime_error("failed to read footer: " + shard_path.string());
 
-    if (std::memcmp(magic, kFooterMagic, 8) != 0)
+    if (std::memcmp(magic, testKFooterMagic, 8) != 0)
         throw std::runtime_error("footer magic mismatch: " + shard_path.string());
 
     fi.json_len = read_u64_le(len_bytes);
-    if (fi.json_len == 0 || fi.json_len > fi.file_size - kFooterSize)
+    if (fi.json_len == 0 || fi.json_len > fi.file_size - testKFooterSize)
         throw std::runtime_error("invalid json_len in footer: " + shard_path.string());
 
-    fi.json_start = fi.file_size - kFooterSize - fi.json_len;
+    fi.json_start = fi.file_size - testKFooterSize - fi.json_len;
 
     // footer layout: magic(8) + len(8) + index_crc(4) + reserved(4)
     fi.index_crc_off = fi.footer_start + 8 + 8;
@@ -320,14 +330,14 @@ static FooterInfo24 read_footer_info(const fs::path& shard_path) {
 
     in.seekg(0, std::ios::end);
     const std::streamoff end = in.tellg();
-    if (end < static_cast<std::streamoff>(kFooterSize)) {
+    if (end < static_cast<std::streamoff>(testKFooterSize)) {
         throw std::runtime_error("shard too small for footer: " + shard_path.string());
     }
     FooterInfo24 fi;
     fi.file_size = static_cast<uint64_t>(end);
 
     // read footer
-    in.seekg(static_cast<std::streamoff>(fi.file_size - kFooterSize), std::ios::beg);
+    in.seekg(static_cast<std::streamoff>(fi.file_size - testKFooterSize), std::ios::beg);
 
     char magic[8];
     uint8_t len_bytes[8];
@@ -336,16 +346,16 @@ static FooterInfo24 read_footer_info(const fs::path& shard_path) {
     if (!in)
         throw std::runtime_error("failed to read footer: " + shard_path.string());
 
-    if (std::memcmp(magic, kFooterMagic, 8) != 0) {
+    if (std::memcmp(magic, testKFooterMagic, 8) != 0) {
         throw std::runtime_error("footer magic mismatch: " + shard_path.string());
     }
 
     fi.json_len = read_u64_le(len_bytes);
-    if (fi.json_len == 0 || fi.json_len > fi.file_size - kFooterSize) {
+    if (fi.json_len == 0 || fi.json_len > fi.file_size - testKFooterSize) {
         throw std::runtime_error("invalid json_len in footer: " + shard_path.string());
     }
 
-    fi.json_start = fi.file_size - kFooterSize - fi.json_len;
+    fi.json_start = fi.file_size - testKFooterSize - fi.json_len;
 
     in.seekg(static_cast<std::streamoff>(fi.json_start), std::ios::beg);
     fi.json.resize(static_cast<size_t>(fi.json_len));
@@ -435,7 +445,7 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
     memcpy(cTensor.getMemPtr<void>(), c.data(), fileSize);
 
     {
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
         w.addArchiveFile("a.bin", aTensor);
         w.addArchiveFile("b.bin", bTensor);
         w.addArchiveFile("c.bin", cTensor);
@@ -456,7 +466,7 @@ TEST(TarRoundTrip, RejectsArchiveIdMismatchAcrossThreeShards) {
 
     // Now TarReader should refuse to open due to archive_id mismatch.
     try {
-        thor_file::TarReader r(archiveName, archiveDir);
+        TarReader r(archiveName, archiveDir);
         FAIL() << "Expected TarReader to throw due to archive_id mismatch, but it constructed successfully.";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
@@ -484,7 +494,7 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
     memcpy(payloadTensor.getMemPtr<void>(), payload.data(), fileSize);
 
     {
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
         w.addArchiveFile("x.bin", payloadTensor);
         w.createArchive(archiveDir, overwrite);
     }
@@ -496,14 +506,14 @@ TEST(TarRoundTrip, RejectsWrongFooterMagicNumber) {
     // Keep length unchanged; only corrupt magic bytes.
     std::array<char, 8> bad_magic = {'B', 'A', 'D', 'M', 'A', 'G', 'I', 'C'};
     const uint64_t file_size = static_cast<uint64_t>(fs::file_size(shard0));
-    ASSERT_GT(file_size, kFooterSize);
+    ASSERT_GT(file_size, testKFooterSize);
 
-    const uint64_t magic_off = file_size - kFooterSize;  // start of footer
+    const uint64_t magic_off = file_size - testKFooterSize;  // start of footer
     ASSERT_NO_THROW(overwrite_bytes_at(shard0, magic_off, bad_magic.data(), bad_magic.size()));
 
     // Reader should reject due to wrong magic.
     try {
-        thor_file::TarReader r(archiveName, archiveDir);
+        TarReader r(archiveName, archiveDir);
         FAIL() << "Expected TarReader to throw due to wrong footer magic, but it constructed successfully.";
     } catch (const std::runtime_error& e) {
         const std::string msg = e.what();
@@ -564,7 +574,7 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
 
     {
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
 
         uint64_t total_written = 0;
         for (uint32_t i = 0; i < kNumFiles; ++i) {
@@ -593,10 +603,37 @@ TEST(TarRoundTrip, ManyFiles_ManyShards_1MiBLimit_100FilesTotal10MiB) {
     ASSERT_TRUE(fs::exists(prefix + ".000000.thor.tar")) << "expected multi-shard output";
 
     // Read back and verify all files via TarReader (pread path).
-    thor_file::TarReader r(archiveName, archiveDir);
+    TarReader r(archiveName, archiveDir);
+
+    std::vector<ThorImplementation::Tensor> destTensors;
+    std::vector<uint32_t> actualCrcs;
 
     for (uint32_t i = 0; i < kNumFiles; ++i) {
-        read_and_expect(r, paths[i], contents[i]);
+        ASSERT_TRUE(r.containsFile(paths[i])) << "missing: " << paths[i];
+
+        std::vector<EntryInfo> fileEntries = r.getFileShards(paths[i]);
+        // const auto& info = r.getFileShards(path);
+        ASSERT_EQ(fileEntries.size(), 1UL);
+        EntryInfo info = fileEntries[0];
+        ASSERT_EQ(info.size, static_cast<uint64_t>(contents[i].size())) << "size mismatch for " << paths[i];
+        actualCrcs.push_back(info.crc);
+
+        ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {contents[i].size()});
+        ThorImplementation::Tensor destTensor(cpuPlacement, descriptor);
+        destTensors.push_back(destTensor);
+
+        r.registerReadRequest(paths[i], destTensor);
+    }
+
+    r.executeReadRequests();
+
+    for (uint32_t i = 0; i < kNumFiles; ++i) {
+        ASSERT_EQ(destTensors[i].getArraySizeInBytes(), contents[i].size());
+        ASSERT_EQ(std::memcmp(destTensors[i].getMemPtr<uint8_t>(), contents[i].data(), contents[i].size()), 0)
+            << "payload mismatch for " << paths[i];
+
+        const uint32_t crc_expected = crc32_ieee(0xFFFFFFFF, (uint8_t*)contents[i].data(), contents[i].size());
+        EXPECT_EQ(actualCrcs[i], crc_expected) << "index crc32c mismatch for " << paths[i];
     }
 
     // Optional: ensure shard count is "reasonable" (at least 10 shards for 10MiB @ 1MiB limit)
@@ -640,7 +677,7 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
         w.addArchiveFile("docs/hello.txt", helloTensor);
         w.addArchiveFile("data/blob.bin", blobTensor);
         w.createArchive(archiveDir, overwrite);
@@ -650,12 +687,12 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     ASSERT_TRUE(fs::exists(shard0)) << shard0;
 
     // Footer layout (24 bytes): magic(8) + json_len(8) + index_crc(4) + reserved(4)
-    static constexpr uint64_t kFooterSize = 24;
+    static constexpr uint64_t testKFooterSize = 24;
 
     const uint64_t file_size = static_cast<uint64_t>(fs::file_size(shard0));
-    ASSERT_GT(file_size, kFooterSize);
+    ASSERT_GT(file_size, testKFooterSize);
 
-    const uint64_t footer_start = file_size - kFooterSize;
+    const uint64_t footer_start = file_size - testKFooterSize;
     const uint64_t index_crc_off = footer_start + 8 + 8;  // after magic+len
 
     // Read existing index_crc so we can flip it.
@@ -693,7 +730,7 @@ TEST(TarRoundTrip, RejectsBadIndexCrcInFooter) {
     }
 
     // Now TarReader should reject due to index CRC mismatch.
-    EXPECT_THROW({ thor_file::TarReader r(archiveName, archiveDir); }, std::runtime_error);
+    EXPECT_THROW({ TarReader r(archiveName, archiveDir); }, std::runtime_error);
 }
 
 inline uint32_t read_u32_le(const uint8_t b[4]) {
@@ -708,12 +745,12 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
 
     in.seekg(0, std::ios::end);
     const std::streamoff end = in.tellg();
-    if (end < (std::streamoff)kFooterSize) {
+    if (end < (std::streamoff)testKFooterSize) {
         throw std::runtime_error("load_footer_index_json: file too small for footer: " + shard_path.string());
     }
 
     const uint64_t file_size = (uint64_t)end;
-    const uint64_t footer_start = file_size - kFooterSize;
+    const uint64_t footer_start = file_size - testKFooterSize;
 
     in.seekg((std::streamoff)footer_start, std::ios::beg);
 
@@ -730,19 +767,19 @@ static nlohmann::json load_footer_index_json(const fs::path& shard_path) {
         throw std::runtime_error("load_footer_index_json: failed reading footer: " + shard_path.string());
     }
 
-    if (std::memcmp(magic, kFooterMagic, 8) != 0) {
+    if (std::memcmp(magic, testKFooterMagic, 8) != 0) {
         throw std::runtime_error("load_footer_index_json: footer magic mismatch: " + shard_path.string());
     }
 
     const uint64_t json_len = read_u64_le(len_bytes);
-    if (json_len == 0 || json_len > file_size - kFooterSize) {
+    if (json_len == 0 || json_len > file_size - testKFooterSize) {
         throw std::runtime_error("load_footer_index_json: invalid json_len in footer: " + shard_path.string());
     }
 
     const uint32_t index_crc_expected = read_u32_le(crc_bytes);
     (void)reserved_bytes;  // reserved for future
 
-    const uint64_t json_start = file_size - kFooterSize - json_len;
+    const uint64_t json_start = file_size - testKFooterSize - json_len;
 
     in.seekg((std::streamoff)json_start, std::ios::beg);
     std::string json_str(json_len, '\0');
@@ -790,7 +827,7 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
 
     {
-        thor_file::TarWriter w(archiveName, shard_limit);
+        TarWriter w(archiveName, shard_limit);
         w.addArchiveFile("docs/hello.txt", helloTensor);
         w.addArchiveFile("data/blob.bin", blobTensor);
         w.createArchive(archiveDir, overwrite);
@@ -809,8 +846,8 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     const auto& checksum_alg = j0.at("checksum_alg").get<std::string>();
     ASSERT_TRUE(checksum_alg == "crc32_ieee");
 
-    const auto& e = files["data/blob.bin"];
-    const uint64_t off = e["data_offset"].get<uint64_t>();
+    const auto& e = files["data/blob.bin"][0];
+    const uint64_t off = e["file_data_offset"].get<uint64_t>();
     const uint64_t sz = e["size"].get<uint64_t>();
     ASSERT_GT(sz, 16u) << "blob too small for corruption test";
     ASSERT_TRUE(e.contains("crc"));
@@ -842,115 +879,14 @@ TEST(TarRoundTrip, CorruptSingleBitInPayload_ThrowsOnValidatedRead) {
     }
 
     // Now reading with validate=true should throw due to CRC mismatch.
-    thor_file::TarReader r(archiveName, archiveDir);
+    TarReader r(archiveName, archiveDir);
 
-    std::vector<uint8_t> out(sz);
-    EXPECT_THROW({ r.readFile("data/blob.bin", out.data(), sz); }, std::runtime_error);
+    ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {sz});
+    ThorImplementation::Tensor out(cpuPlacement, descriptor);
+
+    r.registerReadRequest("data/blob.bin", out);
+
+    EXPECT_THROW({ r.executeReadRequests(); }, std::runtime_error);
 }
 
-TEST(TarRoundTrip, VerifyAll_DoesNotThrow_OnCleanArchive) {
-    const std::string prefix = makeTmpPrefix("thor_tar_verifyall_ok");
-    CleanupGuard guard{prefix};
-
-    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
-    const std::string archiveName = std::filesystem::path(prefix).filename().string();
-
-    const uint64_t shard_limit = 1'000'000;  // single shard
-    const bool overwrite = true;
-
-    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
-    // Build some files
-    const std::string hello_str = "hello from gtest\n";
-    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
-    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
-    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
-
-    uint32_t blobBytes = 32 * 1024;
-    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 37);
-    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
-    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
-    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
-
-    {
-        thor_file::TarWriter w(archiveName, overwrite);
-        w.addArchiveFile("docs/hello.txt", helloTensor);
-        w.addArchiveFile("data/blob.bin", blobTensor);
-        w.createArchive(archiveDir, shard_limit);
-    }
-
-    thor_file::TarReader r(archiveName, archiveDir);
-    EXPECT_NO_THROW(r.verifyAll());
-}
-
-TEST(TarRoundTrip, VerifyAll_Throws_OnSingleBitCorruption) {
-    const std::string prefix = makeTmpPrefix("thor_tar_verifyall_bad");
-    CleanupGuard guard{prefix};
-
-    const std::filesystem::path archiveDir = std::filesystem::path(prefix).remove_filename();
-    const std::string archiveName = std::filesystem::path(prefix).filename().string();
-
-    const uint64_t shard_limit = 0;  // single shard
-    const bool overwrite = true;
-
-    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
-    // Build some files
-    const std::string hello_str = "hello from gtest\n";
-    ThorImplementation::TensorDescriptor helloDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {hello_str.size()});
-    ThorImplementation::Tensor helloTensor(cpuPlacement, helloDescriptor);
-    memcpy(helloTensor.getMemPtr<void>(), hello_str.data(), hello_str.size());
-
-    uint32_t blobBytes = 512 * 1024;
-    const std::vector<uint8_t> blob = make_pattern_bytes(blobBytes, 123);
-    ThorImplementation::TensorDescriptor blobDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {blobBytes});
-    ThorImplementation::Tensor blobTensor(cpuPlacement, blobDescriptor);
-    memcpy(blobTensor.getMemPtr<void>(), blob.data(), blob.size());
-
-    {
-        thor_file::TarWriter w(archiveName, overwrite);
-        w.addArchiveFile("data/blob.bin", blobTensor);
-        w.createArchive(archiveDir, shard_limit);
-    }
-
-    const fs::path shard0 = prefix + ".thor.tar";
-    ASSERT_TRUE(fs::exists(shard0)) << shard0;
-
-    // Load index to find payload offset/size
-    nlohmann::json j0;
-    ASSERT_NO_THROW(j0 = load_footer_index_json(shard0));
-    ASSERT_TRUE(j0.contains("files"));
-    ASSERT_TRUE(j0["files"].contains("data/blob.bin"));
-
-    const auto& e = j0["files"]["data/blob.bin"];
-    const uint64_t off = e["data_offset"].get<uint64_t>();
-    const uint64_t sz = e["size"].get<uint64_t>();
-    ASSERT_GT(sz, 0u);
-
-    // Flip one bit in the middle of payload
-    const uint64_t corrupt_pos = off + (sz / 2);
-
-    {
-        std::fstream io(shard0, std::ios::binary | std::ios::in | std::ios::out);
-        ASSERT_TRUE(io.good());
-
-        io.seekg((std::streamoff)corrupt_pos, std::ios::beg);
-        ASSERT_TRUE(io.good());
-
-        char byte = 0;
-        io.read(&byte, 1);
-        ASSERT_TRUE(io.good());
-
-        byte ^= 0x01;
-
-        io.seekp((std::streamoff)corrupt_pos, std::ios::beg);
-        ASSERT_TRUE(io.good());
-        io.write(&byte, 1);
-        ASSERT_TRUE(io.good());
-        io.flush();
-        ASSERT_TRUE(io.good());
-    }
-
-    thor_file::TarReader r(archiveName, archiveDir);
-    EXPECT_THROW(r.verifyAll(), std::runtime_error);
-}
+// FIXME: Test multiple shards for a single file

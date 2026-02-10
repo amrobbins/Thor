@@ -6,37 +6,11 @@
 
 namespace thor_file {
 
-struct ArchiveCreationPlanEntry {
-    ThorImplementation::Tensor deviceTensor;
-
-    uint64_t offsetBytes = 0;
-    uint64_t numBytes = 0;
-    std::string path_in_tar;
-};
-
-struct ArchiveShardCreationPlan {
-    explicit ArchiveShardCreationPlan(const std::string &path) : archiveShardPath(path) {}
-
-    std::string archiveShardPath;
-    uint32_t shardNumber;
-    uint64_t totalBytes = 0;
-    std::vector<ArchiveCreationPlanEntry> entries;
-};
-
-struct WorkerJobContext {
-    WorkerJobContext(std::unordered_map<std::string, EntryInfo> &archiveIndex,
-                     std::mutex &archiveIndexMutex,
-                     std::filesystem::path archiveDirectory)
-        : archiveIndex(archiveIndex), archiveIndexMutex(archiveIndexMutex), archiveDirectory(archiveDirectory) {}
-
-    std::unordered_map<std::string, EntryInfo> &archiveIndex;
-    std::mutex &archiveIndexMutex;
-    std::filesystem::path archiveDirectory;
-};
-
 class TarWriter {
    public:
-    explicit TarWriter(std::string archiveName, uint64_t shard_payload_limit_bytes = 5e9);
+    explicit TarWriter(const std::string &archiveName,
+                       uint64_t archiveShardSizeLimitBytes = 5'010'000'000,
+                       uint64_t fileShardSizeLimitBytes = 500'000'000);
     TarWriter(const TarWriter &) = delete;
     TarWriter &operator=(const TarWriter &) = delete;
     virtual ~TarWriter() = default;
@@ -48,11 +22,13 @@ class TarWriter {
     std::string createArchive(std::filesystem::path archiveDirectory, bool overwriteIfExists);
 
    private:
-    // e.g. "MyModel"
-    std::string archiveName;
-    const uint64_t SHARD_PAYLOAD_LIMIT;
+    const uint64_t ARCHIVE_SHARD_PAYLOAD_LIMIT;
+    const uint64_t MAX_FILE_SHARD_BYTES;
 
-    std::vector<ArchiveShardCreationPlan> archiveShardCreationPlan;
+    // e.g. "MyModel"
+    const std::string archiveName;
+
+    std::vector<ArchiveShardPlan> archiveShardCreationPlan;
 
     std::mutex archiveIndexMutex;
 };
