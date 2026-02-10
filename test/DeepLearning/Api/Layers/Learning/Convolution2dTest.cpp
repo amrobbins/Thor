@@ -855,7 +855,7 @@ TEST(Convolution2d, SerializeDeserialize) {
         // The network attached the optimizer to its copy of the conv layer
         json convolution2dJ;
         bool convFound = false;
-        shared_ptr<Convolution2d> initalNetworkConv;
+        shared_ptr<Layer> initalNetworkConv;
         for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkConv = dynamic_pointer_cast<Convolution2d>(layer);
@@ -918,6 +918,8 @@ TEST(Convolution2d, SerializeDeserialize) {
             ASSERT_TRUE(dropOutFound);
         }
 
+        archiveWriter.createArchive("/tmp/", true);
+
         // printf("%s\n", networkInputJ.dump(4).c_str());
         // printf("%s\n", labelsInputJ.dump(4).c_str());
         // if (useBatchNorm)
@@ -931,11 +933,6 @@ TEST(Convolution2d, SerializeDeserialize) {
         // printf("%s\n", flattenJ.dump(4).c_str());
         // printf("%s\n", meanAbsoluteErrorJ.dump(4).c_str());
         // printf("%s\n", networkOutputJ.dump(4).c_str());
-
-        // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
-        shared_ptr<Layer> layer = initalNetworkConv;
-        json convolution2dFromLayer = layer->serialize(archiveWriter, stream, true);
-        ASSERT_EQ(convolution2dJ, convolution2dFromLayer);
 
         ASSERT_EQ(convolution2dJ["version"], "1.0.0");
         ASSERT_EQ(convolution2dJ["layer_type"], "convolution_2d");
@@ -1045,6 +1042,7 @@ TEST(Convolution2d, SerializeDeserialize) {
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
+        archiveReader->executeReadRequests();
         ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);

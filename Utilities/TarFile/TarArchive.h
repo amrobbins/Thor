@@ -29,20 +29,50 @@ static constexpr char kFooterMagic[8] = {'T', 'H', 'O', 'R', 'I', 'D', 'X', '1'}
 static constexpr size_t kFooterSize = 24;
 
 struct EntryInfo {
-    uint32_t shard = 0;
-    uint64_t data_offset = 0;
+    uint32_t archiveShard = 0;
+    uint64_t fileDataOffset = 0;
+    uint64_t tensorDataOffset = 0;
     uint64_t size = 0;
     uint32_t crc = 0;
 };
 
-struct ShardState {
-    std::string path;
-    std::ofstream out;
-    archive* a = nullptr;
-    uint64_t pos = 0;
-    bool closed = false;
+struct ArchivePlanEntry {
+    ThorImplementation::Tensor tensor;
 
-    std::vector<char> io_buf;
+    uint64_t tensorOffsetBytes = 0;
+    uint64_t fileOffsetBytes = 0;
+    uint64_t numBytes = 0;
+    std::string pathInTar;
+    uint32_t expectedCrc;
+};
+
+struct ArchiveShardPlan {
+    ArchiveShardPlan() = default;
+    explicit ArchiveShardPlan(const std::string& path) : archiveShardPath(path) {}
+
+    std::string archiveShardPath;
+    uint32_t shardNumber;
+    uint64_t totalBytes = 0;
+    std::vector<ArchivePlanEntry> entries;
+};
+
+struct ArchiveWorkerJobContext {
+    ArchiveWorkerJobContext(std::unordered_map<std::string, std::vector<EntryInfo>>& archiveIndex,
+                            std::mutex& archiveIndexMutex,
+                            std::filesystem::path archiveDirectory)
+        : archiveIndex(archiveIndex), archiveIndexMutex(archiveIndexMutex), archiveDirectory(archiveDirectory) {}
+
+    std::unordered_map<std::string, std::vector<EntryInfo>>& archiveIndex;
+    std::mutex& archiveIndexMutex;
+    std::filesystem::path archiveDirectory;
+};
+
+struct ArchiveReaderContext {
+    ArchiveReaderContext(std::filesystem::path archiveDirectory, std::string& errorMessage, std::mutex& mtx)
+        : archiveDirectory(archiveDirectory), errorMessage(errorMessage), mtx(mtx) {}
+    std::filesystem::path archiveDirectory;
+    std::string& errorMessage;
+    std::mutex& mtx;
 };
 
 inline void throwArchive(archive* a, const char* what) {

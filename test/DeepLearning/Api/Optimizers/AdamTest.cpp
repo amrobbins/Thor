@@ -395,6 +395,8 @@ TEST(Adam, SerializeDeserialize) {
         json meanAbsoluteErrorJ = meanAbsoluteError.serialize(archiveWriter, stream);
         json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
+        archiveWriter.createArchive("/tmp/", true);
+
         ASSERT_TRUE(fullyConnectedJ.contains("optimizer"));
         json adamJ = fullyConnectedJ["optimizer"];
 
@@ -435,6 +437,7 @@ TEST(Adam, SerializeDeserialize) {
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
+        archiveReader->executeReadRequests();
         ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);

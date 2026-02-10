@@ -395,6 +395,9 @@ ElementDataType *Tensor::getMemPtr() {
             assert((is_same<ElementDataType, half>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
             assert((is_same<ElementDataType, float>::value));
+        else if (is_same<ElementDataType, char>::value)
+            assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
+                   descriptor.getDataType() == TensorDescriptor::DataType::INT8);
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
             assert((is_same<ElementDataType, int8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
@@ -566,8 +569,9 @@ void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffs
 }
 
 void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
-    assert(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    assert(stream.getGpuNum() == dest.getPlacement().getDeviceNum());
+    if (dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
+        assert(stream.getGpuNum() == dest.getPlacement().getDeviceNum());
+    }
 
     // Check that access is within range
     uint64_t sourceArraySizeBytes = descriptor.getArraySizeInBytes();
@@ -1714,6 +1718,8 @@ template int32_t *Tensor::getMemPtr();
 template uint8_t *Tensor::getMemPtr();
 template uint16_t *Tensor::getMemPtr();
 template uint32_t *Tensor::getMemPtr();
+
+template char *Tensor::getMemPtr();
 
 template half Tensor::getElement(vector<unsigned long> dimensionIndex);
 template float Tensor::getElement(vector<unsigned long> dimensionIndex);

@@ -6,18 +6,7 @@
 #include "Utilities/TarFile/TarArchive.h"
 #include "Utilities/TarFile/UringDirect.h"
 
-struct ArchiveFileReadParams {
-    ThorImplementation::Tensor deviceTensor;
-
-    // Where to place the bytes in the destination device tensor:
-    uint64_t deviceOffsetBytes;
-
-    // Number of payload bytes to read for this shard:
-    uint64_t numBytes;
-
-    // Absolute byte offset in the archive file where the payload begins (NOT the tar header).
-    uint64_t archivePayloadOffsetBytes;
-};
+namespace thor_file {
 
 enum class ReaderState {
     INITIAL,
@@ -28,7 +17,8 @@ enum class ReaderState {
 
 class ArchiveShardReaderWorker {
    public:
-    ArchiveShardReaderWorker() : uringDirect(64) {
+    explicit ArchiveShardReaderWorker(ArchiveReaderContext context)
+        : archiveDirectory(context.archiveDirectory), mtx(context.mtx), errorMessage(context.errorMessage), uringDirect(64) {
         ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
         ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {fiveHundredMBPlusTail});
 
@@ -43,15 +33,14 @@ class ArchiveShardReaderWorker {
     }
 
     // Reads each shard from archiveShardPath and uploads into the corresponding device tensor offsets.
-    // Produces CRCs for the payload bytes in the same order as plan.
-    void process(std::vector<ArchiveFileReadParams>& plan, const std::string& archiveShardPath, std::vector<uint32_t>& crcs) {
+    // Produces CRCs for the payload bytes and compares against the crc in the plan.
+    void process(ArchiveShardPlan job) {
+        std::vector<ArchivePlanEntry>& plan = job.entries;
         assert(plan.size() > 0);
+        const std::string& archiveShardPath = (archiveDirectory / job.archiveShardPath).string();
 
         // Symmetric to writer's registerDumpFile()
         uringDirect.registerLoadFile(archiveShardPath);
-
-        crcs.clear();
-        crcs.reserve(plan.size());
 
         // io_uring completion counts for each buffer
         uint32_t numCompletionsToFinish[2] = {0, 0};
@@ -120,7 +109,12 @@ class ArchiveShardReaderWorker {
                 // Compute CRC of payload bytes (CPU side)
                 const uint8_t* payloadPtr = bounceBufferMem[loadedBuffer] + prefixBytesForBuffer[loadedBuffer];
                 uint32_t crc = crc32_ieee(0xFFFFFFFF, payloadPtr, (uint32_t)payloadBytesForBuffer[loadedBuffer]);
-                crcs.push_back(crc);
+                if (crc != plan[i - 1].expectedCrc) {
+                    std::lock_guard<std::mutex> lg(mtx);
+                    errorMessage = "CRC mismatch in file " + plan[i - 1].pathInTar + " expected " +
+                                   std::to_string(plan[i - 1].expectedCrc) + " actual " + std::to_string(crc);
+                    return;
+                }
 
                 if (gpuTransferDone[loadingBuffer].isPresent())
                     gpuTransferDone[loadingBuffer].get().synchronize();
@@ -159,7 +153,12 @@ class ArchiveShardReaderWorker {
 
         const uint8_t* payloadPtr = bounceBufferMem[lastLoadingBuffer] + prefixBytesForBuffer[lastLoadingBuffer];
         uint32_t crc = crc32_ieee(0xFFFFFFFF, payloadPtr, (uint32_t)payloadBytesForBuffer[lastLoadingBuffer]);
-        crcs.push_back(crc);
+        if (crc != plan.back().expectedCrc) {
+            std::lock_guard<std::mutex> lg(mtx);
+            errorMessage = "CRC mismatch in file " + plan.back().pathInTar + " expected " + std::to_string(plan.back().expectedCrc) +
+                           " actual " + std::to_string(crc);
+            return;
+        }
 
         // Drain all outstanding GPU transfers
         uint32_t nonLastLoadingBuffer = lastLoadingBuffer == 0 ? 1 : 0;
@@ -207,7 +206,7 @@ class ArchiveShardReaderWorker {
     // Schedules the disk read for one plan entry into bufferIndex, recording the per-buffer geometry
     // so the consumer knows what slice to upload and where.
     void scheduleReadIntoBuffer(uint32_t bufferIndex,
-                                const ArchiveFileReadParams& p,
+                                const ArchivePlanEntry& p,
                                 uint64_t prefixBytesForBuffer[2],
                                 uint64_t payloadBytesForBuffer[2],
                                 uint64_t dstDeviceOffsetForBuffer[2],
@@ -217,7 +216,7 @@ class ArchiveShardReaderWorker {
         assert(bufferIndex < 2);
         assert(p.numBytes <= fiveHundredMB);
 
-        const uint64_t payloadOffset = p.archivePayloadOffsetBytes;
+        const uint64_t payloadOffset = p.fileOffsetBytes;
         const uint64_t alignedFileOffset = alignDown4k(payloadOffset);
         const uint64_t prefixBytes = payloadOffset - alignedFileOffset;
         const uint64_t totalBytes = alignUp4k(prefixBytes + p.numBytes);
@@ -228,10 +227,10 @@ class ArchiveShardReaderWorker {
 
         prefixBytesForBuffer[bufferIndex] = prefixBytes;
         payloadBytesForBuffer[bufferIndex] = p.numBytes;
-        dstDeviceOffsetForBuffer[bufferIndex] = p.deviceOffsetBytes;
-        dstDeviceTensorForBuffer[bufferIndex] = const_cast<ThorImplementation::Tensor*>(&p.deviceTensor);
+        dstDeviceOffsetForBuffer[bufferIndex] = p.tensorOffsetBytes;
+        dstDeviceTensorForBuffer[bufferIndex] = const_cast<ThorImplementation::Tensor*>(&p.tensor);
 
-        const uint32_t dev = p.deviceTensor.getPlacement().getDeviceNum();
+        const uint32_t dev = p.tensor.getPlacement().getDeviceNum();
         deviceNumForBuffer[bufferIndex] = dev;
 
         // Submit the O_DIRECT aligned read into the bounce buffer.
@@ -244,7 +243,6 @@ class ArchiveShardReaderWorker {
         return it->second;
     }
 
-    // Reverse of your downloadSection helper. Adjust the call if your API differs.
     static Event uploadGpuBuffer(ThorImplementation::Tensor& cpuBuffer,
                                  ThorImplementation::Tensor& deviceTensor,
                                  Stream& stream,
@@ -261,5 +259,10 @@ class ArchiveShardReaderWorker {
 
     std::unordered_map<uint32_t, Stream> streams;
 
+    const std::filesystem::path archiveDirectory;
+    std::mutex& mtx;
+    std::string& errorMessage;
     UringDirect uringDirect;
 };
+
+}  // namespace thor_file

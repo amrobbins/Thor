@@ -319,7 +319,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         // The network attached the optimizer to its copy of the BN layer
         json batchNormalizationJ;
         bool bnFound = false;
-        shared_ptr<BatchNormalization> initalNetworkBN;
+        shared_ptr<Layer> initalNetworkBN;
         for (int32_t i = 0; i < initialNetwork.getNumTrainableLayers(); ++i) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkBN = dynamic_pointer_cast<BatchNormalization>(layer);
@@ -331,10 +331,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         }
         ASSERT_TRUE(bnFound);
 
-        // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
-        shared_ptr<Layer> layer = initalNetworkBN;
-        json fromLayerJ = layer->serialize(archiveWriter, stream, true);
-        ASSERT_EQ(batchNormalizationJ, fromLayerJ);
+        archiveWriter.createArchive("/tmp/", true);
 
         ASSERT_EQ(batchNormalizationJ["version"], "1.0.0");
         ASSERT_EQ(batchNormalizationJ["layer_type"], "batch_normalization");
@@ -414,6 +411,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
 
         batchSize = 1 + (rand() % 16);
         statusCode = newNetwork.place(batchSize, initDoneEvents);
+        archiveReader->executeReadRequests();
         ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);

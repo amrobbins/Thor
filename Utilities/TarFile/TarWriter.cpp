@@ -9,8 +9,6 @@ using namespace std;
 
 namespace thor_file {
 
-// -------------------- TarWriter (PAX, uncompressed) --------------------
-
 static string make_archive_id_sha32() {
     uint8_t buf[16];
 
@@ -94,7 +92,7 @@ static void write_u32_le(std::ostream& out, uint32_t v) {
 
 static uint64_t round_up_512(uint64_t n) { return (n + 511ull) & ~511ull; }
 
-static string shard_temp_path(const string& prefix, uint32_t shard_idx) {
+static string archiveShardTempPath(const string& prefix, uint32_t shard_idx) {
     char buf[64];
     snprintf(buf, sizeof(buf), ".%06u.thor.tar.incomplete", shard_idx);
     return prefix + string(buf);
@@ -130,9 +128,8 @@ static uint32_t usualFileSize(uint64_t fileSize) {
     return 512ull + round_up_512(fileSize);
 }
 
-TarWriter::TarWriter(string archiveName, uint64_t shard_payload_limit_bytes) : SHARD_PAYLOAD_LIMIT(shard_payload_limit_bytes) {
-    this->archiveName = archiveName;
-}
+TarWriter::TarWriter(const string& archiveName, uint64_t archiveShardSizeLimitBytes, uint64_t fileShardSizeLimitBytes)
+    : ARCHIVE_SHARD_PAYLOAD_LIMIT(archiveShardSizeLimitBytes), MAX_FILE_SHARD_BYTES(fileShardSizeLimitBytes), archiveName(archiveName) {}
 
 /**
  * Plan the archive shards adding 1 file at a time
@@ -140,23 +137,21 @@ TarWriter::TarWriter(string archiveName, uint64_t shard_payload_limit_bytes) : S
 void TarWriter::addArchiveFile(const string& pathInTar, ThorImplementation::Tensor& tensor) {
     string cleanedPathInTar = cleanTarPath(pathInTar);
 
-    constexpr size_t MAX_SHARD_BYTES = size_t(1) << 29;
     size_t fileSize = tensor.getArraySizeInBytes();
 
-    if (fileSize <= MAX_SHARD_BYTES) {
+    if (fileSize <= MAX_FILE_SHARD_BYTES) {
         // The file is small enough that it will not be sharded
 
         // Start a new shard when needed
         uint64_t wholeFileBytes = usualFileSize(fileSize);
-        if (archiveShardCreationPlan.empty() || archiveShardCreationPlan.back().totalBytes + wholeFileBytes > SHARD_PAYLOAD_LIMIT) {
+        if (archiveShardCreationPlan.empty() || archiveShardCreationPlan.back().totalBytes + wholeFileBytes > ARCHIVE_SHARD_PAYLOAD_LIMIT) {
             uint32_t nextShardIndex = archiveShardCreationPlan.size();
-            string shardPath = shard_temp_path(archiveName, nextShardIndex);
+            string shardPath = archiveShardTempPath(archiveName, nextShardIndex);
             archiveShardCreationPlan.emplace_back(shardPath);
         }
 
         // Place the file in the archive shard's plan
-        ArchiveCreationPlanEntry shardPlan = {
-            .deviceTensor = tensor, .offsetBytes = 0UL, .numBytes = fileSize, .path_in_tar = cleanedPathInTar};
+        ArchivePlanEntry shardPlan = {.tensor = tensor, .tensorOffsetBytes = 0UL, .numBytes = fileSize, .pathInTar = cleanedPathInTar};
         archiveShardCreationPlan.back().entries.push_back(shardPlan);
         archiveShardCreationPlan.back().totalBytes += wholeFileBytes;
         archiveShardCreationPlan.back().shardNumber = archiveShardCreationPlan.size() - 1;
@@ -174,20 +169,21 @@ void TarWriter::addArchiveFile(const string& pathInTar, ThorImplementation::Tens
     size_t fileShardNum = 0;
     while (shardOffset < fileSize) {
         const size_t remainingBytes = fileSize - shardOffset;
-        const size_t thisShardNumBytes = usualFileSize((remainingBytes > MAX_SHARD_BYTES) ? MAX_SHARD_BYTES : remainingBytes);
-
-        std::string shardPath = dir + "shard" + std::to_string(fileShardNum);
+        const size_t thisShardNumBytes = usualFileSize((remainingBytes > MAX_FILE_SHARD_BYTES) ? MAX_FILE_SHARD_BYTES : remainingBytes);
 
         // Start a new archive shard when necessary
-        if (archiveShardCreationPlan.empty() || archiveShardCreationPlan.back().totalBytes + thisShardNumBytes > SHARD_PAYLOAD_LIMIT) {
+        if (archiveShardCreationPlan.empty() ||
+            archiveShardCreationPlan.back().totalBytes + thisShardNumBytes > ARCHIVE_SHARD_PAYLOAD_LIMIT) {
             uint32_t nextShardIndex = archiveShardCreationPlan.size();
-            string shardPath = shard_temp_path(archiveName, nextShardIndex);
-            archiveShardCreationPlan.emplace_back(shardPath);
+            string archiveShardPath = archiveShardTempPath(archiveName, nextShardIndex);
+            archiveShardCreationPlan.emplace_back(archiveShardPath);
         }
 
         // Place the file shard in the archive shard's plan
-        ArchiveCreationPlanEntry shardPlan = {
-            .deviceTensor = tensor, .offsetBytes = shardOffset, .numBytes = thisShardNumBytes, .path_in_tar = cleanedPathInTar};
+        // FIXME: I need file shard tests, it is not right yet
+        std::string fileShardPath = dir + "shard" + std::to_string(fileShardNum);
+        ArchivePlanEntry shardPlan = {
+            .tensor = tensor, .tensorOffsetBytes = shardOffset, .numBytes = thisShardNumBytes, .pathInTar = fileShardPath};
         archiveShardCreationPlan.back().entries.push_back(shardPlan);
         archiveShardCreationPlan.back().totalBytes += thisShardNumBytes;
         archiveShardCreationPlan.back().shardNumber = archiveShardCreationPlan.size() - 1;
@@ -248,11 +244,12 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
     }
 
     // global index (same across shards except shard_index in the JSON)
-    std::unordered_map<std::string, EntryInfo> archiveIndex;
+    // FIXME: changed to vector<EntryInfo>
+    std::unordered_map<std::string, vector<EntryInfo>> archiveIndex;
 
     // Start the thread pool with writer workers, wait for it to finish running.
-    WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, archiveDirectory);
-    ThreadPool<ArchiveShardWriterWorker, ArchiveShardCreationPlan, WorkerJobContext> archiveWriterThreadPool(
+    ArchiveWorkerJobContext workerContext(archiveIndex, archiveIndexMutex, archiveDirectory);
+    ThreadPool<ArchiveShardWriterWorker, ArchiveShardPlan, ArchiveWorkerJobContext> archiveWriterThreadPool(
         archiveShardCreationPlan, workerContext, 3);
     archiveWriterThreadPool.wait();
 
@@ -269,17 +266,28 @@ string TarWriter::createArchive(filesystem::path archiveDirectory, bool overwrit
     nlohmann::ordered_json files = nlohmann::ordered_json::object();
     for (const auto& kv : archiveIndex) {
         const string& path = kv.first;
-        const EntryInfo& e = kv.second;
-        files[path] = {{"shard", e.shard}, {"data_offset", e.data_offset}, {"size", e.size}, {"crc", e.crc}};
+        const vector<EntryInfo>& entries = kv.second;
+
+        nlohmann::ordered_json fileEntries = nlohmann::ordered_json::array();
+        for (const EntryInfo& fileEntry : entries) {
+            fileEntries.push_back({
+                {"archive_shard", fileEntry.archiveShard},
+                {"file_data_offset", fileEntry.fileDataOffset},
+                {"tensor_data_offset", fileEntry.tensorDataOffset},
+                {"size", fileEntry.size},
+                {"crc", fileEntry.crc},
+            });
+        }
+        files[path] = std::move(fileEntries);
     }
     base["files"] = std::move(files);
 
     // Append per-shard JSON + footer
     for (uint32_t shard_idx = 0; shard_idx < num_shards; ++shard_idx) {
-        nlohmann::ordered_json j = base;
-        j["shard_index"] = shard_idx;  // per-shard field differs
+        nlohmann::ordered_json indexJ = base;
+        indexJ["shard_index"] = shard_idx;  // per-shard field differs
 
-        const string json_str = j.dump();  // UTF-8
+        const string json_str = indexJ.dump();  // UTF-8
         uint32_t index_crc = crc32_ieee(0xFFFFFFFF, (uint8_t*)json_str.c_str(), json_str.size());
 
         // string archiveShardPath = strip_suffix_or_throw(archiveShardCreationPlan[shard_idx].archiveShardPath, ".incomplete", num_shards);

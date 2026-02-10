@@ -68,7 +68,7 @@ enum class WriterState {
 
 class ArchiveShardWriterWorker {
    public:
-    ArchiveShardWriterWorker(WorkerJobContext context)
+    ArchiveShardWriterWorker(ArchiveWorkerJobContext context)
         : archiveIndex(context.archiveIndex),
           archiveIndexMutex(context.archiveIndexMutex),
           archiveDirectory(context.archiveDirectory),
@@ -84,8 +84,8 @@ class ArchiveShardWriterWorker {
     }
 
     // void process(std::vector<ArchiveCreationPlanEntry>& plan, std::string archiveShardPath, std::vector<uint32_t>& crcs) {
-    void process(ArchiveShardCreationPlan job) {
-        std::vector<ArchiveCreationPlanEntry>& plan = job.entries;
+    void process(ArchiveShardPlan job) {
+        std::vector<ArchivePlanEntry>& plan = job.entries;
         const std::string& archiveShardPath = (archiveDirectory / job.archiveShardPath).string();
         const uint32_t shardNumber = job.shardNumber;
 
@@ -101,20 +101,20 @@ class ArchiveShardWriterWorker {
         for (uint32_t i = 0; i < plan.size(); ++i) {
             if (state == WriterState::INITIAL) {
                 // Ensure I have the needed stream
-                uint32_t deviceNum = plan[0].deviceTensor.getPlacement().getDeviceNum();
+                uint32_t deviceNum = plan[0].tensor.getPlacement().getDeviceNum();
                 // Get existing or put one there if missing:
                 auto [it, inserted] = streams.try_emplace(deviceNum, Stream::getNextDownloadStream(deviceNum));
                 Stream& stream = it->second;
 
                 // set numTailBytes to the tar header length for the first file:
-                numTailPadAndHeaderBytes = createTarSeparator(plan[0].path_in_tar, plan[0].numBytes, 0, 0, tailAndTarSeparator, thirtyTwoK);
+                numTailPadAndHeaderBytes = createTarSeparator(plan[0].pathInTar, plan[0].numBytes, 0, 0, tailAndTarSeparator, thirtyTwoK);
                 // Copy the header to the front of the bounce buffer
                 std::memcpy(bounceBufferMem[0], tailAndTarSeparator, numTailPadAndHeaderBytes);
 
                 // Initiate fetch of the first chunk of the file, place it on the bounce buffer after the tar header:
                 assert(plan[0].numBytes <= fiveHundredMB);
                 bounceBufferReady[0] = prefetchGpuBuffer(
-                    bounceBuffer[0], plan[0].deviceTensor, stream, plan[0].offsetBytes, plan[0].numBytes, numTailPadAndHeaderBytes);
+                    bounceBuffer[0], plan[0].tensor, stream, plan[0].tensorOffsetBytes, plan[0].numBytes, numTailPadAndHeaderBytes);
 
                 if (plan.size() == 1) {
                     finalFetchingBuffer = 0;
@@ -136,7 +136,7 @@ class ArchiveShardWriterWorker {
                 }
 
                 // Ensure I have the needed stream
-                uint32_t deviceNum = plan[i].deviceTensor.getPlacement().getDeviceNum();
+                uint32_t deviceNum = plan[i].tensor.getPlacement().getDeviceNum();
                 // Get existing or put one there if missing:
                 auto [it, inserted] = streams.try_emplace(deviceNum, Stream::getNextDownloadStream(deviceNum));
                 Stream& stream = it->second;
@@ -165,7 +165,7 @@ class ArchiveShardWriterWorker {
                 // Append both of these onto the scratch buffer (tailAndTarSeparator),
                 // after the tail bytes that are already at the front of it.
                 numTailPadAndHeaderBytes = createTarSeparator(
-                    plan[i].path_in_tar, plan[i].numBytes, plan[i - 1].numBytes, numTailBytesToForward, tailAndTarSeparator, thirtyTwoK);
+                    plan[i].pathInTar, plan[i].numBytes, plan[i - 1].numBytes, numTailBytesToForward, tailAndTarSeparator, thirtyTwoK);
 
                 // Wait for dump of buffer 1 to disk to complete  - it is possible that there has not yet been a dump from that buffer
                 if (numCompletionsToFinish[dumpingBuffer] > 0)
@@ -177,9 +177,9 @@ class ArchiveShardWriterWorker {
 
                 // Initiate prefetch buffer 1 from GPU, starting immediately past the prepended tail, pad and header.
                 bounceBufferReady[dumpingBuffer] = prefetchGpuBuffer(bounceBuffer[dumpingBuffer],
-                                                                     plan[i].deviceTensor,
+                                                                     plan[i].tensor,
                                                                      stream,
-                                                                     plan[i].offsetBytes,
+                                                                     plan[i].tensorOffsetBytes,
                                                                      plan[i].numBytes,
                                                                      numTailPadAndHeaderBytes);
 
@@ -189,11 +189,12 @@ class ArchiveShardWriterWorker {
                 EntryInfo indexEntry;
                 indexEntry.crc = crc;
                 indexEntry.size = plan[i - 1].numBytes;
-                indexEntry.data_offset = fileBase + loadedBufferTailPadAndHeaderBytes;
-                indexEntry.shard = shardNumber;
+                indexEntry.tensorDataOffset = plan[i - 1].tensorOffsetBytes;
+                indexEntry.fileDataOffset = fileBase + loadedBufferTailPadAndHeaderBytes;
+                indexEntry.archiveShard = shardNumber;
                 {
                     std::lock_guard<std::mutex> guard(archiveIndexMutex);
-                    archiveIndex[plan[i - 1].path_in_tar] = indexEntry;
+                    archiveIndex[plan[i - 1].pathInTar].push_back(indexEntry);
                 }
 
                 if (plan.size() == i + 1) {
@@ -245,11 +246,12 @@ class ArchiveShardWriterWorker {
         EntryInfo indexEntry;
         indexEntry.crc = crc;
         indexEntry.size = plan.back().numBytes;
-        indexEntry.data_offset = fileBase + loadedBufferTailPadAndHeaderBytes;
-        indexEntry.shard = shardNumber;
+        indexEntry.tensorDataOffset = plan.back().tensorOffsetBytes;
+        indexEntry.fileDataOffset = fileBase + loadedBufferTailPadAndHeaderBytes;
+        indexEntry.archiveShard = shardNumber;
         {
             std::lock_guard<std::mutex> guard(archiveIndexMutex);
-            archiveIndex[plan.back().path_in_tar] = indexEntry;
+            archiveIndex[plan.back().pathInTar].push_back(indexEntry);
         }
 
         // Wait for dump from prior stage out of free buffer to finish
@@ -333,7 +335,7 @@ class ArchiveShardWriterWorker {
     uint32_t numTailPadAndHeaderBytes;
     uint8_t tailAndTarSeparator[thirtyTwoK];
 
-    std::unordered_map<std::string, EntryInfo>& archiveIndex;
+    std::unordered_map<std::string, std::vector<EntryInfo>>& archiveIndex;
     std::mutex& archiveIndexMutex;
     std::filesystem::path archiveDirectory;
 

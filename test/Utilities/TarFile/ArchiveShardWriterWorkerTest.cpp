@@ -171,14 +171,14 @@ TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc)
     ScopedUnlink cleanup(absoluteArchivePath);
 
     std::mutex archiveIndexMutex;
-    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
-    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
-    thor_file::ArchiveShardCreationPlan plan(archivePath);
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = deviceTensor,
-        .offsetBytes = 0,
+    std::unordered_map<std::string, std::vector<thor_file::EntryInfo>> archiveIndex;
+    thor_file::ArchiveWorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
+    thor_file::ArchiveShardPlan plan(archivePath);
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = deviceTensor,
+        .tensorOffsetBytes = 0,
         .numBytes = bytes,  // this shard’s bytes
-        .path_in_tar = pathInTar,
+        .pathInTar = pathInTar,
     });
     plan.shardNumber = 3;
 
@@ -189,11 +189,12 @@ TEST(ArchiveShardWriterWorker, SingleFile_WritesValidTarAndCorrectPayloadAndCrc)
     // Verify the index was filled out and that the crc is correct
     uint32_t expectedCrc = crc32_ieee(0xFFFFFFFF, expected.data(), bytes);
     ASSERT_TRUE(archiveIndex.contains(pathInTar));
-    thor_file::EntryInfo entry = archiveIndex[pathInTar];
-    ASSERT_EQ(entry.crc, expectedCrc);
-    ASSERT_EQ(entry.shard, 3);
-    ASSERT_EQ(entry.size, bytes);
-    ASSERT_EQ(entry.data_offset, 512);
+    std::vector<thor_file::EntryInfo> entries = archiveIndex[pathInTar];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, expectedCrc);
+    ASSERT_EQ(entries[0].archiveShard, 3);
+    ASSERT_EQ(entries[0].size, bytes);
+    ASSERT_EQ(entries[0].fileDataOffset, 512);
 
     // Archive should end 4KB aligned
     ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
@@ -238,55 +239,58 @@ TEST(ArchiveShardWriterWorker, MultiFile_IncludingOverlongName_ValidTarAndCorrec
     ScopedUnlink cleanup(absoluteArchivePath);
 
     std::mutex archiveIndexMutex;
-    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
-    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp/");
-    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    std::unordered_map<std::string, std::vector<thor_file::EntryInfo>> archiveIndex;
+    thor_file::ArchiveWorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp/");
+    thor_file::ArchiveShardPlan plan(archivePath);
     plan.shardNumber = 9;
 
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = t0,
-        .offsetBytes = 0,
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = t0,
+        .tensorOffsetBytes = 0,
         .numBytes = bytes,
-        .path_in_tar = path0,
+        .pathInTar = path0,
     });
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = t1,
-        .offsetBytes = 0,
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = t1,
+        .tensorOffsetBytes = 0,
         .numBytes = bytes,
-        .path_in_tar = path1,
+        .pathInTar = path1,
     });
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = t2,
-        .offsetBytes = 0,
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = t2,
+        .tensorOffsetBytes = 0,
         .numBytes = bytes,
-        .path_in_tar = path2,
+        .pathInTar = path2,
     });
 
     thor_file::ArchiveShardWriterWorker worker(workerContext);
     worker.process(plan);
 
     // Verify the index was filled out and that the crc is correct
-    thor_file::EntryInfo entry;
+    std::vector<thor_file::EntryInfo> entries;
     ASSERT_TRUE(archiveIndex.contains(path0));
-    entry = archiveIndex[path0];
-    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected0.data(), bytes));
-    ASSERT_EQ(entry.shard, 9);
-    ASSERT_EQ(entry.size, bytes);
-    ASSERT_EQ(entry.data_offset, 512);
+    entries = archiveIndex[path0];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, crc32_ieee(0xFFFFFFFF, expected0.data(), bytes));
+    ASSERT_EQ(entries[0].archiveShard, 9);
+    ASSERT_EQ(entries[0].size, bytes);
+    ASSERT_EQ(entries[0].fileDataOffset, 512);
 
     ASSERT_TRUE(archiveIndex.contains(path0));
-    entry = archiveIndex[path1];
-    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected1.data(), bytes));
-    ASSERT_EQ(entry.shard, 9);
-    ASSERT_EQ(entry.size, bytes);
-    ASSERT_EQ(entry.data_offset, 16779776);
+    entries = archiveIndex[path1];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, crc32_ieee(0xFFFFFFFF, expected1.data(), bytes));
+    ASSERT_EQ(entries[0].archiveShard, 9);
+    ASSERT_EQ(entries[0].size, bytes);
+    ASSERT_EQ(entries[0].fileDataOffset, 16779776);
 
     ASSERT_TRUE(archiveIndex.contains(path2));
-    entry = archiveIndex[path2];
-    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected2.data(), bytes));
-    ASSERT_EQ(entry.shard, 9);
-    ASSERT_EQ(entry.size, bytes);
-    ASSERT_EQ(entry.data_offset, 33558016);
+    entries = archiveIndex[path2];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, crc32_ieee(0xFFFFFFFF, expected2.data(), bytes));
+    ASSERT_EQ(entries[0].archiveShard, 9);
+    ASSERT_EQ(entries[0].size, bytes);
+    ASSERT_EQ(entries[0].fileDataOffset, 33558016);
 
     // 4KB-aligned final size
     ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
@@ -331,29 +335,30 @@ TEST(ArchiveShardWriterWorker, SingleFile_ExactlyFiveMillionBytes_WritesValidTar
     ScopedUnlink cleanup(absoluteArchivePath);
 
     std::mutex archiveIndexMutex;
-    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
-    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
-    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    std::unordered_map<std::string, std::vector<thor_file::EntryInfo>> archiveIndex;
+    thor_file::ArchiveWorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
+    thor_file::ArchiveShardPlan plan(archivePath);
     plan.shardNumber = 0;
 
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = deviceTensor,
-        .offsetBytes = 0,
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = deviceTensor,
+        .tensorOffsetBytes = 0,
         .numBytes = bytes,
-        .path_in_tar = pathInTar,
+        .pathInTar = pathInTar,
     });
 
     thor_file::ArchiveShardWriterWorker worker(workerContext);
     worker.process(plan);
 
     // Verify the index was filled out and that the crc is correct
-    thor_file::EntryInfo entry;
+    std::vector<thor_file::EntryInfo> entries;
     ASSERT_TRUE(archiveIndex.contains(pathInTar));
-    entry = archiveIndex[pathInTar];
-    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
-    ASSERT_EQ(entry.shard, 0);
-    ASSERT_EQ(entry.size, bytes);
-    ASSERT_EQ(entry.data_offset, 512);
+    entries = archiveIndex[pathInTar];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, crc32_ieee(0xFFFFFFFF, expected.data(), bytes));
+    ASSERT_EQ(entries[0].archiveShard, 0);
+    ASSERT_EQ(entries[0].size, bytes);
+    ASSERT_EQ(entries[0].fileDataOffset, 512);
 
     // Your writer should still end on a 4KB boundary due to appendTarEndOfArchive(...)
     ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);
@@ -399,42 +404,44 @@ TEST(ArchiveShardWriterWorker, TwoFiles_100MB_And_500MB_WritesValidTarAndCorrect
     ScopedUnlink cleanup(absoluteArchivePath);
 
     std::mutex archiveIndexMutex;
-    std::unordered_map<std::string, thor_file::EntryInfo> archiveIndex;
-    thor_file::WorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
-    thor_file::ArchiveShardCreationPlan plan(archivePath);
+    std::unordered_map<std::string, std::vector<thor_file::EntryInfo>> archiveIndex;
+    thor_file::ArchiveWorkerJobContext workerContext(archiveIndex, archiveIndexMutex, "/tmp");
+    thor_file::ArchiveShardPlan plan(archivePath);
     plan.shardNumber = 0;
 
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = t0,
-        .offsetBytes = 0,
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = t0,
+        .tensorOffsetBytes = 0,
         .numBytes = oneHundredMB,
-        .path_in_tar = path0,
+        .pathInTar = path0,
     });
-    plan.entries.push_back(thor_file::ArchiveCreationPlanEntry{
-        .deviceTensor = t1,
-        .offsetBytes = 0,
+    plan.entries.push_back(thor_file::ArchivePlanEntry{
+        .tensor = t1,
+        .tensorOffsetBytes = 0,
         .numBytes = fiveHundredMB,
-        .path_in_tar = path1,
+        .pathInTar = path1,
     });
 
     thor_file::ArchiveShardWriterWorker worker(workerContext);
     worker.process(plan);
 
     // Verify the index was filled out and that the crc is correct
-    thor_file::EntryInfo entry;
+    std::vector<thor_file::EntryInfo> entries;
     ASSERT_TRUE(archiveIndex.contains(path0));
-    entry = archiveIndex[path0];
-    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected0.data(), oneHundredMB));
-    ASSERT_EQ(entry.shard, 0);
-    ASSERT_EQ(entry.size, oneHundredMB);
-    ASSERT_EQ(entry.data_offset, 512);
+    entries = archiveIndex[path0];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, crc32_ieee(0xFFFFFFFF, expected0.data(), oneHundredMB));
+    ASSERT_EQ(entries[0].archiveShard, 0);
+    ASSERT_EQ(entries[0].size, oneHundredMB);
+    ASSERT_EQ(entries[0].fileDataOffset, 512);
 
     ASSERT_TRUE(archiveIndex.contains(path1));
-    entry = archiveIndex[path1];
-    ASSERT_EQ(entry.crc, crc32_ieee(0xFFFFFFFF, expected1.data(), fiveHundredMB));
-    ASSERT_EQ(entry.shard, 0);
-    ASSERT_EQ(entry.size, fiveHundredMB);
-    ASSERT_EQ(entry.data_offset, 512 + oneHundredMB + 256 + 512);
+    entries = archiveIndex[path1];
+    ASSERT_EQ(entries.size(), 1UL);
+    ASSERT_EQ(entries[0].crc, crc32_ieee(0xFFFFFFFF, expected1.data(), fiveHundredMB));
+    ASSERT_EQ(entries[0].archiveShard, 0);
+    ASSERT_EQ(entries[0].size, fiveHundredMB);
+    ASSERT_EQ(entries[0].fileDataOffset, 512 + oneHundredMB + 256 + 512);
 
     // Should end on a 4KB boundary due to appendTarEndOfArchive(...)
     ASSERT_EQ(fileSizeBytes(absoluteArchivePath) & (4096u - 1u), 0u);

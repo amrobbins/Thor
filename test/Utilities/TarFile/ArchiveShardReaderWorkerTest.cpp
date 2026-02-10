@@ -23,6 +23,8 @@
 
 #include "Utilities/TarFile/ArchiveShardReaderWorker.h"
 
+using namespace thor_file;
+
 // ---------------------- helpers ----------------------
 
 class ScopedUnlink {
@@ -82,7 +84,7 @@ static void pwriteAll(int fd, const void* buf, uint64_t n, uint64_t off) {
     }
 }
 
-static std::string makeTempPath(const char* tag) { return std::string("/tmp/") + tag + "_" + std::to_string(::getpid()) + ".bin"; }
+static std::string makeArchiveName(const char* tag) { return std::string(tag) + "_" + std::to_string(::getpid()) + ".bin"; }
 
 static uint64_t fileSizeBytes(const std::string& path) {
     struct stat st{};
@@ -100,7 +102,7 @@ struct FilePayloadSpec {
     uint32_t seed;
 };
 
-static void createBinaryFixtureFile(const std::string& path, const std::vector<FilePayloadSpec>& specs) {
+static void createBinaryFixtureFile(const std::string& path, const std::vector<FilePayloadSpec>& specs, uint32_t poisonLength = 4096) {
     int fd = ::open(path.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644);
     if (fd < 0)
         throw std::runtime_error("open failed: " + path + ": " + std::strerror(errno));
@@ -123,8 +125,8 @@ static void createBinaryFixtureFile(const std::string& path, const std::vector<F
     // Write each payload and surrounding poison.
     // Poison helps detect if offsets are wrong (you'll see CRC/content mismatch loudly).
     std::vector<uint8_t> payload;
-    std::array<uint8_t, 4096> poisonPrefix{};
-    std::array<uint8_t, 4096> poisonTail{};
+    std::vector<uint8_t> poisonPrefix(poisonLength);
+    std::vector<uint8_t> poisonTail(poisonLength);
 
     for (const auto& s : specs) {
         payload.resize(s.payloadBytes);
@@ -188,9 +190,10 @@ TEST(ArchiveShardReaderWorker, ReadsThreePayloadsAtArbitraryOffsets_ExactBytesAn
         {.payloadOffset = 2 * gap, .payloadBytes = bytes, .seed = 33},
     };
 
-    std::string filePath = makeTempPath("reader_worker_fixture");
-    ScopedUnlink cleanup(filePath);
-    createBinaryFixtureFile(filePath, specs);
+    std::string archiveFileName = makeArchiveName("reader_worker_fixture");
+    std::string archivePath = std::string("/tmp/") + archiveFileName;
+    ScopedUnlink cleanup(archivePath);
+    createBinaryFixtureFile(archivePath, specs);
 
     // Expected CPU payloads
     std::vector<std::vector<uint8_t>> expected(specs.size());
@@ -204,14 +207,36 @@ TEST(ArchiveShardReaderWorker, ReadsThreePayloadsAtArbitraryOffsets_ExactBytesAn
     ThorImplementation::Tensor d1 = makeEmptyGpuTensor(bytes);
     ThorImplementation::Tensor d2 = makeEmptyGpuTensor(bytes);
 
-    std::vector<ArchiveFileReadParams> plan;
-    plan.push_back({.deviceTensor = d0, .deviceOffsetBytes = 0, .numBytes = bytes, .archivePayloadOffsetBytes = specs[0].payloadOffset});
-    plan.push_back({.deviceTensor = d1, .deviceOffsetBytes = 0, .numBytes = bytes, .archivePayloadOffsetBytes = specs[1].payloadOffset});
-    plan.push_back({.deviceTensor = d2, .deviceOffsetBytes = 0, .numBytes = bytes, .archivePayloadOffsetBytes = specs[2].payloadOffset});
+    ArchivePlanEntry planEntry0;
+    planEntry0.tensor = d0;
+    planEntry0.tensorOffsetBytes = 0;
+    planEntry0.numBytes = bytes;
+    planEntry0.fileOffsetBytes = specs[0].payloadOffset;
+    planEntry0.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[0].data(), (uint32_t)bytes);
 
-    ArchiveShardReaderWorker reader;
-    std::vector<uint32_t> rcrcs;
-    reader.process(plan, filePath, rcrcs);
+    ArchivePlanEntry planEntry1;
+    planEntry1.tensor = d1;
+    planEntry1.tensorOffsetBytes = 0;
+    planEntry1.numBytes = bytes;
+    planEntry1.fileOffsetBytes = specs[1].payloadOffset;
+    planEntry1.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[1].data(), (uint32_t)bytes);
+
+    ArchivePlanEntry planEntry2;
+    planEntry2.tensor = d2;
+    planEntry2.tensorOffsetBytes = 0;
+    planEntry2.numBytes = bytes;
+    planEntry2.fileOffsetBytes = specs[2].payloadOffset;
+    planEntry2.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[2].data(), (uint32_t)bytes);
+
+    std::vector<ArchivePlanEntry> planEntries = {planEntry0, planEntry1, planEntry2};
+
+    std::string errorMessage;
+    std::mutex mtx;
+    ArchiveReaderContext context("/tmp/", errorMessage, mtx);
+    ArchiveShardReaderWorker reader(context);
+    ArchiveShardPlan shardPlan(archiveFileName);
+    shardPlan.entries = planEntries;
+    reader.process(shardPlan);
 
     std::vector<uint8_t> got;
     downloadGpuTensorToCpu(d0, got);
@@ -223,11 +248,7 @@ TEST(ArchiveShardReaderWorker, ReadsThreePayloadsAtArbitraryOffsets_ExactBytesAn
     downloadGpuTensorToCpu(d2, got);
     ASSERT_EQ(std::memcmp(got.data(), expected[2].data(), bytes), 0);
 
-    ASSERT_EQ(rcrcs.size(), 3u);
-
-    EXPECT_EQ(rcrcs[0], crc32_ieee(0xFFFFFFFF, expected[0].data(), (uint32_t)bytes));
-    EXPECT_EQ(rcrcs[1], crc32_ieee(0xFFFFFFFF, expected[1].data(), (uint32_t)bytes));
-    EXPECT_EQ(rcrcs[2], crc32_ieee(0xFFFFFFFF, expected[2].data(), (uint32_t)bytes));
+    ASSERT_TRUE(errorMessage.empty());
 }
 
 TEST(ArchiveShardReaderWorker, ReadsIntoSingleGpuTensorWithDifferentDeviceOffsets) {
@@ -240,9 +261,10 @@ TEST(ArchiveShardReaderWorker, ReadsIntoSingleGpuTensorWithDifferentDeviceOffset
         {.payloadOffset = 2 * gap, .payloadBytes = bytes, .seed = 303},
     };
 
-    std::string filePath = makeTempPath("reader_worker_fixture_offsets");
-    ScopedUnlink cleanup(filePath);
-    createBinaryFixtureFile(filePath, specs);
+    std::string archiveFileName = makeArchiveName("reader_worker_fixture_offsets");
+    std::string archivePath = std::string("/tmp/") + archiveFileName;
+    ScopedUnlink cleanup(archivePath);
+    createBinaryFixtureFile(archivePath, specs);
 
     std::vector<std::vector<uint8_t>> expected(specs.size());
     for (size_t i = 0; i < specs.size(); ++i) {
@@ -253,15 +275,24 @@ TEST(ArchiveShardReaderWorker, ReadsIntoSingleGpuTensorWithDifferentDeviceOffset
     // One big destination tensor
     ThorImplementation::Tensor big = makeEmptyGpuTensor(gap * specs.size());
 
-    std::vector<ArchiveFileReadParams> plan;
+    std::vector<ArchivePlanEntry> planEntries;
     for (size_t i = 0; i < specs.size(); ++i) {
-        plan.push_back(
-            {.deviceTensor = big, .deviceOffsetBytes = gap * i, .numBytes = bytes, .archivePayloadOffsetBytes = specs[i].payloadOffset});
+        ArchivePlanEntry planEntry;
+        planEntry.tensor = big;
+        planEntry.tensorOffsetBytes = gap * i;
+        planEntry.numBytes = bytes;
+        planEntry.fileOffsetBytes = specs[i].payloadOffset;
+        planEntry.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[i].data(), (uint32_t)bytes);
+        planEntries.push_back(planEntry);
     }
 
-    ArchiveShardReaderWorker reader;
-    std::vector<uint32_t> rcrcs;
-    reader.process(plan, filePath, rcrcs);
+    std::string errorMessage;
+    std::mutex mtx;
+    ArchiveReaderContext context("/tmp/", errorMessage, mtx);
+    ArchiveShardReaderWorker reader(context);
+    ArchiveShardPlan shardPlan(archiveFileName);
+    shardPlan.entries = planEntries;
+    reader.process(shardPlan);
 
     // Download big tensor and verify each slice
     std::vector<uint8_t> bigCpu;
@@ -272,11 +303,7 @@ TEST(ArchiveShardReaderWorker, ReadsIntoSingleGpuTensorWithDifferentDeviceOffset
         ASSERT_EQ(std::memcmp(got, expected[i].data(), bytes), 0) << "Mismatch at slice " << i;
     }
 
-    ASSERT_EQ(rcrcs.size(), specs.size());
-
-    for (size_t i = 0; i < specs.size(); ++i) {
-        EXPECT_EQ(rcrcs[i], crc32_ieee(0xFFFFFFFF, expected[i].data(), (uint32_t)bytes));
-    }
+    ASSERT_TRUE(errorMessage.empty());
 }
 
 TEST(ArchiveShardReaderWorker, LargePayloads) {
@@ -293,9 +320,10 @@ TEST(ArchiveShardReaderWorker, LargePayloads) {
         {.payloadOffset = off1, .payloadBytes = bytes1, .seed = 888},
     };
 
-    std::string filePath = makeTempPath("reader_worker_fixture_large");
-    ScopedUnlink cleanup(filePath);
-    createBinaryFixtureFile(filePath, specs);
+    std::string archiveFileName = makeArchiveName("reader_worker_fixture_large");
+    std::string archivePath = std::string("/tmp/") + archiveFileName;
+    ScopedUnlink cleanup(archivePath);
+    createBinaryFixtureFile(archivePath, specs);
 
     std::vector<uint8_t> exp0(bytes0), exp1(bytes1);
     fillPattern(exp0.data(), bytes0, specs[0].seed);
@@ -304,17 +332,31 @@ TEST(ArchiveShardReaderWorker, LargePayloads) {
     ThorImplementation::Tensor d0 = makeEmptyGpuTensor(bytes0);
     ThorImplementation::Tensor d1 = makeEmptyGpuTensor(bytes1);
 
-    std::vector<ArchiveFileReadParams> plan;
-    plan.push_back({.deviceTensor = d0, .deviceOffsetBytes = 0, .numBytes = bytes0, .archivePayloadOffsetBytes = specs[0].payloadOffset});
-    plan.push_back({.deviceTensor = d1, .deviceOffsetBytes = 0, .numBytes = bytes1, .archivePayloadOffsetBytes = specs[1].payloadOffset});
+    std::vector<ArchivePlanEntry> planEntries;
+    ArchivePlanEntry planEntry0;
+    planEntry0.tensor = d0;
+    planEntry0.tensorOffsetBytes = 0;
+    planEntry0.numBytes = bytes0;
+    planEntry0.fileOffsetBytes = specs[0].payloadOffset;
+    planEntry0.expectedCrc = crc32_ieee(0xFFFFFFFF, exp0.data(), (uint32_t)bytes0);
 
-    ArchiveShardReaderWorker reader;
-    std::vector<uint32_t> rcrcs;
-    reader.process(plan, filePath, rcrcs);
+    ArchivePlanEntry planEntry1;
+    planEntry1.tensor = d1;
+    planEntry1.tensorOffsetBytes = 0;
+    planEntry1.numBytes = bytes1;
+    planEntry1.fileOffsetBytes = specs[1].payloadOffset;
+    planEntry1.expectedCrc = crc32_ieee(0xFFFFFFFF, exp1.data(), (uint32_t)bytes1);
 
-    ASSERT_EQ(rcrcs.size(), 2u);
-    EXPECT_EQ(rcrcs[0], crc32_ieee(0xFFFFFFFF, exp0.data(), (uint32_t)bytes0));
-    EXPECT_EQ(rcrcs[1], crc32_ieee(0xFFFFFFFF, exp1.data(), (uint32_t)bytes1));
+    planEntries.push_back(planEntry0);
+    planEntries.push_back(planEntry1);
+
+    std::string errorMessage;
+    std::mutex mtx;
+    ArchiveReaderContext context("/tmp/", errorMessage, mtx);
+    ArchiveShardReaderWorker reader(context);
+    ArchiveShardPlan shardPlan(archiveFileName);
+    shardPlan.entries = planEntries;
+    reader.process(shardPlan);
 
     // Spot-check start/end to avoid a full memcmp of hundreds of MB if you want:
     // But below is full verification; keep only if you like.
@@ -324,4 +366,108 @@ TEST(ArchiveShardReaderWorker, LargePayloads) {
 
     downloadGpuTensorToCpu(d1, got);
     ASSERT_EQ(std::memcmp(got.data(), exp1.data(), bytes1), 0);
+
+    ASSERT_TRUE(errorMessage.empty());
+}
+
+TEST(ArchiveShardReaderWorker, ReadsFiveSmallPayloadsAtArbitraryOffsets_ExactBytesAndCrcs) {
+    // 5 payloads, each 10–20 bytes, placed far enough apart to avoid overlap/poisoning issues.
+    const uint64_t baseStride = 0;          // keep offsets 4K aligned (nice for O_DIRECT-ish paths)
+    const uint64_t gap = baseStride + 123;  // extra guard spacing
+
+    std::vector<FilePayloadSpec> specs = {
+        {.payloadOffset = 0 * gap, .payloadBytes = 10, .seed = 11},
+        {.payloadOffset = 1 * gap, .payloadBytes = 12, .seed = 22},
+        {.payloadOffset = 2 * gap, .payloadBytes = 15, .seed = 33},
+        {.payloadOffset = 3 * gap, .payloadBytes = 18, .seed = 44},
+        {.payloadOffset = 4 * gap, .payloadBytes = 20, .seed = 55},
+    };
+
+    std::string archiveFileName = makeArchiveName("reader_worker_fixture_small5");
+    std::string archivePath = std::string("/tmp/") + archiveFileName;
+    ScopedUnlink cleanup(archivePath);
+    createBinaryFixtureFile(archivePath, specs, 32);
+
+    // Expected CPU payloads
+    std::vector<std::vector<uint8_t>> expected(specs.size());
+    for (size_t i = 0; i < specs.size(); ++i) {
+        expected[i].resize(specs[i].payloadBytes);
+        fillPattern(expected[i].data(), specs[i].payloadBytes, specs[i].seed);
+    }
+
+    // Destination GPU tensors (exact-size tensors per payload)
+    ThorImplementation::Tensor d0 = makeEmptyGpuTensor(specs[0].payloadBytes);
+    ThorImplementation::Tensor d1 = makeEmptyGpuTensor(specs[1].payloadBytes);
+    ThorImplementation::Tensor d2 = makeEmptyGpuTensor(specs[2].payloadBytes);
+    ThorImplementation::Tensor d3 = makeEmptyGpuTensor(specs[3].payloadBytes);
+    ThorImplementation::Tensor d4 = makeEmptyGpuTensor(specs[4].payloadBytes);
+
+    ArchivePlanEntry planEntry0;
+    planEntry0.tensor = d0;
+    planEntry0.tensorOffsetBytes = 0;
+    planEntry0.numBytes = specs[0].payloadBytes;
+    planEntry0.fileOffsetBytes = specs[0].payloadOffset;
+    planEntry0.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[0].data(), (uint32_t)specs[0].payloadBytes);
+
+    ArchivePlanEntry planEntry1;
+    planEntry1.tensor = d1;
+    planEntry1.tensorOffsetBytes = 0;
+    planEntry1.numBytes = specs[1].payloadBytes;
+    planEntry1.fileOffsetBytes = specs[1].payloadOffset;
+    planEntry1.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[1].data(), (uint32_t)specs[1].payloadBytes);
+
+    ArchivePlanEntry planEntry2;
+    planEntry2.tensor = d2;
+    planEntry2.tensorOffsetBytes = 0;
+    planEntry2.numBytes = specs[2].payloadBytes;
+    planEntry2.fileOffsetBytes = specs[2].payloadOffset;
+    planEntry2.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[2].data(), (uint32_t)specs[2].payloadBytes);
+
+    ArchivePlanEntry planEntry3;
+    planEntry3.tensor = d3;
+    planEntry3.tensorOffsetBytes = 0;
+    planEntry3.numBytes = specs[3].payloadBytes;
+    planEntry3.fileOffsetBytes = specs[3].payloadOffset;
+    planEntry3.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[3].data(), (uint32_t)specs[3].payloadBytes);
+
+    ArchivePlanEntry planEntry4;
+    planEntry4.tensor = d4;
+    planEntry4.tensorOffsetBytes = 0;
+    planEntry4.numBytes = specs[4].payloadBytes;
+    planEntry4.fileOffsetBytes = specs[4].payloadOffset;
+    planEntry4.expectedCrc = crc32_ieee(0xFFFFFFFF, expected[4].data(), (uint32_t)specs[4].payloadBytes);
+
+    std::vector<ArchivePlanEntry> planEntries = {planEntry0, planEntry1, planEntry2, planEntry3, planEntry4};
+
+    std::string errorMessage;
+    std::mutex mtx;
+    ArchiveReaderContext context("/tmp/", errorMessage, mtx);
+    ArchiveShardReaderWorker reader(context);
+    ArchiveShardPlan shardPlan(archiveFileName);
+    shardPlan.entries = planEntries;
+    reader.process(shardPlan);
+
+    ASSERT_TRUE(errorMessage.empty());
+
+    std::vector<uint8_t> got;
+
+    downloadGpuTensorToCpu(d0, got);
+    ASSERT_EQ(got.size(), specs[0].payloadBytes);
+    ASSERT_EQ(std::memcmp(got.data(), expected[0].data(), specs[0].payloadBytes), 0);
+
+    downloadGpuTensorToCpu(d1, got);
+    ASSERT_EQ(got.size(), specs[1].payloadBytes);
+    ASSERT_EQ(std::memcmp(got.data(), expected[1].data(), specs[1].payloadBytes), 0);
+
+    downloadGpuTensorToCpu(d2, got);
+    ASSERT_EQ(got.size(), specs[2].payloadBytes);
+    ASSERT_EQ(std::memcmp(got.data(), expected[2].data(), specs[2].payloadBytes), 0);
+
+    downloadGpuTensorToCpu(d3, got);
+    ASSERT_EQ(got.size(), specs[3].payloadBytes);
+    ASSERT_EQ(std::memcmp(got.data(), expected[3].data(), specs[3].payloadBytes), 0);
+
+    downloadGpuTensorToCpu(d4, got);
+    ASSERT_EQ(got.size(), specs[4].payloadBytes);
+    ASSERT_EQ(std::memcmp(got.data(), expected[4].data(), specs[4].payloadBytes), 0);
 }

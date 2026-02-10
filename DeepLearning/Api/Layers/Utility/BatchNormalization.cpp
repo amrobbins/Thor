@@ -32,9 +32,6 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
     }
     j["outputs"] = outputs;
 
-    ThorImplementation::TensorPlacement cpuPlacement =
-        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::BatchNormalization> batchNorm;
     if (network->getNumStamps() >= 1) {
@@ -45,51 +42,36 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
     }
 
     ThorImplementation::Tensor weights;
-    ThorImplementation::Tensor weightsBuffer;
     ThorImplementation::Tensor biases;
-    ThorImplementation::Tensor biasesBuffer;
     string weightsFile;
     string biasesFile;
 
     string resultRunningMeanFile;
     ThorImplementation::Tensor means;
-    ThorImplementation::Tensor meansBuffer;
 
     string resultRunningVarianceFile;
     ThorImplementation::Tensor variance;
-    ThorImplementation::Tensor varianceBuffer;
 
     if (batchNorm != nullptr) {
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
         weights = batchNorm->getWeights();
-        weightsBuffer = weights.clone(cpuPlacement);
-        weightsBuffer.copyFromAsync(weights, stream);
+        archiveWriter.addArchiveFile(weightsFile, weights);
 
         biasesFile = (layerName + "_biases.gds");
         j["biases_tensor"] = biasesFile;
         biases = batchNorm->getBiases().get();
-        biasesBuffer = biases.clone(cpuPlacement);
-        biasesBuffer.copyFromAsync(biases, stream);
+        archiveWriter.addArchiveFile(biasesFile, biases);
 
         resultRunningMeanFile = (layerName + "_means.gds");
         j["means_tensor"] = resultRunningMeanFile;
         means = batchNorm->getResultRunningMean();
-        meansBuffer = means.clone(cpuPlacement);
-        meansBuffer.copyFromAsync(means, stream);
+        archiveWriter.addArchiveFile(resultRunningMeanFile, means);
 
         resultRunningVarianceFile = (layerName + "_variances.gds");
         j["variances_tensor"] = resultRunningVarianceFile;
         variance = batchNorm->getResultRunningVariance();
-        varianceBuffer = variance.clone(cpuPlacement);
-        varianceBuffer.copyFromAsync(variance, stream);
-
-        stream.synchronize();
-
-        archiveWriter.addArchiveFile(weightsFile, weightsBuffer);
-        archiveWriter.addArchiveFile(biasesFile, biasesBuffer);
-        archiveWriter.addArchiveFile(resultRunningMeanFile, meansBuffer);
-        archiveWriter.addArchiveFile(resultRunningVarianceFile, varianceBuffer);
+        archiveWriter.addArchiveFile(resultRunningVarianceFile, variance);
     }
 
     if (hasOptimizer()) {
@@ -194,30 +176,19 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
 
-        ThorImplementation::TensorPlacement cpuPlacement =
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
         ThorImplementation::Tensor weights = physicalLayer->getWeights();
-        ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
-        archiveReader->readFile(weightsFile.get(), weightsBuffer.getMemPtr<void>(), weights.getArraySizeInBytes());
-        weights.copyFromAsync(weightsBuffer, stream);
+        archiveReader->registerReadRequest(weightsFile.get(), weights);
         assert(biasesFile.isPresent());
         ThorImplementation::Tensor biases = physicalLayer->getBiases().get();
-        ThorImplementation::Tensor biasesBuffer = biases.clone(cpuPlacement);
-        archiveReader->readFile(biasesFile.get(), biasesBuffer.getMemPtr<void>(), biases.getArraySizeInBytes());
-        biases.copyFromAsync(biasesBuffer, stream);
+        archiveReader->registerReadRequest(biasesFile.get(), biases);
 
         assert(runningVariancesFile.isPresent());
         ThorImplementation::Tensor variances = physicalBatchNorm->getResultRunningVariance();
-        ThorImplementation::Tensor variancesBuffer = variances.clone(cpuPlacement);
-        archiveReader->readFile(runningVariancesFile.get(), variancesBuffer.getMemPtr<void>(), variances.getArraySizeInBytes());
-        variances.copyFromAsync(variancesBuffer, stream);
+        archiveReader->registerReadRequest(runningVariancesFile.get(), variances);
 
         assert(runningMeansFile.isPresent());
         ThorImplementation::Tensor means = physicalBatchNorm->getResultRunningMean();
-        ThorImplementation::Tensor meansBuffer = means.clone(cpuPlacement);
-        archiveReader->readFile(runningMeansFile.get(), meansBuffer.getMemPtr<void>(), means.getArraySizeInBytes());
-        means.copyFromAsync(meansBuffer, stream);
+        archiveReader->registerReadRequest(runningMeansFile.get(), means);
 
         // Can't use the file later, it may not still be there
         archiveReader = nullptr;
@@ -227,9 +198,6 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
         runningMeansFile = Optional<string>::empty();
 
         physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
-
-        // I need to synchronize here to keep bounce buffer alive
-        stream.synchronize();
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
         Optional<Event> initDoneEvent;

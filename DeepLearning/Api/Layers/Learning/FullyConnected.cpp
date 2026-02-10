@@ -122,9 +122,6 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     }
     j["outputs"] = outputs;
 
-    ThorImplementation::TensorPlacement cpuPlacement =
-        ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
     if (network->getNumStamps() >= 1) {
@@ -135,9 +132,7 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     }
 
     ThorImplementation::Tensor weights;
-    ThorImplementation::Tensor weightsBuffer;
     ThorImplementation::Tensor biases;
-    ThorImplementation::Tensor biasesBuffer;
     string weightsFile;
     string biasesFile;
     if (twbLayer != nullptr) {
@@ -145,15 +140,13 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
             biasesFile = (layerName + "_biases.gds");
             j["biases_tensor"] = biasesFile;
             biases = twbLayer->getBiases().get();
-            biasesBuffer = biases.clone(cpuPlacement);
-            biasesBuffer.copyFromAsync(biases, stream);
+            archiveWriter.addArchiveFile(biasesFile, biases);
         }
 
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
         weights = twbLayer->getWeights();
-        weightsBuffer = weights.clone(cpuPlacement);
-        weightsBuffer.copyFromAsync(weights, stream);
+        archiveWriter.addArchiveFile(weightsFile, weights);
     }
 
     if (weightsInitializer != nullptr) {
@@ -165,14 +158,6 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
 
     if (hasOptimizer()) {
         j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer, saveOptimizerState);
-    }
-
-    stream.synchronize();
-
-    if (twbLayer != nullptr) {
-        archiveWriter.addArchiveFile(weightsFile, weightsBuffer);
-        if (hasBias)
-            archiveWriter.addArchiveFile(biasesFile, biasesBuffer);
     }
 
     return j;
@@ -266,28 +251,18 @@ vector<Event> FullyConnected::initialize(shared_ptr<ThorImplementation::Trainabl
         assert(physicalLayer->getWeights().getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         Stream stream = Stream::getNextUploadStream(physicalLayer->getWeights().getPlacement().getDeviceNum());
 
-        ThorImplementation::TensorPlacement cpuPlacement =
-            ThorImplementation::TensorPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-
         ThorImplementation::Tensor weights = physicalLayer->getWeights();
-        ThorImplementation::Tensor weightsBuffer = weights.clone(cpuPlacement);
-        archiveReader->readFile(weightsFile.get(), weightsBuffer.getMemPtr<void>(), weights.getArraySizeInBytes());
-        weights.copyFromAsync(weightsBuffer, stream);
+        archiveReader->registerReadRequest(weightsFile.get(), weights);
         if (hasBias) {
             assert(biasesFile.isPresent());
             ThorImplementation::Tensor biases = physicalLayer->getBiases().get();
-            ThorImplementation::Tensor biasesBuffer = biases.clone(cpuPlacement);
-            archiveReader->readFile(biasesFile.get(), biasesBuffer.getMemPtr<void>(), biases.getArraySizeInBytes());
-            biases.copyFromAsync(biasesBuffer, stream);
+            archiveReader->registerReadRequest(biasesFile.get(), biases);
         }
 
         // Can't use the file later, it may not still be there
         archiveReader = nullptr;
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
-
-        // I need to synchronize here to keep bounce buffer alive
-        stream.synchronize();
     } else {
         // 3. Run an initializer to set the weights - on an untrained network
         assert(weightsInitializer != nullptr);
