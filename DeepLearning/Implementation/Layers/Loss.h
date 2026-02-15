@@ -223,7 +223,7 @@ class Loss : public Layer {
     TensorDescriptor::DataType lossDataType;
 
     // FIXME: only const for now for convenience
-    static constexpr uint32_t lossScalingFactor = 32;
+    static constexpr uint32_t lossScalingFactor = 4;  // 32;
     Stream labelsStream;
 
     bool featureInputReceived;
