@@ -21,36 +21,37 @@ using namespace Thor;
 
 using DataType = Thor::Tensor::DataType;
 
-shared_ptr<Activation> getDefaultFCActivation() {
-    static shared_ptr<Relu> defaultActivation = make_shared<Relu>();
-    return defaultActivation;
-}
-
 void bind_fully_connected(nb::module_ &m) {
+    nb::object DEFAULT = nb::module_::import_("thor").attr("DEFAULT");
+
     nb::class_<FullyConnected, TrainableWeightsBiasesLayer>(m, "FullyConnected")
         .def(
             "__init__",
-            [](FullyConnected *self,
-               Network &network,
-               Tensor featureInput,
-               uint32_t numOutputFeatures,
-               bool hasBias,
-               shared_ptr<Activation> activation,
-               shared_ptr<Initializer> weights_initializer,
-               shared_ptr<Initializer> biases_initializer,
-               bool add_drop_out,
-               float drop_proportion,
-               bool add_batch_normalization,
-               float batch_norm_exp_running_avg_factor,
-               float batch_norm_epsilon) {
+            [DEFAULT](FullyConnected *self,
+                      Network &network,
+                      Tensor featureInput,
+                      uint32_t numOutputFeatures,
+                      bool hasBias,
+                      nb::object activation_obj,
+                      shared_ptr<Initializer> weights_initializer,
+                      shared_ptr<Initializer> biases_initializer,
+                      bool add_drop_out,
+                      float drop_proportion,
+                      bool add_batch_normalization,
+                      float batch_norm_exp_running_avg_factor,
+                      float batch_norm_epsilon) {
                 FullyConnected::Builder builder;
                 builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
-                if (activation == nullptr)
-                    // Explicitly no activation applied -> was explicitly set to None -> because the parameter defaults to Relu
+                if (activation_obj.is(DEFAULT)) {
+                    // not provided => default Relu
+                    builder.activation(std::make_shared<Relu>());
+                } else if (activation_obj.is_none()) {
+                    // explicitly None => no activation
                     builder.noActivation();
-                else
-                    builder.activation(activation);
+                } else {
+                    builder.activation(nb::cast<std::shared_ptr<Activation>>(activation_obj));
+                }
 
                 if (weights_initializer != nullptr)
                     builder.weightsInitializer(weights_initializer);
@@ -70,7 +71,7 @@ void bind_fully_connected(nb::module_ &m) {
             "feature_input"_a,
             "num_output_features"_a,
             "has_bias"_a = true,
-            nb::arg("activation").none() = getDefaultFCActivation(),
+            nb::arg("activation").none() = DEFAULT,
             "weights_initializer"_a = nb::none(),
             "biases_initializer"_a = nb::none(),
             "add_drop_out"_a = false,
