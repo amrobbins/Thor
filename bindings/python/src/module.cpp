@@ -16,6 +16,9 @@ void bind_optimizers(nb::module_ &m);
 NB_MODULE(thor, m) {
     m.doc() = "Thor Python bindings";
 
+    auto DEFAULT = nb::capsule((void *)0x1, "thor.default");
+    m.attr("DEFAULT") = DEFAULT;
+
     bind_version(m);
     bind_tensor(m);
     bind_network(m);

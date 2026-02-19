@@ -783,23 +783,6 @@ class Tensor : private ReferenceCounted {
 
     std::string dimensionsToString();
 
-    bool enableGpuDirectStorage(bool enable) {
-        bool oldEnable = gpuDirectStorageEnabled;
-        if (enable == oldEnable)
-            return oldEnable;
-
-        if (!this->fileName.empty()) {
-            std::string attachedFileName = this->fileName;
-            detachFile();
-            gpuDirectStorageEnabled = enable;
-            attachFile(attachedFileName, gpuDirectStorageFileOffset, fileAccessRequirement);
-        } else {
-            gpuDirectStorageEnabled = enable;
-        }
-
-        return oldEnable;
-    }
-
     virtual bool isKerasCompatible(std::string &explanation) {
         explanation.clear();
         return true;
@@ -817,8 +800,6 @@ class Tensor : private ReferenceCounted {
     unsigned long instanceId;
 
     TensorDescriptor descriptor;
-
-    bool gpuDirectStorageEnabled = false;
 
     bool usingExternallyManagedMemory = false;
 
@@ -859,17 +840,17 @@ class Tensor : private ReferenceCounted {
 class CuFileInitializer {
    public:
     CuFileInitializer() {
-        // First ensure cuda context has been created, via effective NOP
-        cudaError_t cudaStatus;
-        cudaStatus = cudaFree(nullptr);
-        if (cudaStatus == cudaSuccess) {
-            // Call cuFileDriverOpen() and check for errors
-            CUfileError_t cuFileError = cuFileDriverOpen();
-            assert(cuFileError.err == CU_FILE_SUCCESS);
-        }
+        // // First ensure cuda context has been created, via effective NOP
+        // cudaError_t cudaStatus;
+        // cudaStatus = cudaFree(nullptr);
+        // if (cudaStatus == cudaSuccess) {
+        //     // Call cuFileDriverOpen() and check for errors
+        //     CUfileError_t cuFileError = cuFileDriverOpen();
+        //     assert(cuFileError.err == CU_FILE_SUCCESS);
+        // }
     }
 
-    ~CuFileInitializer() { cuFileDriverClose(); }
+    // ~CuFileInitializer() { cuFileDriverClose(); }
 };
 
 }  // namespace ThorImplementation

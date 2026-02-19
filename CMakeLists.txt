@@ -154,7 +154,6 @@ target_link_directories(Thor PRIVATE
 
 target_link_libraries(Thor PRIVATE
         cudnn
-        cufile
 )
 
 target_include_directories(Thor PUBLIC
@@ -386,7 +385,6 @@ target_link_directories(thor_tests PRIVATE
 )
 target_link_libraries(thor_tests PRIVATE
         cudnn
-        cufile
 )
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)

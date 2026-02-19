@@ -1,6 +1,6 @@
 #include <nanobind/nanobind.h>
 
-#include <nanobind/stl/vector.h>
+#include <nanobind/stl/string.h>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -19,7 +19,7 @@ void bind_network(nb::module_ &m) {
                                      new (self) Network(name);
                                  },
                                  "name"_a,
-                                 nb::sig("def __init__(self) -> None"),
+                                 nb::sig("def __init__(self, name: str) -> None"),
 
                                  R"nbdoc(
         A Network that contains layers. FIXME.
