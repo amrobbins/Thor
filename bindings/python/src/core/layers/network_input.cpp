@@ -1,5 +1,9 @@
 #include <nanobind/nanobind.h>
 
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
+
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -11,7 +15,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Thor::Tensor::DataType;
+using DataType = Tensor::DataType;
 
 void bind_network_input(nb::module_ &m) {
     nb::class_<NetworkInput, Layer>(m, "NetworkInput")
@@ -53,5 +57,22 @@ void bind_network_input(nb::module_ &m) {
             data_type : thor.DataType
                 Data type of the input tensor (e.g. thor.Tensor.DataType.fp16).
             )nbdoc")
-        .def("get_feature_output", &NetworkInput::getFeatureOutput);
+        .def(
+            "get_feature_output",
+            [](NetworkInput &self) -> Tensor {
+                Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+                // if (!maybeFeatureOutput.isPresent())
+                //     return nullopt;
+                // Network input creates featureOutput always, straight away.
+                return maybeFeatureOutput.get();
+            },
+            nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+            R"nbdoc(
+            Return the output tensor produced by this layer.
+
+            Returns
+            -------
+            thor.Tensor
+                The feature output tensor handle.
+            )nbdoc");
 }

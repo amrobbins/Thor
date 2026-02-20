@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/shared_ptr.h>
 
-#include <optional>
+#include <memory>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
@@ -9,17 +10,13 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include <nanobind/stl/optional.h>
-
-#include "bindings/python/src/core/binding_types.h"
-
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 
 using namespace Thor;
 
-using DataType = Thor::Tensor::DataType;
+using DataType = Tensor::DataType;
 
 void bind_fully_connected(nb::module_ &m) {
     nb::object DEFAULT = nb::module_::import_("thor").attr("DEFAULT");
@@ -32,36 +29,26 @@ void bind_fully_connected(nb::module_ &m) {
                       Tensor featureInput,
                       uint32_t numOutputFeatures,
                       bool hasBias,
-                      nb::object activation_obj,
+                      // nb::object activation,
                       shared_ptr<Initializer> weights_initializer,
-                      shared_ptr<Initializer> biases_initializer,
-                      bool add_drop_out,
-                      float drop_proportion,
-                      bool add_batch_normalization,
-                      float batch_norm_exp_running_avg_factor,
-                      float batch_norm_epsilon) {
+                      shared_ptr<Initializer> biases_initializer) {
                 FullyConnected::Builder builder;
                 builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
-                if (activation_obj.is(DEFAULT)) {
-                    // not provided => default Relu
-                    builder.activation(std::make_shared<Relu>());
-                } else if (activation_obj.is_none()) {
-                    // explicitly None => no activation
-                    builder.noActivation();
-                } else {
-                    builder.activation(nb::cast<std::shared_ptr<Activation>>(activation_obj));
-                }
-
+                // if (activation.is(DEFAULT)) {
+                //     // not provided => default Relu
+                //     builder.activation(std::make_shared<Relu>());
+                // } else if (activation.is_none()) {
+                //     // explicitly None => no activation
+                //     builder.noActivation();
+                // } else {
+                //     builder.activation(nb::cast<std::shared_ptr<Activation>>(activation));
+                // }
+                //
                 if (weights_initializer != nullptr)
                     builder.weightsInitializer(weights_initializer);
                 if (biases_initializer != nullptr)
                     builder.biasInitializer(biases_initializer);
-
-                if (add_drop_out)
-                    builder.dropOut(drop_proportion);
-                if (add_batch_normalization)
-                    builder.batchNormalization(batch_norm_exp_running_avg_factor, batch_norm_epsilon);
 
                 FullyConnected built = builder.build();
 
@@ -71,27 +58,17 @@ void bind_fully_connected(nb::module_ &m) {
             "feature_input"_a,
             "num_output_features"_a,
             "has_bias"_a = true,
-            nb::arg("activation").none() = DEFAULT,
+            // nb::arg("activation").none() = DEFAULT,
             "weights_initializer"_a = nb::none(),
             "biases_initializer"_a = nb::none(),
-            "add_drop_out"_a = false,
-            "drop_proportion"_a = 0.0f,
-            "add_batch_normalization"_a = false,
-            "batch_norm_exp_running_avg_factor"_a = 0.05f,
-            "batch_norm_epsilon"_a = 1e-4f,
             nb::sig("def __init__(self, "
                     "network: thor.Network, "
                     "feature_input: thor.Tensor, "
                     "num_output_features: int, "
                     "has_bias: bool = True, "
-                    "activation: thor.Activation | None = thor.activations.Relu(), "
+                    // "activation: thor.Activation | None = thor.activations.Relu(), "
                     "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                    "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                    "add_drop_out: bool = False, "
-                    "drop_proportion: float = 0.0, "
-                    "add_batch_normalization: bool = False, "
-                    "batch_norm_exp_running_avg_factor: float = 0.05, "
-                    "batch_norm_epsilon: float = 1e-4"
+                    "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot() "
                     ") -> None"),
 
             R"nbdoc(
@@ -126,21 +103,20 @@ void bind_fully_connected(nb::module_ &m) {
             Initializer for the weight matrix.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the bias vector.
-        add_drop_out : bool, default False
-            If True, inserts a DropOut layer, sequenced as described above.
-        drop_proportion : float, default 0.0
-            Fraction of units to drop when dropout is enabled.
-            Ignored if ``add_drop_out`` is False.
-        add_batch_normalization : bool, default False
-            If True, inserts a batch-normalization layer, sequenced as
-            described above.
-        batch_norm_exp_running_avg_factor : float, default 0.05
-            Exponential running-average factor used to update the batch
-            normalization mean and variance statistics during training.
-            Ignored if ``add_batch_normalization`` is False.
-        batch_norm_epsilon : float, default 1e-4
-            Small constant added to the variance in batch normalization
-            for numerical stability.
-            Ignored if ``add_batch_normalization`` is False.
-        )nbdoc");
+        )nbdoc")
+        .def(
+            "get_feature_output",
+            [](FullyConnected &self) -> Tensor {
+                Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+                return maybeFeatureOutput.get();
+            },
+            nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+            R"nbdoc(
+            Return the output tensor produced by this layer.
+
+            Returns
+            -------
+            thor.Tensor
+                The feature output tensor handle.
+            )nbdoc");
 }

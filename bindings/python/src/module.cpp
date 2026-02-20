@@ -8,6 +8,7 @@ void bind_network(nb::module_ &m);
 void bind_tensor(nb::module_ &m);
 
 void bind_activations(nb::module_ &m);
+void bind_initializers(nb::module_ &initializers);
 void bind_layers(nb::module_ &layers);
 void bind_losses(nb::module_ &m);
 void bind_metrics(nb::module_ &m);
@@ -25,6 +26,9 @@ NB_MODULE(thor, m) {
 
     auto activations = m.def_submodule("activations");
     bind_activations(activations);
+
+    auto initializers = m.def_submodule("initializers");
+    bind_initializers(initializers);
 
     auto layers = m.def_submodule("layers");
     bind_layers(layers);
