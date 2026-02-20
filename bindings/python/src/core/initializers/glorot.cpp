@@ -9,58 +9,48 @@ using namespace nb::literals;
 using namespace std;
 using namespace Thor;
 
-struct GlorotFactory {};
-
 void bind_glorot(nb::module_ &m) {
-    // Create a Python type for the factory object
-    auto gf = nb::class_<GlorotFactory>(m, "_GlorotFactory", nb::dynamic_attr());
+    auto glorot = nb::class_<Glorot, Initializer>(m, "Glorot");
 
-    // Attach enum as nested attribute of the factory TYPE
-    nb::enum_<ThorImplementation::Glorot::Mode>(gf, "Mode")
+    nb::enum_<ThorImplementation::Glorot::Mode>(glorot, "Mode")
         .value("NORMAL", ThorImplementation::Glorot::Mode::NORMAL)
         .value("UNIFORM", ThorImplementation::Glorot::Mode::UNIFORM)
         .export_values();
 
-    gf.def(nb::init<>());
-
-    gf.def(
-        "__call__",
-        [](GlorotFactory &, ThorImplementation::Glorot::Mode mode) -> std::shared_ptr<Initializer> {
+    glorot.def_static(
+        "__new__",
+        [](nb::handle cls, ThorImplementation::Glorot::Mode mode) -> std::shared_ptr<Glorot> {
             Glorot::Builder b;
             b.mode(mode);
-            return b.build();
+            shared_ptr<Initializer> base = b.build();
+            shared_ptr<Glorot> g = std::dynamic_pointer_cast<Glorot>(base);
+            if (!g)
+                throw nb::type_error("Glorot builder did not return a Glorot instance");
+            return g;  // nanobind converts shared_ptr<Glorot> to a Glorot Python object
+        },
+        "cls"_a,
+        "mode"_a = ThorImplementation::Glorot::Mode::UNIFORM,
+        nb::sig(
+            "def __new__(cls, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> thor.initializers.Glorot"),
+        R"nbdoc(Construct a Glorot initializer.)nbdoc");
+
+    // make __init__ a no-op
+    glorot.def(
+        "__init__",
+        [](Glorot *, ThorImplementation::Glorot::Mode) {
+            // no-op: constructed in __new__
         },
         "mode"_a = ThorImplementation::Glorot::Mode::UNIFORM,
+        nb::sig("def __init__(self, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> None"),
+        R"nbdoc(Initialize a Glorot initializer (construction happens in __new__).)nbdoc");
 
-        // Signature shown for Glorot(...)
-        nb::sig("def __call__(self, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> "
-                "thor.initializers.Initializer"),
-
-        R"nbdoc(
-
-)nbdoc");
-
-    nb::object inst = nb::cast(GlorotFactory{});
-    inst.attr("__name__") = "Glorot";
-    inst.attr("__qualname__") = "Glorot";
-    inst.attr("__doc__") = R"doc(
-A Glorot (Xavier) weight initializer factory.
-
-Glorot(mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> thor.initializers.Initializer
-
-See: Glorot.Mode
-
-------------------------------------------------
-
-Returns:
+    glorot.attr("__doc__") = R"doc(
     A Glorot (Xavier) initializer.
 
-    Draws each weight from a uniform (or normal) distribution.
+    Draws each weight from a uniform (or normal) distribution. See: Glorot.Mode.
 
     References:
     X. Glorot and Y. Bengio, “Understanding the difficulty of training deep feedforward neural networks,”
     AISTATS 2010. https://proceedings.mlr.press/v9/glorot10a.html
 )doc";
-
-    m.attr("Glorot") = inst;
 }

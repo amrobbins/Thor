@@ -9,43 +9,45 @@ using namespace nb::literals;
 using namespace std;
 using namespace Thor;
 
-struct UniformRandomFactory {};
-
 void bind_uniform_random(nb::module_ &m) {
-    auto uf = nb::class_<UniformRandomFactory>(m, "_UniformRandomFactory", nb::dynamic_attr())
-                  .def(nb::init<>())
-                  .def(
-                      "__call__",
-                      [](UniformRandomFactory &, float min_value, float max_value) -> std::shared_ptr<Initializer> {
-                          UniformRandom::Builder b;
-                          b.minValue(min_value).maxValue(max_value);
-                          return b.build();  // <-- must exist and return shared_ptr<Initializer>
-                      },
-                      "min_value"_a,
-                      "max_value"_a,
+    auto uniform_random = nb::class_<UniformRandom, Initializer>(m, "UniformRandom");
 
-                      nb::sig("def __call__(self, min_value: float, max_value: float) -> thor.initializers.Initializer"));
+    uniform_random.def_static(
+        "__new__",
+        [](nb::handle /*cls*/, float min_value, float max_value) -> std::shared_ptr<UniformRandom> {
+            UniformRandom::Builder b;
+            b.minValue(min_value).maxValue(max_value);
 
-    // Export a single callable instance named "UniformRandom"
-    nb::object inst = nb::cast(UniformRandomFactory{});
-    inst.attr("__name__") = "UniformRandom";
-    inst.attr("__qualname__") = "UniformRandom";
-    inst.attr("__doc__") = R"doc(
-Uniform random initializer factory.
+            shared_ptr<Initializer> base = b.build();
+            shared_ptr<UniformRandom> ur = std::dynamic_pointer_cast<UniformRandom>(base);
+            if (!ur)
+                throw nb::type_error("UniformRandom builder did not return a UniformRandom instance");
+            return ur;  // nanobind converts shared_ptr<UniformRandom> to a UniformRandom Python object
+        },
+        "cls"_a,
+        "min_value"_a,
+        "max_value"_a,
+        nb::sig("def __new__(cls, min_value: float, max_value: float) -> thor.initializers.UniformRandom"),
+        R"nbdoc(Construct a UniformRandom initializer.)nbdoc");
 
-UniformRandom(min_value: float, max_value: float) -> thor.initializers.Initializer
+    // Make __init__ a no-op (construction happens in __new__)
+    uniform_random.def(
+        "__init__",
+        [](UniformRandom *, float, float) {
+            // no-op: constructed in __new__
+        },
+        "min_value"_a,
+        "max_value"_a,
+        nb::sig("def __init__(self, min_value: float, max_value: float) -> None"),
+        R"nbdoc(Initialize a UniformRandom initializer.)nbdoc");
 
--------------------------------------------------------
+    uniform_random.attr("__doc__") = R"doc(
+A uniform random initializer.
 
-Returns:
-    A uniform random initializer.
-
-    Draws each weight from a uniform distribution.
+Draws each weight from a uniform distribution:
 
     U[min_value, max_value]
 
-    Where min_value <= max_value. When min_value == max_value, the constant is written.
+Where min_value <= max_value. When min_value == max_value, the constant is written to each weight.
 )doc";
-
-    m.attr("UniformRandom") = inst;
 }
