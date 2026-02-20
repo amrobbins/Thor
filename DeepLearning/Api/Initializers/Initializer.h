@@ -19,7 +19,6 @@ namespace Thor {
 class Initializer {
    public:
     class Builder;
-
     Initializer() { initialized = false; }
 
     virtual ~Initializer() {}

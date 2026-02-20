@@ -41,7 +41,7 @@ void bind_convolution_2d(nb::module_ &m) {
                       bool verticalSamePadding,
                       bool horizontalSamePadding,
                       bool hasBias,
-                      nb::object activation_obj,
+                      nb::object activation,
                       shared_ptr<Initializer> weights_initializer,
                       shared_ptr<Initializer> biases_initializer,
                       bool add_drop_out,
@@ -59,14 +59,14 @@ void bind_convolution_2d(nb::module_ &m) {
                     .horizontalStride(horizontalStride)
                     .hasBias(hasBias);
 
-                if (activation_obj.is(DEFAULT)) {
+                if (activation.is(DEFAULT)) {
                     // not provided => default Relu
                     builder.activation(std::make_shared<Relu>());
-                } else if (activation_obj.is_none()) {
+                } else if (activation.is_none()) {
                     // explicitly None => no activation
                     builder.noActivation();
                 } else {
-                    builder.activation(nb::cast<std::shared_ptr<Activation>>(activation_obj));
+                    builder.activation(nb::cast<std::shared_ptr<Activation>>(activation));
                 }
 
                 if (weights_initializer != nullptr)

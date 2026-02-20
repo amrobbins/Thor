@@ -1,11 +1,11 @@
 #include <nanobind/nanobind.h>
 
+#include <nanobind/stl/string.h>
+
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
-
-#include "bindings/python/src/core/binding_types.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -13,13 +13,13 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Thor::Tensor::DataType;
+using DataType = Tensor::DataType;
 
 void bind_network_output(nb::module_ &m) {
     nb::class_<NetworkOutput, Layer>(m, "NetworkOutput")
         .def(
             "__init__",
-            [](NetworkOutput *self, Network &network, const string &name, const Thor::Tensor &input_tensor, const DataType &data_type) {
+            [](NetworkOutput *self, Network &network, const string &name, const Tensor &input_tensor, const DataType &data_type) {
                 NetworkOutput::Builder builder;
                 NetworkOutput built = builder.network(network).name(name).inputTensor(input_tensor).dataType(data_type).build();
 
@@ -52,5 +52,22 @@ void bind_network_output(nb::module_ &m) {
             data_type : thor.DataType
                 Data type of the output tensor (e.g. thor.DataType.fp16).
             )nbdoc")
-        .def("get_feature_output", &NetworkOutput::getFeatureOutput);
+        .def(
+            "get_feature_output",
+            [](NetworkOutput &self) -> Tensor {
+                Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+                // if (!maybeFeatureOutput.isPresent())
+                //     return nullopt;
+                // Network output creates featureOutput always, straight away.
+                return maybeFeatureOutput.get();
+            },
+            nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+            R"nbdoc(
+            Return the output tensor produced by this layer.
+
+            Returns
+            -------
+            thor.Tensor
+                The feature output tensor handle.
+            )nbdoc");
 }
