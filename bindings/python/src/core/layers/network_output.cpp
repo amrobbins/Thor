@@ -16,7 +16,10 @@ using namespace Thor;
 using DataType = Tensor::DataType;
 
 void bind_network_output(nb::module_ &m) {
-    nb::class_<NetworkOutput, Layer>(m, "NetworkOutput")
+    auto network_output = nb::class_<NetworkOutput, Layer>(m, "NetworkOutput");
+    network_output.attr("__module__") = "thor.layers";
+
+    network_output
         .def(
             "__init__",
             [](NetworkOutput *self, Network &network, const string &name, const Tensor &input_tensor, const DataType &data_type) {

@@ -11,18 +11,21 @@ using namespace std;
 using namespace Thor;
 
 void bind_network(nb::module_ &m) {
-    auto network_class = nb::class_<Network>(m, "Network")
-                             .def(
-                                 "__init__",
-                                 [](Network *self, const std::string &name) {
-                                     // Create the network in the pre-allocated but uninitialized memory at self
-                                     new (self) Network(name);
-                                 },
-                                 "name"_a,
-                                 nb::sig("def __init__(self, name: str) -> None"),
+    auto network = nb::class_<Network>(m, "Network");
+    network.attr("__module__") = "thor";
 
-                                 R"nbdoc(
+    network
+        .def(
+            "__init__",
+            [](Network *self, const std::string &name) {
+                // Create the network in the pre-allocated but uninitialized memory at self
+                new (self) Network(name);
+            },
+            "name"_a,
+            nb::sig("def __init__(self, name: str) -> None"),
+
+            R"nbdoc(
         A Network that contains layers. FIXME.
         )nbdoc")
-                             .def("get_network_name", &Network::getNetworkName);
+        .def("get_network_name", &Network::getNetworkName);
 }

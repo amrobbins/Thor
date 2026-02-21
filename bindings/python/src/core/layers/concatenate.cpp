@@ -5,7 +5,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include "bindings/python/src/core/binding_types.h"
+#include "core/binding_types.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -13,32 +13,34 @@ using namespace std;
 using namespace Thor;
 
 void bind_concatenate(nb::module_ &m) {
-    nb::class_<Concatenate, Layer>(m, "Concatenate")
-        .def(
-            "__init__",
-            [](Concatenate *self, Network &network, TensorList feature_inputs, uint32_t concatenation_axis) {
-                Concatenate::Builder builder;
-                builder.network(network).concatenationAxis(concatenation_axis);
-                // Iterate Python list and cast each element to Tensor&
-                for (nb::handle h : feature_inputs) {
-                    Tensor &t = nb::cast<Tensor &>(h);
-                    builder.featureInput(t);
-                }
+    auto concatenate = nb::class_<Concatenate, Layer>(m, "Concatenate");
+    concatenate.attr("__module__") = "thor.layers";
 
-                // Move the concatenate layer into the pre-allocated but uninitialized memory at self
-                new (self) Concatenate(std::move(builder.build()));
-            },
-            "network"_a,
-            "feature_inputs"_a,
-            "concatenation_axis"_a,
+    concatenate.def(
+        "__init__",
+        [](Concatenate *self, Network &network, TensorList feature_inputs, uint32_t concatenation_axis) {
+            Concatenate::Builder builder;
+            builder.network(network).concatenationAxis(concatenation_axis);
+            // Iterate Python list and cast each element to Tensor&
+            for (nb::handle h : feature_inputs) {
+                Tensor &t = nb::cast<Tensor &>(h);
+                builder.featureInput(t);
+            }
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_inputs: list[thor.Tensor], "
-                    "concatenation_axis: int"
-                    ") -> None"),
+            // Move the concatenate layer into the pre-allocated but uninitialized memory at self
+            new (self) Concatenate(std::move(builder.build()));
+        },
+        "network"_a,
+        "feature_inputs"_a,
+        "concatenation_axis"_a,
 
-            R"nbdoc(
+        nb::sig("def __init__(self, "
+                "network: thor.Network, "
+                "feature_inputs: list[thor.Tensor], "
+                "concatenation_axis: int"
+                ") -> None"),
+
+        R"nbdoc(
             Create and attach a Concatenate layer to a Network.
 
             Parameters

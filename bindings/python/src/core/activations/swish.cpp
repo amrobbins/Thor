@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_swish(nb::module_ &m) {
     auto swish = nb::class_<Swish, Activation>(m, "Swish");
+    swish.attr("__module__") = "thor.activations";
 
     swish.def_static(
         "__new__",

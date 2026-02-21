@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_tanh(nb::module_ &m) {
     auto tanh = nb::class_<Tanh, Activation>(m, "Tanh");
+    tanh.attr("__module__") = "thor.activations";
 
     tanh.def_static(
         "__new__",

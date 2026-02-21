@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_uniform_random(nb::module_ &m) {
     auto uniform_random = nb::class_<UniformRandom, Initializer>(m, "UniformRandom");
+    uniform_random.attr("__module__") = "thor.initializers";
 
     uniform_random.def_static(
         "__new__",

@@ -1,6 +1,5 @@
 #include <nanobind/nanobind.h>
 
-#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
@@ -15,32 +14,53 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Tensor::DataType;
-
 void bind_network_input(nb::module_ &m) {
-    nb::class_<NetworkInput, Layer>(m, "NetworkInput")
-        .def(
-            "__init__",
-            [](NetworkInput *self, Network &network, const string &name, const vector<uint64_t> &dimensions, const DataType &data_type) {
-                NetworkInput::Builder builder;
-                NetworkInput built = builder.network(network).name(name).dimensions(dimensions).dataType(data_type).build();
+    using DataType = Tensor::DataType;
 
-                // Move the networkInput layer into the pre-allocated but uninitialized memory at self
-                new (self) NetworkInput(std::move(built));
-            },
-            "network"_a,
-            "name"_a,
-            "dimensions"_a,
-            "data_type"_a,
+    auto network_input = nb::class_<NetworkInput, Layer>(m, "NetworkInput");
+    network_input.attr("__module__") = "thor.layers";
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "name: str, "
-                    "dimensions: list[int], "
-                    "data_type: thor.Tensor.DataType"
-                    ") -> None"),
+    network_input.def(
+        "__init__",
+        [](NetworkInput *self, Network &network, const string &name, const vector<uint64_t> &dimensions, const DataType &data_type) {
+            NetworkInput::Builder builder;
+            NetworkInput built = builder.network(network).name(name).dimensions(dimensions).dataType(data_type).build();
 
-            R"nbdoc(
+            // Move the networkInput layer into the pre-allocated but uninitialized memory at self
+            new (self) NetworkInput(std::move(built));
+        },
+        "network"_a,
+        "name"_a,
+        "dimensions"_a,
+        "data_type"_a,
+
+        nb::sig("def __init__(self, "
+                "network: thor.Network, "
+                "name: str, "
+                "dimensions: list[int], "
+                "data_type: thor.DataType"
+                ") -> None"));
+
+    network_input.def(
+        "get_feature_output",
+        [](NetworkInput &self) -> Tensor {
+            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            // if (!maybeFeatureOutput.isPresent())
+            //     return nullopt;
+            // Network input creates featureOutput always, straight away.
+            return maybeFeatureOutput.get();
+        },
+        nb::sig("def get_feature_output(self) -> thor.Tensor"),
+        R"nbdoc(
+            Return the output tensor produced by this layer.
+
+            Returns
+            -------
+            thor.Tensor
+                The feature output tensor handle.
+            )nbdoc");
+
+    network_input.attr("__doc__") = R"nbdoc(
             Create and attach a NetworkInput to send data into a Network.
 
             Parameters
@@ -55,24 +75,6 @@ void bind_network_input(nb::module_ &m) {
                 Note: the batch dimension is never specified in API layer tensors,
                       the batch dimension is only added when stamping down a physical network instance.
             data_type : thor.DataType
-                Data type of the input tensor (e.g. thor.Tensor.DataType.fp16).
-            )nbdoc")
-        .def(
-            "get_feature_output",
-            [](NetworkInput &self) -> Tensor {
-                Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-                // if (!maybeFeatureOutput.isPresent())
-                //     return nullopt;
-                // Network input creates featureOutput always, straight away.
-                return maybeFeatureOutput.get();
-            },
-            nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
-            R"nbdoc(
-            Return the output tensor produced by this layer.
-
-            Returns
-            -------
-            thor.Tensor
-                The feature output tensor handle.
-            )nbdoc");
+                Data type of the input tensor (e.g. thor.DataType.fp16).
+            )nbdoc";
 }

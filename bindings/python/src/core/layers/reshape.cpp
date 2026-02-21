@@ -14,28 +14,30 @@ using namespace std;
 using namespace Thor;
 
 void bind_reshape(nb::module_ &m) {
-    nb::class_<Reshape, Layer>(m, "Reshape")
-        .def(
-            "__init__",
-            [](Reshape *self, Network &network, const Tensor &feature_input, vector<uint64_t> new_dimensions) {
-                Reshape::Builder builder;
+    auto reshape = nb::class_<Reshape, Layer>(m, "Reshape");
+    reshape.attr("__module__") = "thor.layers";
 
-                Reshape built = builder.network(network).featureInput(feature_input).newDimensions(new_dimensions).build();
+    reshape.def(
+        "__init__",
+        [](Reshape *self, Network &network, const Tensor &feature_input, vector<uint64_t> new_dimensions) {
+            Reshape::Builder builder;
 
-                // Move the reshape layer into the pre-allocated but uninitialized memory at self
-                new (self) Reshape(std::move(built));
-            },
-            "network"_a,
-            "feature_input"_a,
-            "new_dimensions"_a,
+            Reshape built = builder.network(network).featureInput(feature_input).newDimensions(new_dimensions).build();
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_input: thor.Tensor, "
-                    "new_dimensions: list[int]"
-                    ") -> None"),
+            // Move the reshape layer into the pre-allocated but uninitialized memory at self
+            new (self) Reshape(std::move(built));
+        },
+        "network"_a,
+        "feature_input"_a,
+        "new_dimensions"_a,
 
-            R"nbdoc(
+        nb::sig("def __init__(self, "
+                "network: thor.Network, "
+                "feature_input: thor.Tensor, "
+                "new_dimensions: list[int]"
+                ") -> None"),
+
+        R"nbdoc(
             Create and attach a Reshape layer to a Network.
             The number of elements in the reshaped tensor must exactly equal the
             number of elements of the input tensor.

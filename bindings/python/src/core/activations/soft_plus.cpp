@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_soft_plus(nb::module_ &m) {
     auto soft_plus = nb::class_<SoftPlus, Activation>(m, "SoftPlus");
+    soft_plus.attr("__module__") = "thor.activations";
 
     soft_plus.def_static(
         "__new__",

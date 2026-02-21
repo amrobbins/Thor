@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_gelu(nb::module_ &m) {
     auto gelu = nb::class_<Gelu, Activation>(m, "Gelu");
+    gelu.attr("__module__") = "thor.activations";
 
     gelu.def_static(
         "__new__",
