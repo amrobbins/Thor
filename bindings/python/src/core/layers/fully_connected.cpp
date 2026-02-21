@@ -35,11 +35,8 @@ void bind_fully_connected(nb::module_ &m) {
                 builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
                 if (activation == nullptr) {
-                    // FIXME: This does not work, need to find the right pattern for this.
-                    printf("\nA\n");
                     builder.noActivation();
                 } else {
-                    printf("\nB\n");
                     builder.activation(activation);
                 }
 
@@ -56,7 +53,7 @@ void bind_fully_connected(nb::module_ &m) {
             "feature_input"_a,
             "num_output_features"_a,
             "has_bias"_a = true,
-            "activation"_a = Relu(),
+            "activation"_a.none() = Relu(),
             "weights_initializer"_a = nb::none(),
             "biases_initializer"_a = nb::none(),
             nb::sig("def __init__(self, "
