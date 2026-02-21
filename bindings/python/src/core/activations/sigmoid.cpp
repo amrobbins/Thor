@@ -14,7 +14,7 @@ void bind_sigmoid(nb::module_ &m) {
 
     sigmoid.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<Sigmoid> {
+        [](nb::handle cls) -> std::shared_ptr<Sigmoid> {
             Sigmoid::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>
@@ -30,7 +30,7 @@ void bind_sigmoid(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     sigmoid.def(
         "__init__",
-        [](Sigmoid *) {
+        [](Sigmoid *self) -> void {
             // no-op: constructed in __new__
         },
         nb::sig("def __init__(self) -> None"),

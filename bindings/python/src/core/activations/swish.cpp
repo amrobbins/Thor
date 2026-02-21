@@ -14,7 +14,7 @@ void bind_swish(nb::module_ &m) {
 
     swish.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<Swish> {
+        [](nb::handle cls) -> std::shared_ptr<Swish> {
             Swish::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>

@@ -14,7 +14,7 @@ void bind_relu(nb::module_ &m) {
 
     relu.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<Relu> {
+        [](nb::handle cls) -> std::shared_ptr<Relu> {
             Relu::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>
@@ -30,7 +30,7 @@ void bind_relu(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     relu.def(
         "__init__",
-        [](Relu *) {
+        [](Relu *self) -> void {
             // no-op: constructed in __new__
         },
         nb::sig("def __init__(self) -> None"),

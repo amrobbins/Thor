@@ -14,7 +14,7 @@ void bind_tanh(nb::module_ &m) {
 
     tanh.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<Tanh> {
+        [](nb::handle cls) -> std::shared_ptr<Tanh> {
             Tanh::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>

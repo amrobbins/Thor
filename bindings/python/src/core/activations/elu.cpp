@@ -14,7 +14,7 @@ void bind_elu(nb::module_ &m) {
 
     elu.def_static(
         "__new__",
-        [](nb::handle /*cls*/, float alpha) -> std::shared_ptr<Elu> {
+        [](nb::handle cls, float alpha) -> std::shared_ptr<Elu> {
             Elu::Builder b;
             b.alpha(alpha);
 
@@ -32,12 +32,11 @@ void bind_elu(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     elu.def(
         "__init__",
-        [](Elu *, float) {
+        [](Elu *self, nb::args args, nb::kwargs kwargs) -> void {
             // no-op: constructed in __new__
         },
-        "alpha"_a = 1.0f,
-        nb::sig("def __init__(self, alpha: float = 1.0) -> None"),
-        R"nbdoc(Initialize an ELU activation (construction happens in __new__).)nbdoc");
+        nb::sig("def __init__(self, *args, **kwargs) -> None"),
+        R"nbdoc(No-op; constructed in __new__.)nbdoc");
 
     elu.attr("__doc__") = R"doc(
 Exponential Linear Unit (ELU) activation.
