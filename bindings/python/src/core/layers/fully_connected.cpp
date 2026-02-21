@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 
 #include <memory>
@@ -19,32 +20,29 @@ using namespace Thor;
 using DataType = Tensor::DataType;
 
 void bind_fully_connected(nb::module_ &m) {
-    nb::object DEFAULT = nb::module_::import_("thor").attr("DEFAULT");
-
     nb::class_<FullyConnected, TrainableWeightsBiasesLayer>(m, "FullyConnected")
         .def(
             "__init__",
-            [DEFAULT](FullyConnected *self,
-                      Network &network,
-                      Tensor featureInput,
-                      uint32_t numOutputFeatures,
-                      bool hasBias,
-                      // nb::object activation,
-                      shared_ptr<Initializer> weights_initializer,
-                      shared_ptr<Initializer> biases_initializer) {
+            [](FullyConnected *self,
+               Network &network,
+               Tensor featureInput,
+               uint32_t numOutputFeatures,
+               bool hasBias,
+               shared_ptr<Activation> activation,
+               shared_ptr<Initializer> weights_initializer,
+               shared_ptr<Initializer> biases_initializer) {
                 FullyConnected::Builder builder;
                 builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
-                // if (activation.is(DEFAULT)) {
-                //     // not provided => default Relu
-                //     builder.activation(std::make_shared<Relu>());
-                // } else if (activation.is_none()) {
-                //     // explicitly None => no activation
-                //     builder.noActivation();
-                // } else {
-                //     builder.activation(nb::cast<std::shared_ptr<Activation>>(activation));
-                // }
-                //
+                if (activation == nullptr) {
+                    // FIXME: This does not work, need to find the right pattern for this.
+                    printf("\nA\n");
+                    builder.noActivation();
+                } else {
+                    printf("\nB\n");
+                    builder.activation(activation);
+                }
+
                 if (weights_initializer != nullptr)
                     builder.weightsInitializer(weights_initializer);
                 if (biases_initializer != nullptr)
@@ -58,7 +56,7 @@ void bind_fully_connected(nb::module_ &m) {
             "feature_input"_a,
             "num_output_features"_a,
             "has_bias"_a = true,
-            // nb::arg("activation").none() = DEFAULT,
+            "activation"_a = Relu(),
             "weights_initializer"_a = nb::none(),
             "biases_initializer"_a = nb::none(),
             nb::sig("def __init__(self, "
@@ -66,7 +64,7 @@ void bind_fully_connected(nb::module_ &m) {
                     "feature_input: thor.Tensor, "
                     "num_output_features: int, "
                     "has_bias: bool = True, "
-                    // "activation: thor.Activation | None = thor.activations.Relu(), "
+                    "activation: thor.Activation | None = thor.activations.Relu(), "
                     "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
                     "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot() "
                     ") -> None"),
