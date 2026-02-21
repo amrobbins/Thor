@@ -14,7 +14,7 @@ void bind_gelu(nb::module_ &m) {
 
     gelu.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<Gelu> {
+        [](nb::handle cls) -> std::shared_ptr<Gelu> {
             Gelu::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>
@@ -30,7 +30,7 @@ void bind_gelu(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     gelu.def(
         "__init__",
-        [](Gelu *) {
+        [](Gelu *self) -> void {
             // no-op: constructed in __new__
         },
         nb::sig("def __init__(self) -> None"),

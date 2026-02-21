@@ -14,7 +14,7 @@ void bind_softmax(nb::module_ &m) {
 
     softmax.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<Softmax> {
+        [](nb::handle cls) -> std::shared_ptr<Softmax> {
             Softmax::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>
@@ -30,7 +30,7 @@ void bind_softmax(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     softmax.def(
         "__init__",
-        [](Softmax *) {
+        [](Softmax *self) -> void {
             // no-op: constructed in __new__
         },
         nb::sig("def __init__(self) -> None"),

@@ -14,7 +14,7 @@ void bind_soft_sign(nb::module_ &m) {
 
     soft_sign.def_static(
         "__new__",
-        [](nb::handle /*cls*/) -> std::shared_ptr<SoftSign> {
+        [](nb::handle cls) -> std::shared_ptr<SoftSign> {
             SoftSign::Builder b;
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>
@@ -30,7 +30,7 @@ void bind_soft_sign(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     soft_sign.def(
         "__init__",
-        [](SoftSign *) {
+        [](SoftSign *self) -> void {
             // no-op: constructed in __new__
         },
         nb::sig("def __init__(self) -> None"),

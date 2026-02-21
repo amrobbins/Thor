@@ -1,5 +1,8 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
 
+#include <memory>
 #include <optional>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
@@ -22,126 +25,117 @@ using namespace Thor;
 using DataType = Thor::Tensor::DataType;
 
 void bind_convolution_2d(nb::module_ &m) {
-    nb::object DEFAULT = nb::module_::import_("thor").attr("DEFAULT");
+    auto convolution_2d = nb::class_<Convolution2d, TrainableWeightsBiasesLayer>(m, "Convolution2d");
 
-    nb::class_<Convolution2d, TrainableWeightsBiasesLayer>(m, "Convolution2d")
-        .def(
-            "__init__",
-            [DEFAULT](Convolution2d *self,
-                      Network &network,
-                      Tensor featureInput,
-                      uint32_t numOutputChannels,
-                      uint32_t filterHeight,
-                      uint32_t filterWidth,
-                      uint32_t verticalStride,
-                      uint32_t horizontalStride,
-                      uint32_t verticalPadding,
-                      uint32_t horizontalPadding,
-                      bool samePadding,
-                      bool verticalSamePadding,
-                      bool horizontalSamePadding,
-                      bool hasBias,
-                      nb::object activation,
-                      shared_ptr<Initializer> weights_initializer,
-                      shared_ptr<Initializer> biases_initializer,
-                      bool add_drop_out,
-                      float drop_proportion,
-                      bool add_batch_normalization,
-                      float batch_norm_exp_running_avg_factor,
-                      float batch_norm_epsilon) {
-                Convolution2d::Builder builder;
-                builder.network(network)
-                    .featureInput(featureInput)
-                    .numOutputChannels(numOutputChannels)
-                    .filterHeight(filterHeight)
-                    .filterWidth(filterWidth)
-                    .verticalStride(verticalStride)
-                    .horizontalStride(horizontalStride)
-                    .hasBias(hasBias);
+    convolution_2d.def(
+        "__init__",
+        [](Convolution2d *self,
+           Network &network,
+           Tensor featureInput,
+           uint32_t numOutputChannels,
+           uint32_t filterHeight,
+           uint32_t filterWidth,
+           uint32_t verticalStride,
+           uint32_t horizontalStride,
+           uint32_t verticalPadding,
+           uint32_t horizontalPadding,
+           bool hasBias,
+           shared_ptr<Activation> activation,
+           shared_ptr<Initializer> weights_initializer,
+           shared_ptr<Initializer> biases_initializer,
+           bool add_drop_out,
+           float drop_proportion,
+           bool add_batch_normalization,
+           float batch_norm_exp_running_avg_factor,
+           float batch_norm_epsilon) {
+            Convolution2d::Builder builder;
+            builder.network(network)
+                .featureInput(featureInput)
+                .numOutputChannels(numOutputChannels)
+                .filterHeight(filterHeight)
+                .filterWidth(filterWidth)
+                .verticalPadding(verticalPadding)
+                .horizontalPadding(horizontalPadding)
+                .verticalStride(verticalStride)
+                .horizontalStride(horizontalStride)
+                .hasBias(hasBias);
 
-                if (activation.is(DEFAULT)) {
-                    // not provided => default Relu
-                    builder.activation(std::make_shared<Relu>());
-                } else if (activation.is_none()) {
-                    // explicitly None => no activation
-                    builder.noActivation();
-                } else {
-                    builder.activation(nb::cast<std::shared_ptr<Activation>>(activation));
-                }
+            if (activation == nullptr) {
+                builder.noActivation();
+            } else {
+                builder.activation(activation);
+            }
 
-                if (weights_initializer != nullptr)
-                    builder.weightsInitializer(weights_initializer);
-                if (biases_initializer != nullptr)
-                    builder.biasInitializer(biases_initializer);
+            if (weights_initializer != nullptr)
+                builder.weightsInitializer(weights_initializer);
+            if (biases_initializer != nullptr)
+                builder.biasInitializer(biases_initializer);
 
-                if (add_drop_out)
-                    builder.dropOut(drop_proportion);
-                if (add_batch_normalization)
-                    builder.batchNormalization(batch_norm_exp_running_avg_factor, batch_norm_epsilon);
+            if (add_drop_out)
+                builder.dropOut(drop_proportion);
+            if (add_batch_normalization)
+                builder.batchNormalization(batch_norm_exp_running_avg_factor, batch_norm_epsilon);
 
-                // These can't all be specified at the same time, but logic to enforce that
-                // is on the implementation side, not the binding side.
-                if (verticalPadding != 0)
-                    builder.verticalPadding(verticalPadding);
-                if (horizontalPadding != 0)
-                    builder.horizontalPadding(horizontalPadding);
-                if (samePadding)
-                    builder.samePadding();
-                if (verticalSamePadding)
-                    builder.verticalSamePadding();
-                if (horizontalSamePadding)
-                    builder.horizontalSamePadding();
+            Convolution2d built = builder.build();
 
-                Convolution2d built = builder.build();
+            new (self) Convolution2d(std::move(built));
+        },
+        "network"_a,
+        "feature_input"_a,
+        "num_output_channels"_a,
+        "filter_height"_a,
+        "filter_width"_a,
+        "vertical_stride"_a = 1,
+        "horizontal_stride"_a = 1,
+        "vertical_padding"_a = 0,
+        "horizontal_padding"_a = 0,
+        "has_bias"_a = true,
+        "activation"_a = nb::none(),
+        "weights_initializer"_a = nb::none(),
+        "biases_initializer"_a = nb::none(),
+        "add_drop_out"_a = false,
+        "drop_proportion"_a = 0.0f,
+        "add_batch_normalization"_a = false,
+        "batch_norm_exp_running_avg_factor"_a = 0.05f,
+        "batch_norm_epsilon"_a = 1e-4f,
+        nb::sig("def __init__(self, "
+                "network: thor.Network, "
+                "feature_input: thor.Tensor, "
+                "num_output_channels: int, "
+                "filter_height: int, "
+                "filter_width: int, "
+                "vertical_stride: int = 1, "
+                "horizontal_stride: int = 1, "
+                "vertical_padding: int = 0, "
+                "horizontal_padding: int = 0, "
+                "has_bias: bool = True, "
+                "activation: thor.Activation | None = None, "
+                "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
+                "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
+                "add_drop_out: bool = False, "
+                "drop_proportion: float = 0.0, "
+                "add_batch_normalization: bool = False, "
+                "batch_norm_exp_running_avg_factor: float = 0.05, "
+                "batch_norm_epsilon: float = 1e-4"
+                ") -> None"));
 
-                new (self) Convolution2d(std::move(built));
-            },
-            "network"_a,
-            "feature_input"_a,
-            "num_output_channels"_a,
-            "filter_height"_a,
-            "filter_width"_a,
-            "vertical_stride"_a = 1,
-            "horizontal_stride"_a = 1,
-            "vertical_padding"_a = 0,
-            "horizontal_padding"_a = 0,
-            "same_padding"_a = false,
-            "vertical_same_padding"_a = false,
-            "horizontal_same_padding"_a = false,
-            "has_bias"_a = true,
-            nb::arg("activation") = DEFAULT,
-            "weights_initializer"_a = nb::none(),
-            "biases_initializer"_a = nb::none(),
-            "add_drop_out"_a = false,
-            "drop_proportion"_a = 0.0f,
-            "add_batch_normalization"_a = false,
-            "batch_norm_exp_running_avg_factor"_a = 0.05f,
-            "batch_norm_epsilon"_a = 1e-4f,
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_input: thor.Tensor, "
-                    "num_output_channels: int, "
-                    "filter_height: int, "
-                    "filter_width: int, "
-                    "vertical_stride: int = 1, "
-                    "horizontal_stride: int = 1, "
-                    "vertical_padding: int = 0, "
-                    "horizontal_padding: int = 0, "
-                    "same_padding: bool = False, "
-                    "vertical_same_padding: bool = False, "
-                    "horizontal_same_padding: bool = False, "
-                    "has_bias: bool = True, "
-                    "activation: thor.Activation | None = thor.activations.Relu(), "
-                    "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                    "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                    "add_drop_out: bool = False, "
-                    "drop_proportion: float = 0.0, "
-                    "add_batch_normalization: bool = False, "
-                    "batch_norm_exp_running_avg_factor: float = 0.05, "
-                    "batch_norm_epsilon: float = 1e-4"
-                    ") -> None"),
+    convolution_2d.def(
+        "get_feature_output",
+        [](Convolution2d &self) -> Tensor {
+            Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
+            return maybeFeatureOutput.get();
+        },
+        nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+        R"nbdoc(
+            Return the output tensor produced by this layer.
 
-            R"nbdoc(
+            Returns
+            -------
+            thor.Tensor
+                The feature output tensor handle.
+            )nbdoc");
+
+    convolution_2d.attr("__doc__") = R"nbdoc(
         2D convolution layer.
 
         Builds a trainable 2D convolutional layer with optional activation,
@@ -175,23 +169,10 @@ void bind_convolution_2d(nb::module_ &m) {
             Stride of the convolution in the horizontal direction.
         vertical_padding : int, default 0
             Amount of explicit zero-padding to apply above and below the
-            input. Cannot be specified when vertical_same_padding is enabled.
+            input.
         horizontal_padding : int, default 0
             Amount of explicit zero-padding to apply left and right of the
-            input. Cannot be specified when horizontal_same_padding is enabled.
-        same_padding : bool, default False
-            If True, apply symmetric “same” padding in both directions so
-            that the output spatial size matches the input (subject to
-            stride constraints). When same_padding is enabled, do not specify
-            any other padding parameters.
-        vertical_same_padding : bool, default False
-            If True, apply “same” padding in the vertical dimension.
-            When vertical_same_padding is specified, do not specify any other
-            vertical padding parameters.
-        horizontal_same_padding : bool, default False
-            If True, apply “same” padding in the horizontal dimension.
-            When horizontal_same_padding is specified, do not specify any other
-            horizontal padding parameters.
+            input.
         has_bias : bool, default True
             Whether to learn an additive bias per output channel.
         activation : thor.Activation or None, default thor.activations.Relu()
@@ -218,5 +199,5 @@ void bind_convolution_2d(nb::module_ &m) {
             Small constant added to the variance in batch normalization
             for numerical stability.
             Ignored if ``add_batch_normalization`` is False.
-        )nbdoc");
+        )nbdoc";
 }
