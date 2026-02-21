@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_softmax(nb::module_ &m) {
     auto softmax = nb::class_<Softmax, Activation>(m, "Softmax");
+    softmax.attr("__module__") = "thor.activations";
 
     softmax.def_static(
         "__new__",

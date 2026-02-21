@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_relu(nb::module_ &m) {
     auto relu = nb::class_<Relu, Activation>(m, "Relu");
+    relu.attr("__module__") = "thor.activations";
 
     relu.def_static(
         "__new__",

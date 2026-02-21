@@ -12,28 +12,30 @@ using namespace std;
 using namespace Thor;
 
 void bind_flatten(nb::module_ &m) {
-    nb::class_<Flatten, Layer>(m, "Flatten")
-        .def(
-            "__init__",
-            [](Flatten *self, Network &network, const Tensor &feature_input, uint32_t num_output_dimensions) {
-                Flatten::Builder builder;
+    auto flatten = nb::class_<Flatten, Layer>(m, "Flatten");
+    flatten.attr("__module__") = "thor.layers";
 
-                Flatten built = builder.network(network).featureInput(feature_input).numOutputDimensions(num_output_dimensions).build();
+    flatten.def(
+        "__init__",
+        [](Flatten *self, Network &network, const Tensor &feature_input, uint32_t num_output_dimensions) {
+            Flatten::Builder builder;
 
-                // Move the flatten layer into the pre-allocated but uninitialized memory at self
-                new (self) Flatten(std::move(built));
-            },
-            "network"_a,
-            "feature_input"_a,
-            "num_output_dimensions"_a,
+            Flatten built = builder.network(network).featureInput(feature_input).numOutputDimensions(num_output_dimensions).build();
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_input: thor.Tensor, "
-                    "num_output_dimensions: int"
-                    ") -> None"),
+            // Move the flatten layer into the pre-allocated but uninitialized memory at self
+            new (self) Flatten(std::move(built));
+        },
+        "network"_a,
+        "feature_input"_a,
+        "num_output_dimensions"_a,
 
-            R"nbdoc(
+        nb::sig("def __init__(self, "
+                "network: thor.Network, "
+                "feature_input: thor.Tensor, "
+                "num_output_dimensions: int"
+                ") -> None"),
+
+        R"nbdoc(
             Create and attach a Flatten layer to a Network.
 
             Parameters

@@ -12,7 +12,10 @@ using namespace std;
 using namespace Thor;
 
 void bind_stub(nb::module_ &m) {
-    nb::class_<Stub, Layer>(m, "Stub").def(
+    auto stub = nb::class_<Stub, Layer>(m, "Stub");
+    stub.attr("__module__") = "thor.layers";
+
+    stub.def(
         "__init__",
         [](Stub *self, Network &network, const Tensor &input_tensor) {
             Stub::Builder builder;

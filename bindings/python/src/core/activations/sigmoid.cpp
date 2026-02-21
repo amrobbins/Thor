@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_sigmoid(nb::module_ &m) {
     auto sigmoid = nb::class_<Sigmoid, Activation>(m, "Sigmoid");
+    sigmoid.attr("__module__") = "thor.activations";
 
     sigmoid.def_static(
         "__new__",

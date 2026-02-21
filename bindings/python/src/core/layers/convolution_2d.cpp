@@ -14,8 +14,6 @@
 
 #include <nanobind/stl/optional.h>
 
-#include "bindings/python/src/core/binding_types.h"
-
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
@@ -26,6 +24,7 @@ using DataType = Thor::Tensor::DataType;
 
 void bind_convolution_2d(nb::module_ &m) {
     auto convolution_2d = nb::class_<Convolution2d, TrainableWeightsBiasesLayer>(m, "Convolution2d");
+    convolution_2d.attr("__module__") = "thor.layers";
 
     convolution_2d.def(
         "__init__",

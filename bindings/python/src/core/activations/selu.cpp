@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_selu(nb::module_ &m) {
     auto selu = nb::class_<Selu, Activation>(m, "Selu");
+    selu.attr("__module__") = "thor.activations";
 
     selu.def_static(
         "__new__",

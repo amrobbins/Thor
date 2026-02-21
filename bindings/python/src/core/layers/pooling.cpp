@@ -5,7 +5,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-#include "bindings/python/src/core/binding_types.h"
+#include "core/binding_types.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -14,78 +14,80 @@ using namespace std;
 using namespace Thor;
 
 void bind_pooling(nb::module_ &m) {
-    auto pooling_class = nb::class_<Pooling, Layer>(m, "Pooling")
-                             .def(
-                                 "__init__",
-                                 [](Pooling *self,
-                                    Network &network,
-                                    Tensor feature_input,
-                                    Pooling::Type type,
-                                    uint32_t windowHeight,
-                                    uint32_t windowWidth,
-                                    uint32_t verticalStride,
-                                    uint32_t horizontalStride,
-                                    uint32_t verticalPadding,
-                                    uint32_t horizontalPadding,
-                                    bool samePadding,
-                                    bool verticalSamePadding,
-                                    bool horizontalSamePadding) {
-                                     Pooling::Builder builder;
-                                     builder.network(network)
-                                         .featureInput(feature_input)
-                                         .type(type)
-                                         .windowHeight(windowHeight)
-                                         .windowWidth(windowWidth)
-                                         .verticalStride(verticalStride)
-                                         .horizontalStride(horizontalStride);
+    auto pooling = nb::class_<Pooling, Layer>(m, "Pooling");
+    pooling.attr("__module__") = "thor.layers";
+     pooling
+        .def(
+            "__init__",
+            [](Pooling *self,
+               Network &network,
+               Tensor feature_input,
+               Pooling::Type type,
+               uint32_t windowHeight,
+               uint32_t windowWidth,
+               uint32_t verticalStride,
+               uint32_t horizontalStride,
+               uint32_t verticalPadding,
+               uint32_t horizontalPadding,
+               bool samePadding,
+               bool verticalSamePadding,
+               bool horizontalSamePadding) {
+                Pooling::Builder builder;
+                builder.network(network)
+                    .featureInput(feature_input)
+                    .type(type)
+                    .windowHeight(windowHeight)
+                    .windowWidth(windowWidth)
+                    .verticalStride(verticalStride)
+                    .horizontalStride(horizontalStride);
 
-                                     // These can't all be specified at the same time, but logic to enforce that
-                                     // is on the implementation side, not the binding side.
-                                     if (verticalPadding != 0)
-                                         builder.verticalPadding(verticalPadding);
-                                     if (horizontalPadding != 0)
-                                         builder.horizontalPadding(horizontalPadding);
-                                     if (samePadding)
-                                         builder.samePadding();
-                                     if (verticalSamePadding)
-                                         builder.verticalSamePadding();
-                                     if (horizontalSamePadding)
-                                         builder.horizontalSamePadding();
+                // These can't all be specified at the same time, but logic to enforce that
+                // is on the implementation side, not the binding side.
+                if (verticalPadding != 0)
+                    builder.verticalPadding(verticalPadding);
+                if (horizontalPadding != 0)
+                    builder.horizontalPadding(horizontalPadding);
+                if (samePadding)
+                    builder.samePadding();
+                if (verticalSamePadding)
+                    builder.verticalSamePadding();
+                if (horizontalSamePadding)
+                    builder.horizontalSamePadding();
 
-                                     Pooling built = builder.build();
+                Pooling built = builder.build();
 
-                                     // Move the pooling layer into the pre-allocated but uninitialized memory at self
-                                     new (self) Pooling(std::move(built));
-                                 },
-                                 "network"_a,
-                                 "feature_input"_a,
-                                 "type"_a,
-                                 "window_height"_a,
-                                 "window_width"_a,
-                                 "vertical_stride"_a = 1,
-                                 "horizontal_stride"_a = 1,
-                                 "vertical_padding"_a = 0,
-                                 "horizontal_padding"_a = 0,
-                                 "same_padding"_a = false,
-                                 "vertical_same_padding"_a = false,
-                                 "horizontal_same_padding"_a = false,
+                // Move the pooling layer into the pre-allocated but uninitialized memory at self
+                new (self) Pooling(std::move(built));
+            },
+            "network"_a,
+            "feature_input"_a,
+            "type"_a,
+            "window_height"_a,
+            "window_width"_a,
+            "vertical_stride"_a = 1,
+            "horizontal_stride"_a = 1,
+            "vertical_padding"_a = 0,
+            "horizontal_padding"_a = 0,
+            "same_padding"_a = false,
+            "vertical_same_padding"_a = false,
+            "horizontal_same_padding"_a = false,
 
-                                 nb::sig("def __init__(self, "
-                                         "network: thor.Network, "
-                                         "feature_input: thor.Tensor, "
-                                         "type: thor.Pooling.Type, "
-                                         "window_height: int, "
-                                         "window_width: int, "
-                                         "vertical_stride: int = 1, "
-                                         "horizontal_stride: int = 1, "
-                                         "vertical_padding: int = 0, "
-                                         "horizontal_padding: int = 0, "
-                                         "same_padding: bool = False, "
-                                         "vertical_same_padding: bool = False, "
-                                         "horizontal_same_padding: bool = False"
-                                         ") -> None"),
+            nb::sig("def __init__(self, "
+                    "network: thor.Network, "
+                    "feature_input: thor.Tensor, "
+                    "type: thor.Pooling.Type, "
+                    "window_height: int, "
+                    "window_width: int, "
+                    "vertical_stride: int = 1, "
+                    "horizontal_stride: int = 1, "
+                    "vertical_padding: int = 0, "
+                    "horizontal_padding: int = 0, "
+                    "same_padding: bool = False, "
+                    "vertical_same_padding: bool = False, "
+                    "horizontal_same_padding: bool = False"
+                    ") -> None"),
 
-                                 R"nbdoc(
+            R"nbdoc(
         Pooling layer that downsamples its input by applying a pooling operation
         (e.g. max or average) over sliding windows.
 
@@ -139,17 +141,14 @@ void bind_pooling(nb::module_ &m) {
         -----
         The supported tensor layout is NCHW.
         )nbdoc")
-                             .def("get_output_dimensions", &Pooling::getOutputDimensions)
-                             .def("get_pooling_type", &Pooling::getPoolingType)
-                             .def("get_window_height", &Pooling::getWindowHeight)
-                             .def("get_window_width", &Pooling::getWindowWidth)
-                             .def("get_vertical_stride", &Pooling::getVerticalStride)
-                             .def("get_horizontal_stride", &Pooling::getHorizontalStride)
-                             .def("get_vertical_padding", &Pooling::getVerticalPadding)
-                             .def("get_horizontal_padding", &Pooling::getHorizontalPadding);
+        .def("get_output_dimensions", &Pooling::getOutputDimensions)
+        .def("get_pooling_type", &Pooling::getPoolingType)
+        .def("get_window_height", &Pooling::getWindowHeight)
+        .def("get_window_width", &Pooling::getWindowWidth)
+        .def("get_vertical_stride", &Pooling::getVerticalStride)
+        .def("get_horizontal_stride", &Pooling::getHorizontalStride)
+        .def("get_vertical_padding", &Pooling::getVerticalPadding)
+        .def("get_horizontal_padding", &Pooling::getHorizontalPadding);
 
-    nb::enum_<Pooling::Type>(pooling_class, "Type")
-        .value("AVERAGE", Pooling::Type::AVERAGE)
-        .value("MAX", Pooling::Type::MAX)
-        .export_values();
+    nb::enum_<Pooling::Type>(pooling, "Type").value("AVERAGE", Pooling::Type::AVERAGE).value("MAX", Pooling::Type::MAX).export_values();
 }

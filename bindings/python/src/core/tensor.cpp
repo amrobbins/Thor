@@ -13,24 +13,27 @@ using namespace Thor;
 using DataType = Thor::Tensor::DataType;
 
 void bind_tensor(nb::module_ &m) {
-    auto tensor_class = nb::class_<Tensor>(m, "Tensor")
-                            .def(
-                                "__init__",
-                                [](Tensor *self, const vector<uint64_t> &dimensions, const DataType &data_type) {
-                                    Tensor tensor(data_type, dimensions);
+    auto tensor_class = nb::class_<Tensor>(m, "Tensor");
+    tensor_class.attr("__module__") = "thor";
 
-                                    // Move the tensor layer into the pre-allocated but uninitialized memory at self
-                                    new (self) Tensor(std::move(tensor));
-                                },
-                                "dimensions"_a,
-                                "data_type"_a,
+    tensor_class
+        .def(
+            "__init__",
+            [](Tensor *self, const vector<uint64_t> &dimensions, const DataType &data_type) {
+                Tensor tensor(data_type, dimensions);
 
-                                nb::sig("def __init__(self, "
-                                        "dimensions: list[int], "
-                                        "data_type: thor.Tensor.DataType "
-                                        ") -> None"),
+                // Move the tensor layer into the pre-allocated but uninitialized memory at self
+                new (self) Tensor(std::move(tensor));
+            },
+            "dimensions"_a,
+            "data_type"_a,
 
-                                R"nbdoc(
+            nb::sig("def __init__(self, "
+                    "dimensions: list[int], "
+                    "data_type: thor.DataType "
+                    ") -> None"),
+
+            R"nbdoc(
         A Tensor that is used to describe the shape of data and to record the
         connections between API elements.
 
@@ -48,16 +51,16 @@ void bind_tensor(nb::module_ &m) {
             The dimensions of the tensor.
             The batch size dimension is **NOT** included here; the batch dimension
             will be created upon realization of a network via the stamping process.
-        data_type : thor.Tensor.DataType
+        data_type : thor.DataType
             Data type of all elements in the tensor.
         )nbdoc")
-                            .def("get_id", &Tensor::getId)
-                            .def("get_dimensions", &Tensor::getDimensions)
-                            .def("get_data_type", &Tensor::getDataType)
-                            .def("get_total_num_elements", &Tensor::getTotalNumElements)
-                            .def_static("bytes_per_element", nb::overload_cast<DataType>(&Tensor::getBytesPerElement), "data_type"_a)
-                            .def("get_bytes_per_element", nb::overload_cast<>(&Tensor::getBytesPerElement, nb::const_))
-                            .def("get_total_size_in_bytes", &Tensor::getTotalSizeInBytes);
+        .def("get_id", &Tensor::getId)
+        .def("get_dimensions", &Tensor::getDimensions)
+        .def("get_data_type", &Tensor::getDataType)
+        .def("get_total_num_elements", &Tensor::getTotalNumElements)
+        .def_static("bytes_per_element", nb::overload_cast<DataType>(&Tensor::getBytesPerElement), "data_type"_a)
+        .def("get_bytes_per_element", nb::overload_cast<>(&Tensor::getBytesPerElement, nb::const_))
+        .def("get_total_size_in_bytes", &Tensor::getTotalSizeInBytes);
 
     auto dt = nb::enum_<Tensor::DataType>(m, "DataType")
                   .value("packed_bool", DataType::PACKED_BOOLEAN)
@@ -75,8 +78,7 @@ void bind_tensor(nb::module_ &m) {
                   .value("bf16", DataType::BF16)
                   .value("fp16", DataType::FP16)
                   .value("fp32", DataType::FP32)
-                  .value("fp64", DataType::FP64)
-                  .export_values();
+                  .value("fp64", DataType::FP64);
 
-    tensor_class.attr("DataType") = dt;
+    // tensor_class.attr("DataType") = dt;
 }

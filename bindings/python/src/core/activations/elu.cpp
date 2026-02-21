@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_elu(nb::module_ &m) {
     auto elu = nb::class_<Elu, Activation>(m, "Elu");
+    elu.attr("__module__") = "thor.activations";
 
     elu.def_static(
         "__new__",

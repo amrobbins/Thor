@@ -29,7 +29,7 @@ void bind_type_converter(nb::module_ &m) {
 
             nb::sig("def __init__(self, "
                     "network: thor.Network, "
-                    "new_data_type: thor.Tensor.DataType"
+                    "new_data_type: thor.DataType"
                     ") -> None"),
 
             R"nbdoc(
@@ -40,6 +40,6 @@ void bind_type_converter(nb::module_ &m) {
             network : thor.Network
                 The network that the layer should be added to.
             new_data_type : thor.DataType
-                Data type of the output tensor (e.g. thor.Tensor.DataType.fp16).
+                Data type of the output tensor (e.g. thor.DataType.fp16).
             )nbdoc");
 }

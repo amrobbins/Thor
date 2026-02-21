@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_glorot(nb::module_ &m) {
     auto glorot = nb::class_<Glorot, Initializer>(m, "Glorot");
+    glorot.attr("__module__") = "thor.initializers";
 
     nb::enum_<ThorImplementation::Glorot::Mode>(glorot, "Mode")
         .value("NORMAL", ThorImplementation::Glorot::Mode::NORMAL)

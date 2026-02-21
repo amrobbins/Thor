@@ -486,24 +486,19 @@ add_custom_command(
 add_custom_target(ThorHeader ALL DEPENDS ${CMAKE_BINARY_DIR}/generated/Thor.h)
 add_dependencies(Thor ThorHeader)
 
-# Python bindings
-option(THOR_USE_PROJECT_VENV "Prefer the project's .venv for Python" ON)
+set(_thor_venv_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
+message(STATUS "Thor: using project venv Python at ${_thor_venv_python}")
 
-if (THOR_USE_PROJECT_VENV)
-    set(_thor_venv_python "${CMAKE_SOURCE_DIR}/.venv/bin/python3")
-    message(STATUS "Thor: using project venv Python at ${_thor_venv_python}")
+# Clear old cached Python detection (3.9, etc.)
+unset(Python3_EXECUTABLE CACHE)
+unset(Python3_LIBRARY CACHE)
+unset(Python3_INCLUDE_DIR CACHE)
+unset(Python_EXECUTABLE CACHE)
+unset(Python_LIBRARY CACHE)
+unset(Python_INCLUDE_DIR CACHE)
 
-    # Clear old cached Python detection (3.9, etc.)
-    unset(Python3_EXECUTABLE CACHE)
-    unset(Python3_LIBRARY CACHE)
-    unset(Python3_INCLUDE_DIR CACHE)
-    unset(Python_EXECUTABLE CACHE)
-    unset(Python_LIBRARY CACHE)
-    unset(Python_INCLUDE_DIR CACHE)
-
-    set(Python3_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python3 executable for Thor bindings" FORCE)
-    set(Python_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python executable for Thor bindings (nanobind)" FORCE)
-endif ()
+set(Python3_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python3 executable for Thor bindings" FORCE)
+set(Python_EXECUTABLE "${_thor_venv_python}" CACHE FILEPATH "Python executable for Thor bindings (nanobind)" FORCE)
 
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 
@@ -521,4 +516,4 @@ if (THOR_BUILD_PYTHON)
 endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
-add_dependencies(thor_tests thor)
+add_dependencies(thor_tests _thor)

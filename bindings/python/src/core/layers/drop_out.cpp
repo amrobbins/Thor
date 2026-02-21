@@ -12,7 +12,10 @@ using namespace std;
 using namespace Thor;
 
 void bind_drop_out(nb::module_ &m) {
-    nb::class_<DropOut, Layer>(m, "DropOut")
+    auto drop_out = nb::class_<DropOut, Layer>(m, "DropOut");
+    drop_out.attr("__module__") = "thor.layers";
+
+    drop_out
         .def(
             "__init__",
             [](DropOut *self, Network &network, const Tensor &feature_input, float drop_proportion) {

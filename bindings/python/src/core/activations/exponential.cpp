@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_exponential(nb::module_ &m) {
     auto exponential = nb::class_<Exponential, Activation>(m, "Exponential");
+    exponential.attr("__module__") = "thor.activations";
 
     exponential.def_static(
         "__new__",

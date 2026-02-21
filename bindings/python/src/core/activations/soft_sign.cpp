@@ -11,6 +11,7 @@ using namespace Thor;
 
 void bind_soft_sign(nb::module_ &m) {
     auto soft_sign = nb::class_<SoftSign, Activation>(m, "SoftSign");
+    soft_sign.attr("__module__") = "thor.activations";
 
     soft_sign.def_static(
         "__new__",
