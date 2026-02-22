@@ -7,7 +7,7 @@ from thor import DataType
 from thor import Tensor
 
 
-def test_basic_network():
+def test_smoke():
     n = Network("smoke_network")
     ni = NetworkInput(n, "smoke_input", [3, 100, 100], data_type=DataType.fp16)
     conv = Convolution2d(
