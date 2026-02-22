@@ -39,8 +39,9 @@ cd ~
 ~$ git clone git@github.com:amrobbins/Thor.git
 ~$ cd ~/Thor
 ~/Thor$ python3 -m venv .venv
+~/Thor$ source .venv/bin/activate
 ~/Thor$ python -m pip install --upgrade pip
-~/Thor$ python -m pip install nanobind yapf
+# DEPRECATED: (pyproject.toml now): ~/Thor$ python -m pip install nanobind yapf
 
 ~/Thor$ mkdir build
 ~/Thor$ cd build

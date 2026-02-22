@@ -57,7 +57,7 @@ class Sgd::Builder {
         if (_initialLearningRate.isEmpty())
             _initialLearningRate = 0.01f;
         if (_decay.isEmpty())
-            _decay = 0.1f;
+            _decay = 0.0f;
         if (_momentum.isEmpty())
             _momentum = 0.0f;
         if (_useNesterovMomentum.isEmpty())
