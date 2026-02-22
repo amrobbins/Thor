@@ -51,8 +51,12 @@ file(GLOB_RECURSE THOR_PY_BIND_SOURCES CONFIGURE_DEPENDS
 # ---- Build native extension: thor/_thor*.so ----
 # NB_MODULE name in C++ must match this target name. :contentReference[oaicite:6]{index=6}
 nanobind_add_module(_thor
-        NB_SHARED
+        NB_STATIC
         ${THOR_PY_BIND_SOURCES}
+)
+#target_link_options(_thor PRIVATE "LINKER:-rpath,\$ORIGIN")
+install(TARGETS Thor
+        LIBRARY DESTINATION thor
 )
 
 add_dependencies(_thor thor_py_pkg_sync)
@@ -63,7 +67,19 @@ target_compile_features(_thor PRIVATE cxx_std_20)
 # Put the built extension inside the build-tree package dir: <bin>/bindings/python/thor/_thor*.so
 set_target_properties(_thor PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY "${THOR_PY_PKG_BUILD_DIR}"
+        BUILD_RPATH "\$ORIGIN"
+        INSTALL_RPATH "\$ORIGIN"
 )
+
+set(THOR_PYTHON_PACKAGE_DIR "thor")
+
+# Install the zlib-ng runtime shared library next to the extension/libThor.so
+get_target_property(_zng_type ${ZLIBNG_TARGET} TYPE)
+if (_zng_type STREQUAL "SHARED_LIBRARY")
+    install(TARGETS ${ZLIBNG_TARGET}
+            LIBRARY DESTINATION ${THOR_PYTHON_PACKAGE_DIR}
+    )
+endif ()
 
 target_include_directories(_thor PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
