@@ -33,11 +33,12 @@ void bind_elu(nb::module_ &m) {
     // No-op __init__ (construction happens in __new__)
     elu.def(
         "__init__",
-        [](Elu *self, nb::args args, nb::kwargs kwargs) -> void {
+        [](Elu *self, float alpha) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self, *args, **kwargs) -> None"),
-        R"nbdoc(No-op; constructed in __new__.)nbdoc");
+        "alpha"_a = 1.0f,
+        nb::sig("def __init__(self, alpha: float = 1.0) -> None"),
+        R"nbdoc(Construct an ELU activation.)nbdoc");
 
     elu.attr("__doc__") = R"doc(
 Exponential Linear Unit (ELU) activation.

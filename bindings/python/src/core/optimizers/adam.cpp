@@ -31,19 +31,24 @@ void bind_adam(nb::module_ &optimizers) {
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
-        nb::sig("def __new__(cls, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, "
-                "epsilon: bool "
+        nb::sig("def __new__(cls, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float = 1e-7"
                 "= False) -> thor.optimizers.Adam"),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
     adam.def(
         "__init__",
-        [](Adam *self, nb::args args, nb::kwargs kwargs) -> void {
+        [](Adam *self, Network &network, float alpha, float beta1, float beta2, float epsilon) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self, *args, **kwargs) -> None"),
-        R"nbdoc(No-op; constructed in __new__.)nbdoc");
+        "network"_a,
+        "alpha"_a = 0.001f,
+        "beta1"_a = 0.9f,
+        "beta2"_a = 0.999f,
+        "epsilon"_a = 1e-7f,
+        nb::sig("def __init__(self, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float = "
+                "1e-7) -> None"),
+        R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     adam.attr("__doc__") = R"doc(
 ADAM optimizer (Adaptive Moment Estimation).
