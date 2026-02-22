@@ -416,7 +416,11 @@ install(TARGETS Thor
         RUNTIME DESTINATION bin
         INCLUDES DESTINATION include
 )
-install(FILES Thor.h ${CMAKE_BINARY_DIR}/generated/ThorVersion.h DESTINATION include)
+install(FILES
+        "${CMAKE_BINARY_DIR}/generated/Thor.h"
+        "${CMAKE_BINARY_DIR}/generated/ThorVersion.h"
+        DESTINATION include
+)
 
 install(EXPORT ThorTargets
         FILE ThorTargets.cmake
