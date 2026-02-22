@@ -1,3 +1,4 @@
+import thor.optimizers
 from thor import Network
 from thor.layers import NetworkInput
 from thor.layers import NetworkOutput
@@ -5,6 +6,7 @@ from thor.layers import Convolution2d
 from thor.layers import FullyConnected
 from thor import DataType
 from thor import Tensor
+from thor.optimizers import Adam
 
 
 def test_smoke():
@@ -32,3 +34,5 @@ def test_smoke():
         DataType.fp32,
     )
     t = Tensor([2, 50], data_type=DataType.uint8)
+    sgd = thor.optimizers.Sgd(n)
+    adam = Adam(n)

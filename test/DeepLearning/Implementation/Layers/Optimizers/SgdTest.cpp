@@ -1,5 +1,5 @@
 // FIXME: Check over this to ensure it would properly catch failures
-// FIXME: Get Nesterov momentum test working
+// FIXME: Get Nesterov momentum test working - thought I did but it can fail still. Could be test sync, could be something else.
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"

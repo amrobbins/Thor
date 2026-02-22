@@ -1,7 +1,7 @@
 [build-system]
 requires = [
     "scikit-build-core>=0.11.6",
-    "pybind11>=3.0.1",
+    "nanobind>=2.11.0",
     "numpy>=2.3.4",
 ]
 build-backend = "scikit_build_core.build"
@@ -39,11 +39,11 @@ dev = [
     "mypy>=1.10",
     "ruff>=0.6",
     "build>=1.2",
-    "pybind11-stubgen>=2.5.5",
-    "nanobind>=2.9.2",
+    "nanobind>=2.11.0",
     "nanobind-stubgen>=0.1.5",
     "setuptools",
     "wheel",
+    "yapf>=0.43.0,<0.44",
 ]
 
 [project.urls]
