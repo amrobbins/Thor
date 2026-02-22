@@ -38,6 +38,10 @@ mkdir build
 cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build .
 ./thor_tests
+cmake --build . --target thor_pytest
+
+Build the wheel from the repo root directory:
+python -m build --wheel bindings/python
 
 When setting up IDE, clion recommended, point it to the python interpreter at <repo root>/.venv/.
 Go to  settings → editor → general → on save and check
