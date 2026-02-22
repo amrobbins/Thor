@@ -37,18 +37,23 @@ void bind_sgd(nb::module_ &optimizers) {
         "momentum"_a = 0.0f,
         "nesterov_momentum"_a = false,
         nb::sig("def __new__(cls, network: thor.Network, initial_learning_rate: float = 0.01, decay: float = 0.0, momentum: float = 0.0, "
-                "nesterov_momentum: bool "
-                "= False) -> thor.optimizers.Sgd"),
+                "nesterov_momentum: bool = False) -> thor.optimizers.Sgd"),
         R"nbdoc(Construct an SGD optimizer.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
     sgd.def(
         "__init__",
-        [](Sgd *self, nb::args args, nb::kwargs kwargs) -> void {
+        [](Sgd *self, Network &network, float initial_learning_rate, float decay, float momentum, bool nesterov_momentum) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self, *args, **kwargs) -> None"),
-        R"nbdoc(No-op; constructed in __new__.)nbdoc");
+        "network"_a,
+        "initial_learning_rate"_a = 0.01f,
+        "decay"_a = 0.0f,
+        "momentum"_a = 0.0f,
+        "nesterov_momentum"_a = false,
+        nb::sig("def __init__(self, network: thor.Network, initial_learning_rate: float = 0.01, decay: float = 0.0, momentum: float = 0.0, "
+                "nesterov_momentum: bool = False) -> thor.optimizers.Sgd"),
+        R"nbdoc(Construct an SGD optimizer.)nbdoc");
 
     sgd.attr("__doc__") = R"doc(
 Stochastic Gradient Descent (SGD) optimizer.
