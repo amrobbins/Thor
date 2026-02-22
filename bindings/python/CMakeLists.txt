@@ -238,11 +238,17 @@ endif ()
 if (THOR_PYTHON_TESTS)
     set(THOR_PY_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test")
 
-    add_custom_target(thor_pytest
-            COMMAND "${Python3_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
+    add_custom_target(check-python
+            COMMAND "${Python3_EXECUTABLE}" -m pytest
+            -q
+            --color=yes
+            --code-highlight=yes
+            "${THOR_PY_TEST_DIR}"
             DEPENDS thor_py_install thor_py_deps
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            USES_TERMINAL
             COMMENT "Thor: running Python binding tests"
+            VERBATIM
     )
 
     include(CTest)
@@ -287,3 +293,23 @@ if (THOR_PYTHON_STUBS)
         )
     endforeach ()
 endif ()
+
+
+add_custom_target(check-cpp
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_BINARY_DIR}
+        $<TARGET_FILE:thor_tests> --gtest_color=yes
+        DEPENDS thor_tests
+        USES_TERMINAL
+        VERBATIM
+)
+
+
+add_custom_target(check
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_BINARY_DIR}
+        $<TARGET_FILE:thor_tests> --gtest_color=yes
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_SOURCE_DIR}
+        "${Python3_EXECUTABLE}" -m pytest -q "${THOR_PY_TEST_DIR}"
+        DEPENDS thor_tests ${_thor_py_deps}
+        USES_TERMINAL
+        VERBATIM
+)
