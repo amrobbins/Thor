@@ -110,6 +110,8 @@ add_library(Thor SHARED ${THOR_SOURCES})
 set_target_properties(Thor PROPERTIES
         CXX_STANDARD 20
         CUDA_STANDARD 17
+        BUILD_RPATH "\$ORIGIN"
+        INSTALL_RPATH "\$ORIGIN"
 )
 
 target_include_directories(Thor
