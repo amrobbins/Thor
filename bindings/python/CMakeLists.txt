@@ -218,6 +218,20 @@ if (THOR_PYTHON_STUBS)
     add_dependencies(thor_py_stub_install thor_py_stub_thor)
     add_dependencies(thor_py_stub_install thor_py_public_stub_install)
     add_dependencies(thor_py_install thor_py_stub_install)
+
+    # Aggregate target so we can easily depend on "all stubs"
+    add_custom_target(thor_py_stubs_all
+            DEPENDS
+            thor_py_stub
+            thor_py_stub_thor
+            ${_thor_public_stub_targets}
+    )
+
+    # IMPORTANT: for wheel builds, ensure stubs are generated as part of the default build
+    if (DEFINED SKBUILD_PROJECT_NAME)
+        add_dependencies(_thor thor_py_pkg_sync) # you already have this
+        add_custom_target(thor_py_stubs_all_build ALL DEPENDS thor_py_stubs_all)
+    endif ()
 endif ()
 
 # ---- Pytest target + optional CTest ----
@@ -260,8 +274,16 @@ install(DIRECTORY "${THOR_PY_PKG_SRC_DIR}/"
 if (THOR_PYTHON_STUBS)
     install(FILES
             "${THOR_PY_PKG_BUILD_DIR}/_thor.pyi"
+            "${THOR_PY_PKG_BUILD_DIR}/__init__.pyi"
             "${THOR_PY_PKG_BUILD_DIR}/py.typed"
             DESTINATION "${_thor_install_pkg_dir}"
-            OPTIONAL
     )
+
+    # Submodule stubs
+    foreach (_sm IN LISTS THOR_PY_PUBLIC_SUBMODULES)
+        install(FILES
+                "${THOR_PY_PKG_BUILD_DIR}/${_sm}/__init__.pyi"
+                DESTINATION "${_thor_install_pkg_dir}/${_sm}"
+        )
+    endforeach ()
 endif ()
