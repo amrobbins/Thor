@@ -16,9 +16,6 @@ class Loss : public Layer {
     enum class LabelType { INDEX = 5, ONE_HOT };
     enum class LossShape { BATCH = 9, ELEMENTWISE, CLASSWISE, RAW };
 
-    enum class InputLossType { NUMERICAL_LOSS = 5, CATEGORICAL_LOSS };
-    enum class OutputLossType { BATCH_LOSS = 11, CLASSWISE_LOSS };
-
     Loss() { numInputConnectionsMade = 0; }
     virtual ~Loss() {}
 

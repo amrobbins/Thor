@@ -10,13 +10,30 @@ namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
-using DataType = Thor::Tensor::DataType;
+using DataType = Tensor::DataType;
 
-void bind_tensor(nb::module_ &m) {
-    auto tensor_class = nb::class_<Tensor>(m, "Tensor");
+void bind_tensor(nb::module_ &thor) {
+    auto tensor_class = nb::class_<Tensor>(thor, "Tensor");
     tensor_class.attr("__module__") = "thor";
 
-    tensor_class
+    auto dt = nb::enum_<Tensor::DataType>(thor, "DataType")
+                  .value("packed_bool", DataType::PACKED_BOOLEAN)
+                  .value("bool", DataType::BOOLEAN)
+                  .value("int8", DataType::INT8)
+                  .value("uint8", DataType::UINT8)
+                  .value("int16", DataType::INT16)
+                  .value("uint16", DataType::UINT16)
+                  .value("int32", DataType::INT32)
+                  .value("uint32", DataType::UINT32)
+                  .value("int64", DataType::INT64)
+                  .value("uint64", DataType::UINT64)
+                  .value("fp8_e4m3", DataType::FP8_E4M3)
+                  .value("fp8_e5m2", DataType::FP8_E5M2)
+                  .value("bf16", DataType::BF16)
+                  .value("fp16", DataType::FP16)
+                  .value("fp32", DataType::FP32)
+                  .value("fp64", DataType::FP64);
+     tensor_class
         .def(
             "__init__",
             [](Tensor *self, const vector<uint64_t> &dimensions, const DataType &data_type) {
@@ -61,24 +78,6 @@ void bind_tensor(nb::module_ &m) {
         .def_static("bytes_per_element", nb::overload_cast<DataType>(&Tensor::getBytesPerElement), "data_type"_a)
         .def("get_bytes_per_element", nb::overload_cast<>(&Tensor::getBytesPerElement, nb::const_))
         .def("get_total_size_in_bytes", &Tensor::getTotalSizeInBytes);
-
-    auto dt = nb::enum_<Tensor::DataType>(m, "DataType")
-                  .value("packed_bool", DataType::PACKED_BOOLEAN)
-                  .value("bool", DataType::BOOLEAN)
-                  .value("int8", DataType::INT8)
-                  .value("uint8", DataType::UINT8)
-                  .value("int16", DataType::INT16)
-                  .value("uint16", DataType::UINT16)
-                  .value("int32", DataType::INT32)
-                  .value("uint32", DataType::UINT32)
-                  .value("int64", DataType::INT64)
-                  .value("uint64", DataType::UINT64)
-                  .value("fp8_e4m3", DataType::FP8_E4M3)
-                  .value("fp8_e5m2", DataType::FP8_E5M2)
-                  .value("bf16", DataType::BF16)
-                  .value("fp16", DataType::FP16)
-                  .value("fp32", DataType::FP32)
-                  .value("fp64", DataType::FP64);
 
     // tensor_class.attr("DataType") = dt;
 }
