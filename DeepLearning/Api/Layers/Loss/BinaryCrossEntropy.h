@@ -59,7 +59,7 @@ class BinaryCrossEntropy::Builder {
         assert(_predictions.isPresent());
         assert(_labels.isPresent());
         assert(_predictions.get() != _labels.get());
-        assert(_lossType.isPresent());
+        assert(_lossShape.isPresent());
 
         std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         // API layer does not have a batch dimension:
@@ -79,9 +79,9 @@ class BinaryCrossEntropy::Builder {
         assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
         binaryCrossEntropy.lossDataType = _lossDataType;
 
-        if (_lossType == LossShape::BATCH) {
+        if (_lossShape == LossShape::BATCH) {
             binaryCrossEntropy.lossShape = LossShape::BATCH;
-        } else if (_lossType == LossShape::ELEMENTWISE) {
+        } else if (_lossShape == LossShape::ELEMENTWISE) {
             binaryCrossEntropy.lossShape = LossShape::ELEMENTWISE;
         }
         binaryCrossEntropy.initialized = true;
@@ -123,8 +123,8 @@ class BinaryCrossEntropy::Builder {
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsBatchLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossShape::BATCH;
+        assert(!_lossShape.isPresent());
+        _lossShape = LossShape::BATCH;
         return *this;
     }
 
@@ -133,8 +133,8 @@ class BinaryCrossEntropy::Builder {
      * Note that is only for reporting, this setting does not affect the form of loss used in the math to train the network.
      */
     virtual BinaryCrossEntropy::Builder &reportsElementwiseLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossShape::ELEMENTWISE;
+        assert(!_lossShape.isPresent());
+        _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
@@ -161,7 +161,7 @@ class BinaryCrossEntropy::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<LossShape> _lossType;
+    Optional<LossShape> _lossShape;
     Optional<Tensor::DataType> _lossDataType;
     Optional<bool> _sigmoidAddedToNetwork;
 

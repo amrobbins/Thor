@@ -10,6 +10,9 @@ from thor.optimizers import Adam
 
 
 def test_smoke():
+    print(f'\nthor version: {thor.__version__}')
+    print(f'thor git version: {thor.__git_version__}')
+
     n = Network("smoke_network")
     ni = NetworkInput(n, "smoke_input", [3, 100, 100], data_type=DataType.fp16)
     conv = Convolution2d(
@@ -37,3 +40,5 @@ def test_smoke():
     sgd = thor.optimizers.Sgd(n)
     adam = Adam(n, epsilon=0.01)
     elu = thor.activations.Elu(alpha=0.5)
+    # Would need network inputs of the right shape:
+    # thor.losses.BinaryCrossEntropy(n, fc.get_feature_output(), fc.get_feature_output())
