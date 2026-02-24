@@ -67,8 +67,8 @@ class MeanAbsolutePercentageError::Builder {
         assert(_predictions.get().getDimensions().size() == 1);
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
-        if (_lossType.isEmpty())
-            _lossType = LossShape::BATCH;
+        if (_lossShape.isEmpty())
+            _lossShape = LossShape::BATCH;
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -77,7 +77,7 @@ class MeanAbsolutePercentageError::Builder {
         meanAbsolutePercentageError.predictionsTensor = _predictions;
         meanAbsolutePercentageError.labelsTensor = _labels;
         meanAbsolutePercentageError.lossDataType = _lossDataType;
-        meanAbsolutePercentageError.lossShape = _lossType;
+        meanAbsolutePercentageError.lossShape = _lossShape;
         meanAbsolutePercentageError.network = _network;
         meanAbsolutePercentageError.initialized = true;
 
@@ -114,26 +114,26 @@ class MeanAbsolutePercentageError::Builder {
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsBatchLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::BATCH;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsElementwiseLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::ELEMENTWISE;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsPerOutputLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::CLASSWISE;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanAbsolutePercentageError::Builder &reportsRawLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::RAW;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::RAW;
         return *this;
     }
 
@@ -147,7 +147,7 @@ class MeanAbsolutePercentageError::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<LossShape> _lossType;
+    Optional<LossShape> _lossShape;
     Optional<Tensor::DataType> _lossDataType;
 };
 

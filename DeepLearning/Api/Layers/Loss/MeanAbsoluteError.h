@@ -69,8 +69,8 @@ class MeanAbsoluteError::Builder {
         assert(_predictions.get().getDimensions().size() == 1);
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
-        if (_lossType.isEmpty())
-            _lossType = LossShape::BATCH;
+        if (_lossShape.isEmpty())
+            _lossShape = LossShape::BATCH;
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -79,7 +79,7 @@ class MeanAbsoluteError::Builder {
         meanAbsoluteError.predictionsTensor = _predictions;
         meanAbsoluteError.labelsTensor = _labels;
         meanAbsoluteError.lossDataType = _lossDataType;
-        meanAbsoluteError.lossShape = _lossType;
+        meanAbsoluteError.lossShape = _lossShape;
         meanAbsoluteError.network = _network;
         meanAbsoluteError.initialized = true;
 
@@ -116,26 +116,26 @@ class MeanAbsoluteError::Builder {
     }
 
     virtual MeanAbsoluteError::Builder &reportsBatchLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::BATCH;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanAbsoluteError::Builder &reportsElementwiseLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::ELEMENTWISE;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanAbsoluteError::Builder &reportsPerOutputLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::CLASSWISE;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanAbsoluteError::Builder &reportsRawLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::RAW;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::RAW;
         return *this;
     }
 
@@ -149,7 +149,7 @@ class MeanAbsoluteError::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<LossShape> _lossType;
+    Optional<LossShape> _lossShape;
     Optional<Tensor::DataType> _lossDataType;
 };
 

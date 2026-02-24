@@ -67,8 +67,8 @@ class MeanSquaredError::Builder {
         assert(_predictions.get().getDimensions().size() == 1);
         assert(_predictions.get().getDimensions() == _labels.get().getDimensions());
 
-        if (_lossType.isEmpty())
-            _lossType = LossShape::BATCH;
+        if (_lossShape.isEmpty())
+            _lossShape = LossShape::BATCH;
         if (_lossDataType.isEmpty())
             _lossDataType = _predictions.get().getDataType();
         uint32_t batchSize = _predictions.get().getDimensions()[0];
@@ -77,7 +77,7 @@ class MeanSquaredError::Builder {
         meanSquaredError.predictionsTensor = _predictions;
         meanSquaredError.labelsTensor = _labels;
         meanSquaredError.lossDataType = _lossDataType;
-        meanSquaredError.lossShape = _lossType;
+        meanSquaredError.lossShape = _lossShape;
         meanSquaredError.network = _network;
         meanSquaredError.initialized = true;
 
@@ -114,26 +114,26 @@ class MeanSquaredError::Builder {
     }
 
     virtual MeanSquaredError::Builder &reportsBatchLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::BATCH;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::BATCH;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsElementwiseLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::ELEMENTWISE;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsPerOutputLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::CLASSWISE;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
     virtual MeanSquaredError::Builder &reportsRawLoss() {
-        assert(this->_lossType.isEmpty());
-        _lossType = LossShape::RAW;
+        assert(this->_lossShape.isEmpty());
+        _lossShape = LossShape::RAW;
         return *this;
     }
 
@@ -147,7 +147,7 @@ class MeanSquaredError::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<LossShape> _lossType;
+    Optional<LossShape> _lossShape;
     Optional<Tensor::DataType> _lossDataType;
 };
 

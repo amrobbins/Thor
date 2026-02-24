@@ -98,18 +98,18 @@ class CategoricalCrossEntropy::Builder {
         assert(_lossDataType == Tensor::DataType::FP16 || _lossDataType == Tensor::DataType::FP32);
         categoricalCrossEntropy.lossDataType = _lossDataType;
 
-        if (_lossType.isEmpty())
-            _lossType = LossShape::BATCH;
-        if (_lossType == LossShape::BATCH) {
+        if (_lossShape.isEmpty())
+            _lossShape = LossShape::BATCH;
+        if (_lossShape == LossShape::BATCH) {
             categoricalCrossEntropy.lossShape = LossShape::BATCH;
-        } else if (_lossType == LossShape::CLASSWISE) {
+        } else if (_lossShape == LossShape::CLASSWISE) {
             // This type is batch-reduced by the implemenation layer
             categoricalCrossEntropy.lossShape = LossShape::CLASSWISE;
-        } else if (_lossType == LossShape::ELEMENTWISE) {
+        } else if (_lossShape == LossShape::ELEMENTWISE) {
             categoricalCrossEntropy.lossShape = LossShape::ELEMENTWISE;
         } else {
             // This type is *not* batch-reduced by the implemenation layer
-            assert(_lossType == LossShape::RAW);
+            assert(_lossShape == LossShape::RAW);
             categoricalCrossEntropy.lossShape = LossShape::RAW;
         }
         categoricalCrossEntropy.labelType = _labelType;
@@ -157,8 +157,8 @@ class CategoricalCrossEntropy::Builder {
      * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsBatchLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossShape::BATCH;
+        assert(!_lossShape.isPresent());
+        _lossShape = LossShape::BATCH;
         return *this;
     }
 
@@ -171,8 +171,8 @@ class CategoricalCrossEntropy::Builder {
      * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsClasswiseLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossShape::CLASSWISE;
+        assert(!_lossShape.isPresent());
+        _lossShape = LossShape::CLASSWISE;
         return *this;
     }
 
@@ -185,8 +185,8 @@ class CategoricalCrossEntropy::Builder {
      * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsElementwiseLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossShape::ELEMENTWISE;
+        assert(!_lossShape.isPresent());
+        _lossShape = LossShape::ELEMENTWISE;
         return *this;
     }
 
@@ -198,8 +198,8 @@ class CategoricalCrossEntropy::Builder {
      * Raw [b][c] -> [b][c]
      */
     virtual CategoricalCrossEntropy::Builder &reportsRawLoss() {
-        assert(!_lossType.isPresent());
-        _lossType = LossShape::RAW;
+        assert(!_lossShape.isPresent());
+        _lossShape = LossShape::RAW;
         return *this;
     }
 
@@ -252,7 +252,7 @@ class CategoricalCrossEntropy::Builder {
     Optional<Tensor> _labels;
     Optional<LabelType> _labelType;
     Optional<uint32_t> _numClasses;
-    Optional<LossShape> _lossType;
+    Optional<LossShape> _lossShape;
     Optional<Tensor::DataType> _lossDataType;
     Optional<bool> _softmaxAddedToNetwork;
 

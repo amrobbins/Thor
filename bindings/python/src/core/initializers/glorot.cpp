@@ -13,10 +13,11 @@ void bind_glorot(nb::module_ &m) {
     auto glorot = nb::class_<Glorot, Initializer>(m, "Glorot");
     glorot.attr("__module__") = "thor.initializers";
 
-    nb::enum_<ThorImplementation::Glorot::Mode>(glorot, "Mode")
-        .value("NORMAL", ThorImplementation::Glorot::Mode::NORMAL)
-        .value("UNIFORM", ThorImplementation::Glorot::Mode::UNIFORM)
-        .export_values();
+    auto glorot_mode = nb::enum_<ThorImplementation::Glorot::Mode>(glorot, "Mode")
+                           .value("NORMAL", ThorImplementation::Glorot::Mode::NORMAL)
+                           .value("UNIFORM", ThorImplementation::Glorot::Mode::UNIFORM);
+    glorot_mode.attr("__qualname__") = "Glorot.Mode";
+    glorot.attr("Mode") = glorot_mode;
 
     glorot.def_static(
         "__new__",
