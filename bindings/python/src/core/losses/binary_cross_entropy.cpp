@@ -12,7 +12,6 @@ using namespace std;
 using namespace Thor;
 
 using DataType = Tensor::DataType;
-using LossShape = Loss::LossShape;
 
 void bind_binary_cross_entropy(nb::module_ &losses) {
     auto binary_cross_entropy = nb::class_<BinaryCrossEntropy, Loss>(losses, "BinaryCrossEntropy");
@@ -56,15 +55,15 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
         "reports_batch_loss"_a.none() = nb::none(),
         "reports_elementwise_loss"_a.none() = nb::none(),
         "loss_data_type"_a = DataType::FP32,
-        nb::sig("def __init__(self, "
-                "network: thor.Network, "
-                "predictions: thor.Tensor, "
-                "labels: thor.Tensor, "
-                "reports_batch_loss: bool | None = None, "
-                "reports_elementwise_loss: bool | None = None, "
-                "loss_data_type: thor.DataType = thor.DataType.fp32"
-                ") -> None"),
-        R"nbdoc(Construct an Binary Cross Entropy loss.)nbdoc");
+        // nb::sig("def __init__(self, "
+        //         "network: thor.Network, "
+        //         "predictions: thor.Tensor, "
+        //         "labels: thor.Tensor, "
+        //         "reports_batch_loss: bool | None = None, "
+        //         "reports_elementwise_loss: bool | None = None, "
+        //         "loss_data_type: thor.DataType = thor.DataType.fp32"
+        //         ") -> None"),
+        R"nbdoc(Construct a Binary Cross Entropy loss.)nbdoc");
 
     binary_cross_entropy.attr("__doc__") = R"nbdoc(
 Binary cross-entropy loss.
@@ -80,6 +79,6 @@ reports_batch_loss : Optional[bool], default None
 reports_elementwise_loss : Optional[bool], default None
     If True, report elementwise loss.
     When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.
-loss_data_type : thor.DataType, default DataType.FP32
+loss_data_type : thor.DataType, default thor.DataType.FP32
 )nbdoc";
 }

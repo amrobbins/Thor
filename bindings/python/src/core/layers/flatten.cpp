@@ -29,11 +29,11 @@ void bind_flatten(nb::module_ &m) {
         "feature_input"_a,
         "num_output_dimensions"_a,
 
-        nb::sig("def __init__(self, "
-                "network: thor.Network, "
-                "feature_input: thor.Tensor, "
-                "num_output_dimensions: int"
-                ") -> None"),
+        // nb::sig("def __init__(self, "
+        //         "network: thor.Network, "
+        //         "feature_input: thor.Tensor, "
+        //         "num_output_dimensions: int"
+        //         ") -> None"),
 
         R"nbdoc(
             Create and attach a Flatten layer to a Network.

@@ -25,7 +25,7 @@ void bind_soft_plus(nb::module_ &m) {
             return sp;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.SoftPlus"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.SoftPlus"),
         R"nbdoc(Construct a SoftPlus activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_soft_plus(nb::module_ &m) {
         [](SoftPlus *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a SoftPlus activation (construction happens in __new__).)nbdoc");
 
     soft_plus.attr("__doc__") = R"doc(

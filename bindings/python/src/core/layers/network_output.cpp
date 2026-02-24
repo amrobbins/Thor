@@ -34,12 +34,12 @@ void bind_network_output(nb::module_ &m) {
             "input_tensor"_a,
             "data_type"_a,
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "name: str, "
-                    "input_tensor: thor.Tensor, "
-                    "data_type: thor.DataType"
-                    ") -> None"),
+            // nb::sig("def __init__(self, "
+            //         "network: thor.Network, "
+            //         "name: str, "
+            //         "input_tensor: thor.Tensor, "
+            //         "data_type: thor.DataType"
+            //         ") -> None"),
 
             R"nbdoc(
             Create and attach a NetworkOutput to send data out of a Network.
@@ -64,7 +64,7 @@ void bind_network_output(nb::module_ &m) {
                 // Network output creates featureOutput always, straight away.
                 return maybeFeatureOutput.get();
             },
-            nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+            // nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
             R"nbdoc(
             Return the output tensor produced by this layer.
 

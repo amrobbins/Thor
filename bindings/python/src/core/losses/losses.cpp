@@ -15,26 +15,23 @@ using namespace Thor;
 void bind_losses(nb::module_ &losses) {
     losses.doc() = "Thor losses";
 
-    nb::class_<Loss>(losses, "Loss");
-
-    bind_binary_cross_entropy(losses);
-    // bind_categorical_cross_entropy(losses);
-    // bind_mean_absolute_error(losses);
-    // bind_mean_absolute_percentage_error(losses);
-    // bind_mean_squared_error(losses);
-
-    // losses.def("BinaryCrossEntropy", []() { return "temp"; });
-    // losses.def("CategoricalCrossEntropy", []() { return "temp"; });
-    // losses.def("MeanAbsoluteError", []() { return "temp"; });
-    // losses.def("MeanAbsolutePercentageError", []() { return "temp"; });
-    // losses.def("MeanSquaredError", []() { return "temp"; });
+    auto loss = nb::class_<Loss>(losses, "Loss");
+    loss.attr("__module__") = "thor.losses";
 
     auto label_type =
         nb::enum_<Loss::LabelType>(losses, "LabelType").value("index", Loss::LabelType::INDEX).value("one_hot", Loss::LabelType::ONE_HOT);
+    label_type.attr("__module__") = "thor.losses";
 
     auto loss_shape = nb::enum_<Loss::LossShape>(losses, "LossShape")
                           .value("batch", Loss::LossShape::BATCH)
                           .value("classwise", Loss::LossShape::CLASSWISE)
                           .value("elementwise", Loss::LossShape::ELEMENTWISE)
                           .value("raw", Loss::LossShape::RAW);
+    loss_shape.attr("__module__") = "thor.losses";
+
+    bind_binary_cross_entropy(losses);
+    bind_categorical_cross_entropy(losses);
+    // bind_mean_absolute_error(losses);
+    // bind_mean_absolute_percentage_error(losses);
+    // bind_mean_squared_error(losses);
 }

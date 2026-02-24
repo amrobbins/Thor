@@ -13,10 +13,16 @@ using namespace std;
 
 using namespace Thor;
 
-void bind_pooling(nb::module_ &m) {
-    auto pooling = nb::class_<Pooling, Layer>(m, "Pooling");
+void bind_pooling(nb::module_ &layers) {
+    auto pooling = nb::class_<Pooling, Layer>(layers, "Pooling");
     pooling.attr("__module__") = "thor.layers";
-     pooling
+
+    auto pooling_type = nb::enum_<Pooling::Type>(pooling, "Type").value("average", Pooling::Type::AVERAGE).value("max", Pooling::Type::MAX);
+    pooling_type.attr("__module__") = "thor.layers";
+    pooling_type.attr("__qualname__") = "Pooling.Type";
+    pooling.attr("Type") = pooling_type;
+
+    pooling
         .def(
             "__init__",
             [](Pooling *self,
@@ -72,20 +78,20 @@ void bind_pooling(nb::module_ &m) {
             "vertical_same_padding"_a = false,
             "horizontal_same_padding"_a = false,
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_input: thor.Tensor, "
-                    "type: thor.Pooling.Type, "
-                    "window_height: int, "
-                    "window_width: int, "
-                    "vertical_stride: int = 1, "
-                    "horizontal_stride: int = 1, "
-                    "vertical_padding: int = 0, "
-                    "horizontal_padding: int = 0, "
-                    "same_padding: bool = False, "
-                    "vertical_same_padding: bool = False, "
-                    "horizontal_same_padding: bool = False"
-                    ") -> None"),
+            // nb::sig("def __init__(self, "
+            //         "network: thor.Network, "
+            //         "feature_input: thor.Tensor, "
+            //         "type: thor.Pooling.Type, "
+            //         "window_height: int, "
+            //         "window_width: int, "
+            //         "vertical_stride: int = 1, "
+            //         "horizontal_stride: int = 1, "
+            //         "vertical_padding: int = 0, "
+            //         "horizontal_padding: int = 0, "
+            //         "same_padding: bool = False, "
+            //         "vertical_same_padding: bool = False, "
+            //         "horizontal_same_padding: bool = False"
+            //         ") -> None"),
 
             R"nbdoc(
         Pooling layer that downsamples its input by applying a pooling operation
@@ -149,6 +155,4 @@ void bind_pooling(nb::module_ &m) {
         .def("get_horizontal_stride", &Pooling::getHorizontalStride)
         .def("get_vertical_padding", &Pooling::getVerticalPadding)
         .def("get_horizontal_padding", &Pooling::getHorizontalPadding);
-
-    nb::enum_<Pooling::Type>(pooling, "Type").value("AVERAGE", Pooling::Type::AVERAGE).value("MAX", Pooling::Type::MAX).export_values();
 }

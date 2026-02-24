@@ -25,7 +25,7 @@ void bind_swish(nb::module_ &m) {
             return s;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.Swish"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.Swish"),
         R"nbdoc(Construct a Swish (SiLU) activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_swish(nb::module_ &m) {
         [](Swish *) {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a Swish (SiLU) activation (construction happens in __new__).)nbdoc");
 
     swish.attr("__doc__") = R"doc(

@@ -25,7 +25,7 @@ void bind_sigmoid(nb::module_ &m) {
             return s;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.Sigmoid"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.Sigmoid"),
         R"nbdoc(Construct a Sigmoid activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_sigmoid(nb::module_ &m) {
         [](Sigmoid *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a Sigmoid activation (construction happens in __new__).)nbdoc");
 
     sigmoid.attr("__doc__") = R"doc(

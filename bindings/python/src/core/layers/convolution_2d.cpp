@@ -96,27 +96,27 @@ void bind_convolution_2d(nb::module_ &m) {
         "drop_proportion"_a = 0.0f,
         "add_batch_normalization"_a = false,
         "batch_norm_exp_running_avg_factor"_a = 0.05f,
-        "batch_norm_epsilon"_a = 1e-4f,
-        nb::sig("def __init__(self, "
-                "network: thor.Network, "
-                "feature_input: thor.Tensor, "
-                "num_output_channels: int, "
-                "filter_height: int, "
-                "filter_width: int, "
-                "vertical_stride: int = 1, "
-                "horizontal_stride: int = 1, "
-                "vertical_padding: int = 0, "
-                "horizontal_padding: int = 0, "
-                "has_bias: bool = True, "
-                "activation: thor.Activation | None = None, "
-                "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                "add_drop_out: bool = False, "
-                "drop_proportion: float = 0.0, "
-                "add_batch_normalization: bool = False, "
-                "batch_norm_exp_running_avg_factor: float = 0.05, "
-                "batch_norm_epsilon: float = 1e-4"
-                ") -> None"));
+        "batch_norm_epsilon"_a = 1e-4f);
+    // nb::sig("def __init__(self, "
+    //         "network: thor.Network, "
+    //         "feature_input: thor.Tensor, "
+    //         "num_output_channels: int, "
+    //         "filter_height: int, "
+    //         "filter_width: int, "
+    //         "vertical_stride: int = 1, "
+    //         "horizontal_stride: int = 1, "
+    //         "vertical_padding: int = 0, "
+    //         "horizontal_padding: int = 0, "
+    //         "has_bias: bool = True, "
+    //         "activation: thor.Activation | None = None, "
+    //         "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
+    //         "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
+    //         "add_drop_out: bool = False, "
+    //         "drop_proportion: float = 0.0, "
+    //         "add_batch_normalization: bool = False, "
+    //         "batch_norm_exp_running_avg_factor: float = 0.05, "
+    //         "batch_norm_epsilon: float = 1e-4"
+    //         ") -> None")
 
     convolution_2d.def(
         "get_feature_output",
@@ -124,7 +124,7 @@ void bind_convolution_2d(nb::module_ &m) {
             Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
             return maybeFeatureOutput.get();
         },
-        nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+        // nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
         R"nbdoc(
             Return the output tensor produced by this layer.
 

@@ -57,16 +57,16 @@ void bind_fully_connected(nb::module_ &m) {
         "has_bias"_a = true,
         "activation"_a.none() = nb::none(),
         "weights_initializer"_a.none() = nb::none(),
-        "biases_initializer"_a.none() = nb::none(),
-        nb::sig("def __init__(self, "
-                "network: thor.Network, "
-                "feature_input: thor.Tensor, "
-                "num_output_features: int, "
-                "has_bias: bool = True, "
-                "activation: thor.Activation | None = None, "
-                "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-                "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot() "
-                ") -> None"));
+        "biases_initializer"_a.none() = nb::none());
+    // nb::sig("def __init__(self, "
+    //         "network: thor.Network, "
+    //         "feature_input: thor.Tensor, "
+    //         "num_output_features: int, "
+    //         "has_bias: bool = True, "
+    //         "activation: thor.Activation | None = None, "
+    //         "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
+    //         "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot() "
+    //         ") -> None"));
 
     fully_connected.def(
         "get_feature_output",
@@ -74,7 +74,7 @@ void bind_fully_connected(nb::module_ &m) {
             Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
             return maybeFeatureOutput.get();
         },
-        nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
+        // nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
         R"nbdoc(
             Return the output tensor produced by this layer.
 

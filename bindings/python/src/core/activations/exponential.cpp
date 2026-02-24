@@ -25,7 +25,7 @@ void bind_exponential(nb::module_ &m) {
             return e;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.Exponential"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.Exponential"),
         R"nbdoc(Construct an Exponential activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_exponential(nb::module_ &m) {
         [](Exponential *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize an Exponential activation (construction happens in __new__).)nbdoc");
 
     exponential.attr("__doc__") = R"doc(

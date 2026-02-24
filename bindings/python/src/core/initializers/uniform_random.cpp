@@ -28,7 +28,7 @@ void bind_uniform_random(nb::module_ &m) {
         "cls"_a,
         "min_value"_a,
         "max_value"_a,
-        nb::sig("def __new__(cls, min_value: float, max_value: float) -> thor.initializers.UniformRandom"),
+        // nb::sig("def __new__(cls, min_value: float, max_value: float) -> thor.initializers.UniformRandom"),
         R"nbdoc(Construct a UniformRandom initializer.)nbdoc");
 
     // Make __init__ a no-op (construction happens in __new__)
@@ -39,7 +39,7 @@ void bind_uniform_random(nb::module_ &m) {
         },
         "min_value"_a,
         "max_value"_a,
-        nb::sig("def __init__(self, min_value: float, max_value: float) -> None"),
+        // nb::sig("def __init__(self, min_value: float, max_value: float) -> None"),
         R"nbdoc(Initialize a UniformRandom initializer.)nbdoc");
 
     uniform_random.attr("__doc__") = R"doc(
