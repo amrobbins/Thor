@@ -30,11 +30,11 @@ void bind_drop_out(nb::module_ &m) {
             "feature_input"_a,
             "drop_proportion"_a,
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_input: thor.Tensor, "
-                    "drop_proportion: float"
-                    ") -> None"),
+            // nb::sig("def __init__(self, "
+            //         "network: thor.Network, "
+            //         "feature_input: thor.Tensor, "
+            //         "drop_proportion: float"
+            //         ") -> None"),
 
             R"nbdoc(
             Create and attach a DropOut layer to a Network.

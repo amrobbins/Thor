@@ -25,7 +25,7 @@ void bind_relu(nb::module_ &m) {
             return r;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.Relu"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.Relu"),
         R"nbdoc(Construct a ReLU activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_relu(nb::module_ &m) {
         [](Relu *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a ReLU activation (construction happens in __new__).)nbdoc");
 
     relu.attr("__doc__") = R"doc(

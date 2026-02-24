@@ -31,8 +31,9 @@ void bind_adam(nb::module_ &optimizers) {
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
-        nb::sig("def __new__(cls, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float = 1e-7"
-                "= False) -> thor.optimizers.Adam"),
+        // nb::sig("def __new__(cls, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float =
+        // 1e-7"
+        //         "= False) -> thor.optimizers.Adam"),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -46,8 +47,9 @@ void bind_adam(nb::module_ &optimizers) {
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
-        nb::sig("def __init__(self, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float = "
-                "1e-7) -> None"),
+        // nb::sig("def __init__(self, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float =
+        // "
+        //         "1e-7) -> None"),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     adam.attr("__doc__") = R"doc(

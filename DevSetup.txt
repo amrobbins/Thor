@@ -41,7 +41,7 @@ cd ~
 ~/Thor$ python3 -m venv .venv
 ~/Thor$ source .venv/bin/activate
 ~/Thor$ python -m pip install --upgrade pip
-# DEPRECATED: (pyproject.toml now): ~/Thor$ python -m pip install nanobind yapf
+~/Thor$ python -m pip install nanobind
 
 ~/Thor$ mkdir build
 ~/Thor$ cd build

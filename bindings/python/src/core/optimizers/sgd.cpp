@@ -36,8 +36,9 @@ void bind_sgd(nb::module_ &optimizers) {
         "decay"_a = 0.0f,
         "momentum"_a = 0.0f,
         "nesterov_momentum"_a = false,
-        nb::sig("def __new__(cls, network: thor.Network, initial_learning_rate: float = 0.01, decay: float = 0.0, momentum: float = 0.0, "
-                "nesterov_momentum: bool = False) -> thor.optimizers.Sgd"),
+        // nb::sig("def __new__(cls, network: thor.Network, initial_learning_rate: float = 0.01, decay: float = 0.0, momentum: float = 0.0,
+        // "
+        //         "nesterov_momentum: bool = False) -> thor.optimizers.Sgd"),
         R"nbdoc(Construct an SGD optimizer.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -51,8 +52,9 @@ void bind_sgd(nb::module_ &optimizers) {
         "decay"_a = 0.0f,
         "momentum"_a = 0.0f,
         "nesterov_momentum"_a = false,
-        nb::sig("def __init__(self, network: thor.Network, initial_learning_rate: float = 0.01, decay: float = 0.0, momentum: float = 0.0, "
-                "nesterov_momentum: bool = False) -> thor.optimizers.Sgd"),
+        // nb::sig("def __init__(self, network: thor.Network, initial_learning_rate: float = 0.01, decay: float = 0.0, momentum: float =
+        // 0.0, "
+        //         "nesterov_momentum: bool = False) -> thor.optimizers.Sgd"),
         R"nbdoc(Construct an SGD optimizer.)nbdoc");
 
     sgd.attr("__doc__") = R"doc(

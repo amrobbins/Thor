@@ -31,8 +31,8 @@ void bind_glorot(nb::module_ &m) {
         },
         "cls"_a,
         "mode"_a = ThorImplementation::Glorot::Mode::UNIFORM,
-        nb::sig(
-            "def __new__(cls, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> thor.initializers.Glorot"),
+        // nb::sig(
+        //     "def __new__(cls, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> thor.initializers.Glorot"),
         R"nbdoc(Construct a Glorot initializer.)nbdoc");
 
     // make __init__ a no-op
@@ -42,7 +42,7 @@ void bind_glorot(nb::module_ &m) {
             // no-op: constructed in __new__
         },
         "mode"_a = ThorImplementation::Glorot::Mode::UNIFORM,
-        nb::sig("def __init__(self, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> None"),
+        // nb::sig("def __init__(self, mode: thor.initializers.Glorot.Mode = thor.initializers.Glorot.Mode.UNIFORM) -> None"),
         R"nbdoc(Initialize a Glorot initializer (construction happens in __new__).)nbdoc");
 
     glorot.attr("__doc__") = R"doc(

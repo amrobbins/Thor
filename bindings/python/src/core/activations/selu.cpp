@@ -25,7 +25,7 @@ void bind_selu(nb::module_ &m) {
             return s;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.Selu"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.Selu"),
         R"nbdoc(Construct a SELU activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_selu(nb::module_ &m) {
         [](Selu *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a SELU activation (construction happens in __new__).)nbdoc");
 
     selu.attr("__doc__") = R"doc(

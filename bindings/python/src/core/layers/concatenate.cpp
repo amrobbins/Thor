@@ -34,11 +34,11 @@ void bind_concatenate(nb::module_ &m) {
         "feature_inputs"_a,
         "concatenation_axis"_a,
 
-        nb::sig("def __init__(self, "
-                "network: thor.Network, "
-                "feature_inputs: list[thor.Tensor], "
-                "concatenation_axis: int"
-                ") -> None"),
+        // nb::sig("def __init__(self, "
+        //         "network: thor.Network, "
+        //         "feature_inputs: list[thor.Tensor], "
+        //         "concatenation_axis: int"
+        //         ") -> None"),
 
         R"nbdoc(
             Create and attach a Concatenate layer to a Network.

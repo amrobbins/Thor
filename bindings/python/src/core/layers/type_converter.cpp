@@ -27,10 +27,10 @@ void bind_type_converter(nb::module_ &m) {
             "network"_a,
             "new_data_type"_a,
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "new_data_type: thor.DataType"
-                    ") -> None"),
+            // nb::sig("def __init__(self, "
+            //         "network: thor.Network, "
+            //         "new_data_type: thor.DataType"
+            //         ") -> None"),
 
             R"nbdoc(
             Create and attach a TypeConverter to send data into a Network.

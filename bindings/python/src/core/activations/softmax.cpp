@@ -25,7 +25,7 @@ void bind_softmax(nb::module_ &m) {
             return sm;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.Softmax"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.Softmax"),
         R"nbdoc(Construct a Softmax activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_softmax(nb::module_ &m) {
         [](Softmax *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a Softmax activation (construction happens in __new__).)nbdoc");
 
     softmax.attr("__doc__") = R"doc(

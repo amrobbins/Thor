@@ -39,14 +39,14 @@ void bind_batch_normalization(nb::module_ &m) {
             "network"_a,
             "feature_input"_a,
             "exponential_running_average_factor"_a,
-            "epsilon"_a,
+            "epsilon"_a)
 
-            nb::sig("def __init__(self, "
-                    "network: thor.Network, "
-                    "feature_inputs: list[thor.Tensor], "
-                    "exponential_running_average_factor: float = 0.05, "
-                    "epsilon: float = 0.0001"
-                    ") -> None"))
+        // nb::sig("def __init__(self, "
+        //         "network: thor.Network, "
+        //         "feature_inputs: list[thor.Tensor], "
+        //         "exponential_running_average_factor: float = 0.05, "
+        //         "epsilon: float = 0.0001"
+        //         ") -> None"))
         // .def("get_feature_output", &BatchNormalization::getFeatureOutput)
         .def("get_feature_outputs", &BatchNormalization::getFeatureOutputs)
         .def("get_exponential_running_average_factor", &BatchNormalization::getExponentialRunningAverageFactor)

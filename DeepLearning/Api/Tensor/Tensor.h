@@ -67,6 +67,10 @@ class Tensor {
         return dimensions;
     }
 
+    std::string getDescriptorString() const {
+        return ThorImplementation::TensorDescriptor(convertToImplementationDataType(dataType), dimensions).toString();
+    }
+
     bool isInitialized() const { return initialized; }
 
     bool operator==(const Tensor &other) const { return id == other.id; }
@@ -76,6 +80,8 @@ class Tensor {
 
     static bool dataTypeValid(DataType dataType) { return dataType >= DataType::PACKED_BOOLEAN && dataType <= DataType::FP64; }
 
+    // FIXME: Can I get rid of API data type, maybe using ThorImplementation::DataType.
+    //        Check and be sure there may be a reason don't make a change and have to back it out.
     static ThorImplementation::TensorDescriptor::DataType convertToImplementationDataType(DataType apiDataType) {
         switch (apiDataType) {
             case DataType::INT8:

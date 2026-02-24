@@ -32,14 +32,14 @@ void bind_network_input(nb::module_ &m) {
         "network"_a,
         "name"_a,
         "dimensions"_a,
-        "data_type"_a,
+        "data_type"_a);
 
-        nb::sig("def __init__(self, "
-                "network: thor.Network, "
-                "name: str, "
-                "dimensions: list[int], "
-                "data_type: thor.DataType"
-                ") -> None"));
+    // nb::sig("def __init__(self, "
+    //         "network: thor.Network, "
+    //         "name: str, "
+    //         "dimensions: list[int], "
+    //         "data_type: thor.DataType"
+    //         ") -> None"));
 
     network_input.def(
         "get_feature_output",
@@ -50,7 +50,7 @@ void bind_network_input(nb::module_ &m) {
             // Network input creates featureOutput always, straight away.
             return maybeFeatureOutput.get();
         },
-        nb::sig("def get_feature_output(self) -> thor.Tensor"),
+        // nb::sig("def get_feature_output(self) -> thor.Tensor"),
         R"nbdoc(
             Return the output tensor produced by this layer.
 

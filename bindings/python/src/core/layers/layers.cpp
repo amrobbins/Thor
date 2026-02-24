@@ -20,7 +20,7 @@ void bind_flatten(nb::module_ &m);
 void bind_fully_connected(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
 void bind_network_output(nb::module_ &m);
-void bind_pooling(nb::module_ &m);
+void bind_pooling(nb::module_ &layers);
 void bind_reshape(nb::module_ &m);
 void bind_stub(nb::module_ &m);
 void bind_type_converter(nb::module_ &m);
@@ -28,9 +28,13 @@ void bind_type_converter(nb::module_ &m);
 void bind_layers(nb::module_ &layers) {
     layers.doc() = "Thor layers";
 
-    nb::class_<Layer>(layers, "Layer");
-    nb::class_<MultiConnectionLayer, Layer>(layers, "MultiConnectionLayer");
-    nb::class_<TrainableWeightsBiasesLayer, MultiConnectionLayer>(layers, "TrainableWeightsBiasesLayer");
+    auto layer = nb::class_<Layer>(layers, "Layer");
+    layer.attr("__module__") = "thor.layers";
+    auto multi_connection_layer = nb::class_<MultiConnectionLayer, Layer>(layers, "MultiConnectionLayer");
+    multi_connection_layer.attr("__module__") = "thor.layers";
+    auto trainable_weights_biases_layer =
+        nb::class_<TrainableWeightsBiasesLayer, MultiConnectionLayer>(layers, "TrainableWeightsBiasesLayer");
+    trainable_weights_biases_layer.attr("__module__") = "thor.layers";
 
     bind_batch_normalization(layers);
     bind_drop_out(layers);

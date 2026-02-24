@@ -25,7 +25,7 @@ void bind_hard_sigmoid(nb::module_ &m) {
             return hs;
         },
         "cls"_a,
-        nb::sig("def __new__(cls) -> thor.layers.activations.HardSigmoid"),
+        // nb::sig("def __new__(cls) -> thor.layers.activations.HardSigmoid"),
         R"nbdoc(Construct a HardSigmoid activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -34,7 +34,7 @@ void bind_hard_sigmoid(nb::module_ &m) {
         [](HardSigmoid *self) -> void {
             // no-op: constructed in __new__
         },
-        nb::sig("def __init__(self) -> None"),
+        // nb::sig("def __init__(self) -> None"),
         R"nbdoc(Initialize a HardSigmoid activation (construction happens in __new__).)nbdoc");
 
     hard_sigmoid.attr("__doc__") = R"doc(

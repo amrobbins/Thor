@@ -24,7 +24,8 @@ void bind_tanh(nb::module_ &m);
 void bind_activations(nb::module_ &activations) {
     activations.doc() = "Thor activations";
 
-    nb::class_<Activation>(activations, "Activation");
+    auto activation = nb::class_<Activation>(activations, "Activation");
+    activation.attr("__module__") = "thor.activations";
 
     bind_elu(activations);
     bind_exponential(activations);

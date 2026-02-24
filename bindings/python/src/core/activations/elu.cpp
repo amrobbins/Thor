@@ -27,7 +27,7 @@ void bind_elu(nb::module_ &m) {
         },
         "cls"_a,
         "alpha"_a = 1.0f,
-        nb::sig("def __new__(cls, alpha: float = 1.0) -> thor.layers.activations.Elu"),
+        // nb::sig("def __new__(cls, alpha: float = 1.0) -> thor.layers.activations.Elu"),
         R"nbdoc(Construct an ELU activation.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
@@ -37,7 +37,7 @@ void bind_elu(nb::module_ &m) {
             // no-op: constructed in __new__
         },
         "alpha"_a = 1.0f,
-        nb::sig("def __init__(self, alpha: float = 1.0) -> None"),
+        // nb::sig("def __init__(self, alpha: float = 1.0) -> None"),
         R"nbdoc(Construct an ELU activation.)nbdoc");
 
     elu.attr("__doc__") = R"doc(
