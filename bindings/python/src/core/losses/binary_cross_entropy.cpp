@@ -23,27 +23,13 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
            Network &network,
            Tensor predictions,
            Tensor labels,
-           std::optional<bool> reportsBatchLoss,
-           std::optional<bool> reportsElementwiseLoss,
-           DataType loss_data_type) {
+           DataType loss_data_type,
+           bool reportsElementwiseLoss) {
             BinaryCrossEntropy::Builder builder;
             builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type);
 
-            if (!reportsBatchLoss.has_value() && !reportsElementwiseLoss.has_value()) {
-                builder.reportsBatchLoss();
-            } else {
-                if (reportsBatchLoss.has_value() && reportsElementwiseLoss.has_value()) {
-                    if (reportsBatchLoss.value() == reportsElementwiseLoss.value()) {
-                        throw nb::value_error(
-                            "reports_batch_loss and reports_elementwise_loss cannot be equal when both are provided. "
-                            "Provide only one, or set them to opposite values.");
-                    } else if (reportsBatchLoss.value() == true) {
-                        builder.reportsBatchLoss();
-                    } else {
-                        builder.reportsElementwiseLoss();
-                    }
-                }
-            }
+            if (reportsElementwiseLoss)
+                builder.reportsElementwiseLoss();
 
             BinaryCrossEntropy built = builder.build();
 
@@ -52,9 +38,8 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
         "network"_a,
         "predictions"_a,
         "labels"_a,
-        "reports_batch_loss"_a.none() = nb::none(),
-        "reports_elementwise_loss"_a.none() = nb::none(),
         "loss_data_type"_a = DataType::FP32,
+        "reports_elementwise_loss"_a = false,
         // nb::sig("def __init__(self, "
         //         "network: thor.Network, "
         //         "predictions: thor.Tensor, "
@@ -80,5 +65,15 @@ reports_elementwise_loss : Optional[bool], default None
     If True, report elementwise loss.
     When reports_batch_loss and reports_elementwise_loss are None, defaults to batch loss.
 loss_data_type : thor.DataType, default thor.DataType.FP32
+
+Loss reductions available, meant to aid in hand analysis of a data set:
+
+ * Batch [b][1] -> [1] - default
+ * Elementwise [b][1] -> [b]
+
+So you could send a single batch and check the loss per example using Elementwise.
+If you want to see loss per category (categories 1, 0 in this case) it may be more
+convenient to get that using CategoricalCrossEntropy, e.g. use index labels
+with 2 classes and set reported_loss_shape=Loss.LossShape.classwise.
 )nbdoc";
 }
