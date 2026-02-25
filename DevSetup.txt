@@ -41,7 +41,7 @@ cd ~
 ~/Thor$ python3 -m venv .venv
 ~/Thor$ source .venv/bin/activate
 ~/Thor$ python -m pip install --upgrade pip
-~/Thor$ python -m pip install nanobind
+~/Thor$ python -m pip install nanobind yapf
 
 ~/Thor$ mkdir build
 ~/Thor$ cd build
@@ -106,7 +106,7 @@ Settings / Preferences → Tools → File Watchers
 Select your YAPF watcher → Edit
 In Advanced Options, UNcheck:
     Auto-save edited files to trigger the watcher
-With that unchecked, the watcher runs only when a real save happens (explicit save / Save All / or when CLion saves on frame deactivation).
+With that unchecked, the watcher runs only when a real save happens (explicit save or when CLion saves on frame deactivation).
 Prevent “format loop” / extra jumps:
 In that same watcher, if you see it, uncheck:
     Trigger the watcher on external changes (prevents a watcher rewrite from re-triggering itself / causing extra reload-jitter)

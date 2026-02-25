@@ -59,7 +59,8 @@ class BinaryCrossEntropy::Builder {
         assert(_predictions.isPresent());
         assert(_labels.isPresent());
         assert(_predictions.get() != _labels.get());
-        assert(_lossShape.isPresent());
+        if (_lossShape.isEmpty())
+            _lossShape = LossShape::BATCH;
 
         std::vector<uint64_t> labelDimensions = _labels.get().getDimensions();
         // API layer does not have a batch dimension:

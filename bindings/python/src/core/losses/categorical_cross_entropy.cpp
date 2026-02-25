@@ -30,7 +30,7 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
            DataType loss_data_type,
            LossShape reported_loss_shape) {
             CategoricalCrossEntropy::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type);
+            builder.network(network);
 
             // Ensure everything matches up.
             if (label_type == LabelType::ONE_HOT) {
@@ -102,6 +102,7 @@ void bind_categorical_cross_entropy(nb::module_ &losses) {
                 throw nb::value_error(error_message.c_str());
             }
 
+            builder.predictions(predictions).labels(labels).lossDataType(loss_data_type);
             CategoricalCrossEntropy built = builder.build();
 
             new (self) CategoricalCrossEntropy(std::move(built));
