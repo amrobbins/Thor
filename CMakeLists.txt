@@ -542,3 +542,10 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/.git/index"
         "${CMAKE_SOURCE_DIR}/.git/packed-refs"
 )
+
+# Also depend on the currently checked-out branch ref, if available
+file(READ "${CMAKE_SOURCE_DIR}/.git/HEAD" _git_head LIMIT 200)
+if (_git_head MATCHES "^ref: (.+)$")
+    set(_git_ref "${CMAKE_SOURCE_DIR}/.git/${CMAKE_MATCH_1}")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_git_ref}")
+endif ()
