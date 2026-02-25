@@ -25,6 +25,22 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
            Tensor labels,
            DataType loss_data_type,
            bool reportsElementwiseLoss) {
+            if (predictions.getDimensions().size() != 1 || predictions.getDimensions()[0] != 1) {
+                string error_message =
+                    "BinaryCrossEntropy instance: predictions must be a 1 dimensional tensor of size one but predictions is " +
+                    predictions.getDescriptorString();
+                throw nb::value_error(error_message.c_str());
+            }
+            if (labels.getDimensions().size() != 1 || labels.getDimensions()[0] != 1) {
+                string error_message = "BinaryCrossEntropy instance: labels must be a 1 dimensional tensor of size one but labels is " +
+                                       labels.getDescriptorString();
+                throw nb::value_error(error_message.c_str());
+            }
+            if (loss_data_type != DataType::FP16 && loss_data_type != DataType::FP32) {
+                string error_message = "BinaryCrossEntropy instance: loss_data_type must be fp16 or fp32";
+                throw nb::value_error(error_message.c_str());
+            }
+
             BinaryCrossEntropy::Builder builder;
             builder.network(network).predictions(predictions).labels(labels).lossDataType(loss_data_type);
 

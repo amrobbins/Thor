@@ -85,7 +85,6 @@ class BinaryAccuracy::Builder {
     Optional<Network *> _network;
     Optional<Tensor> _predictions;
     Optional<Tensor> _labels;
-    Optional<uint32_t> _numClasses;
 };
 
 }  // namespace Thor
