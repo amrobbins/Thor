@@ -523,3 +523,22 @@ endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
 add_dependencies(thor_tests _thor)
+
+# Compute GIT_VERSION at configure time
+execute_process(
+        COMMAND git describe --always --dirty --tags
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE GIT_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+configure_file(${CMAKE_SOURCE_DIR}/ThorVersion.h.in
+        ${CMAKE_BINARY_DIR}/generated/ThorVersion.h
+        @ONLY)
+
+# Reconfigure when HEAD changes (and when refs/index change)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/.git/HEAD"
+        "${CMAKE_SOURCE_DIR}/.git/index"
+        "${CMAKE_SOURCE_DIR}/.git/packed-refs"
+)
