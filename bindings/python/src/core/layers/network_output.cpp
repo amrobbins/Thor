@@ -23,6 +23,11 @@ void bind_network_output(nb::module_ &m) {
         .def(
             "__init__",
             [](NetworkOutput *self, Network &network, const string &name, const Tensor &input_tensor, const DataType &data_type) {
+                if (name.length() == 0) {
+                    string msg = "Network Output instance: name must have non-zero length but name=\"\" was passed in.";
+                    throw nb::value_error(msg.c_str());
+                }
+
                 NetworkOutput::Builder builder;
                 NetworkOutput built = builder.network(network).name(name).inputTensor(input_tensor).dataType(data_type).build();
 
@@ -33,13 +38,6 @@ void bind_network_output(nb::module_ &m) {
             "name"_a,
             "input_tensor"_a,
             "data_type"_a,
-
-            // nb::sig("def __init__(self, "
-            //         "network: thor.Network, "
-            //         "name: str, "
-            //         "input_tensor: thor.Tensor, "
-            //         "data_type: thor.DataType"
-            //         ") -> None"),
 
             R"nbdoc(
             Create and attach a NetworkOutput to send data out of a Network.
@@ -64,7 +62,6 @@ void bind_network_output(nb::module_ &m) {
                 // Network output creates featureOutput always, straight away.
                 return maybeFeatureOutput.get();
             },
-            // nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
             R"nbdoc(
             Return the output tensor produced by this layer.
 

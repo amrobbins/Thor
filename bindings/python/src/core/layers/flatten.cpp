@@ -18,8 +18,33 @@ void bind_flatten(nb::module_ &m) {
     flatten.def(
         "__init__",
         [](Flatten *self, Network &network, const Tensor &feature_input, uint32_t num_output_dimensions) {
-            Flatten::Builder builder;
+            const auto &dims = feature_input.getDimensions();
+            const size_t rank = dims.size();
 
+            if (rank == 0) {
+                string msg = "Flatten instance: feature_input must have at least 1 dimension but tensor format is " +
+                             feature_input.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            if (num_output_dimensions == 0) {
+                string msg =
+                    "Flatten instance: num_output_dimensions must be >= 1. You passed 0. "
+                    "feature_input is " +
+                    feature_input.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            if (num_output_dimensions >= rank) {
+                string msg =
+                    "Flatten instance: num_output_dimensions must be < rank of feature_input. "
+                    "You passed num_output_dimensions " +
+                    to_string(num_output_dimensions) + " for rank " + to_string(rank) + ". feature_input is " +
+                    feature_input.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            Flatten::Builder builder;
             Flatten built = builder.network(network).featureInput(feature_input).numOutputDimensions(num_output_dimensions).build();
 
             // Move the flatten layer into the pre-allocated but uninitialized memory at self
@@ -28,12 +53,6 @@ void bind_flatten(nb::module_ &m) {
         "network"_a,
         "feature_input"_a,
         "num_output_dimensions"_a,
-
-        // nb::sig("def __init__(self, "
-        //         "network: thor.Network, "
-        //         "feature_input: thor.Tensor, "
-        //         "num_output_dimensions: int"
-        //         ") -> None"),
 
         R"nbdoc(
             Create and attach a Flatten layer to a Network.

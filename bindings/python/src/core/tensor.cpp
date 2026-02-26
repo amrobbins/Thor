@@ -20,6 +20,11 @@ void bind_tensor(nb::module_ &thor) {
         .def(
             "__init__",
             [](Tensor *self, const vector<uint64_t> &dimensions, const DataType &data_type) {
+                if (dimensions.size() == 0) {
+                    string msg = "Tensor instance: dimensions cannot be size 0, but dimensions of size 0 was passed in.";
+                    throw nb::value_error(msg.c_str());
+                }
+
                 Tensor tensor(data_type, dimensions);
 
                 // Move the tensor layer into the pre-allocated but uninitialized memory at self

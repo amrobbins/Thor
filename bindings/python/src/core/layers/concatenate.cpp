@@ -19,6 +19,68 @@ void bind_concatenate(nb::module_ &m) {
     concatenate.def(
         "__init__",
         [](Concatenate *self, Network &network, TensorList feature_inputs, uint32_t concatenation_axis) {
+            if (feature_inputs.size() == 0) {
+                throw nb::value_error("Concatenate instance: feature_inputs must be a non-empty list of thor.Tensor.");
+            }
+
+            // Use first tensor as reference
+            nb::handle h0 = feature_inputs[0];
+            Tensor &t0 = nb::cast<Tensor &>(h0);
+
+            const auto &ref_dims = t0.getDimensions();
+            const size_t ref_rank = ref_dims.size();
+            const auto ref_dtype = t0.getDataType();
+
+            if (ref_rank == 0) {
+                string msg = "Concatenate instance: tensors must have at least 1 dimension. First tensor is " + t0.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            if (concatenation_axis >= ref_rank) {
+                string msg = "Concatenate instance: concatenation_axis " + to_string(concatenation_axis) +
+                             " is out of range for tensor rank " + to_string(ref_rank) + ". First tensor is " + t0.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            // Validate remaining tensors match requirements
+            for (size_t i = 0; i < feature_inputs.size(); ++i) {
+                Tensor &ti = nb::cast<Tensor &>(feature_inputs[i]);
+
+                const auto &dims = ti.getDimensions();
+                const size_t rank = dims.size();
+
+                if (rank != ref_rank) {
+                    string msg =
+                        "Concatenate instance: all tensors must have the same number of dimensions. "
+                        "First tensor rank " +
+                        to_string(ref_rank) + " (" + t0.getDescriptorString() +
+                        "), "
+                        "tensor[" +
+                        to_string(i) + "] rank " + to_string(rank) + " (" + ti.getDescriptorString() + ").";
+                    throw nb::value_error(msg.c_str());
+                }
+
+                if (ti.getDataType() != ref_dtype) {
+                    string msg =
+                        "Concatenate instance: all tensors must have the same data type. "
+                        "First tensor: " +
+                        string(t0.getDescriptorString()) + "tensor[" + to_string(i) + "]: " + string(ti.getDescriptorString());
+                    throw nb::value_error(msg.c_str());
+                }
+
+                for (size_t d = 0; d < ref_rank; ++d) {
+                    if (d == concatenation_axis)
+                        continue;
+                    if (dims[d] != ref_dims[d]) {
+                        string msg = "Concatenate instance: all tensor dimensions must match except along concatenation_axis " +
+                                     to_string(concatenation_axis) + ". Mismatch at dim " + to_string(d) + ": first tensor has " +
+                                     to_string(ref_dims[d]) + ", tensor[" + to_string(i) + "] has " + to_string(dims[d]) + ". tensor[" +
+                                     to_string(i) + "] is " + ti.getDescriptorString();
+                        throw nb::value_error(msg.c_str());
+                    }
+                }
+            }
+
             Concatenate::Builder builder;
             builder.network(network).concatenationAxis(concatenation_axis);
             // Iterate Python list and cast each element to Tensor&
@@ -33,12 +95,6 @@ void bind_concatenate(nb::module_ &m) {
         "network"_a,
         "feature_inputs"_a,
         "concatenation_axis"_a,
-
-        // nb::sig("def __init__(self, "
-        //         "network: thor.Network, "
-        //         "feature_inputs: list[thor.Tensor], "
-        //         "concatenation_axis: int"
-        //         ") -> None"),
 
         R"nbdoc(
             Create and attach a Concatenate layer to a Network.

@@ -47,6 +47,7 @@ class Flatten::Builder {
         assert(_featureInput.isPresent());
         assert(_numOutputDimensions.isPresent());
         assert(_numOutputDimensions.get() < _featureInput.get().getDimensions().size());
+        assert(_numOutputDimensions.get() > 0);
 
         std::vector<uint64_t> inputDimensions = _featureInput.get().getDimensions();
         assert(inputDimensions.size() > 0);

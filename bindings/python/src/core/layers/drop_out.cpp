@@ -19,8 +19,13 @@ void bind_drop_out(nb::module_ &m) {
         .def(
             "__init__",
             [](DropOut *self, Network &network, const Tensor &feature_input, float drop_proportion) {
-                DropOut::Builder builder;
+                if (drop_proportion < 0.0f || drop_proportion > 1.0f) {
+                    string error_message =
+                        "Drop Out instance: you must pass 0 <= drop_proportion <= 1. drop_proportion: " + to_string(drop_proportion);
+                    throw nb::value_error(error_message.c_str());
+                }
 
+                DropOut::Builder builder;
                 DropOut built = builder.network(network).featureInput(feature_input).dropProportion(drop_proportion).build();
 
                 // Move the dropout layer into the pre-allocated but uninitialized memory at self
@@ -29,12 +34,6 @@ void bind_drop_out(nb::module_ &m) {
             "network"_a,
             "feature_input"_a,
             "drop_proportion"_a,
-
-            // nb::sig("def __init__(self, "
-            //         "network: thor.Network, "
-            //         "feature_input: thor.Tensor, "
-            //         "drop_proportion: float"
-            //         ") -> None"),
 
             R"nbdoc(
             Create and attach a DropOut layer to a Network.

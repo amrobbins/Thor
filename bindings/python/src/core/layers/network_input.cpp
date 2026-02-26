@@ -23,6 +23,15 @@ void bind_network_input(nb::module_ &m) {
     network_input.def(
         "__init__",
         [](NetworkInput *self, Network &network, const string &name, const vector<uint64_t> &dimensions, const DataType &data_type) {
+            if (name.length() == 0) {
+                string msg = "Network Input instance: name must have non-zero length but name=\"\" was passed in.";
+                throw nb::value_error(msg.c_str());
+            }
+            if (dimensions.size() == 0) {
+                string msg = "Network Input instance: dimensions must be non-zero, but dimensions of size 0 was passed in.";
+                throw nb::value_error(msg.c_str());
+            }
+
             NetworkInput::Builder builder;
             NetworkInput built = builder.network(network).name(name).dimensions(dimensions).dataType(data_type).build();
 
@@ -34,13 +43,6 @@ void bind_network_input(nb::module_ &m) {
         "dimensions"_a,
         "data_type"_a);
 
-    // nb::sig("def __init__(self, "
-    //         "network: thor.Network, "
-    //         "name: str, "
-    //         "dimensions: list[int], "
-    //         "data_type: thor.DataType"
-    //         ") -> None"));
-
     network_input.def(
         "get_feature_output",
         [](NetworkInput &self) -> Tensor {
@@ -50,7 +52,6 @@ void bind_network_input(nb::module_ &m) {
             // Network input creates featureOutput always, straight away.
             return maybeFeatureOutput.get();
         },
-        // nb::sig("def get_feature_output(self) -> thor.Tensor"),
         R"nbdoc(
             Return the output tensor produced by this layer.
 

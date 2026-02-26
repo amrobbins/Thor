@@ -38,22 +38,22 @@ class UniformRandom::Builder : public Initializer::Builder {
     virtual ~Builder() = default;
 
     virtual std::shared_ptr<Initializer> build() {
+        assert(this->_minValue.isPresent());
+        assert(this->_maxValue.isPresent());
+        assert(_minValue.get() <= _maxValue.get());
+
         UniformRandom uniformRandomInitializer(_minValue, _maxValue);
         return uniformRandomInitializer.clone();
     }
 
     virtual UniformRandom::Builder &minValue(double _minValue) {
         assert(!this->_minValue.isPresent());
-        if (_maxValue.isPresent())
-            assert(_minValue <= _maxValue.get());
         this->_minValue = _minValue;
         return *this;
     }
 
     virtual UniformRandom::Builder &maxValue(double _maxValue) {
         assert(!this->_maxValue.isPresent());
-        if (_minValue.isPresent())
-            assert(_maxValue >= _minValue.get());
         this->_maxValue = _maxValue;
         return *this;
     }

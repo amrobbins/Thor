@@ -16,13 +16,18 @@ void bind_elu(nb::module_ &m) {
     elu.def_static(
         "__new__",
         [](nb::handle cls, float alpha) -> std::shared_ptr<Elu> {
+            if (alpha < 0) {
+                string error_message = "Elu builder: alpha must be >= 0. alpha == " + to_string(alpha);
+                throw nb::value_error(error_message.c_str());
+            }
+
             Elu::Builder b;
             b.alpha(alpha);
 
             std::shared_ptr<Activation> base = b.build();  // Builder returns shared_ptr<Activation>
             std::shared_ptr<Elu> e = std::dynamic_pointer_cast<Elu>(base);
             if (!e)
-                throw nb::type_error("Elu builder did not return an Elu instance");
+                throw nb::type_error("Elu builder did not return an Elu instance. This is likely a bug in thor.");
             return e;  // nanobind converts shared_ptr<Elu> to an Elu Python object
         },
         "cls"_a,

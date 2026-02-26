@@ -16,6 +16,12 @@ void bind_uniform_random(nb::module_ &m) {
     uniform_random.def_static(
         "__new__",
         [](nb::handle /*cls*/, float min_value, float max_value) -> std::shared_ptr<UniformRandom> {
+            if (min_value > max_value) {
+                string error_message = "Uniform Random builder: min_value must be <= max_value. min_value:  " + to_string(min_value) +
+                                       " max_value: " + to_string(max_value);
+                throw nb::value_error(error_message.c_str());
+            }
+
             UniformRandom::Builder b;
             b.minValue(min_value).maxValue(max_value);
 

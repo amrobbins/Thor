@@ -17,6 +17,20 @@ void bind_sgd(nb::module_ &optimizers) {
         "__new__",
         [](nb::handle cls, Network &network, float initial_learning_rate, float decay, float momentum, bool nesterov_momentum)
             -> std::shared_ptr<Sgd> {
+            if (initial_learning_rate <= 0.0f) {
+                string error_message =
+                    "Sgd builder: initial_learning_rate must be > 0. initial_learning_rate: " + to_string(initial_learning_rate);
+                throw nb::value_error(error_message.c_str());
+            }
+            if (decay < 0.0f || decay > 1.0f) {
+                string error_message = "Sgd builder: assertion 0 <= decay <= 1 failed. decay: " + to_string(decay);
+                throw nb::value_error(error_message.c_str());
+            }
+            if (momentum < 0.0f) {
+                string error_message = "Sgd builder: momentum must be >= 0. momentum: " + to_string(momentum);
+                throw nb::value_error(error_message.c_str());
+            }
+
             Sgd::Builder builder;
             builder.network(network)
                 .initialLearningRate(initial_learning_rate)
