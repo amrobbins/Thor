@@ -73,6 +73,12 @@ class Adam::Builder {
         adam.beta1 = _beta1;
         adam.beta2 = _beta2;
         adam.epsilon = _epsilon;
+
+        assert(adam.alpha > 0.0f);
+        assert(adam.beta1 >= 0.0f && adam.beta1 < 1.0f);
+        assert(adam.beta2 >= 0.0f && adam.beta2 < 1.0f);
+        assert(adam.epsilon > 0);
+
         assert(_network.isPresent());
         assert(_network.get() != nullptr);
         adam.addToNetwork(_network);

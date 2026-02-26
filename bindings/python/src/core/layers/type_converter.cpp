@@ -17,20 +17,16 @@ void bind_type_converter(nb::module_ &m) {
     nb::class_<TypeConverter, Layer>(m, "TypeConverter")
         .def(
             "__init__",
-            [](TypeConverter *self, Network &network, const DataType &new_data_type) {
+            [](TypeConverter *self, Network &network, const Tensor &feature_input, const DataType &new_data_type) {
                 TypeConverter::Builder builder;
-                TypeConverter built = builder.network(network).newDataType(new_data_type).build();
+                TypeConverter built = builder.network(network).featureInput(feature_input).newDataType(new_data_type).build();
 
                 // Move the typeConverter layer into the pre-allocated but uninitialized memory at self
                 new (self) TypeConverter(std::move(built));
             },
             "network"_a,
+            "feature_input"_a,
             "new_data_type"_a,
-
-            // nb::sig("def __init__(self, "
-            //         "network: thor.Network, "
-            //         "new_data_type: thor.DataType"
-            //         ") -> None"),
 
             R"nbdoc(
             Create and attach a TypeConverter to send data into a Network.

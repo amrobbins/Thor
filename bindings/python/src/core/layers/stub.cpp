@@ -28,11 +28,6 @@ void bind_stub(nb::module_ &m) {
         "network"_a,
         "input_tensor"_a,
 
-        // nb::sig("def __init__(self, "
-        //         "network: thor.Network, "
-        //         "feature_input: thor.Tensor"
-        //         ") -> None"),
-
         R"nbdoc(
             Create and attach a Stub layer to a Network.
             When there is a dangling tensor in the execution graph (i.e. it is not

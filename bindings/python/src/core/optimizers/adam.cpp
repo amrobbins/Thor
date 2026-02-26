@@ -16,6 +16,24 @@ void bind_adam(nb::module_ &optimizers) {
     adam.def_static(
         "__new__",
         [](nb::handle cls, Network &network, float alpha, float beta1, float beta2, float epsilon) -> std::shared_ptr<Adam> {
+            if (alpha <= 0.0f) {
+                string error_message = "Adam builder: alpha must be > 0. alpha: " + to_string(alpha);
+                throw nb::value_error(error_message.c_str());
+            }
+            // beta1, beta2 are exponential decay rates; require [0, 1)
+            if (beta1 < 0.0f || beta1 >= 1.0f) {
+                string error_message = "Adam builder: assertion 0 <= beta1 < 1 failed. beta1: " + to_string(beta1);
+                throw nb::value_error(error_message.c_str());
+            }
+            if (beta2 < 0.0f || beta2 >= 1.0f) {
+                string error_message = "Adam builder: assertion 0 <= beta2 < 1 failed. beta2: " + to_string(beta2);
+                throw nb::value_error(error_message.c_str());
+            }
+            if (epsilon <= 0.0f) {
+                string error_message = "Adam builder: epsilon must be > 0. epsilon: " + to_string(epsilon);
+                throw nb::value_error(error_message.c_str());
+            }
+
             Adam::Builder builder;
             builder.network(network).alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon);
 

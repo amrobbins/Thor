@@ -31,12 +31,6 @@ void bind_reshape(nb::module_ &m) {
         "feature_input"_a,
         "new_dimensions"_a,
 
-        // nb::sig("def __init__(self, "
-        //         "network: thor.Network, "
-        //         "feature_input: thor.Tensor, "
-        //         "new_dimensions: list[int]"
-        //         ") -> None"),
-
         R"nbdoc(
             Create and attach a Reshape layer to a Network.
             The number of elements in the reshaped tensor must exactly equal the
