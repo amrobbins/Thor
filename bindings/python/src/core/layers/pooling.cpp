@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/vector.h>
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Pooling.h"
@@ -34,10 +35,67 @@ void bind_pooling(nb::module_ &layers) {
                uint32_t verticalStride,
                uint32_t horizontalStride,
                uint32_t verticalPadding,
-               uint32_t horizontalPadding,
-               bool samePadding,
-               bool verticalSamePadding,
-               bool horizontalSamePadding) {
+               uint32_t horizontalPadding) {
+                const auto &dims = feature_input.getDimensions();
+                const size_t rank = dims.size();
+
+                // Expect NCHW without batch => [C, H, W]
+                if (rank != 3) {
+                    string msg =
+                        "Pooling instance: feature_input must be a 3D NCHW tensor without batch "
+                        "(expected dimensions [C, H, W]) but tensor format is " +
+                        feature_input.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+
+                const uint64_t C = dims[0];
+                const uint64_t H = dims[1];
+                const uint64_t W = dims[2];
+
+                if (C == 0 || H == 0 || W == 0) {
+                    string msg = "Pooling instance: feature_input dimensions must all be > 0 but tensor format is " +
+                                 feature_input.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+
+                if (windowHeight == 0 || windowWidth == 0) {
+                    string msg =
+                        "Pooling instance: window_height and window_width must be >= 1. "
+                        "window_height=" +
+                        to_string(windowHeight) + " window_width=" + to_string(windowWidth);
+                    throw nb::value_error(msg.c_str());
+                }
+
+                if (verticalStride == 0 || horizontalStride == 0) {
+                    string msg =
+                        "Pooling instance: vertical_stride and horizontal_stride must be >= 1. "
+                        "vertical_stride=" +
+                        to_string(verticalStride) + " horizontal_stride=" + to_string(horizontalStride);
+                    throw nb::value_error(msg.c_str());
+                }
+
+                // Validate pooling type
+                if (type != Pooling::Type::AVERAGE && type != Pooling::Type::MAX) {
+                    string msg = "Pooling instance: invalid pooling type value " + to_string((int)type);
+                    throw nb::value_error(msg.c_str());
+                }
+
+                // Ensure window fits within padded input
+                const uint64_t effH = H + 2ULL * uint64_t(verticalPadding);
+                const uint64_t effW = W + 2ULL * uint64_t(horizontalPadding);
+
+                if (uint64_t(windowHeight) > effH) {
+                    string msg = "Pooling instance: window_height " + to_string(windowHeight) + " is larger than padded input height " +
+                                 to_string(effH) + ". Input tensor is " + feature_input.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+
+                if (uint64_t(windowWidth) > effW) {
+                    string msg = "Pooling instance: window_width " + to_string(windowWidth) + " is larger than padded input width " +
+                                 to_string(effW) + ". Input tensor is " + feature_input.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+
                 Pooling::Builder builder;
                 builder.network(network)
                     .featureInput(feature_input)
@@ -47,18 +105,10 @@ void bind_pooling(nb::module_ &layers) {
                     .verticalStride(verticalStride)
                     .horizontalStride(horizontalStride);
 
-                // These can't all be specified at the same time, but logic to enforce that
-                // is on the implementation side, not the binding side.
                 if (verticalPadding != 0)
                     builder.verticalPadding(verticalPadding);
                 if (horizontalPadding != 0)
                     builder.horizontalPadding(horizontalPadding);
-                if (samePadding)
-                    builder.samePadding();
-                if (verticalSamePadding)
-                    builder.verticalSamePadding();
-                if (horizontalSamePadding)
-                    builder.horizontalSamePadding();
 
                 Pooling built = builder.build();
 
@@ -74,79 +124,46 @@ void bind_pooling(nb::module_ &layers) {
             "horizontal_stride"_a = 1,
             "vertical_padding"_a = 0,
             "horizontal_padding"_a = 0,
-            "same_padding"_a = false,
-            "vertical_same_padding"_a = false,
-            "horizontal_same_padding"_a = false,
-
-            // nb::sig("def __init__(self, "
-            //         "network: thor.Network, "
-            //         "feature_input: thor.Tensor, "
-            //         "type: thor.Pooling.Type, "
-            //         "window_height: int, "
-            //         "window_width: int, "
-            //         "vertical_stride: int = 1, "
-            //         "horizontal_stride: int = 1, "
-            //         "vertical_padding: int = 0, "
-            //         "horizontal_padding: int = 0, "
-            //         "same_padding: bool = False, "
-            //         "vertical_same_padding: bool = False, "
-            //         "horizontal_same_padding: bool = False"
-            //         ") -> None"),
 
             R"nbdoc(
-        Pooling layer that downsamples its input by applying a pooling operation
-        (e.g. max or average) over sliding windows.
+Pooling layer that downsamples its input by applying a pooling operation
+(e.g. max or average) over sliding windows.
 
-        This layer supports different pooling types via :class:`thor.Pooling.Type`
-        (such as ``Pooling.Type.MAX`` or ``Pooling.Type.AVERAGE``), and allows
-        explicit control over window size, stride, and padding in both the
-        vertical and horizontal directions.
+This layer supports different pooling types via :class:`thor.Pooling.Type`
+(such as ``Pooling.Type.MAX`` or ``Pooling.Type.AVERAGE``), and allows
+explicit control over window size, stride, and padding in both the
+vertical and horizontal directions.
 
-        Parameters
-        ----------
-        network : thor.Network
-            The network to add this layer into.
-        type : thor.Pooling.Type
-            The pooling mode to use (e.g. ``Pooling.Type.MAX`` or
-            ``Pooling.Type.AVERAGE``).
-        window_height : int
-            Height of the pooling window (in cells).
-        window_width : int
-            Width of the pooling window (in cells).
-        vertical_stride : int, optional
-            Vertical stride of the pooling window. Defaults to 1.
-        horizontal_stride : int, optional
-            Horizontal stride of the pooling window. Defaults to 1.
-        vertical_padding : int, optional
-            Amount of zero-padding added to the top and bottom of the input.
-            This amount of padding is added to both the top and bottom of the input,
-            so vertical_padding=2 creates 4 rows of padding total.
-            Defaults to 0.
-        horizontal_padding : int, optional
-            Amount of zero-padding added to the left and right of the input.
-            This amount of padding is added to both the left and right of the input,
-            so horizontal_padding=2 creates 4 columns of padding total.
-            Defaults to 0.
-        same_padding: bool, optional
-            Compute and apply the amount of padding required for the output height
-            and width to match the input height and width. Note that the
-            implementation applies the number of padding elements specified to both
-            sides of the block, so the amount of padding applied is always even.
-            So, when the amount of padding required for same_padding is odd, it is
-            not possible to do here and an exception will be raised if same_padding
-            is requested.
-        vertical_same_padding: bool, optional
-            Compute and apply same padding in the vertical direction.
-            Note that the limitation described in for same_padding applies here as well.
-        horizontal_same_padding: bool, optional
-            Compute and apply same padding in the vertical direction.
-            Note that the limitation described in for same_padding applies here as well.
+Parameters
+----------
+network : thor.Network
+    The network to add this layer into.
+type : thor.Pooling.Type
+    The pooling mode to use (e.g. ``Pooling.Type.MAX`` or
+    ``Pooling.Type.AVERAGE``).
+window_height : int
+    Height of the pooling window (in cells).
+window_width : int
+    Width of the pooling window (in cells).
+vertical_stride : int, optional
+    Vertical stride of the pooling window. Defaults to 1.
+horizontal_stride : int, optional
+    Horizontal stride of the pooling window. Defaults to 1.
+vertical_padding : int, optional
+    Amount of zero-padding added to the top and bottom of the input.
+    This amount of padding is added to both the top and bottom of the input,
+    so vertical_padding=2 creates 4 rows of padding total.
+    Defaults to 0.
+horizontal_padding : int, optional
+    Amount of zero-padding added to the left and right of the input.
+    This amount of padding is added to both the left and right of the input,
+    so horizontal_padding=2 creates 4 columns of padding total.
+    Defaults to 0.
 
-
-        Notes
-        -----
-        The supported tensor layout is NCHW.
-        )nbdoc")
+Notes
+-----
+The supported tensor layout is NCHW.
+)nbdoc")
         .def("get_output_dimensions", &Pooling::getOutputDimensions)
         .def("get_pooling_type", &Pooling::getPoolingType)
         .def("get_window_height", &Pooling::getWindowHeight)
