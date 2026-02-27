@@ -61,7 +61,6 @@ TEST(Activations, ReluBuilds) {
 
     ASSERT_NE(relu->getId(), clone->getId());
     ASSERT_GT(relu->getId(), 1u);
-
 }
 
 TEST(Activations, ReluSerializeDeserialize) {

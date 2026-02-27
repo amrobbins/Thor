@@ -41,12 +41,57 @@ void bind_convolution_2d(nb::module_ &m) {
            bool hasBias,
            shared_ptr<Activation> activation,
            shared_ptr<Initializer> weights_initializer,
-           shared_ptr<Initializer> biases_initializer,
-           bool add_drop_out,
-           float drop_proportion,
-           bool add_batch_normalization,
-           float batch_norm_exp_running_avg_factor,
-           float batch_norm_epsilon) {
+           shared_ptr<Initializer> biases_initializer) {
+            const auto &dims = featureInput.getDimensions();
+            if (dims.size() != 3) {
+                string msg = "Convolution2d instance: feature_input must be a 3D CHW tensor (no batch) but tensor format is " +
+                             featureInput.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            const uint64_t C = dims[0];
+            const uint64_t H = dims[1];
+            const uint64_t W = dims[2];
+
+            if (C == 0 || H == 0 || W == 0) {
+                string msg = "Convolution2d instance: feature_input dimensions must all be > 0 but tensor format is " +
+                             featureInput.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
+            if (numOutputChannels == 0) {
+                throw nb::value_error("Convolution2d instance: num_output_channels must be > 0.");
+            }
+            if (filterHeight == 0 || filterWidth == 0) {
+                string msg =
+                    "Convolution2d instance: filter_height and filter_width must be >= 1. "
+                    "filter_height=" +
+                    to_string(filterHeight) + " filter_width=" + to_string(filterWidth);
+                throw nb::value_error(msg.c_str());
+            }
+            if (verticalStride == 0 || horizontalStride == 0) {
+                string msg =
+                    "Convolution2d instance: vertical_stride and horizontal_stride must be >= 1. "
+                    "vertical_stride=" +
+                    to_string(verticalStride) + " horizontal_stride=" + to_string(horizontalStride);
+                throw nb::value_error(msg.c_str());
+            }
+
+            // Ensure filter fits within padded input (otherwise output dims go <= 0)
+            const uint64_t effH = H + 2ULL * uint64_t(verticalPadding);
+            const uint64_t effW = W + 2ULL * uint64_t(horizontalPadding);
+
+            if (uint64_t(filterHeight) > effH) {
+                string msg = "Convolution2d instance: filter_height " + to_string(filterHeight) + " is larger than padded input height " +
+                             to_string(effH) + ". Input tensor is " + featureInput.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+            if (uint64_t(filterWidth) > effW) {
+                string msg = "Convolution2d instance: filter_width " + to_string(filterWidth) + " is larger than padded input width " +
+                             to_string(effW) + ". Input tensor is " + featureInput.getDescriptorString();
+                throw nb::value_error(msg.c_str());
+            }
+
             Convolution2d::Builder builder;
             builder.network(network)
                 .featureInput(featureInput)
@@ -70,11 +115,6 @@ void bind_convolution_2d(nb::module_ &m) {
             if (biases_initializer != nullptr)
                 builder.biasInitializer(biases_initializer);
 
-            if (add_drop_out)
-                builder.dropOut(drop_proportion);
-            if (add_batch_normalization)
-                builder.batchNormalization(batch_norm_exp_running_avg_factor, batch_norm_epsilon);
-
             Convolution2d built = builder.build();
 
             new (self) Convolution2d(std::move(built));
@@ -91,32 +131,7 @@ void bind_convolution_2d(nb::module_ &m) {
         "has_bias"_a = true,
         "activation"_a = nb::none(),
         "weights_initializer"_a = nb::none(),
-        "biases_initializer"_a = nb::none(),
-        "add_drop_out"_a = false,
-        "drop_proportion"_a = 0.0f,
-        "add_batch_normalization"_a = false,
-        "batch_norm_exp_running_avg_factor"_a = 0.05f,
-        "batch_norm_epsilon"_a = 1e-4f);
-    // nb::sig("def __init__(self, "
-    //         "network: thor.Network, "
-    //         "feature_input: thor.Tensor, "
-    //         "num_output_channels: int, "
-    //         "filter_height: int, "
-    //         "filter_width: int, "
-    //         "vertical_stride: int = 1, "
-    //         "horizontal_stride: int = 1, "
-    //         "vertical_padding: int = 0, "
-    //         "horizontal_padding: int = 0, "
-    //         "has_bias: bool = True, "
-    //         "activation: thor.Activation | None = None, "
-    //         "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-    //         "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-    //         "add_drop_out: bool = False, "
-    //         "drop_proportion: float = 0.0, "
-    //         "add_batch_normalization: bool = False, "
-    //         "batch_norm_exp_running_avg_factor: float = 0.05, "
-    //         "batch_norm_epsilon: float = 1e-4"
-    //         ") -> None")
+        "biases_initializer"_a = nb::none());
 
     convolution_2d.def(
         "get_feature_output",
@@ -124,7 +139,6 @@ void bind_convolution_2d(nb::module_ &m) {
             Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
             return maybeFeatureOutput.get();
         },
-        // nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
         R"nbdoc(
             Return the output tensor produced by this layer.
 
@@ -182,21 +196,5 @@ void bind_convolution_2d(nb::module_ &m) {
             Initializer for the convolution kernel weights.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the bias vector.
-        add_drop_out : bool, default False
-            If True, inserts a DropOut layer, sequenced as described above.
-        drop_proportion : float, default 0.0
-            Fraction of activations to drop when dropout is enabled.
-            Ignored if ``add_drop_out`` is False.
-        add_batch_normalization : bool, default False
-            If True, inserts a batch-normalization layer, sequenced as
-            described above.
-        batch_norm_exp_running_avg_factor : float, default 0.05
-            Exponential running-average factor used to update the batch
-            normalization mean and variance statistics during training.
-            Ignored if ``add_batch_normalization`` is False.
-        batch_norm_epsilon : float, default 1e-4
-            Small constant added to the variance in batch normalization
-            for numerical stability.
-            Ignored if ``add_batch_normalization`` is False.
         )nbdoc";
 }

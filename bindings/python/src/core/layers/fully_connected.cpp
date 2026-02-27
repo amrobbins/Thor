@@ -33,6 +33,10 @@ void bind_fully_connected(nb::module_ &m) {
            shared_ptr<Activation> activation,
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer) {
+            if (numOutputFeatures == 0) {
+                throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
+            }
+
             FullyConnected::Builder builder;
             builder.network(network).featureInput(featureInput).numOutputFeatures(numOutputFeatures).hasBias(hasBias);
 
@@ -58,15 +62,6 @@ void bind_fully_connected(nb::module_ &m) {
         "activation"_a.none() = nb::none(),
         "weights_initializer"_a.none() = nb::none(),
         "biases_initializer"_a.none() = nb::none());
-    // nb::sig("def __init__(self, "
-    //         "network: thor.Network, "
-    //         "feature_input: thor.Tensor, "
-    //         "num_output_features: int, "
-    //         "has_bias: bool = True, "
-    //         "activation: thor.Activation | None = None, "
-    //         "weights_initializer: thor.initializers.Initializer = thor.initializers.Glorot(), "
-    //         "biases_initializer: thor.initializers.Initializer = thor.initializers.Glorot() "
-    //         ") -> None"));
 
     fully_connected.def(
         "get_feature_output",
@@ -74,7 +69,6 @@ void bind_fully_connected(nb::module_ &m) {
             Optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
             return maybeFeatureOutput.get();
         },
-        // nb::sig("def get_feature_output(self) -> Optional[thor.Tensor]"),
         R"nbdoc(
             Return the output tensor produced by this layer.
 
