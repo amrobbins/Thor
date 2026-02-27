@@ -340,6 +340,31 @@ class MultiConnectionLayer : public Layer {
         return numPresent;
     }
 
+    virtual Optional<Tensor> getFeatureInput() {
+        assert(featureInputs.size() == 1);
+        return featureInputs[0];
+    }
+    virtual Optional<Tensor> getFeatureOutput() {
+        assert(featureInputs.size() == 1);
+        return featureInputs[0];
+    }
+    virtual Optional<Tensor> getErrorInput() {
+        assert(featureInputs.size() == 1);
+        return featureInputs[0];
+    }
+    virtual Optional<Tensor> getErrorOutput() {
+        assert(featureInputs.size() == 1);
+        return featureInputs[0];
+    }
+    virtual Optional<Layer *> getNextLayer() {
+        assert(nextLayers.size() == 1);
+        return nextLayers[0];
+    }
+    virtual Stream getStream() {
+        assert(streams.size() == 1);
+        return streams[0];
+    }
+
    protected:
     std::set<unsigned long> allErrorInputTensorIds;
     std::set<unsigned long> stillWaitingForErrorInputTensors;
@@ -370,12 +395,6 @@ class MultiConnectionLayer : public Layer {
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) { assert(false); }
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) { assert(false); }
-    virtual Optional<Tensor> getFeatureInput() { assert(false); }
-    virtual Optional<Tensor> getFeatureOutput() { assert(false); }
-    virtual Optional<Tensor> getErrorInput() { assert(false); }
-    virtual Optional<Tensor> getErrorOutput() { assert(false); }
-    virtual Optional<Layer *> getNextLayer() { assert(false); }
-    virtual Stream getStream() { assert(false); }
 };
 
 }  // namespace ThorImplementation
