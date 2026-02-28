@@ -107,7 +107,7 @@ class Adam::Builder {
     }
     virtual Adam::Builder epsilon(float _epsilon) {
         assert(!this->_epsilon.isPresent());
-        this->_epsilon = _epsilon;
+        this->_epsilon = fmaxf(_epsilon, ThorImplementation::Adam::MIN_FP16_EPSILON);
         return *this;
     }
 

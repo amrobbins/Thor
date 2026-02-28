@@ -106,19 +106,20 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
                               epsilon,
                               weightsGradient.getTotalNumElements(),
                               gradientUpdateStream);
-        if (biasesGradient.isPresent())
+        if (biasesGradient.isPresent()) {
             assert(biasesUpdate.isPresent());
-        launchAdamStep<float>(biasesUpdate.get().getMemPtr<float>(),
-                              biasesGradient.get().getMemPtr<float>(),
-                              mBias.get().getMemPtr<float>(),
-                              vBias.get().getMemPtr<float>(),
-                              t,
-                              alpha,
-                              beta1,
-                              beta2,
-                              epsilon,
-                              biasesGradient.get().getTotalNumElements(),
-                              gradientUpdateStream);
+            launchAdamStep<float>(biasesUpdate.get().getMemPtr<float>(),
+                                  biasesGradient.get().getMemPtr<float>(),
+                                  mBias.get().getMemPtr<float>(),
+                                  vBias.get().getMemPtr<float>(),
+                                  t,
+                                  alpha,
+                                  beta1,
+                                  beta2,
+                                  epsilon,
+                                  biasesGradient.get().getTotalNumElements(),
+                                  gradientUpdateStream);
+        }
     } else {
         assert(false);
     }

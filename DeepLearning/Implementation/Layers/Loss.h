@@ -216,14 +216,14 @@ class Loss : public Layer {
 
     enum class LossType { BATCH = (int)ConnectionType::LABELS + 1027, CLASSWISE, ELEMENTWISE, RAW };
 
-    static uint32_t getLossScalingFactor() { return lossScalingFactor; }
+    static float getLossScalingFactor() { return lossScalingFactor; }
 
    protected:
     Optional<Tensor> labelsInput;
     TensorDescriptor::DataType lossDataType;
 
     // FIXME: only const for now for convenience
-    static constexpr uint32_t lossScalingFactor = 4;  // 32;
+    static constexpr float lossScalingFactor = 4;  // 32;
     Stream labelsStream;
 
     bool featureInputReceived;

@@ -229,13 +229,19 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         if (!isInferenceOnly()) {
             assert(optimizer.isPresent());
 
+            // * grad stream is now synced with data stream
+
             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
             optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+
+            // * grad stream is now running to compute weights update
 
             // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
             // so to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and gradient are
             // computed
-            optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
+            // FIXME I think this is backwards    optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
+            // FIXME What is the right thing here? dataStream.waitEvent(optimizer.get()->getGradientUpdateStream().putEvent());
+            // FIXME: But I have multiply on the data stream above, both need to wait for each other here? I think so.
             // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
 
             // Upon processing the last connection, schedule the upate to the weights memory.
