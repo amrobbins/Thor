@@ -248,7 +248,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16_FP32Labels) {
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 if (abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]) >= thresh)
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],
@@ -376,7 +376,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP16PredictionsGradient_F
             half *elementLossGradientGpu_h_mem = (half *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 if (abs((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]) >= thresh)
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],
@@ -502,7 +502,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32) {
             float *elementLossGradientGpu_h_mem = (float *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 if (elementLoss[i] != elementLossGpu_h_mem[i])
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],
@@ -628,7 +628,7 @@ TEST(MeanSquaredError, ComputesCorrectResult_BatchLoss_FP32_FP16Labels) {
             float *elementLossGradientGpu_h_mem = (float *)elementLossGradientGpu_h.getMemPtr();
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 if (elementLoss[i] != elementLossGpu_h_mem[i])
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %i\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],

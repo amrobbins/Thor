@@ -18,7 +18,9 @@ __global__ void adamStep_fp16_moments_fp32(half *__restrict__ weightUpdate,    /
     float gradBuff = __half2float(gradient[index]);
     float mBuf = m[index];
     float vBuf = v[index];
+    // printf("m[%d] = %f ", index, mBuf);
     mBuf = beta1 * mBuf + (1.0f - beta1) * gradBuff;
+    // printf("-> m[%d] = %f, ", index, mBuf);
     m[index] = mBuf;
     vBuf = beta2 * vBuf + (1.0f - beta2) * (gradBuff * gradBuff);
     v[index] = vBuf;

@@ -205,7 +205,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP16) {
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 float thresh = fmaxf(abs((float)elementLossGradient[i] * 0.06f), 0.0001f);
                 if (fabsf((float)elementLossGradient[i] - (float)elementLossGradientGpu_h_mem[i]) >= thresh)
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %d\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],
@@ -382,7 +382,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32) {
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 float thresh = fmaxf(abs(elementLossGradient[i] * 0.06f), 0.0001f);
                 if (fabsf(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]) >= thresh)
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %d\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],
@@ -558,7 +558,7 @@ TEST(MeanAbsolutePercentageError, ComputesCorrectResult_FP32_FP16Labels) {
             for (uint32_t i = 0; i < elementLossCpu.getTotalNumElements(); ++i) {
                 float thresh = fmaxf(abs(elementLossGradient[i] * 0.06f), 0.0001f);
                 if (fabsf(elementLossGradient[i] - elementLossGradientGpu_h_mem[i]) >= thresh)
-                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %d\n",
+                    printf("gradient %d (%ld, %ld)  %f vs %f   %f  %f  %f\n",
                            i,
                            dimensions[0],
                            dimensions[1],
