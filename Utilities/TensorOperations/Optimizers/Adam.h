@@ -9,5 +9,14 @@
 #include <type_traits>
 
 template <typename T>
-void launchAdamStep(
-    T *weightUpdate_d, T *gradient_d, T *m_d, T *v_d, float t, T alpha, T beta1, T beta2, T epsilon, uint32_t length, Stream stream);
+void launchAdamStep(T *weightUpdate_d,
+                    T *gradient_d,
+                    float *m_d,
+                    float *v_d,
+                    float t,
+                    float alpha,
+                    float beta1,
+                    float beta2,
+                    float epsilon,
+                    uint32_t length,
+                    Stream stream);
