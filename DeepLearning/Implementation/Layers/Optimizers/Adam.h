@@ -51,6 +51,8 @@ class Adam : public Optimizer {
 
     void testSetDataType(TensorDescriptor::DataType dataType) { featureDataType = dataType; }
 
+    static constexpr float MIN_FP16_EPSILON = 1.0e-4f;
+
    protected:
     void loadParamsFromFiles();
 

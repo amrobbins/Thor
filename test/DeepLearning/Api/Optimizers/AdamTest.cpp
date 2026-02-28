@@ -2,6 +2,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
 #include "DeepLearning/Api/Optimizers/Adam.h"
+#include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -97,7 +98,7 @@ TEST(Adam, InitializesParametersWithOneStamp) {
     ASSERT_EQ(params.count("beta2"), 1U);
     ASSERT_EQ(params["beta2"], beta2);
     ASSERT_EQ(params.count("epsilon"), 1U);
-    ASSERT_EQ(params["epsilon"], epsilon);
+    ASSERT_EQ(params["epsilon"], fmaxf(epsilon, ThorImplementation::Adam::MIN_FP16_EPSILON));
 }
 
 /* FIXME: put this back in once multile stamps is supported
@@ -194,7 +195,7 @@ TEST(Adam, SettersAndGetters) {
     ASSERT_EQ(params.count("beta2"), 1U);
     ASSERT_EQ(params["beta2"], beta2);
     ASSERT_EQ(params.count("epsilon"), 1U);
-    ASSERT_EQ(params["epsilon"], epsilon);
+    ASSERT_EQ(params["epsilon"], fmaxf(epsilon, ThorImplementation::Adam::MIN_FP16_EPSILON));
 
     // Test the setters
     alpha = 0.75f;
@@ -317,8 +318,8 @@ TEST(Adam, SerializeDeserialize) {
         m.copyFromAsync(physicalAdam->getM(), stream);
         v.copyFromAsync(physicalAdam->getV(), stream);
 
-        ASSERT_EQ(physicalAdam->getM().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP16);
-        ASSERT_EQ(physicalAdam->getV().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP16);
+        ASSERT_EQ(physicalAdam->getM().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP32);
+        ASSERT_EQ(physicalAdam->getV().getDataType(), ThorImplementation::TensorDescriptor::DataType::FP32);
 
         ThorImplementation::Tensor mBias;
         ThorImplementation::Tensor vBias;
@@ -330,26 +331,26 @@ TEST(Adam, SerializeDeserialize) {
         }
         stream.synchronize();
 
-        half *mPtr = m.getMemPtr<half>();
-        half *vPtr = v.getMemPtr<half>();
-        half *mBiasPtr;
-        half *vBiasPtr;
+        float *mPtr = m.getMemPtr<float>();
+        float *vPtr = v.getMemPtr<float>();
+        float *mBiasPtr;
+        float *vBiasPtr;
         if (hasBias) {
-            mBiasPtr = mBias.getMemPtr<half>();
-            vBiasPtr = vBias.getMemPtr<half>();
+            mBiasPtr = mBias.getMemPtr<float>();
+            vBiasPtr = vBias.getMemPtr<float>();
         }
 
         for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
                 uint32_t index = in * numOutputFeatures + out;
-                ASSERT_EQ(float(mPtr[index]), 0.0f);
-                ASSERT_EQ(float(vPtr[index]), 0.0f);
+                ASSERT_EQ(mPtr[index], 0.0f);
+                ASSERT_EQ(vPtr[index], 0.0f);
             }
         }
         if (hasBias) {
             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-                ASSERT_EQ(float(mBiasPtr[out]), 0.0f);
-                ASSERT_EQ(float(vBiasPtr[out]), 0.0f);
+                ASSERT_EQ(mBiasPtr[out], 0.0f);
+                ASSERT_EQ(vBiasPtr[out], 0.0f);
             }
         }
 
@@ -358,16 +359,16 @@ TEST(Adam, SerializeDeserialize) {
             for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
                 for (uint32_t out = 0; out < numOutputFeatures; ++out) {
                     uint32_t index = in * numOutputFeatures + out;
-                    mPtr[index] = half(randFloat(-2.0f, 2.0f));
-                    vPtr[index] = half(randFloat(-2.0f, 2.0f));
+                    mPtr[index] = randFloat(-2.0f, 2.0f);
+                    vPtr[index] = randFloat(-2.0f, 2.0f);
                 }
             }
             physicalAdam->getM().copyFromAsync(m, stream);
             physicalAdam->getV().copyFromAsync(v, stream);
             if (hasBias) {
                 for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-                    mBiasPtr[out] = half(randFloat(-2.0f, 2.0f));
-                    vBiasPtr[out] = half(randFloat(-2.0f, 2.0f));
+                    mBiasPtr[out] = randFloat(-2.0f, 2.0f);
+                    vBiasPtr[out] = randFloat(-2.0f, 2.0f);
                 }
                 physicalAdam->getMBias().get().copyFromAsync(mBias, stream);
                 physicalAdam->getVBias().get().copyFromAsync(vBias, stream);
@@ -472,26 +473,26 @@ TEST(Adam, SerializeDeserialize) {
         }
         stream.synchronize();
 
-        half *mDeserPtr = mDeser.getMemPtr<half>();
-        half *vDeserPtr = vDeser.getMemPtr<half>();
-        half *mBiasDeserPtr;
-        half *vBiasDeserPtr;
+        float *mDeserPtr = mDeser.getMemPtr<float>();
+        float *vDeserPtr = vDeser.getMemPtr<float>();
+        float *mBiasDeserPtr;
+        float *vBiasDeserPtr;
         if (hasBias) {
-            mBiasDeserPtr = mBiasDeser.getMemPtr<half>();
-            vBiasDeserPtr = vBiasDeser.getMemPtr<half>();
+            mBiasDeserPtr = mBiasDeser.getMemPtr<float>();
+            vBiasDeserPtr = vBiasDeser.getMemPtr<float>();
         }
 
         for (uint32_t in = 0; in < inputDimensions[0]; ++in) {
             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
                 uint32_t index = in * numOutputFeatures + out;
-                ASSERT_EQ(float(mPtr[index]), float(mDeserPtr[index]));
-                ASSERT_EQ(float(vPtr[index]), float(vDeserPtr[index]));
+                ASSERT_EQ(mPtr[index], mDeserPtr[index]);
+                ASSERT_EQ(vPtr[index], vDeserPtr[index]);
             }
         }
         if (hasBias) {
             for (uint32_t out = 0; out < numOutputFeatures; ++out) {
-                ASSERT_EQ(float(mBiasPtr[out]), float(mBiasDeserPtr[out]));
-                ASSERT_EQ(float(vBiasPtr[out]), float(vBiasDeserPtr[out]));
+                ASSERT_EQ(mBiasPtr[out], mBiasDeserPtr[out]);
+                ASSERT_EQ(vBiasPtr[out], vBiasDeserPtr[out]);
             }
         }
     }

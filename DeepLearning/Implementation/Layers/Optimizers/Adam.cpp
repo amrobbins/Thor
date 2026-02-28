@@ -33,18 +33,18 @@ void Adam::compile() {
     else
         biasesUpdate = Optional<Tensor>::empty();
 
-    m = weightsGradient.clone();
-    v = weightsGradient.clone();
+    m = weightsGradient.clone(TensorDescriptor::DataType::FP32);
+    v = weightsGradient.clone(TensorDescriptor::DataType::FP32);
     if (biasesGradient.isPresent()) {
-        mBias = biasesGradient.get().clone();
-        vBias = biasesGradient.get().clone();
+        mBias = biasesGradient.get().clone(TensorDescriptor::DataType::FP32);
+        vBias = biasesGradient.get().clone(TensorDescriptor::DataType::FP32);
     }
 
     // The minimum strictly positive (subnormal) value of fp16 is 2^−24 ≈ 5.96 × 10^−8
     // So the default value of epsilon (which prevents divide by zero) is set to no less than this when epsilon is FP16.
     // https://en.wikipedia.org/wiki/Half-precision_floating-point_format
-    if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 && epsilon < 5.96046448e-8)
-        epsilon = __float2half_ru(5.9604644e-8f);
+    if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 && epsilon < MIN_FP16_EPSILON)
+        epsilon = MIN_FP16_EPSILON;
 
     assert(weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 ||
            weightsGradient.getDataType() == TensorDescriptor::DataType::FP32);
@@ -69,10 +69,10 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
     if (!accumulateValues)
         t += 1;
     if (featureDataType.get() == TensorDescriptor::DataType::FP16) {
-        launchAdamStep<half>((half *)weightsUpdate.getMemPtr(),
-                             (half *)weightsGradient.getMemPtr(),
-                             (half *)m.getMemPtr(),
-                             (half *)v.getMemPtr(),
+        launchAdamStep<half>(weightsUpdate.getMemPtr<half>(),
+                             weightsGradient.getMemPtr<half>(),
+                             m.getMemPtr<float>(),
+                             v.getMemPtr<float>(),
                              t,
                              alpha,
                              beta1,
@@ -82,10 +82,10 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
                              gradientUpdateStream);
         if (biasesGradient.isPresent()) {
             assert(biasesUpdate.isPresent());
-            launchAdamStep<half>((half *)biasesUpdate.get().getMemPtr(),
-                                 (half *)biasesGradient.get().getMemPtr(),
-                                 (half *)mBias.get().getMemPtr(),
-                                 (half *)vBias.get().getMemPtr(),
+            launchAdamStep<half>(biasesUpdate.get().getMemPtr<half>(),
+                                 biasesGradient.get().getMemPtr<half>(),
+                                 mBias.get().getMemPtr<float>(),
+                                 vBias.get().getMemPtr<float>(),
                                  t,
                                  alpha,
                                  beta1,
@@ -95,10 +95,10 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
                                  gradientUpdateStream);
         }
     } else if (featureDataType.get() == TensorDescriptor::DataType::FP32) {
-        launchAdamStep<float>((float *)weightsUpdate.getMemPtr(),
-                              (float *)weightsGradient.getMemPtr(),
-                              (float *)m.getMemPtr(),
-                              (float *)v.getMemPtr(),
+        launchAdamStep<float>(weightsUpdate.getMemPtr<float>(),
+                              weightsGradient.getMemPtr<float>(),
+                              m.getMemPtr<float>(),
+                              v.getMemPtr<float>(),
                               t,
                               alpha,
                               beta1,
@@ -108,10 +108,10 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
                               gradientUpdateStream);
         if (biasesGradient.isPresent())
             assert(biasesUpdate.isPresent());
-        launchAdamStep<float>((float *)biasesUpdate.get().getMemPtr(),
-                              (float *)biasesGradient.get().getMemPtr(),
-                              (float *)mBias.get().getMemPtr(),
-                              (float *)vBias.get().getMemPtr(),
+        launchAdamStep<float>(biasesUpdate.get().getMemPtr<float>(),
+                              biasesGradient.get().getMemPtr<float>(),
+                              mBias.get().getMemPtr<float>(),
+                              vBias.get().getMemPtr<float>(),
                               t,
                               alpha,
                               beta1,
