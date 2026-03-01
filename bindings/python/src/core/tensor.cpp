@@ -66,6 +66,4 @@ void bind_tensor(nb::module_ &thor) {
         .def_static("bytes_per_element", nb::overload_cast<DataType>(&Tensor::getBytesPerElement), "data_type"_a)
         .def("get_bytes_per_element", nb::overload_cast<>(&Tensor::getBytesPerElement, nb::const_))
         .def("get_total_size_in_bytes", &Tensor::getTotalSizeInBytes);
-
-    // tensor_class.attr("DataType") = dt;
 }
