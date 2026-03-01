@@ -15,6 +15,8 @@ Adam::Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer, float al
 }
 
 void Adam::compile() {
+    assert(!compiled);
+
     TensorPlacement layerPlacement = trainableLayer->getPlacement();
     assert(layerPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     gpuNum = layerPlacement.getDeviceNum();

@@ -62,24 +62,6 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(
             gpuNum, batchSize, numInputFeatures, numInputFeatures, numOutputFeatures, false, false, TensorDescriptor::DataType::FP16);
 
-        if (!isInferenceOnly()) {
-            if (optimizer.isEmpty()) {
-                throw std::runtime_error("FullyConnected: compiled but optimizer is not present, and not in inference only mode.");
-            }
-            Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
-            assert(anErrorInput.isPresent());
-            uint64_t numUnits = anErrorInput.get().getDimensions()[1];
-            biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
-                                                                           batchSize,
-                                                                           numUnits,
-                                                                           true,
-                                                                           false,
-                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
-                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
-                                                                           optimizer.get()->getGradientUpdateStream(),
-                                                                           false));
-        }
-
         // Allocate 1 workspace of each type, since it is possible that all three types of kernels may be running at the same time.
         // If there is more than one connection, the kernels of a given type will run sequentially so that the workspace will be available
         bool kernelWillRunOnGpu;
@@ -155,6 +137,25 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
         if (!isInferenceOnly())
             optimizer.get()->compile();
+
+        if (!isInferenceOnly() && hasBias) {
+            if (optimizer.isEmpty()) {
+                throw std::runtime_error("FullyConnected: compiled but optimizer is not present, and not in inference only mode.");
+            }
+            Optional<Tensor> anErrorInput = getFirstPresentTensor(errorInputs);
+            assert(anErrorInput.isPresent());
+            uint64_t numUnits = anErrorInput.get().getDimensions()[1];
+            Stream gradientUpdateStream = optimizer.get()->getGradientUpdateStream();
+            biasBatchReduce = std::unique_ptr<BatchReduce>(new BatchReduce(batchSize,
+                                                                           batchSize,
+                                                                           numUnits,
+                                                                           true,
+                                                                           false,
+                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                           ThorImplementation::TensorDescriptor::DataType::FP16,
+                                                                           gradientUpdateStream,
+                                                                           false));
+        }
     }
 
     virtual void infer(Optional<Tensor> inputTensor,
@@ -207,6 +208,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         assert(errorIn.isPresent());
         assert(errorIn.get().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
+        // * grad stream is now synced with data stream
+
         if (errorOut.isPresent()) {
             assert(dataStream.isInitialized());
 
@@ -226,22 +229,20 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                                                       dataStream);
         }
 
+        // * data stream is now computing error out
+
         if (!isInferenceOnly()) {
             assert(optimizer.isPresent());
-
-            // * grad stream is now synced with data stream
 
             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
             optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
 
             // * grad stream is now running to compute weights update
 
-            // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
-            // so to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and gradient are
-            // computed
-            // FIXME I think this is backwards    optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
-            // FIXME What is the right thing here? dataStream.waitEvent(optimizer.get()->getGradientUpdateStream().putEvent());
-            // FIXME: But I have multiply on the data stream above, both need to wait for each other here? I think so.
+            // weights update cannot be applied to weights until errorOut has been computed since weights are part of the computation of
+            // error out. So to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and
+            // gradient are computed
+            optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
             // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
 
             // Upon processing the last connection, schedule the upate to the weights memory.

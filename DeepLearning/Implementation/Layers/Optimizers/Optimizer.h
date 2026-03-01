@@ -15,7 +15,11 @@ class Optimizer {
         id = nextId.fetch_add(1);
     }
 
-    virtual void compile() { compiled = true; }
+    virtual void compile() {
+        assert(!compiled);
+        compiled = true;
+    }
+    bool isCompiled() { return compiled; }
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until

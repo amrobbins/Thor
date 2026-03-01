@@ -136,7 +136,6 @@ TEST(AdamTest, Adam_SingleStep_FromInjectedGradient_IsCorrect) {
 
     auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
-    adam->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -261,7 +260,6 @@ TEST(AdamTest, Adam_TwoStep_FromInjectedGradient_CarriesMomentsAndBiasCorrection
 
     auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
-    adam->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -450,7 +448,6 @@ TEST(AdamTest, Adam_Integrated_ForwardBackward_SingleStep_IsCorrect) {
 
     auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
-    adam->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -609,7 +606,6 @@ TEST(AdamTest, Adam_Integrated_ForwardBackward_WithBias_Batch3_SingleStep_IsCorr
 
     auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
-    adam->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -856,7 +852,6 @@ TEST(AdamTest, Adam_Integrated_TwoIterations_WithBias_Batch3_CarriesMomentsAndBi
     const bool hasBias = true;
 
     for (uint32_t t = 0; t < 100; ++t) {
-        printf("%d\n", t);
         std::vector<std::shared_ptr<Layer>> layers;
         layers.push_back(std::make_shared<NetworkInput>(gpu, TensorDescriptor::DataType::FP16, std::vector<uint64_t>{batchSize, inF}));
         layers.push_back(std::make_shared<NoOpLayer>());
@@ -873,7 +868,6 @@ TEST(AdamTest, Adam_Integrated_TwoIterations_WithBias_Batch3_CarriesMomentsAndBi
 
         auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
         adam->testSetDataType(TensorDescriptor::DataType::FP16);
-        adam->compile();
         fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
         LayerTestHelper::initializeNetwork(layers);
@@ -1165,7 +1159,6 @@ TEST(AdamTest, Adam_T_AccumulateValues_DoesNotIncrementUntilFinal) {
 
     auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
-    adam->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1232,7 +1225,6 @@ TEST(AdamTest, Adam_T_AccumulateValues_DoesNotIncrementUntilFinal) {
 //
 //     auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
 //     adam->testSetDataType(TensorDescriptor::DataType::FP32);
-//     adam->compile();
 //     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 //
 //     LayerTestHelper::initializeNetwork(layers);

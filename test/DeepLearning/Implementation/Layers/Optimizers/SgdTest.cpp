@@ -97,7 +97,6 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
     shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
-    sgd->compile();
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -237,7 +236,6 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
-        sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         LayerTestHelper::initializeNetwork(layers);
 
@@ -505,7 +503,6 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         // Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
         shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
-        sgd->compile();
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         LayerTestHelper::initializeNetwork(layers);
 
@@ -781,7 +778,6 @@ TEST(FullyConnectedTest, BackwardProducesCorrectErrorOutputAndWeightGradient) {
                                      /*momentum*/ 0.0f,
                                      /*useNesterov*/ false,
                                      /*resumeEpoch*/ 0);
-    sgd->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -906,7 +902,6 @@ TEST(FullyConnectedTest, ForwardUsesProjectedWeightsOnlyInTrainingMode) {
     float momentum = 0.3;
     bool useNesterovMomentum = true;
     shared_ptr<Sgd> sgd = make_shared<Sgd>(fc, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
-    sgd->compile();
     fc->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1070,7 +1065,6 @@ TEST(SgdTest, NesterovMomentum_SingleStep_UpdateAndProjectionAreCorrect) {
     const bool useNesterov = true;
 
     auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
-    sgd->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1206,7 +1200,6 @@ TEST(SgdTest, NesterovMomentum_TwoStep_UpdateCarriesMomentum) {
     const bool useNesterov = true;
 
     auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
-    sgd->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1398,7 +1391,6 @@ TEST(SgdTest, NesterovMomentum_Integrated_ForwardBackwardUpdate_ProjectedUsedInT
     const bool useNesterov = true;
 
     auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
-    sgd->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1640,7 +1632,6 @@ TEST(SgdTest, NesterovMomentum_Integrated_TwoIterations_CarriesMomentumAndUsesPr
     const bool useNesterov = true;
 
     auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
-    sgd->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1875,7 +1866,6 @@ TEST(SgdTest, NesterovMomentum_Integrated_TwoIterations_WithBias) {
     const bool useNesterov = true;
 
     auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
-    sgd->compile();
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
