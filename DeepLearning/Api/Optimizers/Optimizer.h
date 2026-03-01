@@ -54,6 +54,8 @@ class Optimizer {
 
     virtual std::string getVersion() const;
 
+    virtual std::string getType() const = 0;
+
    protected:
     // Only subclasses can be instantiated
     Optimizer();

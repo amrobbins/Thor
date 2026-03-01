@@ -66,20 +66,17 @@ class Network {
         DEADLOCK_CYCLE
     };
 
-    const static int32_t CPU = -1;
-
     Network(std::string networkName) : networkName(networkName), frozen(false) {}
     virtual ~Network();
 
-    virtual std::string statusCodeToString(int statusCode);
+    virtual std::string statusCodeToString(StatusCode statusCode);
 
-    virtual StatusCode connect(bool inferenceOnly);
     virtual StatusCode place(uint32_t batchSize,
                              std::vector<Event> &initDoneEvents,
                              bool inferenceOnly = false,
                              std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
                              uint32_t forcedNumStampsPerGpu = 0);
-    //    virtual std::vector<ThorImplementation::StampedNetwork> getStampedNetworks() { return stampedNetworks; }
+
     uint64_t getNumStamps() { return stampedNetworks.size(); }
     ThorImplementation::StampedNetwork &getStampedNetwork(uint64_t i) { return stampedNetworks[i]; }
 
@@ -88,15 +85,20 @@ class Network {
     virtual void save(const std::string &directory, bool overwrite, bool saveOptimizerState);
     virtual void load(const std::string &directory);
 
-    std::shared_ptr<Optimizer> getOptimizer();
-    void attachOptimizerToLayers(bool replaceIfExisting);
+    std::shared_ptr<Optimizer> getDefaultOptimizer();
 
-    Tensor getApiTensorByOriginalId(uint64_t originalId);
+    // FIXME: I will need to support indexing layers by their name.
     uint32_t getNumTrainableLayers() { return allTrainableLayersInNetwork.size(); }
     std::shared_ptr<TrainableWeightsBiasesLayer> getTrainableLayer(uint32_t i) { return allTrainableLayersInNetwork[i]; }
 
     uint32_t getNumLayers() { return allLayersInNetwork.size(); }
     std::shared_ptr<Layer> getLayer(uint32_t i) { return allLayersInNetworkList[i]; }
+
+    Tensor getApiTensorByOriginalId(uint64_t originalId);
+
+   protected:
+    virtual StatusCode connect(bool inferenceOnly);
+    void attachOptimizerToLayers(bool replaceIfExisting);
 
    private:
     static const bool DEBUG_STAMP = false;

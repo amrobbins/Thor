@@ -6,20 +6,20 @@ using json = nlohmann::json;
 using ThorImplementation::TensorPlacement;
 
 namespace Thor {
-string Network::statusCodeToString(int statusCode) {
-    if ((StatusCode)statusCode == StatusCode::SUCCESS)
+string Network::statusCodeToString(StatusCode statusCode) {
+    if (statusCode == StatusCode::SUCCESS)
         return "SUCCESS";
-    else if ((StatusCode)statusCode == StatusCode::FLOATING_INPUT)
+    else if (statusCode == StatusCode::FLOATING_INPUT)
         return "FLOATING INPUT";
-    else if ((StatusCode)statusCode == StatusCode::DANGLING_OUTPUT)
+    else if (statusCode == StatusCode::DANGLING_OUTPUT)
         return "DANGLING OUTPUT";
-    else if ((StatusCode)statusCode == StatusCode::GPU_OUT_OF_MEMORY)
+    else if (statusCode == StatusCode::GPU_OUT_OF_MEMORY)
         return "GPU OUT OF MEMORY";
-    else if ((StatusCode)statusCode == StatusCode::DUPLICATE_NAMED_NETWORK_INPUT)
+    else if (statusCode == StatusCode::DUPLICATE_NAMED_NETWORK_INPUT)
         return "DUPLICATE NAMED NETWORK INPUT";
-    else if ((StatusCode)statusCode == StatusCode::DUPLICATE_NAMED_NETWORK_OUTPUT)
+    else if (statusCode == StatusCode::DUPLICATE_NAMED_NETWORK_OUTPUT)
         return "DUPLICATE NAMED NETWORK OUTPUT";
-    else if ((StatusCode)statusCode == StatusCode::DEADLOCK_CYCLE)
+    else if (statusCode == StatusCode::DEADLOCK_CYCLE)
         return "DEADLOCK CYCLE";
     assert(false);
 }
@@ -168,7 +168,7 @@ Network::StatusCode Network::connect(bool inferenceOnly) {
 
     StatusCode dagStatus = createDagAndFreeze();
     if (dagStatus != StatusCode::SUCCESS) {
-        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString((int)dagStatus).c_str());
+        printf("ERROR: evaluateGraph() returned %s\n", statusCodeToString(dagStatus).c_str());
         fflush(stdout);
     }
 
@@ -694,10 +694,19 @@ void Network::addLayerToNetwork(const Layer *layer) {
 }
 
 // An optimizer is used to optimize all weights and biases in a network
-// If a new optimizer is added to the network it will replace the old one.
-void Network::addToNetwork(Optimizer *optimizer) { this->optimizer = optimizer->clone(); }
+void Network::addToNetwork(Optimizer *optimizer) {
+    // If the default optimizer is specified more than once, the user has an error in their code, call it out.
+    if (this->optimizer != nullptr) {
+        string errorMessage = "Error: Multiple default optimizers specified on network " + this->getNetworkName() +
+                              ". You may specify at most one default optimizer. Had " + this->optimizer->getType() + " and tried to add " +
+                              optimizer->getType();
+        throw(runtime_error(errorMessage.c_str()));
+    }
 
-shared_ptr<Optimizer> Network::getOptimizer() { return optimizer; }
+    this->optimizer = optimizer->clone();
+}
+
+shared_ptr<Optimizer> Network::getDefaultOptimizer() { return optimizer; }
 
 // For future multi-gpu support, optimizers for the same layer on different GPU's will need to accumulate into a single weights memory
 // and then broadcast the updated weights to the optimizers on the other gpus.
