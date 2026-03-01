@@ -38,7 +38,7 @@ class StampedNetwork {
     uint32_t getGpuNum() const { return gpuNum; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
     std::vector<std::shared_ptr<ThorImplementation::NetworkOutput>> getOutputs() { return outputsShared; }
-    // std::vector<std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer>> getTrainableLayers() { return trainableLayersShared; }
+
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }
     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
     std::vector<std::shared_ptr<ThorImplementation::Layer>> getOtherLayers() { return otherLayersShared; }
@@ -47,12 +47,16 @@ class StampedNetwork {
         assert(false);
     }
 
-    // For testing:
-    // FIXME: Create a test friend?
-    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(uint64_t apiLayerId) {
         return apiLayerToPhysicalLayerShared[apiLayerId];
     }
+    std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(std::shared_ptr<Thor::Layer> apiLayer) {
+        return apiLayerToPhysicalLayerShared[apiLayer->getId()];
+    }
+
+#if defined(THOR_GTEST) || defined(__JETBRAINS_IDE__)
+    std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
+#endif
 
    protected:
     void initialize(bool initializeWeights, bool copyWeightsFromOtherStamp, StampedNetwork *otherStamp = nullptr);

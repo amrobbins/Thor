@@ -106,3 +106,13 @@ def test_adam_is_optimizer_subclass_if_exposed():
         pytest.skip("thor.optimizers.Optimizer not exposed in Python")
     n = _net()
     assert isinstance(thor.optimizers.Adam(network=n), Optimizer)
+
+
+def test_adam_multiple_optimizers_on_same_network_throws():
+    n = _net()
+    opt = thor.optimizers.Adam(network=n)
+    assert opt is not None
+    assert isinstance(opt, thor.optimizers.Adam)
+
+    with pytest.raises(RuntimeError, match=r".*Multiple default optimizers.*"):
+        thor.optimizers.Adam(network=n)

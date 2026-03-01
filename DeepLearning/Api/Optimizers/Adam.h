@@ -38,6 +38,8 @@ class Adam : public Optimizer {
                                      bool saveOptimizerState) const;
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j);
 
+    virtual std::string getType() const { return "Adam"; }
+
    protected:
     void updateParameters();
 
@@ -82,8 +84,8 @@ class Adam::Builder {
         // When network is passed to the builder, this optimizer becomes the network default optimizer:
         if (_network.isPresent() && _network.get() != nullptr) {
             adam.addToNetwork(_network);
-            assert(std::dynamic_pointer_cast<Adam>(_network.get()->getOptimizer()) != nullptr);
-            return std::dynamic_pointer_cast<Adam>(_network.get()->getOptimizer());
+            assert(std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer()) != nullptr);
+            return std::dynamic_pointer_cast<Adam>(_network.get()->getDefaultOptimizer());
         } else {
             return std::dynamic_pointer_cast<Adam>(adam.clone());
         }

@@ -397,9 +397,8 @@ gtest_discover_tests(thor_tests)
 
 # Per-configuration flags
 target_compile_definitions(thor_tests PRIVATE
-        $<$<CONFIG:Release>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
-        $<$<CONFIG:RelWithDebInfo>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
-        $<$<CONFIG:Debug>:SOURCE_DIR="${CMAKE_SOURCE_DIR}">
+        THOR_GTEST
+        SOURCE_DIR="$<SHELL_PATH:${CMAKE_SOURCE_DIR}>"
 )
 
 target_compile_options(thor_tests PRIVATE

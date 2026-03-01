@@ -78,17 +78,17 @@ individually.
 
 Parameters
 ----------
-alpha : float, optional
-    Base learning rate (step size). Default is 0.001.
-beta1 : float, optional
+alpha : float, default 0.001
+    Base learning rate (step size).
+beta1 : float, default 0.9
     Exponential decay rate for the first-moment estimate (mean of gradients).
-    Typical values are close to 0.9. Default is 0.9.
-beta2 : float, optional
+    Typical values are close to 0.9.
+beta2 : float, default 0.999
     Exponential decay rate for the second-moment estimate (mean of squared gradients).
-    Typical values are close to 0.999. Default is 0.999.
-epsilon : float, optional
-    Small constant added to the denominator for numerical stability. Default is 1e-7.
-network : thor.Network, optional
+    Typical values are close to 0.999.
+epsilon : float, default fp32: 1e-7, fp16: 1e-4
+    Small constant added to the denominator for numerical stability.
+network : thor.Network, default None
     When network is passed in, then this optimizer will be set as the default optimizer in
     the network and attached to all layers that do not have a layer specific optimizer
     already attached, at network stamping time. You would not pass network here when you
