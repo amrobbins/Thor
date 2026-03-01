@@ -56,15 +56,6 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     virtual void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) {
         if (!physicalLayer->isInferenceOnly())
             assert(hasOptimizer());
-        if (hasOptimizer()) {
-            assert(physicalLayer != nullptr);
-            std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalTrainableLayer =
-                dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-            assert(physicalTrainableLayer != nullptr);
-            std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalTrainableLayer->getOptimizer();
-            assert(physicalOptimizer != nullptr);
-            optimizer->compile(physicalOptimizer);
-        }
 
         MultiConnectionLayer::compile(physicalLayer);
     }
