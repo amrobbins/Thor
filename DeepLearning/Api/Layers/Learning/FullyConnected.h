@@ -25,7 +25,6 @@
 // #endif
 
 #include <assert.h>
-#include <filesystem>
 
 namespace Thor {
 
@@ -152,6 +151,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation> activation;
+    std::shared_ptr<Optimizer> layerOptimizer;
 
     DropOut dropOut;
     BatchNormalization batchNormalization;
@@ -210,6 +210,11 @@ class FullyConnected::Builder {
         fullyConnected.useBatchNormalization = _useBatchNormalization;
         fullyConnected.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         fullyConnected.batchNormEpsilon = _batchNormEpsilon;
+
+        // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
+        if (_layerOptimizer != nullptr)
+            fullyConnected.optimizer = _layerOptimizer;
+
         fullyConnected.initialized = true;
 
         // When the config requires supporting layers then this layer is not actually added to the network but a subnetwork of layers
@@ -307,6 +312,12 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    virtual FullyConnected::Builder &optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
+        assert(this->_layerOptimizer == nullptr);
+        this->_layerOptimizer = _layerOptimizer;
+        return *this;
+    }
+
     // FIXME: batchNormalization and dropOut should be passed as builders. To support this Layer::Builder will need to be created with
     // virtual std::shared_ptr<Layer::Builder> clone.
 
@@ -336,6 +347,7 @@ class FullyConnected::Builder {
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Activation> _activation;
+    std::shared_ptr<Optimizer> _layerOptimizer;
     bool _activationExplicitlyRemoved;
 
     Optional<float> _dropProportion;

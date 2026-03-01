@@ -25,7 +25,7 @@ void bind_mean_absolute_error(nb::module_ &losses) {
            Network &network,
            Tensor predictions,
            Tensor labels,
-           std::optional<DataType> loss_data_type,
+           optional<DataType> loss_data_type,
            bool reportsElementwiseLoss) {
             MeanAbsoluteError::Builder builder;
 

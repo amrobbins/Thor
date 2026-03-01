@@ -79,11 +79,14 @@ class Adam::Builder {
         assert(adam.beta2 >= 0.0f && adam.beta2 < 1.0f);
         assert(adam.epsilon > 0);
 
-        assert(_network.isPresent());
-        assert(_network.get() != nullptr);
-        adam.addToNetwork(_network);
-        assert(std::dynamic_pointer_cast<Adam>(_network.get()->getOptimizer()) != nullptr);
-        return std::dynamic_pointer_cast<Adam>(_network.get()->getOptimizer());
+        // When network is passed to the builder, this optimizer becomes the network default optimizer:
+        if (_network.isPresent() && _network.get() != nullptr) {
+            adam.addToNetwork(_network);
+            assert(std::dynamic_pointer_cast<Adam>(_network.get()->getOptimizer()) != nullptr);
+            return std::dynamic_pointer_cast<Adam>(_network.get()->getOptimizer());
+        } else {
+            return std::dynamic_pointer_cast<Adam>(adam.clone());
+        }
     }
     virtual Adam::Builder &network(Network &_network) {
         assert(!this->_network.isPresent());

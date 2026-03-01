@@ -61,7 +61,7 @@ class Sgd::Builder {
         if (_momentum.isEmpty())
             _momentum = 0.0f;
         if (_useNesterovMomentum.isEmpty())
-            _useNesterovMomentum = true;
+            _useNesterovMomentum = false;
 
         assert(_initialLearningRate > 0.0f);
         assert(_decay < 1.0f);
@@ -74,13 +74,14 @@ class Sgd::Builder {
         sgd.momentum = _momentum;
         sgd.useNesterovMomentum = _useNesterovMomentum;
 
-        assert(_network.isPresent());
-        assert(_network.get() != nullptr);
-        sgd.addToNetwork(_network);
-
-        // Network clones the Optimizer when it is added to the network
-        assert(std::dynamic_pointer_cast<Sgd>(_network.get()->getOptimizer()) != nullptr);
-        return std::dynamic_pointer_cast<Sgd>(_network.get()->getOptimizer());
+        // When network is passed to the builder, this optimizer becomes the network default optimizer:
+        if (_network.isPresent() && _network.get() != nullptr) {
+            sgd.addToNetwork(_network);
+            assert(std::dynamic_pointer_cast<Sgd>(_network.get()->getOptimizer()) != nullptr);
+            return std::dynamic_pointer_cast<Sgd>(_network.get()->getOptimizer());
+        } else {
+            return std::dynamic_pointer_cast<Sgd>(sgd.clone());
+        }
     }
 
     virtual Sgd::Builder &network(Network &_network) {

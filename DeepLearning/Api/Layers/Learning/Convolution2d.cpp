@@ -18,6 +18,7 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
         .hasBias(hasBias)
         .weightsInitializer(weightsInitializer)
         .biasInitializer(biasInitializer)
+        .optimizer(optimizer)
         .noActivation();
 
     vector<Tensor> currentFeatureInputs;

@@ -15,7 +15,7 @@ void bind_adam(nb::module_ &optimizers) {
 
     adam.def_static(
         "__new__",
-        [](nb::handle cls, Network &network, float alpha, float beta1, float beta2, float epsilon) -> std::shared_ptr<Adam> {
+        [](nb::handle cls, float alpha, float beta1, float beta2, float epsilon, shared_ptr<Network> network) -> std::shared_ptr<Adam> {
             if (alpha <= 0.0f) {
                 string error_message = "Adam builder: alpha must be > 0. alpha: " + to_string(alpha);
                 throw nb::value_error(error_message.c_str());
@@ -35,7 +35,10 @@ void bind_adam(nb::module_ &optimizers) {
             }
 
             Adam::Builder builder;
-            builder.network(network).alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon);
+            builder.alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon);
+
+            if (network != nullptr)
+                builder.network(*network);
 
             std::shared_ptr<Optimizer> base = builder.build();  // Builder returns shared_ptr<Optimizer>
             std::shared_ptr<Adam> adam = std::dynamic_pointer_cast<Adam>(base);
@@ -44,30 +47,24 @@ void bind_adam(nb::module_ &optimizers) {
             return adam;  // nanobind converts shared_ptr<Adam> to an Adam Python object
         },
         "cls"_a,
-        "network"_a,
         "alpha"_a = 0.001f,
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
-        // nb::sig("def __new__(cls, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float =
-        // 1e-7"
-        //         "= False) -> thor.optimizers.Adam"),
+        "network"_a.none() = nb::none(),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     // No-op __init__ (construction happens in __new__)
     adam.def(
         "__init__",
-        [](Adam *self, Network &network, float alpha, float beta1, float beta2, float epsilon) -> void {
+        [](Adam *self, float alpha, float beta1, float beta2, float epsilon, shared_ptr<Network> network) -> void {
             // no-op: constructed in __new__
         },
-        "network"_a,
         "alpha"_a = 0.001f,
         "beta1"_a = 0.9f,
         "beta2"_a = 0.999f,
         "epsilon"_a = 1e-7f,
-        // nb::sig("def __init__(self, network: thor.Network, alpha: float = 0.01, beta1: float = 0.0, beta2: float = 0.0, epsilon: float =
-        // "
-        //         "1e-7) -> None"),
+        "network"_a.none() = nb::none(),
         R"nbdoc(Construct an ADAM optimizer.)nbdoc");
 
     adam.attr("__doc__") = R"doc(
@@ -81,8 +78,6 @@ individually.
 
 Parameters
 ----------
-network : thor.Network
-    The network whose trainable parameters will be updated.
 alpha : float, optional
     Base learning rate (step size). Default is 0.001.
 beta1 : float, optional
@@ -93,6 +88,12 @@ beta2 : float, optional
     Typical values are close to 0.999. Default is 0.999.
 epsilon : float, optional
     Small constant added to the denominator for numerical stability. Default is 1e-7.
+network : thor.Network, optional
+    When network is passed in, then this optimizer will be set as the default optimizer in
+    the network and attached to all layers that do not have a layer specific optimizer
+    already attached, at network stamping time. You would not pass network here when you
+    want this optimizer to be specific to one or more layers, but not applied to the others
+    by default.
 
 Notes
 -----
