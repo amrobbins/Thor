@@ -15,8 +15,6 @@
 #include "Utilities/TensorOperations/GpuConvolution/ConvolutionKernelRequirement.h"
 #include "Utilities/TensorOperations/GpuConvolution/GpuConvolution.h"
 
-#include <filesystem>
-
 namespace Thor {
 
 class Convolution2d : public TrainableWeightsBiasesLayer {
@@ -229,6 +227,11 @@ class Convolution2d::Builder {
         convolution2d.useBatchNormalization = _useBatchNormalization;
         convolution2d.batchNormExponentialRunningAverageFactor = _batchNormExponentialRunningAverageFactor;
         convolution2d.batchNormEpsilon = _batchNormEpsilon;
+
+        // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
+        if (_layerOptimizer != nullptr)
+            convolution2d.optimizer = _layerOptimizer;
+
         convolution2d.initialized = true;
 
         if (convolution2d.isMultiLayer()) {
@@ -401,6 +404,12 @@ class Convolution2d::Builder {
         return *this;
     }
 
+    virtual Convolution2d::Builder &optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
+        assert(this->_layerOptimizer == nullptr);
+        this->_layerOptimizer = _layerOptimizer;
+        return *this;
+    }
+
     // Adds a BatchNormalization layer before this Convolution2d layer and before the DropOut layer when that is also present
     // exponentialRunningAverageFactor and epsilon will be set to good default values when not specified.
     virtual Convolution2d::Builder &batchNormalization(Optional<double> exponentialRunningAverageFactor = Optional<double>::empty(),
@@ -455,6 +464,7 @@ class Convolution2d::Builder {
     std::shared_ptr<Initializer> _biasInitializer;
     std::shared_ptr<Activation> _activation;
     bool _activationExplicitlyRemoved;
+    std::shared_ptr<Optimizer> _layerOptimizer;
 
     Optional<float> _dropProportion;
 

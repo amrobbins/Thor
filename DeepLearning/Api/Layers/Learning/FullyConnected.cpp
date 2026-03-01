@@ -67,7 +67,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
         .noActivation();
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
         fullyConnectedBuilder.featureInput(currentFeatureInputs[i]);
-    FullyConnected standAloneFullyConnected = fullyConnectedBuilder.build();
+    FullyConnected standAloneFullyConnected = fullyConnectedBuilder.optimizer(optimizer).build();
     this->id = standAloneFullyConnected.getId();
 
     standaloneFCFeatureInputs = standAloneFullyConnected.getFeatureInputs();

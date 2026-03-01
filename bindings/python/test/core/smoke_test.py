@@ -35,6 +35,6 @@ def test_smoke():
         DataType.fp32,
     )
     t = Tensor([2, 50], data_type=DataType.uint8)
-    sgd = thor.optimizers.Sgd(n)
-    adam = Adam(n, epsilon=0.01)
+    sgd = thor.optimizers.Sgd(network=n)
+    adam = Adam(epsilon=0.01, network=n)
     elu = thor.activations.Elu(alpha=0.5)

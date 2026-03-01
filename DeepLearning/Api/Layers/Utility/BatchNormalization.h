@@ -95,7 +95,13 @@ class BatchNormalization::Builder {
         if (_epsilon.isPresent())
             batchNormalization.epsilon = _epsilon.get();
         batchNormalization.network = _network.get();
+
+        // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
+        if (_layerOptimizer != nullptr)
+            batchNormalization.optimizer = _layerOptimizer;
+
         batchNormalization.initialized = true;
+
         for (uint32_t i = 0; i < batchNormalization.featureInputs.size(); ++i) {
             batchNormalization.featureOutputs.push_back(batchNormalization.featureInputs[i].clone());
             batchNormalization.outputTensorFromInputTensor[batchNormalization.featureInputs[i]] = batchNormalization.featureOutputs[i];
@@ -136,11 +142,18 @@ class BatchNormalization::Builder {
         return *this;
     }
 
+    virtual BatchNormalization::Builder &optimizer(std::shared_ptr<Optimizer> _layerOptimizer) {
+        assert(this->_layerOptimizer == nullptr);
+        this->_layerOptimizer = _layerOptimizer;
+        return *this;
+    }
+
    private:
     Optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
     Optional<double> _exponentialRunningAverageFactor;
     Optional<double> _epsilon;
+    std::shared_ptr<Optimizer> _layerOptimizer;
 };
 
 }  // namespace Thor
