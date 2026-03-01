@@ -43,7 +43,7 @@ class CategoricalCrossEntropy : public Loss {
 
         // Softmax and LossShaper are connected during multi-layer flattening
         std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
-            CrossEntropyLossType::CATEGORICAL, Tensor::convertToImplementationDataType(lossDataType), labelType == LabelType::INDEX);
+            CrossEntropyLossType::CATEGORICAL, lossDataType, labelType == LabelType::INDEX);
         return crossEntropy;
     }
 

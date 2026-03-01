@@ -187,8 +187,8 @@ TEST(UtilityApiLayers, DropOutSerializeDeserialize) {
     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedDropOut->getFeatureInput().get());
     ASSERT_EQ(stampedDropOut->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    ASSERT_EQ(stampedDropOut->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-    ASSERT_EQ(stampedDropOut->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+    ASSERT_EQ(stampedDropOut->getFeatureInput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedDropOut->getFeatureOutput().get().getDataType(), dataType);
 
     ASSERT_EQ(stampedDropOut->getDropOutRate(), dropProportion);
 }

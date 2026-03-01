@@ -16,10 +16,10 @@ TEST(UtilityApiLayers, TypeConverterBuilds) {
     Network network("testNetwork");
 
     vector<uint64_t> dimensions = {2, 6, 4, 1};
-    Tensor::DataType inputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
-    Tensor::DataType outputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
+    Tensor::DataType inputDataType = (Tensor::DataType)((int)Tensor::DataType::FP16 + (rand() % 13));
+    Tensor::DataType outputDataType = (Tensor::DataType)((int)Tensor::DataType::FP16 + (rand() % 13));
     while (outputDataType == inputDataType)
-        outputDataType = (Tensor::DataType)((int)Tensor::DataType::PACKED_BOOLEAN + (rand() % 13));
+        outputDataType = (Tensor::DataType)((int)Tensor::DataType::FP16 + (rand() % 13));
 
     Tensor featureInput(inputDataType, dimensions);
     TypeConverter typeConverter = TypeConverter::Builder().network(network).featureInput(featureInput).newDataType(outputDataType).build();
@@ -140,7 +140,7 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
     ThorImplementation::TensorDescriptor descriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {4});
     ThorImplementation::Tensor dummyData(cpuPlacement, descriptor);
     archiveWriter.addArchiveFile("dummy", dummyData);
-     archiveWriter.createArchive("/tmp/", true);
+    archiveWriter.createArchive("/tmp/", true);
     shared_ptr<thor_file::TarReader> archiveReader = make_shared<thor_file::TarReader>("testModel", "/tmp/");
 
     Layer::deserialize(archiveReader, networkInputJ, &newNetwork);
@@ -186,6 +186,6 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedTypeConverter->getFeatureInput().get());
     ASSERT_EQ(stampedTypeConverter->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    ASSERT_EQ(stampedTypeConverter->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(fromDataType));
-    ASSERT_EQ(stampedTypeConverter->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(toDataType));
+    ASSERT_EQ(stampedTypeConverter->getFeatureInput().get().getDataType(), fromDataType);
+    ASSERT_EQ(stampedTypeConverter->getFeatureOutput().get().getDataType(), toDataType);
 }

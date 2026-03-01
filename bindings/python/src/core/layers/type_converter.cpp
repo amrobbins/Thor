@@ -11,7 +11,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Thor::Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_type_converter(nb::module_ &m) {
     nb::class_<TypeConverter, Layer>(m, "TypeConverter")

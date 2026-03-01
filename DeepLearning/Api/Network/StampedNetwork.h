@@ -42,10 +42,6 @@ class StampedNetwork {
     uint64_t getNumTrainableLayers() { return trainableLayersShared.size(); }
     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &getTrainableLayer(uint64_t i) { return trainableLayersShared[i]; }
     std::vector<std::shared_ptr<ThorImplementation::Layer>> getOtherLayers() { return otherLayersShared; }
-    uint64_t getBytesRequired() {
-        // FIXME
-        assert(false);
-    }
 
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(uint64_t apiLayerId) {
         return apiLayerToPhysicalLayerShared[apiLayerId];

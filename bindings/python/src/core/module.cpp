@@ -4,7 +4,7 @@ namespace nb = nanobind;
 
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
-using DataType = Thor::Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 // Forward declarations for per-feature binders
 void bind_version(nb::module_ &thor);
@@ -17,6 +17,7 @@ void bind_layers(nb::module_ &layers);
 void bind_losses(nb::module_ &losses);
 void bind_metrics(nb::module_ &metrics);
 void bind_optimizers(nb::module_ &optimizers);
+void bind_physical(nb::module_ &physical);
 
 NB_MODULE(_thor, thor) {
     thor.doc() = "Thor Python bindings";
@@ -34,9 +35,9 @@ NB_MODULE(_thor, thor) {
                   .value("uint32", DataType::UINT32)
                   .value("int64", DataType::INT64)
                   .value("uint64", DataType::UINT64)
-                  .value("fp8_e4m3", DataType::FP8_E4M3)
-                  .value("fp8_e5m2", DataType::FP8_E5M2)
-                  .value("bf16", DataType::BF16)
+                  // .value("fp8_e4m3", DataType::FP8_E4M3)
+                  // .value("fp8_e5m2", DataType::FP8_E5M2)
+                  // .value("bf16", DataType::BF16)
                   .value("fp16", DataType::FP16)
                   .value("fp32", DataType::FP32)
                   .value("fp64", DataType::FP64);
@@ -62,4 +63,7 @@ NB_MODULE(_thor, thor) {
 
     auto optimizers = thor.def_submodule("optimizers");
     bind_optimizers(optimizers);
+
+    auto physical = thor.def_submodule("physical");
+    bind_physical(physical);
 }

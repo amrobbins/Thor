@@ -14,9 +14,9 @@ using namespace std;
 
 using namespace Thor;
 
-void bind_network_input(nb::module_ &m) {
-    using DataType = Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
+void bind_network_input(nb::module_ &m) {
     auto network_input = nb::class_<NetworkInput, Layer>(m, "NetworkInput");
     network_input.attr("__module__") = "thor.layers";
 

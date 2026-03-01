@@ -225,6 +225,6 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
     // Ensure that they are all connected
     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-    ASSERT_EQ(stampedOutput->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+    ASSERT_EQ(stampedInput->getFeatureOutput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedOutput->getFeatureInput().get().getDataType(), dataType);
 }

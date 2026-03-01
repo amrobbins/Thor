@@ -31,7 +31,6 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-#include <cufile.h>
 #include <omp.h>
 
 namespace ThorImplementation {
@@ -807,11 +806,7 @@ class Tensor : private ReferenceCounted {
     int32_t fileDescriptor = 0;
     bool ownsFileDescriptor = false;
     FileAccess fileAccessRequirement;
-    CUfileHandle_t gpuDirectStorageCuFileHandle = nullptr;
-    off_t gpuDirectStorageFileOffset;
-    size_t gpuDirectStorageSize;
-    off_t gpuDirectStorageBufOffset = 0;
-    ssize_t gpuDirectStorageBytesAccessed;
+    off_t fileOffset;
 
     bool cpuMemPinnedViaRegister = false;
 

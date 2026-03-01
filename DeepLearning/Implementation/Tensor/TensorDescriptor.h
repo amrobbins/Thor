@@ -9,13 +9,17 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include <assert.h>
+#include <cstdint>
 #include <type_traits>
 
 namespace ThorImplementation {
 
 class TensorDescriptor {
    public:
+    // TODO: add FP8_E4M3, FP8_E5M2, BF16
     enum class DataType {
         FP16 = 10,
         FP32 = 11,
@@ -46,17 +50,17 @@ class TensorDescriptor {
 
     // Gives the number of bytes to store an array of numElements of this dataType, this exists because it can give the number of bytes of
     // packed boolean, whereas bytes per element doesn't work since it is not an integer number of bytes per packed boolean.
-    static unsigned long getArraySizeInBytes(long numElements, DataType dataType) {
+    static uint64_t getArraySizeInBytes(uint64_t numElements, DataType dataType) {
         if (dataType == DataType::PACKED_BOOLEAN) {
             return (numElements + 7) / 8;
         } else {
-            return numElements * getElementSizeInBytes(dataType);
+            return numElements * uint32_t(getElementSizeInBytes(dataType));
         }
     }
-    long unsigned getArraySizeInBytes() { return getArraySizeInBytes(totalNumElements, dataType); }
-    long unsigned getArraySizeInBytes(long numElements) { return getArraySizeInBytes(numElements, dataType); }
+    uint64_t getArraySizeInBytes() { return getArraySizeInBytes(totalNumElements, dataType); }
+    uint64_t getArraySizeInBytes(uint64_t numElements) { return getArraySizeInBytes(numElements, dataType); }
 
-    std::string getElementName() { return getElementTypeName(dataType); }
+    std::string getElementName() const { return getElementTypeName(dataType); }
 
     static std::string getElementTypeName(DataType dataType) {
         switch (dataType) {
@@ -92,11 +96,9 @@ class TensorDescriptor {
         return "";
     }
 
-    std::string getValueAsString(void *basePointer, unsigned long elementIndex) {
-        return getValueAsString(basePointer, elementIndex, dataType);
-    }
+    std::string getValueAsString(void *basePointer, uint64_t elementIndex) { return getValueAsString(basePointer, elementIndex, dataType); }
 
-    static std::string getValueAsString(void *basePointer, unsigned long elementIndex, DataType dataType) {
+    static std::string getValueAsString(void *basePointer, uint64_t elementIndex, DataType dataType) {
         switch (dataType) {
             case DataType::INT8:
                 return std::to_string(*((int8_t *)basePointer + elementIndex));
@@ -130,7 +132,7 @@ class TensorDescriptor {
         return "";
     }
 
-    bool isIntegralType() { return isIntegralType(dataType); }
+    bool isIntegralType() const { return isIntegralType(dataType); }
 
     static bool isIntegralType(DataType dataType) {
         switch (dataType) {
@@ -156,11 +158,11 @@ class TensorDescriptor {
         return false;
     }
 
-    bool isBooleanType() { return isBooleanType(dataType); }
+    bool isBooleanType() const { return isBooleanType(dataType); }
 
     static bool isBooleanType(DataType dataType) { return dataType == DataType::BOOLEAN || dataType == DataType::PACKED_BOOLEAN; }
 
-    bool isSignedType() { return isSignedType(dataType); }
+    bool isSignedType() const { return isSignedType(dataType); }
 
     static bool isSignedType(DataType dataType) {
         switch (dataType) {
@@ -188,13 +190,13 @@ class TensorDescriptor {
     }
 
     DataType getDataType() const { return dataType; }
-    std::vector<unsigned long> getDimensions() const { return dimensions; }
-    unsigned int getNumDimensions() const { return dimensions.size(); }
-    unsigned long getTotalNumElements() const { return totalNumElements; }
+    std::vector<uint64_t> getDimensions() const { return dimensions; }
+    uint32_t getNumDimensions() const { return dimensions.size(); }
+    uint64_t getTotalNumElements() const { return totalNumElements; }
 
     std::string toString() const {
         std::string s = std::string("DataType ") + getElementTypeName(dataType) + "\nDimensions [";
-        for (unsigned int i = 0; i < dimensions.size(); ++i) {
+        for (uint32_t i = 0; i < dimensions.size(); ++i) {
             s += std::to_string(dimensions[i]);
             if (i < dimensions.size() - 1)
                 s += " ";
@@ -203,19 +205,19 @@ class TensorDescriptor {
         return s;
     }
 
-    void reshape(std::vector<unsigned long> newDimensions) {
+    void reshape(std::vector<uint64_t> newDimensions) {
         dimensions = newDimensions;
-        unsigned long newTotalNumElements = 1;
-        for (unsigned int i = 0; i < dimensions.size(); ++i)
+        uint64_t newTotalNumElements = 1;
+        for (uint32_t i = 0; i < dimensions.size(); ++i)
             newTotalNumElements *= newDimensions[i];
         assert(newTotalNumElements == totalNumElements);
     }
 
-    unsigned long getFlatIndex(std::vector<unsigned long> element) {
+    uint64_t getFlatIndex(std::vector<uint64_t> element) {
         assert(element.size() == dimensions.size());
-        unsigned long stepSize = 1;
-        unsigned long index = 0;
-        for (int d = dimensions.size() - 1; d >= 0; --d) {
+        uint64_t stepSize = 1;
+        uint64_t index = 0;
+        for (int32_t d = dimensions.size() - 1; d >= 0; --d) {
             assert(element[d] < dimensions[d]);
             index += element[d] * stepSize;
             stepSize *= dimensions[d];
@@ -224,35 +226,35 @@ class TensorDescriptor {
         return index;
     }
 
-    std::vector<unsigned long> getDimensionalIndex(unsigned long flatIndex) {
+    std::vector<uint64_t> getDimensionalIndex(uint64_t flatIndex) {
         assert(flatIndex < totalNumElements);
 
-        std::vector<unsigned long> dimensionIndex;
-        for (unsigned int d = 0; d < dimensions.size(); ++d) {
+        std::vector<uint64_t> dimensionIndex;
+        for (uint32_t d = 0; d < dimensions.size(); ++d) {
             dimensionIndex.push_back(flatIndex / stridePerDimension[d]);
             flatIndex -= dimensionIndex[d] * stridePerDimension[d];
         }
         return dimensionIndex;
     }
 
-    unsigned long getDimensionStride(unsigned int axis) {
+    uint64_t getDimensionStride(uint32_t axis) {
         assert(axis < dimensions.size());
         return stridePerDimension[axis];
     }
 
-    void *getChunkAddress(std::vector<unsigned long> leadingDimensions, void *mem) {
+    void *getChunkAddress(std::vector<uint64_t> leadingDimensions, void *mem) {
         assert(leadingDimensions.size() <= dimensions.size());
-        unsigned long chunkOffset = 0;
-        for (unsigned int i = 0; i < leadingDimensions.size(); ++i) {
+        uint64_t chunkOffset = 0;
+        for (uint32_t i = 0; i < leadingDimensions.size(); ++i) {
             assert(leadingDimensions[i] < dimensions[i]);
             chunkOffset += stridePerDimension[i] * leadingDimensions[i];
         }
         return (uint8_t *)mem + getArraySizeInBytes(chunkOffset);
     }
 
-    void *getElementAddress(std::vector<unsigned long> leadingDimensions, void *mem) { return getChunkAddress(leadingDimensions, mem); }
+    void *getElementAddress(std::vector<uint64_t> leadingDimensions, void *mem) { return getChunkAddress(leadingDimensions, mem); }
 
-    static int getElementSizeInBytes(DataType dataType) {
+    static float getElementSizeInBytes(DataType dataType) {
         switch (dataType) {
             case DataType::BOOLEAN:
             case DataType::INT8:
@@ -272,7 +274,7 @@ class TensorDescriptor {
                 return 8;
             // The PACKED_BOOLEAN case needs to be caught and handled specially
             case DataType::PACKED_BOOLEAN:
-                assert(false);
+                return 0.125f;
             default:
                 assert(false);
         }
@@ -281,25 +283,42 @@ class TensorDescriptor {
 
    private:
     DataType dataType;
-    std::vector<unsigned long> dimensions;
-    unsigned long totalNumElements;
-    std::vector<unsigned long> stridePerDimension;
+    std::vector<uint64_t> dimensions;
+    uint64_t totalNumElements;
+    std::vector<uint64_t> stridePerDimension;
 
     void construct() {
         assert(!dimensions.empty());
 
         totalNumElements = 1;
-        for (unsigned int i = 0; i < dimensions.size(); ++i)
+        for (uint32_t i = 0; i < dimensions.size(); ++i)
             totalNumElements *= dimensions[i];
         assert(totalNumElements > 0);
 
-        for (int i = (int)dimensions.size() - 1; i >= 0; --i)
+        for (int32_t i = (int)dimensions.size() - 1; i >= 0; --i)
             stridePerDimension.push_back(1);
-        for (int i = (int)dimensions.size() - 2; i >= 0; --i)
+        for (int32_t i = (int)dimensions.size() - 2; i >= 0; --i)
             stridePerDimension[i] = stridePerDimension[i + 1] * dimensions[i + 1];
     }
 
-    int getElementSizeInBytes() { return getElementSizeInBytes(dataType); }
+    float getElementSizeInBytes() { return getElementSizeInBytes(dataType); }
 };
+
+NLOHMANN_JSON_SERIALIZE_ENUM(TensorDescriptor::DataType,
+                             {
+                                 {TensorDescriptor::DataType::PACKED_BOOLEAN, "packed_boolean"},
+                                 {TensorDescriptor::DataType::BOOLEAN, "boolean"},
+                                 {TensorDescriptor::DataType::INT8, "int8"},
+                                 {TensorDescriptor::DataType::UINT8, "uint8"},
+                                 {TensorDescriptor::DataType::INT16, "int16"},
+                                 {TensorDescriptor::DataType::UINT16, "uint16"},
+                                 {TensorDescriptor::DataType::INT32, "int32"},
+                                 {TensorDescriptor::DataType::UINT32, "uint32"},
+                                 {TensorDescriptor::DataType::INT64, "int64"},
+                                 {TensorDescriptor::DataType::UINT64, "uint64"},
+                                 {TensorDescriptor::DataType::FP16, "fp16"},
+                                 {TensorDescriptor::DataType::FP32, "fp32"},
+                                 {TensorDescriptor::DataType::FP64, "fp64"},
+                             })
 
 }  // namespace ThorImplementation

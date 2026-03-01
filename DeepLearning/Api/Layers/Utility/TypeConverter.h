@@ -30,8 +30,8 @@ class TypeConverter : public Layer {
         assert(getFeatureOutput().isPresent());
 
         // Implementation has 1 extra dimension due to having the batchSize dimension
-        std::shared_ptr<ThorImplementation::TypeConversion> typeConverter = std::make_shared<ThorImplementation::TypeConversion>(
-            Tensor::convertToImplementationDataType(getFeatureOutput().get().getDataType()));
+        std::shared_ptr<ThorImplementation::TypeConversion> typeConverter =
+            std::make_shared<ThorImplementation::TypeConversion>(getFeatureOutput().get().getDataType());
         return typeConverter;
     }
 
