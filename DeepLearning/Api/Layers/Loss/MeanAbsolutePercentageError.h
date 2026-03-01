@@ -37,7 +37,7 @@ class MeanAbsolutePercentageError : public Loss {
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         std::shared_ptr<ThorImplementation::MeanAbsolutePercentageError> meanAbsolutePercentageError =
-            std::make_shared<ThorImplementation::MeanAbsolutePercentageError>(Tensor::convertToImplementationDataType(lossDataType));
+            std::make_shared<ThorImplementation::MeanAbsolutePercentageError>(lossDataType);
 
         return meanAbsolutePercentageError;
     }

@@ -418,8 +418,8 @@ TEST(UtilityApiLayers, PoolingSerializeDeserialize) {
     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedPooling->getFeatureInput().get());
     ASSERT_EQ(stampedPooling->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    ASSERT_EQ(stampedPooling->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-    ASSERT_EQ(stampedPooling->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+    ASSERT_EQ(stampedPooling->getFeatureInput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedPooling->getFeatureOutput().get().getDataType(), dataType);
 
     ASSERT_EQ(stampedPooling->getWindowHeight(), windowHeight);
     ASSERT_EQ(stampedPooling->getWindowWidth(), windowWidth);

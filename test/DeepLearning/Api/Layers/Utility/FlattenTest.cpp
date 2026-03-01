@@ -205,6 +205,6 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedFlatten->getFeatureInput().get());
     ASSERT_EQ(stampedFlatten->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    ASSERT_EQ(stampedFlatten->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-    ASSERT_EQ(stampedFlatten->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+    ASSERT_EQ(stampedFlatten->getFeatureInput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedFlatten->getFeatureOutput().get().getDataType(), dataType);
 }

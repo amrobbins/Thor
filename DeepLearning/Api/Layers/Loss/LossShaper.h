@@ -72,8 +72,8 @@ class LossShaper : public Layer {
                                                                implementationInputLossDimensions[1],
                                                                reduceBatchDim,
                                                                reduceLossDim,
-                                                               Tensor::convertToImplementationDataType(lossInput.getDataType()),
-                                                               Tensor::convertToImplementationDataType(lossInput.getDataType()),
+                                                               lossInput.getDataType(),
+                                                               lossInput.getDataType(),
                                                                // I just need any stream, so get one that is exists anyway.
                                                                Stream::getNextUploadStream(deviceNum))
                                    .getWorkspaceSizeInBytes();

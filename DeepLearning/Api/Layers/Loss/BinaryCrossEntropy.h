@@ -36,7 +36,7 @@ class BinaryCrossEntropy : public Loss {
 
         // Sigmoid and LossShaper are connected during multi-layer flattening
         std::shared_ptr<ThorImplementation::CrossEntropy> crossEntropy = std::make_shared<ThorImplementation::CrossEntropy>(
-            CrossEntropyLossType::BINARY, Tensor::convertToImplementationDataType(lossDataType));
+            CrossEntropyLossType::BINARY, lossDataType);
         return crossEntropy;
     }
 

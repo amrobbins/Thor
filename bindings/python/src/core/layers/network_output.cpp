@@ -13,7 +13,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_network_output(nb::module_ &m) {
     auto network_output = nb::class_<NetworkOutput, Layer>(m, "NetworkOutput");

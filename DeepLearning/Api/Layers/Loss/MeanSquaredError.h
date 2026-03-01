@@ -37,7 +37,7 @@ class MeanSquaredError : public Loss {
         assert(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
         std::shared_ptr<ThorImplementation::MeanSquaredError> meanSquaredError =
-            std::make_shared<ThorImplementation::MeanSquaredError>(Tensor::convertToImplementationDataType(lossDataType));
+            std::make_shared<ThorImplementation::MeanSquaredError>(lossDataType);
 
         return meanSquaredError;
     }

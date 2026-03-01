@@ -61,7 +61,6 @@ TEST(Activations, TanhBuilds) {
 
     ASSERT_NE(tanh->getId(), clone->getId());
     ASSERT_GT(tanh->getId(), 1u);
-
 }
 
 TEST(Activations, TanhSerializeDeserialize) {
@@ -127,6 +126,10 @@ TEST(Activations, TanhSerializeDeserialize) {
     json networkInputJ = networkInput.serialize(archiveWriter, stream);
     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
 
+    // printf("%s\n", networkInputJ.dump(4).c_str());
+    // printf("%s\n", tanhJ.dump(4).c_str());
+    // printf("%s\n", networkOutputJ.dump(4).c_str());
+
     // Ensure polymorphism is properly wired and that we get the same result when serializing from the base class
     Layer *layer = tanh.get();
     json fromLayerJ = layer->serialize(archiveWriter, stream);
@@ -155,10 +158,6 @@ TEST(Activations, TanhSerializeDeserialize) {
     ASSERT_TRUE(output.at("dimensions").is_array());
     ASSERT_EQ(output.at("dimensions").get<vector<uint64_t>>(), inputDimensions);
     ASSERT_TRUE(output.at("id").is_number_integer());
-
-    //     printf("%s\n", networkInputJ.dump(4).c_str());
-    //     printf("%s\n", tanhJ.dump(4).c_str());
-    //     printf("%s\n", networkOutputJ.dump(4).c_str());
 
     ////////////////////////////
     // Deserialize

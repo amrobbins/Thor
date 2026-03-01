@@ -40,7 +40,7 @@ class NetworkInput : public Layer {
             batchDimensions.push_back(dimensions[i]);
 
         std::shared_ptr<ThorImplementation::NetworkInput> networkInput = std::make_shared<ThorImplementation::NetworkInput>(
-            placement, Tensor::convertToImplementationDataType(dataType), batchDimensions);
+            placement, dataType, batchDimensions);
         networkInput->setName(name);
 
         return networkInput;

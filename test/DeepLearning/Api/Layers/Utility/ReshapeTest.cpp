@@ -187,6 +187,6 @@ TEST(UtilityApiLayers, ReshapeSerializeDeserialize) {
     EXPECT_EQ(stampedInput->getFeatureOutput().get(), stampedReshape->getFeatureInput().get());
     ASSERT_EQ(stampedReshape->getFeatureOutput().get(), stampedOutput->getFeatureInput().get());
 
-    ASSERT_EQ(stampedReshape->getFeatureInput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
-    ASSERT_EQ(stampedReshape->getFeatureOutput().get().getDataType(), Tensor::convertToImplementationDataType(dataType));
+    ASSERT_EQ(stampedReshape->getFeatureInput().get().getDataType(), dataType);
+    ASSERT_EQ(stampedReshape->getFeatureOutput().get().getDataType(), dataType);
 }

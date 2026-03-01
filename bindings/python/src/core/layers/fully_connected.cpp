@@ -17,7 +17,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_fully_connected(nb::module_ &m) {
     auto fully_connected = nb::class_<FullyConnected, TrainableWeightsBiasesLayer>(m, "FullyConnected");

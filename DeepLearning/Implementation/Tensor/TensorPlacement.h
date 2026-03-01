@@ -19,8 +19,8 @@ class TensorPlacement {
     MemDevices getMemDevice() const { return memDevice; }
     int getDeviceNum() const { return deviceNum; }
 
-    bool operator==(const TensorPlacement& rhs) { return memDevice == rhs.memDevice && deviceNum == rhs.deviceNum; }
-    bool operator!=(const TensorPlacement& rhs) { return !((*this) == rhs); }
+    bool operator==(const TensorPlacement& rhs) const { return memDevice == rhs.memDevice && deviceNum == rhs.deviceNum; }
+    bool operator!=(const TensorPlacement& rhs) const { return !((*this) == rhs); }
 
     std::string toString() {
         assert(memDevice == MemDevices::CPU || memDevice == MemDevices::GPU);

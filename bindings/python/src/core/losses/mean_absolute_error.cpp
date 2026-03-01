@@ -11,7 +11,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 using LossShape = Loss::LossShape;
 using LabelType = Loss::LabelType;
 

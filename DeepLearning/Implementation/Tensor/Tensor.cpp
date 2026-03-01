@@ -285,8 +285,7 @@ void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, con
     ownsFileDescriptor = true;
 
     // GpuDirect Storage takes pointers to its parameters:
-    this->gpuDirectStorageFileOffset = fileOffset;
-    this->gpuDirectStorageSize = getArraySizeInBytes();
+    this->fileOffset = fileOffset;
 }
 
 // With existing file descriptor
@@ -307,8 +306,7 @@ void Tensor::attachFile(const std::string &fileName,
     this->fileDescriptor = fileDescriptor;
     ownsFileDescriptor = false;
 
-    this->gpuDirectStorageFileOffset = fileOffset;
-    this->gpuDirectStorageSize = getArraySizeInBytes();
+    this->fileOffset = fileOffset;
 }
 
 void Tensor::detachFile() {
@@ -727,7 +725,7 @@ void Tensor::loadFromFile(Stream stream, Optional<uint32_t> crc) {
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
         Tensor bounceBuffer = clone(cpuPlacement);
         // disk -> cpu
-        PerformReadParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
+        PerformReadParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor);
         performRead(&args);
         // cpu -> gpu
         copyFromAsync(bounceBuffer, stream);
@@ -735,7 +733,7 @@ void Tensor::loadFromFile(Stream stream, Optional<uint32_t> crc) {
         copyDoneEvent.synchronize();
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(
-            new PerformReadParams(getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor));
+            new PerformReadParams(getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor));
         stream.enqueueHostFunction(performRead, std::move(args));
     }
 }
@@ -761,11 +759,11 @@ void Tensor::dumpToFile(Stream stream) {
         Event copyDoneEvent = stream.putEvent(false, true);
         copyDoneEvent.synchronize();
         // cpu -> disk
-        PerformWriteParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor);
+        PerformWriteParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor);
         performWrite(&args);
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(
-            new PerformWriteParams(getMemPtr(), getArraySizeInBytes(), fileName, gpuDirectStorageFileOffset, fileDescriptor));
+            new PerformWriteParams(getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor));
         stream.enqueueHostFunction(performWrite, std::move(args));
     }
 }

@@ -10,7 +10,7 @@ namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
-using DataType = Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_tensor(nb::module_ &thor) {
     auto tensor = nb::class_<Tensor>(thor, "Tensor");

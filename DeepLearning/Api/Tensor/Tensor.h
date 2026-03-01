@@ -16,24 +16,7 @@ class Network;
 
 class Tensor {
    public:
-    enum class DataType {
-        PACKED_BOOLEAN = 7,
-        BOOLEAN,
-        INT8,
-        UINT8,
-        INT16,
-        UINT16,
-        INT32,
-        UINT32,
-        INT64,
-        UINT64,
-        FP8_E4M3,
-        FP8_E5M2,
-        BF16,
-        FP16,
-        FP32,
-        FP64
-    };
+    using DataType = ThorImplementation::TensorDescriptor::DataType;
 
     Tensor() : initialized(false) {}
     Tensor(DataType dataType, const std::vector<uint64_t> &dimensions)
@@ -67,9 +50,7 @@ class Tensor {
         return dimensions;
     }
 
-    std::string getDescriptorString() const {
-        return ThorImplementation::TensorDescriptor(convertToImplementationDataType(dataType), dimensions).toString();
-    }
+    std::string getDescriptorString() const { return ThorImplementation::TensorDescriptor(dataType, dimensions).toString(); }
 
     bool isInitialized() const { return initialized; }
 
@@ -78,40 +59,7 @@ class Tensor {
     bool operator<(const Tensor &other) const { return id < other.id; }
     bool operator>(const Tensor &other) const { return id > other.id; }
 
-    static bool dataTypeValid(DataType dataType) { return dataType >= DataType::PACKED_BOOLEAN && dataType <= DataType::FP64; }
-
-    // FIXME: Can I get rid of API data type, maybe using ThorImplementation::DataType.
-    //        Check and be sure there may be a reason don't make a change and have to back it out.
-    static ThorImplementation::TensorDescriptor::DataType convertToImplementationDataType(DataType apiDataType) {
-        switch (apiDataType) {
-            case DataType::INT8:
-                return ThorImplementation::TensorDescriptor::DataType::INT8;
-            case DataType::UINT8:
-                return ThorImplementation::TensorDescriptor::DataType::UINT8;
-            case DataType::INT16:
-                return ThorImplementation::TensorDescriptor::DataType::INT16;
-            case DataType::UINT16:
-                return ThorImplementation::TensorDescriptor::DataType::UINT16;
-            case DataType::INT32:
-                return ThorImplementation::TensorDescriptor::DataType::INT32;
-            case DataType::UINT32:
-                return ThorImplementation::TensorDescriptor::DataType::UINT32;
-            case DataType::INT64:
-                return ThorImplementation::TensorDescriptor::DataType::INT64;
-            case DataType::UINT64:
-                return ThorImplementation::TensorDescriptor::DataType::UINT64;
-            case DataType::FP16:
-                return ThorImplementation::TensorDescriptor::DataType::FP16;
-            case DataType::FP32:
-                return ThorImplementation::TensorDescriptor::DataType::FP32;
-            case DataType::FP64:
-                return ThorImplementation::TensorDescriptor::DataType::FP64;
-            case DataType::PACKED_BOOLEAN:
-                return ThorImplementation::TensorDescriptor::DataType::PACKED_BOOLEAN;
-            default:
-                assert(false);
-        }
-    }
+    static bool dataTypeValid(DataType dataType) { return dataType >= DataType::FP16 && dataType <= DataType::PACKED_BOOLEAN; }
 
     uint64_t getTotalNumElements() const {
         uint64_t elements = 1;
@@ -120,52 +68,19 @@ class Tensor {
         return elements;
     }
 
-    static double getBytesPerElement(DataType dataType) {
-        switch (dataType) {
-            case DataType::INT8:
-                return 1;
-            case DataType::UINT8:
-                return 1;
-            case DataType::FP8_E4M3:
-                return 1;
-            case DataType::FP8_E5M2:
-                return 1;
-            case DataType::INT16:
-                return 2;
-            case DataType::UINT16:
-                return 2;
-            case DataType::INT32:
-                return 4;
-            case DataType::UINT32:
-                return 4;
-            case DataType::INT64:
-                return 8;
-            case DataType::UINT64:
-                return 8;
-            case DataType::BF16:
-                return 2;
-            case DataType::FP16:
-                return 2;
-            case DataType::FP32:
-                return 4;
-            case DataType::FP64:
-                return 8;
-            case DataType::PACKED_BOOLEAN:
-                return 0.125;
-            default:
-                assert(false);
-        }
+    static float getBytesPerElement(DataType dataType) { return ThorImplementation::TensorDescriptor::getElementSizeInBytes(dataType); }
+
+    float getBytesPerElement() const { return getBytesPerElement(getDataType()); }
+
+    uint64_t getTotalSizeInBytes() const {
+        return ThorImplementation::TensorDescriptor::getArraySizeInBytes(getTotalNumElements(), getDataType());
     }
-
-    double getBytesPerElement() const { return getBytesPerElement(getDataType()); }
-
-    uint64_t getTotalSizeInBytes() const { return (uint64_t)ceil((double)getTotalNumElements() * getBytesPerElement()); }
 
     void reshape(std::vector<uint64_t> newDimensions) {
         uint64_t oldNumElements = getTotalNumElements();
-        dimensions = newDimensions;
         uint64_t newNumElements = getTotalNumElements();
         assert(oldNumElements == newNumElements);
+        dimensions = newDimensions;
     }
 
     nlohmann::json serialize() const;
@@ -187,21 +102,21 @@ class Tensor {
     friend class Network;
 };
 
-NLOHMANN_JSON_SERIALIZE_ENUM(Tensor::DataType,
-                             {
-                                 {Tensor::DataType::PACKED_BOOLEAN, "packed_boolean"},
-                                 {Tensor::DataType::BOOLEAN, "boolean"},
-                                 {Tensor::DataType::INT8, "int8"},
-                                 {Tensor::DataType::UINT8, "uint8"},
-                                 {Tensor::DataType::INT16, "int16"},
-                                 {Tensor::DataType::UINT16, "uint16"},
-                                 {Tensor::DataType::INT32, "int32"},
-                                 {Tensor::DataType::UINT32, "uint32"},
-                                 {Tensor::DataType::INT64, "int64"},
-                                 {Tensor::DataType::UINT64, "uint64"},
-                                 {Tensor::DataType::FP16, "fp16"},
-                                 {Tensor::DataType::FP32, "fp32"},
-                                 {Tensor::DataType::FP64, "fp64"},
-                             })
+// NLOHMANN_JSON_SERIALIZE_ENUM(Tensor::DataType,
+//                              {
+//                                  {Tensor::DataType::PACKED_BOOLEAN, "packed_boolean"},
+//                                  {Tensor::DataType::BOOLEAN, "boolean"},
+//                                  {Tensor::DataType::INT8, "int8"},
+//                                  {Tensor::DataType::UINT8, "uint8"},
+//                                  {Tensor::DataType::INT16, "int16"},
+//                                  {Tensor::DataType::UINT16, "uint16"},
+//                                  {Tensor::DataType::INT32, "int32"},
+//                                  {Tensor::DataType::UINT32, "uint32"},
+//                                  {Tensor::DataType::INT64, "int64"},
+//                                  {Tensor::DataType::UINT64, "uint64"},
+//                                  {Tensor::DataType::FP16, "fp16"},
+//                                  {Tensor::DataType::FP32, "fp32"},
+//                                  {Tensor::DataType::FP64, "fp64"},
+//                              })
 
 }  // namespace Thor

@@ -20,7 +20,7 @@ using namespace std;
 
 using namespace Thor;
 
-using DataType = Thor::Tensor::DataType;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 void bind_convolution_2d(nb::module_ &m) {
     auto convolution_2d = nb::class_<Convolution2d, TrainableWeightsBiasesLayer>(m, "Convolution2d");
