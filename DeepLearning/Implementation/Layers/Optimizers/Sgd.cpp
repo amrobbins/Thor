@@ -23,6 +23,8 @@ Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
 }
 
 void Sgd::compile() {
+    assert(!compiled);
+
     TensorPlacement layerPlacement = trainableLayer->getPlacement();
     assert(layerPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     gpuNum = layerPlacement.getDeviceNum();

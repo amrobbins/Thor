@@ -54,6 +54,36 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual Optional<Tensor> getProjectedBiasesTensor() { return projectedBiases; }
 
+    // Note: the setWeightsAndBiases is not used during optimization, it is there to support loading a trained model.
+    Event setWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
+        Stream stream = streams[0];
+        stream.waitEvent(dataReadyEvent);
+        weights.copyFromAsync(newWeights, stream);
+        Event weightsUpdatedEvent = stream.putEvent();
+        Optional<Event> biasesUpdatedEvent;
+        if (hasBias) {
+            assert(newBiases.isPresent());
+            biases.get().copyFromAsync(newBiases, stream);
+            biasesUpdatedEvent = stream.putEvent();
+        }
+        for (unsigned int i = 0; i < streams.size(); ++i) {
+            streams[i].waitEvent(weightsUpdatedEvent);
+            if (biasesUpdatedEvent.isPresent())
+                streams[i].waitEvent(biasesUpdatedEvent);
+        }
+
+        // This layer instance is finished with the newWeights tensor when the following event triggers
+        return streams[0].putEvent();
+    }
+
+    virtual SharedWeightsPackage getSharedWeightsPackage() {
+        SharedWeightsPackage sharedWeightsPackage;
+        sharedWeightsPackage.weights = weights;
+        sharedWeightsPackage.biases = biases;
+
+        return sharedWeightsPackage;
+    }
+
     virtual void forward(Optional<Tensor> featureInput, bool validationPass) {
         assert(running);
 
@@ -72,6 +102,7 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
             projectedWeightsInitialized = true;
         }
 
+        // Wait for previous gradient update to complete before starting next forward pass
         if (optimizer.isPresent()) {
             Stream gradientUpdateStream = optimizer.get()->getGradientUpdateStream();
             Event gradientUpdateFinished = gradientUpdateStream.putEvent();
@@ -103,36 +134,6 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
         nextLayers[connectionNumber].get()->forward(featureOutputs[connectionNumber], validationPass);
-    }
-
-    // Note: the setWeightsAndBiases is not used during optimization, it is there to support loading a trained model.
-    Event setWeightsAndBiases(Tensor newWeights, Optional<Tensor> newBiases, Event dataReadyEvent) {
-        Stream stream = streams[0];
-        stream.waitEvent(dataReadyEvent);
-        weights.copyFromAsync(newWeights, stream);
-        Event weightsUpdatedEvent = stream.putEvent();
-        Optional<Event> biasesUpdatedEvent;
-        if (hasBias) {
-            assert(newBiases.isPresent());
-            biases.get().copyFromAsync(newBiases, stream);
-            biasesUpdatedEvent = stream.putEvent();
-        }
-        for (unsigned int i = 0; i < streams.size(); ++i) {
-            streams[i].waitEvent(weightsUpdatedEvent);
-            if (biasesUpdatedEvent.isPresent())
-                streams[i].waitEvent(biasesUpdatedEvent);
-        }
-
-        // This layer instance is finished with the newWeights tensor when the following event triggers
-        return streams[0].putEvent();
-    }
-
-    virtual SharedWeightsPackage getSharedWeightsPackage() {
-        SharedWeightsPackage sharedWeightsPackage;
-        sharedWeightsPackage.weights = weights;
-        sharedWeightsPackage.biases = biases;
-
-        return sharedWeightsPackage;
     }
 
     virtual void backward(Optional<Tensor> errorInput) {

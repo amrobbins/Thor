@@ -78,9 +78,9 @@
 
 class ReferenceCounted {
    public:
-    ReferenceCounted() : referenceCount(nullptr), id(nextId.fetch_add(1)) {}
+    ReferenceCounted() : referenceCount(nullptr), id(0) {}
 
-    ReferenceCounted(const ReferenceCounted &other) : referenceCount(nullptr), id(nextId.fetch_add(1)) {
+    ReferenceCounted(const ReferenceCounted &other) : referenceCount(nullptr), id(0) {
         *this = other;  // implemented using operator=
     }
 
@@ -103,6 +103,7 @@ class ReferenceCounted {
                     this->destroy();
             }
             referenceCount = otherReferenceCount;
+            id = other.getReferenceCountedId();
 
             return *this;
         } else {
@@ -114,12 +115,14 @@ class ReferenceCounted {
                     this->destroy();
             }
             referenceCount = nullptr;
+            id = 0;
             return *this;
         }
     }
 
     // Lock 2 ReferenceCounted's without possibility of deadlock
     void lockSelfAndOther(ReferenceCounted &other) {
+        // FIXME: what if the are 1. the same or 2. uninitialized
         if (id < other.id) {
             mtx.lock();
             other.mtx.lock();
@@ -143,6 +146,7 @@ class ReferenceCounted {
 
     void initialize() {
         referenceCount = new std::atomic<uint32_t>(1);
+        id = nextId.fetch_add(1);
 
 #ifdef DEBUG_REF_COUNTS
         objectsCreated.fetch_add(1);
@@ -168,6 +172,7 @@ class ReferenceCounted {
         if (refCountBeforeDecrement == 1) {
             delete referenceCount.load();
             referenceCount = nullptr;
+            id = 0;
 
 #ifdef DEBUG_REF_COUNTS
             objectsDestroyed.fetch_add(1);
@@ -185,7 +190,7 @@ class ReferenceCounted {
 
     std::recursive_mutex mtx;
 
-    const long id;
+    long id;
     static std::atomic<long> nextId;
 
 #ifdef DEBUG_REF_COUNTS
