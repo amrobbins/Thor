@@ -47,23 +47,21 @@ class Tensor : private ReferenceCounted {
    public:
     Tensor();
     Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes = 0);
-    Tensor(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory);
     Tensor(const Tensor &tensorInstance);
     Tensor &operator=(const Tensor &tensorInstance);
     virtual ~Tensor();
 
     bool isInitialized() { return !uninitialized(); }
-    bool isUsingExternallyManagedMemory();
 
     Tensor clone() const { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
-    Tensor clone(TensorPlacement newPlacement) { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
-    Tensor clone(TensorDescriptor::DataType newDataType) {
+    Tensor clone(TensorPlacement newPlacement) const { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
+    Tensor clone(TensorDescriptor::DataType newDataType) const {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
-    Tensor clone(TensorPlacement newPlacement, TensorDescriptor::DataType newDataType) {
+    Tensor clone(TensorPlacement newPlacement, TensorDescriptor::DataType newDataType) const {
         return uninitialized() ? Tensor() : Tensor(newPlacement, TensorDescriptor(newDataType, descriptor.getDimensions()));
     }
-    Tensor clone(std::vector<uint64_t> newDimensions) {
+    Tensor clone(std::vector<uint64_t> newDimensions) const {
         return uninitialized() ? Tensor() : Tensor(placement, TensorDescriptor(getDataType(), newDimensions));
     }
 
@@ -71,14 +69,14 @@ class Tensor : private ReferenceCounted {
     template <typename ElementDataType = void>
     ElementDataType *getMemPtr();
     template <typename ElementDataType>
-    ElementDataType getElement(std::vector<unsigned long> dimensionIndex);
+    ElementDataType getElement(std::vector<uint64_t> dimensionIndex);
     template <typename ElementDataType>
-    void setElement(std::vector<unsigned long> dimensionIndex, const ElementDataType &value);
+    void setElement(std::vector<uint64_t> dimensionIndex, const ElementDataType &value);
     template <typename ElementDataType = void>
-    ElementDataType *getElementPointer(std::vector<unsigned long> dimensionIndex);
+    ElementDataType *getElementPointer(std::vector<uint64_t> dimensionIndex);
     TensorDescriptor getDescriptor() const;
 
-    unsigned long getTensorId() { return instanceId; }
+    uint64_t getTensorId() { return instanceId; }
 
     void copyFromAsync(Tensor source, Stream stream);
 
@@ -109,14 +107,12 @@ class Tensor : private ReferenceCounted {
     // however the memory is set per byte like other versions of memset. To make this clear, value is int8_t.
     void memset(int8_t value, uint64_t numElements = 0);
     void memsetAsync(Stream stream, int8_t value, uint64_t numElements = 0);
-    void clear();
-    void clearAsync(Stream stream);
 
     // Convert this tensor to refer to an uninitialized tensor
     // If this is the only reference to this tensor, its resources (memory) will be freed
     // Freeing of resources happens immediately, so you must ensure that there are no pending
     // accesses of the tensor's memory still enqueued on a stream, when the reference is dropped
-    // FIXME: I should handle this internally by keeping track of pending operations and host side synchronizing
+    // FIXME, TODO: I should handle this internally by keeping track of pending operations and host side synchronizing
     //        with them before destroying the tensor. Consider if a tensor is allocated in a function, used to copy
     //        data onto the GPU and then the function returns. There could be a good amount of work already enqueued
     //        on the stream so it will be a while before the tensor memory is accessed, however the tensor is freed
@@ -144,14 +140,14 @@ class Tensor : private ReferenceCounted {
     void fillRandom(double minValue, double maxValue, Stream stream);
     void fillZero(Stream dataStream);
 
-    void reshape(std::vector<unsigned long> dimensions);
-    void resize(std::vector<unsigned long> dimensions);
-    void concatenateFrom(std::vector<Tensor> sources);
-    void splitInto(std::vector<Tensor> destinations);
+    void reshape(std::vector<uint64_t> dimensions);
+    void resize(std::vector<uint64_t> dimensions);
+    // void concatenateFrom(std::vector<Tensor> sources);
+    // void splitInto(std::vector<Tensor> destinations);
 
     void fill(const double value, Stream stream);
 
-    // The scalar is casted to the type of the argument tensor, same behavior for the other scalar operations:
+    // The scalar is cast to the type of the argument tensor, same behavior for the other scalar operations:
     // These functions perform the operation on the source tensor and write into this tensor
     // Both tensors must be on the same device.
 
@@ -759,33 +755,28 @@ class Tensor : private ReferenceCounted {
     using ReferenceCounted::getReferenceCount;
 
     // Convenience functions to pass information from the descriptor
-    TensorDescriptor::DataType getDataType() {
+    TensorDescriptor::DataType getDataType() const {
         assert(!uninitialized());
         return descriptor.getDataType();
     }
-    std::vector<unsigned long> getDimensions() {
+    std::vector<uint64_t> getDimensions() const {
         assert(!uninitialized());
         return descriptor.getDimensions();
     }
-    unsigned int getNumDimensions() {
+    uint32_t getNumDimensions() const {
         assert(!uninitialized());
         return descriptor.getNumDimensions();
     }
-    unsigned long getTotalNumElements() {
+    uint64_t getTotalNumElements() const {
         assert(!uninitialized());
         return descriptor.getTotalNumElements();
     }
-    long unsigned getArraySizeInBytes() {
+    uint64_t getArraySizeInBytes() const {
         assert(!uninitialized());
         return descriptor.getArraySizeInBytes();
     }
 
     std::string dimensionsToString();
-
-    virtual bool isKerasCompatible(std::string &explanation) {
-        explanation.clear();
-        return true;
-    }
 
     static uint32_t getThreadIdHash(uint32_t seed = 0);
     static uint64_t getThreadIdHash64(uint64_t seed = 0);
@@ -796,11 +787,9 @@ class Tensor : private ReferenceCounted {
     TensorPlacement placement;
     void *mem = nullptr;
 
-    unsigned long instanceId;
+    uint64_t instanceId;
 
     TensorDescriptor descriptor;
-
-    bool usingExternallyManagedMemory = false;
 
     std::string fileName;
     int32_t fileDescriptor = 0;
@@ -808,13 +797,13 @@ class Tensor : private ReferenceCounted {
     FileAccess fileAccessRequirement;
     off_t fileOffset;
 
-    bool cpuMemPinnedViaRegister = false;
+    bool cpuMemPinnedViaCudaHostRegister = false;
 
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden = false;
     TensorDescriptor overriddenDescriptor;
 
-    static std::atomic<unsigned long> nextInstanceId;
+    static std::atomic<uint64_t> nextInstanceId;
 
     void allocateMemory(uint32_t alignmentBytes = 0);
 
@@ -827,25 +816,9 @@ class Tensor : private ReferenceCounted {
     void overrideDescriptor(TensorDescriptor overrideDescriptor);
     void clearDescriptorOverride();
 
-    void construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes, void *externallyManagedMemory);
+    void construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes);
     void copyObject(const Tensor &other);
     void destroy();
-};
-
-class CuFileInitializer {
-   public:
-    CuFileInitializer() {
-        // // First ensure cuda context has been created, via effective NOP
-        // cudaError_t cudaStatus;
-        // cudaStatus = cudaFree(nullptr);
-        // if (cudaStatus == cudaSuccess) {
-        //     // Call cuFileDriverOpen() and check for errors
-        //     CUfileError_t cuFileError = cuFileDriverOpen();
-        //     assert(cuFileError.err == CU_FILE_SUCCESS);
-        // }
-    }
-
-    // ~CuFileInitializer() { cuFileDriverClose(); }
 };
 
 }  // namespace ThorImplementation

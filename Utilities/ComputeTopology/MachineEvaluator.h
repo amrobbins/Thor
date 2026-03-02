@@ -25,7 +25,7 @@ struct GpuConnectionRanking {
     int peerToPeerSpeedRanking;  // Lower postive number is better, 0 is best. This connection speed is only valid if
                                  // isPeerToPeerSupported.
 
-    inline bool operator<(const GpuConnectionRanking& rhs) { return peerToPeerSpeedRanking < rhs.peerToPeerSpeedRanking; }
+    inline bool operator<(const GpuConnectionRanking& rhs) const { return peerToPeerSpeedRanking < rhs.peerToPeerSpeedRanking; }
 };
 
 // Singleton Object: MachineEvaluator
@@ -56,8 +56,6 @@ class MachineEvaluator {
     int getCurrentGpuNum();
 
     std::vector<GpuConnectionRanking> getConnectionSpeedRankings(int sourceGpuNum);
-    // Returns -1 if not known:
-    int getConnectionSpeedRanking(int sourceGpuNum, int destGpuNum);
     // Returns false if not known:
     bool isPeerToPeerAvailable(int sourceGpuNum, int destGpuNum);
     std::string getGpuType(int gpuNum);
@@ -78,38 +76,7 @@ class MachineEvaluator {
     // returns the previously active device
     static int swapActiveDevice(int newGpuNum);
 
-    // There are 5 mem copy streams created per gpu, to make optimal use of the hardware:
-    //
-    //                    [    gpu 0      ]
-    //                           |
-    //                        fromLower
-    //                           |
-    //                           v
-    // [cpu] --fromCpu--> [ gpu 1 (Local) ]
-    // [cpu] <--toCpu---- [               ]
-    //                           ^
-    //                           |
-    //                        fromHigher
-    //                           |
-    //                    [    gpu 2      ]
-    //
-    // Also, CPU has (only) a local copy stream that is (arbitrarily) associated with gpu 0, since all streams are
-    // assocaited with a gpu.
-    // FIXME: this is going to require more thought, currently one model instance will have to wait for the processing
-    // of another one unneccesarily.
-    //        I think that I will need one set of these per model instance.
-    //        Also, I think that I should have just a toOtherGpu and fromOtherGpu, I think that is a more accurate representation of the
-    //        hardware.
-    Stream getCopyStreamFromLower(int gpuNum);
-    Stream getCopyStreamFromHigher(int gpuNum);
-    Stream getCopyStreamFromCpu(int gpuNum);
-    Stream getCopyStreamToCpu(int gpuNum);
-    Stream getCopyStreamLocal(int gpuNum);
-
     cublasLtHandle_t getCublasLtHandle(int gpuNum);
-
-    // FIXME: add kernel evaluation per gpu type. spread evaluations across all devices of a type. evaluate once per type and lock/block if
-    // still evaluating when the kernel type is requested.
 
     static const int NONE;
     static const int CPU_DEVICE_NUM;
@@ -117,18 +84,11 @@ class MachineEvaluator {
    private:
     std::map<int, std::vector<GpuConnectionRanking>> connectionRankings;
     std::map<int, std::map<int, bool>> peerToPeerEnabled;
-    std::map<int, std::map<int, int>> peerConnectionRankings;
     std::vector<std::string> gpuType;
     std::vector<int> gpuPciBusId;  // index is gpuNum, value is gpuPciBusId
     std::vector<int> orderedGpus;  // index is order (adjacent gpus are adjacent in this vector), value is gpuNum
     std::map<int, int> gpuNumFromBusId;
     std::vector<cudaDeviceProp> deviceProps;
-
-    std::map<int, Stream> copyStreamFromLower;
-    std::map<int, Stream> copyStreamFromHigher;
-    std::map<int, Stream> copyStreamFromCpu;
-    std::map<int, Stream> copyStreamToCpu;
-    std::map<int, Stream> copyStreamLocal;
 
     unsigned int numGpus;
 
@@ -137,7 +97,6 @@ class MachineEvaluator {
     void evaluateConnectionSpeeds();
     void getGpuTypes();
     void getGpuPciBusIds();
-    void createCopyStreams();
 
     std::vector<cublasLtHandle_t> cublasLtHandlePerDevice;
 };

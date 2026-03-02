@@ -3076,7 +3076,7 @@ void Tensor::outerProduct(Tensor A, Tensor B, Stream stream) {
     A.reshape({numElements, 1});
     B.reshape({1, numElements});
     reshape({numElements, numElements});
-    // The result of this is really defined as an N x N matrix, since the tensor was the right size it will be interpretted
+    // The result of this is really defined as an N x N matrix, since the tensor was the right size it will be interpreted
     // as an N x N matrix in all cases, since it is receiving the outerProduct.
     multiply(A, B, stream);
 }

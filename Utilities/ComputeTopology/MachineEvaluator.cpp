@@ -18,7 +18,6 @@ MachineEvaluator::MachineEvaluator() {
     getGpuTypes();
     getGpuPciBusIds();
     evaluateConnectionSpeeds();
-    createCopyStreams();
 
     for (unsigned int gpuNum = 0; gpuNum < numGpus; ++gpuNum) {
         ScopedGpu scopedGpu(gpuNum);
@@ -52,15 +51,6 @@ vector<GpuConnectionRanking> MachineEvaluator::getConnectionSpeedRankings(int so
     if (connectionRankings.find(sourceGpuNum) == connectionRankings.end())
         return vector<GpuConnectionRanking>();
     return connectionRankings[sourceGpuNum];
-}
-
-int MachineEvaluator::getConnectionSpeedRanking(int sourceGpuNum, int destGpuNum) {
-    if (peerConnectionRankings.find(sourceGpuNum) == peerConnectionRankings.end())
-        return -1;
-    if (peerConnectionRankings[sourceGpuNum].find(destGpuNum) == peerConnectionRankings[sourceGpuNum].end())
-        return -1;
-
-    return peerConnectionRankings[sourceGpuNum][destGpuNum];
 }
 
 bool MachineEvaluator::isPeerToPeerAvailable(int sourceGpuNum, int destGpuNum) {
@@ -207,28 +197,6 @@ int MachineEvaluator::swapActiveDevice(int newGpuNum) {
     return previousGpuNum;
 }
 
-void MachineEvaluator::createCopyStreams() {
-    for (unsigned int gpuNum = 0; gpuNum < numGpus; ++gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-
-        copyStreamFromLower.emplace(gpuNum, gpuNum);
-        copyStreamFromHigher.emplace(gpuNum, gpuNum);
-        copyStreamFromCpu.emplace(gpuNum, gpuNum);
-        copyStreamToCpu.emplace(gpuNum, gpuNum);
-        copyStreamLocal.emplace(gpuNum, gpuNum);
-
-        copyStreamFromLower[gpuNum].informIsStatic();
-        copyStreamFromHigher[gpuNum].informIsStatic();
-        copyStreamFromCpu[gpuNum].informIsStatic();
-        copyStreamToCpu[gpuNum].informIsStatic();
-        copyStreamLocal[gpuNum].informIsStatic();
-    }
-
-    // CPU local stream. (Associated with GPU 0, since it needs to be associated with a GPU)
-    ScopedGpu scopedGpu(0);
-    copyStreamLocal.emplace(CPU_DEVICE_NUM, 0);
-}
-
 unsigned int MachineEvaluator::getNumMultiProcessors(int gpuNum) {
     assert((unsigned int)gpuNum < numGpus);
 
@@ -236,36 +204,6 @@ unsigned int MachineEvaluator::getNumMultiProcessors(int gpuNum) {
 }
 
 unsigned int MachineEvaluator::getNumMultiProcessors() { return getNumMultiProcessors(getCurrentGpuNum()); }
-
-Stream MachineEvaluator::getCopyStreamFromLower(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
-
-    return copyStreamFromLower[gpuNum];
-}
-
-Stream MachineEvaluator::getCopyStreamFromHigher(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
-
-    return copyStreamFromHigher[gpuNum];
-}
-
-Stream MachineEvaluator::getCopyStreamFromCpu(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
-
-    return copyStreamFromCpu[gpuNum];
-}
-
-Stream MachineEvaluator::getCopyStreamToCpu(int gpuNum) {
-    assert((unsigned int)gpuNum < numGpus);
-
-    return copyStreamToCpu[gpuNum];
-}
-
-Stream MachineEvaluator::getCopyStreamLocal(int gpuNum) {
-    assert(gpuNum < (int)numGpus);
-
-    return copyStreamLocal[gpuNum];
-}
 
 unsigned long MachineEvaluator::getTotalGlobalMemBytes(int gpuNum) {
     assert(gpuNum < (int)deviceProps.size());

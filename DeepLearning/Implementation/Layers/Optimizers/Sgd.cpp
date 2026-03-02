@@ -46,11 +46,11 @@ void Sgd::compile() {
 
     if (momentum > 0.0f) {
         weightsUpdate = weightsGradient.clone();
-        weightsUpdate.clearAsync(gradientUpdateStream);
+        weightsUpdate.memsetAsync(gradientUpdateStream, 0);
         if (biases.isPresent()) {
             assert(biasesGradient.isPresent());
             biasesUpdate = biasesGradient.get().clone();
-            biasesUpdate.get().clearAsync(gradientUpdateStream);
+            biasesUpdate.get().memsetAsync(gradientUpdateStream, 0);
         }
 
         if (useNesterovMomentum) {

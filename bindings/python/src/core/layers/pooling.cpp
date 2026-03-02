@@ -19,7 +19,6 @@ void bind_pooling(nb::module_ &layers) {
     pooling.attr("__module__") = "thor.layers";
 
     auto pooling_type = nb::enum_<Pooling::Type>(pooling, "Type").value("average", Pooling::Type::AVERAGE).value("max", Pooling::Type::MAX);
-    pooling_type.attr("__module__") = "thor.layers";
     pooling_type.attr("__qualname__") = "Pooling.Type";
     pooling.attr("Type") = pooling_type;
 

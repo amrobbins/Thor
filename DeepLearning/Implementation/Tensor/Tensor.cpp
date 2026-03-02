@@ -123,11 +123,7 @@ uint64_t Tensor::getThreadIdHash64(uint64_t seed) {
 Tensor::Tensor() : ReferenceCounted() {}
 
 Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes) {
-    construct(placement, descriptor, alignmentBytes, nullptr);
-}
-
-Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor, void *externallyManagedMemory) {
-    construct(placement, descriptor, 0, externallyManagedMemory);
+    construct(placement, descriptor, alignmentBytes);
 }
 
 Tensor::Tensor(const Tensor &tensorInstance) {
@@ -161,7 +157,7 @@ bool Tensor::operator<(const Tensor &other) const {
     return instanceId < other.instanceId;
 }
 
-void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes, void *externallyManagedMemory) {
+void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes) {
     ReferenceCounted::initialize();
 
     assert(placement.getMemDevice() == TensorPlacement::MemDevices::CPU || placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -175,18 +171,9 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, u
     this->descriptor = descriptor;
     descriptorOverridden = false;
 
-    if (externallyManagedMemory == nullptr)
-        usingExternallyManagedMemory = false;
-    else
-        usingExternallyManagedMemory = true;
-
     instanceId = nextInstanceId.fetch_add(1);
 
-    if (usingExternallyManagedMemory) {
-        mem = externallyManagedMemory;
-    } else {
-        allocateMemory(alignmentBytes);
-    }
+    allocateMemory(alignmentBytes);
 }
 
 static inline bool isPow2(std::size_t x) { return x && ((x & (x - 1)) == 0); }
@@ -226,7 +213,7 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
                 throw std::runtime_error(std::string("cudaHostRegister failed: ") + cudaGetErrorString(cudaStatus));
             }
             mem = p;
-            cpuMemPinnedViaRegister = true;
+            cpuMemPinnedViaCudaHostRegister = true;
         }
     } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         ScopedGpu scopedGpu(placement.getDeviceNum());
@@ -330,19 +317,17 @@ void Tensor::copyObject(const Tensor &other) {
     descriptor = other.descriptor;
     descriptorOverridden = other.descriptorOverridden;
     overriddenDescriptor = other.overriddenDescriptor;
-    cpuMemPinnedViaRegister = other.cpuMemPinnedViaRegister;
+    cpuMemPinnedViaCudaHostRegister = other.cpuMemPinnedViaCudaHostRegister;
 }
 
 void Tensor::destroy() {
     detachFile();  // detachFile is a NOP when there is no attached file
 
-    if (usingExternallyManagedMemory) {
-        // NOP
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        if (cpuMemPinnedViaRegister) {
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        if (cpuMemPinnedViaCudaHostRegister) {
             cudaHostUnregister(mem);
             free(mem);
-            cpuMemPinnedViaRegister = false;
+            cpuMemPinnedViaCudaHostRegister = false;
             mem = nullptr;
         } else {
             cudaError_t cudaStatus = cudaFreeHost(mem);
@@ -503,16 +488,12 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
     return (ElementDataType *)getDescriptor().getChunkAddress(dimensionIndex, mem);
 }
 
-bool Tensor::isUsingExternallyManagedMemory() { return usingExternallyManagedMemory; }
-
 // Use same memory, but change dimension sizes, must be exactly the same number of elements.
 void Tensor::reshape(vector<unsigned long> dimensions) { descriptor.reshape(dimensions); }
 
 // Change the dimensions of the tensor, possibly changing the amount of memory used.
 // Frees the old memory and uses a new, uninitialized block of memory.
 void Tensor::resize(vector<unsigned long> dimensions) {
-    assert(!usingExternallyManagedMemory);
-
     descriptor = TensorDescriptor(descriptor.getDataType(), dimensions);
     destroy();
     allocateMemory();
@@ -987,11 +968,11 @@ Tensor Tensor::identityMatrix(uint32_t N, TensorPlacement placement, TensorDescr
     Tensor tensor(placement, TensorDescriptor(dataType, {N, N}));
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        tensor.clearAsync(stream);
+        tensor.memsetAsync(stream, 0);
         std::unique_ptr<HostFunctionArgsBase> args(new IdentityMatrixArgs(tensor));
         stream.enqueueHostFunction(fillCpuIdentityMatrixOnes, std::move(args));
     } else {
-        tensor.clearAsync(stream);
+        tensor.memsetAsync(stream, 0);
         tensor.fillGpuIdentityMatrixOnes(stream);
     }
 
@@ -1055,10 +1036,6 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         stream.enqueueHostFunction(callMemsetOnTensor, std::move(args));
     }
 }
-
-void Tensor::clear() { this->memset(0); }
-
-void Tensor::clearAsync(Stream stream) { this->memsetAsync(stream, 0); }
 
 string Tensor::dimensionsToString() {
     string s = "[";

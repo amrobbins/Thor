@@ -75,7 +75,7 @@ dimensions : list[int]
         [](long num_elements, DataType dt) {
             if (num_elements < 0)
                 throw nb::value_error("num_elements must be >= 0");
-            return (uint64_t)TensorDescriptor::getArraySizeInBytes(num_elements, dt);
+            return TensorDescriptor::getArraySizeInBytes(num_elements, dt);
         },
         "num_elements"_a,
         "data_type"_a,
@@ -85,13 +85,13 @@ Return the number of bytes required to store num_elements of data_type.
 Note: packed_boolean is handled correctly.
 )nbdoc");
 
-    tensor_descriptor.def("get_array_size_in_bytes", [](TensorDescriptor &self) { return (uint64_t)self.getArraySizeInBytes(); });
-
-    tensor_descriptor.def("get_element_name", &TensorDescriptor::getElementName);
-
-    tensor_descriptor.def_static("element_type_name", &TensorDescriptor::getElementTypeName, "data_type"_a);
     tensor_descriptor.def_static(
         "element_size_in_bytes", [](DataType dt) { return TensorDescriptor::getElementSizeInBytes(dt); }, "data_type"_a);
+    tensor_descriptor.def("get_array_size_in_bytes", [](TensorDescriptor &self) { return self.getArraySizeInBytes(); });
+
+    tensor_descriptor.def("get_element_type_name",
+                          [](const TensorDescriptor &self) { return TensorDescriptor::getElementTypeName(self.getDataType()); });
+    tensor_descriptor.def_static("element_type_name", [](DataType dt) { return TensorDescriptor::getElementTypeName(dt); }, "data_type"_a);
 
     tensor_descriptor.def("is_integral_type", [](const TensorDescriptor &self) { return self.isIntegralType(); });
     tensor_descriptor.def_static("is_integral_data_type", [](DataType dt) { return TensorDescriptor::isIntegralType(dt); }, "data_type"_a);
@@ -102,7 +102,7 @@ Note: packed_boolean is handled correctly.
     tensor_descriptor.def("is_signed_type", [](const TensorDescriptor &self) { return self.isSignedType(); });
     tensor_descriptor.def_static("is_signed_data_type", [](DataType dt) { return TensorDescriptor::isSignedType(dt); }, "data_type"_a);
 
-    // reshape / indexing helpers (safe)
+    // reshape / indexing helpers
     tensor_descriptor.def(
         "reshape",
         [](TensorDescriptor &self, const vector<uint64_t> &new_dims) {
@@ -113,17 +113,15 @@ Note: packed_boolean is handled correctly.
         "new_dimensions"_a);
 
     tensor_descriptor.def(
-        "flat_index",
-        [](TensorDescriptor &self, const vector<uint64_t> &element) { return (uint64_t)self.getFlatIndex(element); },
-        "element"_a);
+        "flat_index", [](TensorDescriptor &self, const vector<uint64_t> &element) { return self.getFlatIndex(element); }, "element"_a);
 
     tensor_descriptor.def(
         "dimensional_index",
-        [](TensorDescriptor &self, uint64_t flat_index) { return self.getDimensionalIndex((unsigned long)flat_index); },
+        [](TensorDescriptor &self, uint64_t flat_index) { return self.getDimensionalIndex(flat_index); },
         "flat_index"_a);
 
     tensor_descriptor.def(
-        "dimension_stride", [](TensorDescriptor &self, uint32_t axis) { return (uint64_t)self.getDimensionStride(axis); }, "axis"_a);
+        "dimension_stride", [](TensorDescriptor &self, uint32_t axis) { return self.getDimensionStride(axis); }, "axis"_a);
 
     // Physical Tensor
     auto physical_tensor = nb::class_<PhysicalTensor>(physical, "PhysicalTensor");
@@ -153,20 +151,19 @@ Note: packed_boolean is handled correctly.
     physical_tensor.def("__copy__", [](const PhysicalTensor &self) { return PhysicalTensor(self); });
     physical_tensor.def("__deepcopy__", [](const PhysicalTensor &self, nb::handle /*memo*/) { return PhysicalTensor(self); }, "memo"_a);
 
-    // Optional: repr (minimal)
     physical_tensor.def("__repr__", [](const PhysicalTensor & /*self*/) { return string("<thor.physical.PhysicalTensor>"); });
 
-    // TODO (once available): expose safe introspection
-    // t.def("get_descriptor", &PhysicalTensor::getDescriptor);
-    // t.def("get_placement", &PhysicalTensor::getPlacement);
-    // t.def("get_bytes", &PhysicalTensor::getSizeInBytes);
+    physical_tensor.def("get_descriptor", &PhysicalTensor::getDescriptor);
+    physical_tensor.def("get_placement", &PhysicalTensor::getPlacement);
+    physical_tensor.def("get_size_in_bytes", &PhysicalTensor::getArraySizeInBytes);
 
-    physical_tensor.attr("Placement") = placement;
-    placement.attr("__qualname__") = "PhysicalTensor.Placement";
-
-    physical_tensor.attr("DeviceType") = device_type;
-    device_type.attr("__qualname__") = "PhysicalTensor.DeviceType";
+    // physical_tensor.attr("Placement") = placement;
+    // placement.attr("__qualname__") = "PhysicalTensor.Placement";
+    //
+    // physical_tensor.attr("DeviceType") = device_type;
+    // device_type.attr("__qualname__") = "PhysicalTensor.DeviceType";
 
     physical_tensor.attr("Descriptor") = tensor_descriptor;
     tensor_descriptor.attr("__qualname__") = "PhysicalTensor.Descriptor";
+    nb::delattr(physical, "Descriptor");
 }
