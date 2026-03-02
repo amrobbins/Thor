@@ -24,7 +24,6 @@ void bind_network(nb::module_ &m) {
                                         .value("duplicate_named_network_input", Network::StatusCode::DUPLICATE_NAMED_NETWORK_INPUT)
                                         .value("duplicate_named_network_output", Network::StatusCode::DUPLICATE_NAMED_NETWORK_OUTPUT)
                                         .value("deadlock_cycle", Network::StatusCode::DEADLOCK_CYCLE);
-    network_status_code_type.attr("__module__") = "thor";
     network_status_code_type.attr("__qualname__") = "Network.StatusCode";
     network.attr("StatusCode") = network_status_code_type;
 

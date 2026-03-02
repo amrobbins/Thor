@@ -21,7 +21,7 @@ void bind_losses(nb::module_ &losses) {
     auto label_type =
         nb::enum_<Loss::LabelType>(losses, "LabelType").value("index", Loss::LabelType::INDEX).value("one_hot", Loss::LabelType::ONE_HOT);
     label_type.attr("__module__") = "thor.losses";
-    label_type.attr("__qualname__") = "Loss.LabelType";
+    // label_type.attr("__qualname__") = "Loss.LabelType";
     loss.attr("LabelType") = label_type;
 
     auto loss_shape = nb::enum_<Loss::LossShape>(losses, "LossShape")
@@ -30,7 +30,7 @@ void bind_losses(nb::module_ &losses) {
                           .value("elementwise", Loss::LossShape::ELEMENTWISE)
                           .value("raw", Loss::LossShape::RAW);
     loss_shape.attr("__module__") = "thor.losses";
-    loss_shape.attr("__qualname__") = "Loss.LossShape";
+    // loss_shape.attr("__qualname__") = "Loss.LossShape";
     loss.attr("LossShape") = loss_shape;
 
     bind_binary_cross_entropy(losses);

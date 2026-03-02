@@ -181,7 +181,7 @@ class Stream : private ReferenceCounted {
     // so just don't destroy the cuDNN handle of a static string.
     void informIsStatic() { isStatic = true; }
 
-    uint64_t getId() { return getReferenceCountedId(); }
+    uint64_t getId() const { return getReferenceCountedId(); }
 
     // To allow for parallelization while limiting the amount of streams created, gradient update operations all share
     // a fixed size pool of gradientUpdateStreams

@@ -5117,7 +5117,7 @@ TEST(Tensor, ClearCpu) {
         Tensor t_h(cpuPlacement, descriptor);
         // First set all elements to a value representing their prior state
         t_h.memset(12);
-        t_h.clear();
+        t_h.memset(0);
 
         int8_t *tMem_h = (int8_t *)t_h.getMemPtr();
         uint64_t totalNumFilledBytes = t_h.getArraySizeInBytes();
@@ -5179,7 +5179,7 @@ TEST(Tensor, ClearAsyncCpu) {
         Tensor t_h(cpuPlacement, descriptor);
         // First set all elements to a value representing their prior state
         t_h.memset(12);
-        t_h.clearAsync(stream);
+        t_h.memsetAsync(stream, 0);
         stream.synchronize();
 
         int8_t *tMem_h = (int8_t *)t_h.getMemPtr();
@@ -5314,7 +5314,7 @@ TEST(Tensor, ClearAsyncGpu) {
         // First set all elements to a value representing their prior state
         // Then set the desired number of elements, then need to check all elements
         t_d.memsetAsync(stream, 9);
-        t_d.clearAsync(stream);
+        t_d.memsetAsync(stream, 0);
         t_h.copyFromAsync(t_d, stream);
         stream.synchronize();
 

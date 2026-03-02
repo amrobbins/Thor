@@ -21,7 +21,7 @@ class Event : private ReferenceCounted {
    public:
     Event();
 
-    explicit Event(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne = false);
+    explicit Event(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne = false);
     Event(const Event &event);
 
     Event &operator=(const Event &other);
@@ -34,19 +34,19 @@ class Event : private ReferenceCounted {
 
     cudaEvent_t getEvent();
 
-    int getGpuNum() const;
+    int32_t getGpuNum() const;
 
     void synchronize();
 
     float synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent);
 
-    long getReferenceCountedId();
+    uint64_t getId() const;
 
    private:
-    int gpuNum;
+    int32_t gpuNum;
     cudaEvent_t cudaEvent;
 
-    void construct(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne);
+    void construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne);
 
     void copyFrom(const Event &other);
 

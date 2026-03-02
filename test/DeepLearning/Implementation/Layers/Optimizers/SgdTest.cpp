@@ -394,10 +394,10 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
         Tensor weightsGpu_h = weights_h.clone();
         half *weightsMem_h = weights_h.getMemPtr<half>();
         half *weightsMemGpu_h = weightsGpu_h.getMemPtr<half>();
-        weights_h.clear();
+        weights_h.memset(0);
         weights.copyFromAsync(weights_h, gradientUpdateStream);
         if (hasBias) {
-            biases_h.clear();
+            biases_h.memset(0);
             biases.get().copyFromAsync(biases_h, gradientUpdateStream);
         }
         gradientUpdateStream.synchronize();
@@ -661,21 +661,21 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor weightsGpu_h = weights_h.clone();
         half *weightsMem_h = weights_h.getMemPtr<half>();
         half *weightsMemGpu_h = weightsGpu_h.getMemPtr<half>();
-        weights_h.clear();
+        weights_h.memset(0);
         weights.copyFromAsync(weights_h, gradientUpdateStream);
         if (hasBias) {
-            biases_h.clear();
+            biases_h.memset(0);
             biases.get().copyFromAsync(biases_h, gradientUpdateStream);
         }
         Tensor previousWeightsUpdate_h = weights_h.clone();
         half *previousWeightsUpdateMem_h = previousWeightsUpdate_h.getMemPtr<half>();
-        previousWeightsUpdate_h.clearAsync(gradientUpdateStream);
+        previousWeightsUpdate_h.memsetAsync(gradientUpdateStream, 0);
         Tensor previousBiasesUpdate_h;
         half *previousBiasesUpdateMem_h;
         if (hasBias) {
             previousBiasesUpdate_h = biases_h.clone();
             previousBiasesUpdateMem_h = previousBiasesUpdate_h.getMemPtr<half>();
-            previousBiasesUpdate_h.clearAsync(gradientUpdateStream);
+            previousBiasesUpdate_h.memsetAsync(gradientUpdateStream, 0);
         }
         gradientUpdateStream.synchronize();
 

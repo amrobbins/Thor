@@ -3,7 +3,7 @@
 
 Event::Event() : ReferenceCounted() {}
 
-Event::Event(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne) {
+Event::Event(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne) {
     construct(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
 }
 
@@ -38,7 +38,7 @@ cudaEvent_t Event::getEvent() {
     return cudaEvent;
 }
 
-int Event::getGpuNum() const {
+int32_t Event::getGpuNum() const {
     assert(!uninitialized());
     return gpuNum;
 }
@@ -67,9 +67,9 @@ float Event::synchronizeAndReportElapsedTimeInMilliseconds(Event startEvent) {
     return milliseconds;
 }
 
-long Event::getReferenceCountedId() { return ReferenceCounted::getReferenceCountedId(); }
+uint64_t Event::getId() const { return ReferenceCounted::getReferenceCountedId(); }
 
-void Event::construct(int gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne) {
+void Event::construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne) {
     ReferenceCounted::initialize();
 
     ScopedGpu scopedGpu(gpuNum);
@@ -77,7 +77,7 @@ void Event::construct(int gpuNum, bool enableTiming, bool expectingHostToWaitOnT
     cudaError_t cudaStatus;
     this->gpuNum = gpuNum;
 
-    unsigned int flags = 0;
+    uint32_t flags = 0;
     if (!enableTiming)
         flags |= cudaEventDisableTiming;
     if (expectingHostToWaitOnThisOne)

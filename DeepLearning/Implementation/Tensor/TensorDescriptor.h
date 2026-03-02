@@ -57,10 +57,10 @@ class TensorDescriptor {
             return numElements * uint32_t(getElementSizeInBytes(dataType));
         }
     }
-    uint64_t getArraySizeInBytes() { return getArraySizeInBytes(totalNumElements, dataType); }
-    uint64_t getArraySizeInBytes(uint64_t numElements) { return getArraySizeInBytes(numElements, dataType); }
+    uint64_t getArraySizeInBytes() const { return getArraySizeInBytes(totalNumElements, dataType); }
+    uint64_t getArraySizeInBytes(uint64_t numElements) const { return getArraySizeInBytes(numElements, dataType); }
 
-    std::string getElementName() const { return getElementTypeName(dataType); }
+    std::string getElementTypeName() const { return getElementTypeName(dataType); }
 
     static std::string getElementTypeName(DataType dataType) {
         switch (dataType) {
@@ -96,7 +96,9 @@ class TensorDescriptor {
         return "";
     }
 
-    std::string getValueAsString(void *basePointer, uint64_t elementIndex) { return getValueAsString(basePointer, elementIndex, dataType); }
+    std::string getValueAsString(void *basePointer, uint64_t elementIndex) const {
+        return getValueAsString(basePointer, elementIndex, dataType);
+    }
 
     static std::string getValueAsString(void *basePointer, uint64_t elementIndex, DataType dataType) {
         switch (dataType) {
@@ -213,7 +215,7 @@ class TensorDescriptor {
         assert(newTotalNumElements == totalNumElements);
     }
 
-    uint64_t getFlatIndex(std::vector<uint64_t> element) {
+    uint64_t getFlatIndex(std::vector<uint64_t> element) const {
         assert(element.size() == dimensions.size());
         uint64_t stepSize = 1;
         uint64_t index = 0;
@@ -226,7 +228,7 @@ class TensorDescriptor {
         return index;
     }
 
-    std::vector<uint64_t> getDimensionalIndex(uint64_t flatIndex) {
+    std::vector<uint64_t> getDimensionalIndex(uint64_t flatIndex) const {
         assert(flatIndex < totalNumElements);
 
         std::vector<uint64_t> dimensionIndex;
@@ -237,12 +239,12 @@ class TensorDescriptor {
         return dimensionIndex;
     }
 
-    uint64_t getDimensionStride(uint32_t axis) {
+    uint64_t getDimensionStride(uint32_t axis) const {
         assert(axis < dimensions.size());
         return stridePerDimension[axis];
     }
 
-    void *getChunkAddress(std::vector<uint64_t> leadingDimensions, void *mem) {
+    void *getChunkAddress(std::vector<uint64_t> leadingDimensions, void *mem) const {
         assert(leadingDimensions.size() <= dimensions.size());
         uint64_t chunkOffset = 0;
         for (uint32_t i = 0; i < leadingDimensions.size(); ++i) {
@@ -252,7 +254,7 @@ class TensorDescriptor {
         return (uint8_t *)mem + getArraySizeInBytes(chunkOffset);
     }
 
-    void *getElementAddress(std::vector<uint64_t> leadingDimensions, void *mem) { return getChunkAddress(leadingDimensions, mem); }
+    void *getElementAddress(std::vector<uint64_t> leadingDimensions, void *mem) const { return getChunkAddress(leadingDimensions, mem); }
 
     static float getElementSizeInBytes(DataType dataType) {
         switch (dataType) {
@@ -301,7 +303,7 @@ class TensorDescriptor {
             stridePerDimension[i] = stridePerDimension[i + 1] * dimensions[i + 1];
     }
 
-    float getElementSizeInBytes() { return getElementSizeInBytes(dataType); }
+    float getElementSizeInBytes() const { return getElementSizeInBytes(dataType); }
 };
 
 NLOHMANN_JSON_SERIALIZE_ENUM(TensorDescriptor::DataType,

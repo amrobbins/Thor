@@ -52,7 +52,7 @@ void Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
         shared_ptr<Layer> layer = it->second;
 
         if (inputTensor.isPresent()) {
-            layer->preOptimize(inputTensor.get(), batchSize, MachineEvaluator::instance().getCopyStreamFromCpu(gpuNum));
+            layer->preOptimize(inputTensor.get(), batchSize, Stream::getNextUploadStream(gpuNum));
         }
     }
 }
