@@ -10,9 +10,9 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
     return registry;
 }
 
-void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(move(name), move(fn)); }
+void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
-json Activation::serialize(thor_file::TarWriter& archiveWriter, Stream stream) const {
+json Activation::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
@@ -21,20 +21,8 @@ json Activation::serialize(thor_file::TarWriter& archiveWriter, Stream stream) c
     j["factory"] = Layer::Factory::Activation.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
-    j["feature_input"] = featureInput.get().serialize();
-    j["feature_output"] = featureOutput.get().serialize();
-    return j;
-}
-
-json Activation::serialize(Tensor inputTensor, Tensor outputTensor) const {
-    assert(initialized);
-
-    json j;
-    j["factory"] = Layer::Factory::Activation.value();
-    j["version"] = getLayerVersion();
-    j["layer_type"] = to_snake_case(getLayerType());
-    j["feature_input"] = inputTensor.serialize();
-    j["feature_output"] = outputTensor.serialize();
+    j["feature_input"] = featureInput.get().architectureJson();
+    j["feature_output"] = featureOutput.get().architectureJson();
     return j;
 }
 

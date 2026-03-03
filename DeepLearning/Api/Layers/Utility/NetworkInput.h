@@ -26,7 +26,7 @@ class NetworkInput : public Layer {
 
     virtual std::string getLayerType() const { return "NetworkInput"; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
+    virtual nlohmann::json architectureJson() const;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
@@ -39,8 +39,8 @@ class NetworkInput : public Layer {
         for (uint32_t i = 0; i < dimensions.size(); ++i)
             batchDimensions.push_back(dimensions[i]);
 
-        std::shared_ptr<ThorImplementation::NetworkInput> networkInput = std::make_shared<ThorImplementation::NetworkInput>(
-            placement, dataType, batchDimensions);
+        std::shared_ptr<ThorImplementation::NetworkInput> networkInput =
+            std::make_shared<ThorImplementation::NetworkInput>(placement, dataType, batchDimensions);
         networkInput->setName(name);
 
         return networkInput;

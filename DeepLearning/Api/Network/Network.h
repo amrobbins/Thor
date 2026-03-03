@@ -84,6 +84,7 @@ class Network {
 
     virtual void save(const std::string &directory, bool overwrite, bool saveOptimizerState);
     virtual void load(const std::string &directory);
+    virtual std::string architectureJson();
 
     std::shared_ptr<Optimizer> getDefaultOptimizer();
 

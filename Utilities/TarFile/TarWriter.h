@@ -16,7 +16,7 @@ class TarWriter {
     virtual ~TarWriter() = default;
 
     // Called once per file that will be added to the archive
-    void addArchiveFile(const std::string &pathInTar, ThorImplementation::Tensor &tensor);
+    void addArchiveFile(const std::string &pathInTar, const ThorImplementation::Tensor &tensor);
 
     // Called after all files have been added to the archive. Does the actual writing of the data to disk.
     std::string createArchive(std::filesystem::path archiveDirectory, bool overwriteIfExists);

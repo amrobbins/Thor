@@ -20,8 +20,8 @@ class Elu : public Activation {
 
     virtual std::string getLayerType() const { return "Elu"; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
-        nlohmann::json j = Activation::serialize(archiveWriter, stream);
+    virtual nlohmann::json architectureJson() const {
+        nlohmann::json j = Activation::architectureJson();
         j["alpha"] = alpha;
         return j;
     }

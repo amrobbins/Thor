@@ -5,15 +5,15 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json NetworkInput::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json NetworkInput::architectureJson() const {
     return json{{"factory", Layer::Factory::Layer.value()},
                 {"version", "1.0.0"},
                 {"layer_type", "network_input"},
                 {"name", name},
                 {"dimensions", getDimensions()},
                 {"data_type", json(getDataType())},
-                {"feature_input", featureInput.get().serialize()},
-                {"feature_output", featureOutput.get().serialize()}};
+                {"feature_input", featureInput.get().architectureJson()},
+                {"feature_output", featureOutput.get().architectureJson()}};
 }
 
 void NetworkInput::deserialize(const json &j, Network *network) {

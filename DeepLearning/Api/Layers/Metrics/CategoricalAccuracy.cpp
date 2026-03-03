@@ -6,8 +6,8 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json CategoricalAccuracy::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
-    json j = Metric::serialize(archiveWriter, stream);
+json CategoricalAccuracy::architectureJson() const {
+    json j = Metric::architectureJson();
     j["label_type"] = labelType;
     return j;
 }

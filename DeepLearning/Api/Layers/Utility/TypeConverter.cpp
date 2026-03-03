@@ -9,7 +9,7 @@ namespace Thor {
 TypeConverter::TypeConverter() = default;
 TypeConverter::~TypeConverter() = default;
 
-json TypeConverter::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json TypeConverter::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
@@ -19,8 +19,8 @@ json TypeConverter::serialize(thor_file::TarWriter &archiveWriter, Stream stream
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["feature_input"] = featureInput.get().serialize();
-    j["feature_output"] = featureOutput.get().serialize();
+    j["feature_input"] = featureInput.get().architectureJson();
+    j["feature_output"] = featureOutput.get().architectureJson();
 
     return j;
 }

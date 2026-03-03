@@ -32,7 +32,7 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json BinaryCrossEntropy::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json BinaryCrossEntropy::architectureJson() const {
     // The thing that is deserialized must be just the base layer, any helper layers
     // are themselves deserialized. So loss_shape set to LossShape::ELEMENTWISE
 
@@ -44,11 +44,11 @@ json BinaryCrossEntropy::serialize(thor_file::TarWriter &archiveWriter, Stream s
     j["layer_name"] = layerName;
     j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
-    j["labels_tensor"] = labelsTensor.serialize();
-    j["predictions_tensor"] = predictionsTensor.serialize();
-    j["sigmoid_output_tensor"] = sigmoidOutput.serialize();
-    j["loss_shaper_input_tensor"] = lossShaperInput.serialize();
-    j["loss_tensor"] = lossTensor.serialize();
+    j["labels_tensor"] = labelsTensor.architectureJson();
+    j["predictions_tensor"] = predictionsTensor.architectureJson();
+    j["sigmoid_output_tensor"] = sigmoidOutput.architectureJson();
+    j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
+    j["loss_tensor"] = lossTensor.architectureJson();
 
     return j;
 }

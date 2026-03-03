@@ -27,6 +27,8 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     static std::unordered_map<std::string, Deserializer> &get_registry();
     static void register_layer(std::string name, Deserializer fn);
 
+    nlohmann::json architectureJson() const { /*FIXME*/ assert(false); }
+
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> layer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> sisterLayer,

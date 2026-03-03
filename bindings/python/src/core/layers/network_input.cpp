@@ -61,6 +61,8 @@ void bind_network_input(nb::module_ &m) {
                 The feature output tensor handle.
             )nbdoc");
 
+    network_input.def("version", &Layer::getLayerVersion);
+
     network_input.attr("__doc__") = R"nbdoc(
             Create and attach a NetworkInput to send data into a Network.
 

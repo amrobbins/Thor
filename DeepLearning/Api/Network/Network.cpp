@@ -257,6 +257,19 @@ void Network::save(const std::string &directory, bool overwrite, bool saveOptimi
     archiveWriter->createArchive(directory, overwrite);
 }
 
+string Network::architectureJson() {
+    if (!frozen)
+        connect(false);
+
+    json modelJson;
+    modelJson["layers"] = json::array();
+    for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
+        modelJson["layers"].push_back(layer->architectureJson());
+    }
+    string jsonDump = modelJson.dump(4);
+    return jsonDump;
+}
+
 void Network::load(const std::string &directory) {
     // Read the model json from the archive
     archiveReader = make_shared<thor_file::TarReader>(networkName, directory);

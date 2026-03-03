@@ -6,7 +6,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json Pooling::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json Pooling::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
@@ -16,8 +16,8 @@ json Pooling::serialize(thor_file::TarWriter &archiveWriter, Stream stream) cons
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["feature_input"] = featureInput.get().serialize();
-    j["feature_output"] = featureOutput.get().serialize();
+    j["feature_input"] = featureInput.get().architectureJson();
+    j["feature_output"] = featureOutput.get().architectureJson();
 
     j["type"] = type;
     j["window_height"] = windowHeight;

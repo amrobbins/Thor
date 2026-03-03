@@ -9,7 +9,7 @@ namespace Thor {
 Stub::Stub() = default;
 Stub::~Stub() = default;
 
-json Stub::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json Stub::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isEmpty());
@@ -19,7 +19,7 @@ json Stub::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["input_tensor"] = featureInput.get().serialize();
+    j["input_tensor"] = featureInput.get().architectureJson();
 
     return j;
 }

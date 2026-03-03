@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json Glorot::serialize() const {
+json Glorot::architectureJson() const {
     json j;
     j["initializer_type"] = string("glorot");
     j["version"] = getVersion();

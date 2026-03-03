@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json UniformRandom::serialize() const {
+json UniformRandom::architectureJson() const {
     json j;
     j["initializer_type"] = string("uniform_random");
     j["version"] = getVersion();

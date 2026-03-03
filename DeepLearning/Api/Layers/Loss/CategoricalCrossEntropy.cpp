@@ -41,7 +41,7 @@ void CategoricalCrossEntropy::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json CategoricalCrossEntropy::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json CategoricalCrossEntropy::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Loss.value();
     j["version"] = getLayerVersion();
@@ -51,11 +51,11 @@ json CategoricalCrossEntropy::serialize(thor_file::TarWriter &archiveWriter, Str
     j["label_type"] = labelType;
     j["loss_shape"] = LossShape::RAW;
     j["loss_data_type"] = lossDataType;
-    j["labels_tensor"] = labelsTensor.serialize();
-    j["predictions_tensor"] = predictionsTensor.serialize();
-    j["softmax_output_tensor"] = softmaxOutput.serialize();
-    j["loss_shaper_input_tensor"] = lossShaperInput.serialize();
-    j["loss_tensor"] = lossTensor.serialize();
+    j["labels_tensor"] = labelsTensor.architectureJson();
+    j["predictions_tensor"] = predictionsTensor.architectureJson();
+    j["softmax_output_tensor"] = softmaxOutput.architectureJson();
+    j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
+    j["loss_tensor"] = lossTensor.architectureJson();
 
     return j;
 }

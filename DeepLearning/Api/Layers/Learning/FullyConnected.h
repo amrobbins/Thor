@@ -42,6 +42,8 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
 
+    virtual nlohmann::json architectureJson() const;
+
    protected:
     virtual bool isMultiLayer() const {
         assert(featureInputs.size() > 0);

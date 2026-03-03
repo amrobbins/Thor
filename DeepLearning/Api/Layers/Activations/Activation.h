@@ -25,10 +25,8 @@ class Activation : public Layer {
 
     virtual std::string getLayerType() const = 0;
 
-    // Standalone layer version
-    virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter, Stream stream) const;
-    // Activation template version
-    virtual nlohmann::json serialize(Tensor inputTensor, Tensor outputTensor) const;
+    virtual nlohmann::json architectureJson() const;
+    virtual nlohmann::json serialize(thor_file::TarWriter& archiveWriter, Stream stream) const { return architectureJson(); }
 
     static void deserialize(const nlohmann::json& j, Network* network);
     using Deserializer = std::function<void(const nlohmann::json&, Network*)>;
