@@ -22,7 +22,7 @@ class CategoricalCrossEntropy : public Loss {
 
     virtual Tensor getPredictions() const { return softmaxOutput; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
+    virtual nlohmann::json architectureJson() const;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:

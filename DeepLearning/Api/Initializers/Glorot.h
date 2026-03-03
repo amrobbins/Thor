@@ -21,7 +21,7 @@ class Glorot : public Initializer {
 
     virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<Glorot>(*this); }
 
-    virtual nlohmann::json serialize() const;
+    virtual nlohmann::json architectureJson() const;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
     ThorImplementation::Glorot::Mode getMode() const { return mode; }
 

@@ -38,6 +38,8 @@ class Adam : public Optimizer {
                                      bool saveOptimizerState) const;
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j);
 
+    virtual nlohmann::json architectureJson() const;
+
     virtual std::string getType() const { return "Adam"; }
 
    protected:

@@ -38,7 +38,7 @@ TEST(Initializers, UniformRandomSerializeDeserialize) {
 
     Stream stream(0);
 
-    json uniformRandomJ = uniformRandom->serialize();
+    json uniformRandomJ = uniformRandom->architectureJson();
 
     // printf("%s\n", uniformRandomJ.dump(4).c_str());
 

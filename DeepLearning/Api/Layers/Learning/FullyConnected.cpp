@@ -95,7 +95,7 @@ void FullyConnected::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+json FullyConnected::architectureJson() const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
 
@@ -111,14 +111,14 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     // Input connections
     json inputs = json::array();
     for (uint32_t i = 0; i < standaloneFCFeatureInputs.size(); ++i) {
-        inputs.push_back(standaloneFCFeatureInputs[i].serialize());
+        inputs.push_back(standaloneFCFeatureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
     for (uint32_t i = 0; i < standaloneFCFeatureOutputs.size(); ++i) {
-        outputs.push_back(standaloneFCFeatureOutputs[i].serialize());
+        outputs.push_back(standaloneFCFeatureOutputs[i].architectureJson());
     }
     j["outputs"] = outputs;
 
@@ -140,20 +140,57 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
             biasesFile = (layerName + "_biases.gds");
             j["biases_tensor"] = biasesFile;
             biases = twbLayer->getBiases().get();
-            archiveWriter.addArchiveFile(biasesFile, biases);
         }
 
         weightsFile = (layerName + "_weights.gds");
         j["weights_tensor"] = weightsFile;
         weights = twbLayer->getWeights();
-        archiveWriter.addArchiveFile(weightsFile, weights);
     }
 
     if (weightsInitializer != nullptr) {
-        j["weights_initializer"] = weightsInitializer->serialize();
+        j["weights_initializer"] = weightsInitializer->architectureJson();
     }
     if (biasInitializer != nullptr) {
-        j["biases_initializer"] = biasInitializer->serialize();
+        j["biases_initializer"] = biasInitializer->architectureJson();
+    }
+
+    if (hasOptimizer()) {
+        j["optimizer"] = optimizer->architectureJson();
+    }
+
+    return j;
+}
+
+json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+    // Multi-layers will only serialize the single layer, itself.
+    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
+    json j = architectureJson();
+
+    string layerName = string("layer") + to_string(getId());
+
+    // Dump the weights to a file and record its name
+    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
+    if (network->getNumStamps() >= 1) {
+        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+        twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+        assert(twbLayer != nullptr);
+    }
+
+    ThorImplementation::Tensor weights;
+    ThorImplementation::Tensor biases;
+    string weightsFile;
+    string biasesFile;
+    if (twbLayer != nullptr) {
+        if (hasBias) {
+            biasesFile = (layerName + "_biases.gds");
+            biases = twbLayer->getBiases().get();
+            archiveWriter.addArchiveFile(biasesFile, biases);
+        }
+
+        weightsFile = (layerName + "_weights.gds");
+        weights = twbLayer->getWeights();
+        archiveWriter.addArchiveFile(weightsFile, weights);
     }
 
     if (hasOptimizer()) {

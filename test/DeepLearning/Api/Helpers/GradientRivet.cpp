@@ -16,8 +16,8 @@ json GradientRivet::serialize(const string &storageDir, Stream stream) const {
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["input_tensor"] = featureInput.get().serialize();
-    j["output_tensor"] = featureOutput.get().serialize();
+    j["input_tensor"] = featureInput.get().architectureJson();
+    j["output_tensor"] = featureOutput.get().architectureJson();
 
     return j;
 }

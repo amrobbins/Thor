@@ -42,6 +42,7 @@ A Network that contains layers. FIXME.
     network.def("get_num_stamps", &Network::getNumStamps);
     network.def("status_code_to_string", &Network::statusCodeToString, "status_code"_a);
 
+    network.def("get_architecture_json", &Network::architectureJson);
     network.def("save", &Network::save, "directory"_a, "overwrite"_a = false, "save_optimizer_state"_a = true);
     network.def("load", &Network::load, "directory"_a);
 

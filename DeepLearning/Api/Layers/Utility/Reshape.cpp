@@ -9,7 +9,7 @@ namespace Thor {
 Reshape::Reshape() = default;
 Reshape::~Reshape() = default;
 
-json Reshape::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json Reshape::architectureJson() const {
     assert(initialized);
     assert(featureInput.isPresent());
     assert(featureOutput.isPresent());
@@ -19,8 +19,8 @@ json Reshape::serialize(thor_file::TarWriter &archiveWriter, Stream stream) cons
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
-    j["feature_input"] = featureInput.get().serialize();
-    j["feature_output"] = featureOutput.get().serialize();
+    j["feature_input"] = featureInput.get().architectureJson();
+    j["feature_output"] = featureOutput.get().architectureJson();
 
     return j;
 }

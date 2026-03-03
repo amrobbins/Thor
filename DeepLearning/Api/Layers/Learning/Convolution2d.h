@@ -37,6 +37,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
+    virtual nlohmann::json architectureJson() const;
 
    protected:
     virtual bool isMultiLayer() const {

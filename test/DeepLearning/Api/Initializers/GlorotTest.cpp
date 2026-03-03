@@ -34,7 +34,7 @@ TEST(Initializers, GlorotSerializeDeserialize) {
 
     Stream stream(0);
 
-    json glorotJ = glorot->serialize();
+    json glorotJ = glorot->architectureJson();
 
     // printf("%s\n", glorotJ.dump(4).c_str());
 

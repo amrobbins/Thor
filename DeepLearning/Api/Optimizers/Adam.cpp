@@ -61,11 +61,7 @@ void Adam::updateParameters() {
     }
 }
 
-json Adam::serialize(thor_file::TarWriter &archiveWriter,
-                     Stream stream,
-                     TrainableWeightsBiasesLayer const *owningLayer,
-                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
-                     bool saveOptimizerState) const {
+json Adam::architectureJson() const {
     json j;
     j["optimizer_type"] = string("adam");
     j["version"] = getVersion();
@@ -77,6 +73,16 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
     j["beta1"] = beta1;
     j["beta2"] = beta2;
     j["epsilon"] = epsilon;
+
+    return j;
+}
+
+json Adam::serialize(thor_file::TarWriter &archiveWriter,
+                     Stream stream,
+                     TrainableWeightsBiasesLayer const *owningLayer,
+                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                     bool saveOptimizerState) const {
+    json j = architectureJson();
 
     if (saveOptimizerState && physicalOwningLayer != nullptr) {
         shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();

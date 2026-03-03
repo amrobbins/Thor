@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json LossShaper::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json LossShaper::architectureJson() const {
     // The thing that is deserialized must be just the base layers, any helper layers
     // are themselves deserialized. So loss_shape set to LossShape::ELEMENTWISE
 
@@ -16,8 +16,8 @@ json LossShaper::serialize(thor_file::TarWriter &archiveWriter, Stream stream) c
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
     j["loss_shape"] = outputLossType;
-    j["loss_input"] = lossInput.serialize();
-    j["loss_output"] = lossOutput.serialize();
+    j["loss_input"] = lossInput.architectureJson();
+    j["loss_output"] = lossOutput.architectureJson();
 
     return j;
 }

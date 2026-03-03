@@ -16,7 +16,7 @@ class Metric : public Layer {
     Metric() { numInputConnectionsMade = 0; }
     virtual ~Metric() {}
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const;
+    virtual nlohmann::json architectureJson() const;
     static void deserialize(const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();

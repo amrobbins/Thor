@@ -9,7 +9,7 @@ namespace Thor {
 Concatenate::Concatenate() = default;
 Concatenate::~Concatenate() = default;
 
-json Concatenate::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json Concatenate::architectureJson() const {
     assert(initialized);
     assert(featureInputs.size() > 0);
     assert(featureOutputs.size() > 0);
@@ -23,14 +23,14 @@ json Concatenate::serialize(thor_file::TarWriter &archiveWriter, Stream stream) 
 
     json inputs = json::array();
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        inputs.push_back(featureInputs[i].serialize());
+        inputs.push_back(featureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
     for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-        outputs.push_back(featureOutputs[i].serialize());
+        outputs.push_back(featureOutputs[i].architectureJson());
     }
     j["outputs"] = outputs;
 

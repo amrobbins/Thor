@@ -83,11 +83,7 @@ bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
 
 uint64_t Sgd::getEpoch() { return startResumeEpoch; }
 
-json Sgd::serialize(thor_file::TarWriter &archiveWriter,
-                    Stream stream,
-                    TrainableWeightsBiasesLayer const *owningLayer,
-                    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
-                    bool saveOptimizerState) const {
+json Sgd::architectureJson() const {
     json j;
     j["optimizer_type"] = string("sgd");
     j["version"] = getVersion();
@@ -98,7 +94,17 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
     j["use_nesterov"] = useNesterovMomentum;
     j["epoch"] = 0;
 
-    if (physicalOwningLayer != nullptr) {
+    return j;
+}
+
+json Sgd::serialize(thor_file::TarWriter &archiveWriter,
+                    Stream stream,
+                    TrainableWeightsBiasesLayer const *owningLayer,
+                    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                    bool saveOptimizerState) const {
+    json j = architectureJson();
+
+    if (physicalOwningLayer != nullptr && saveOptimizerState) {
         shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
         assert(physicalSgd != nullptr);

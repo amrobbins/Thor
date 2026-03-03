@@ -10,6 +10,9 @@
 #include <utility>
 #include <vector>
 
+#include "Utilities/TarFile/TarReader.h"
+#include "Utilities/TarFile/TarWriter.h"
+
 namespace Thor {
 
 class Network;
@@ -83,8 +86,10 @@ class Tensor {
         dimensions = newDimensions;
     }
 
-    nlohmann::json serialize() const;
-    static Tensor deserialize(const nlohmann::json &j);
+    nlohmann::json architectureJson() const;
+    static Tensor deserialize(const nlohmann::json &j, thor_file::TarReader *archiveReader = nullptr);
+
+    std::string getVersion() const { return "1.0.0"; }
 
    protected:
     void setDataType(DataType dataType) { this->dataType = dataType; }

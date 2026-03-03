@@ -5,10 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
-    // Multi-layers will only serialize the single layer, itself.
-    // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
-
+json BatchNormalization::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = getLayerVersion();
@@ -21,16 +18,28 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream s
     // Input connections
     json inputs = json::array();
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-        inputs.push_back(featureInputs[i].serialize());
+        inputs.push_back(featureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
     for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-        outputs.push_back(featureOutputs[i].serialize());
+        outputs.push_back(featureOutputs[i].architectureJson());
     }
     j["outputs"] = outputs;
+
+    if (hasOptimizer()) {
+        // Not stamped so there is no physical optimizer, so then what do I do? Maybe I expect it can be null?
+        j["optimizer"] = optimizer->architectureJson();
+    }
+
+    return j;
+}
+
+json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+    json j = architectureJson();
+    string layerName = string("layer") + to_string(getId());
 
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::BatchNormalization> batchNorm;

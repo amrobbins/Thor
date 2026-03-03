@@ -90,7 +90,7 @@ void Convolution2d::buildSupportLayersAndAddToNetwork() {
     }
 }
 
-json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+json Convolution2d::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
     j["version"] = getLayerVersion();
@@ -110,16 +110,34 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
     // Input connections
     json inputs = json::array();
     for (uint32_t i = 0; i < standaloneLayerFeatureInputs.size(); ++i) {
-        inputs.push_back(standaloneLayerFeatureInputs[i].serialize());
+        inputs.push_back(standaloneLayerFeatureInputs[i].architectureJson());
     }
     j["inputs"] = inputs;
 
     // Output connections
     json outputs = json::array();
     for (uint32_t i = 0; i < standaloneLayerFeatureOutputs.size(); ++i) {
-        outputs.push_back(standaloneLayerFeatureOutputs[i].serialize());
+        outputs.push_back(standaloneLayerFeatureOutputs[i].architectureJson());
     }
     j["outputs"] = outputs;
+
+    if (weightsInitializer != nullptr) {
+        j["weights_initializer"] = weightsInitializer->architectureJson();
+    }
+    if (biasInitializer != nullptr) {
+        j["biases_initializer"] = biasInitializer->architectureJson();
+    }
+
+    if (hasOptimizer()) {
+        j["optimizer"] = optimizer->architectureJson();
+    }
+
+    return j;
+}
+
+json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+    json j = architectureJson();
+    string layerName = string("layer") + to_string(getId());
 
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
@@ -146,13 +164,6 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream
         j["weights_tensor"] = weightsFile;
         weights = twbLayer->getWeights();
         archiveWriter.addArchiveFile(weightsFile, weights);
-    }
-
-    if (weightsInitializer != nullptr) {
-        j["weights_initializer"] = weightsInitializer->serialize();
-    }
-    if (biasInitializer != nullptr) {
-        j["biases_initializer"] = biasInitializer->serialize();
     }
 
     if (hasOptimizer()) {

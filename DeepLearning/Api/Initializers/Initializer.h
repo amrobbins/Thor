@@ -36,7 +36,7 @@ class Initializer {
         return initDoneEvent;
     }
 
-    virtual nlohmann::json serialize() const = 0;
+    virtual nlohmann::json architectureJson() const = 0;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
     using Deserializer = std::function<std::shared_ptr<Initializer>(const nlohmann::json &)>;
     static std::unordered_map<std::string, Deserializer> &getRegistry();

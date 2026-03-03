@@ -134,7 +134,7 @@ TarWriter::TarWriter(const string& archiveName, uint64_t archiveShardSizeLimitBy
 /**
  * Plan the archive shards adding 1 file at a time
  */
-void TarWriter::addArchiveFile(const string& pathInTar, ThorImplementation::Tensor& tensor) {
+void TarWriter::addArchiveFile(const string& pathInTar, const ThorImplementation::Tensor& tensor) {
     string cleanedPathInTar = cleanTarPath(pathInTar);
 
     size_t fileSize = tensor.getArraySizeInBytes();

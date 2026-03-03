@@ -25,18 +25,18 @@ void Metric::deserialize(const nlohmann::json &j, Network *network) {
     deserializer(j, network);
 }
 
-json Metric::serialize(thor_file::TarWriter &archiveWriter, Stream stream) const {
+json Metric::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Metric.value();
     j["version"] = getLayerVersion();
     j["layer_type"] = to_snake_case(getLayerType());
 
     // Input connections
-    j["predictions"] = getPredictions().serialize();
-    j["labels"] = labelsTensor.serialize();
+    j["predictions"] = getPredictions().architectureJson();
+    j["labels"] = labelsTensor.architectureJson();
 
     // Output connections
-    j["metric"] = metricTensor.serialize();
+    j["metric"] = metricTensor.architectureJson();
 
     return j;
 }
