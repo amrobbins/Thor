@@ -131,9 +131,10 @@ void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveRe
     }
 
     if (j.contains("optimizer")) {
-        batchNormalization.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
+        batchNormalization.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
     }
 
+    batchNormalization.network = network;
     batchNormalization.initialized = true;
     batchNormalization.addToNetwork(network);
 }

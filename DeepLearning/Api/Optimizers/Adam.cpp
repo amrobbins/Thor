@@ -125,7 +125,7 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
     return j;
 }
 
-shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j) {
+shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
     if (j.at("optimizer_type").get<string>() != "adam")
         throw runtime_error("Layer type mismatch in Adam::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")
@@ -163,6 +163,7 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     adam.vFile = vFile;
     adam.mBiasFile = mBiasFile;
     adam.vBiasFile = vBiasFile;
+    adam.network = network;
     return adam.clone();
 }
 

@@ -32,7 +32,8 @@ void bind_fully_connected(nb::module_ &m) {
            bool hasBias,
            shared_ptr<Activation> activation,
            shared_ptr<Initializer> weights_initializer,
-           shared_ptr<Initializer> biases_initializer) {
+           shared_ptr<Initializer> biases_initializer,
+           shared_ptr<Optimizer> optimizer) {
             if (numOutputFeatures == 0) {
                 throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
             }
@@ -50,6 +51,8 @@ void bind_fully_connected(nb::module_ &m) {
                 builder.weightsInitializer(weights_initializer);
             if (biases_initializer != nullptr)
                 builder.biasInitializer(biases_initializer);
+            if (optimizer != nullptr)
+                builder.optimizer(optimizer);
 
             FullyConnected built = builder.build();
 
@@ -61,7 +64,8 @@ void bind_fully_connected(nb::module_ &m) {
         "has_bias"_a = true,
         "activation"_a.none() = nb::none(),
         "weights_initializer"_a.none() = nb::none(),
-        "biases_initializer"_a.none() = nb::none());
+        "biases_initializer"_a.none() = nb::none(),
+        "optimizer"_a.none() = nb::none());
 
     fully_connected.def(
         "get_feature_output",

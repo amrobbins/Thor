@@ -235,9 +235,10 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
     }
 
     if (j.contains("optimizer")) {
-        convolution2d.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
+        convolution2d.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
     }
 
+    convolution2d.network = network;
     convolution2d.initialized = true;
     convolution2d.addToNetwork(network);
 }

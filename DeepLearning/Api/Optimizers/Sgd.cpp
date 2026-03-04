@@ -114,7 +114,7 @@ json Sgd::serialize(thor_file::TarWriter &archiveWriter,
     return j;
 }
 
-shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j) {
+shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
     if (j.at("optimizer_type").get<string>() != "sgd")
         throw runtime_error("Layer type mismatch in Sgd::deserialize: " + j.at("type").get<string>());
     if (j.at("version").get<string>() != "1.0.0")
@@ -132,6 +132,7 @@ shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archive
     sgd.momentum = momentum;
     sgd.useNesterovMomentum = useNesterov;
     sgd.startResumeEpoch = epoch;
+    sgd.network = network;
     return sgd.clone();
 }
 
