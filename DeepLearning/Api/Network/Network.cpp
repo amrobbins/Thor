@@ -222,7 +222,6 @@ Network::StatusCode Network::place(uint32_t batchSize,
     return StatusCode::SUCCESS;
 }
 
-// FIXME: modelName should be on the constructor. archiveWriter should be saved after first creation.
 void Network::save(const std::string &directory, bool overwrite, bool saveOptimizerState) {
     if (!frozen)
         connect(false);
@@ -258,9 +257,6 @@ void Network::save(const std::string &directory, bool overwrite, bool saveOptimi
 }
 
 string Network::architectureJson() {
-    if (!frozen)
-        connect(false);
-
     json modelJson;
     modelJson["layers"] = json::array();
     for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {

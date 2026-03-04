@@ -43,6 +43,7 @@ dev = [
     "nanobind-stubgen>=0.1.5",
     "setuptools",
     "wheel",
+    "isort",
     "yapf>=0.43.0,<0.44",
 ]
 
@@ -74,3 +75,15 @@ include = ["src/thor/py.typed"]
 
 [tool.pytest.ini_options]
 addopts = "-s -vv"
+
+[tool.isort]
+profile = "black"
+line_length = 120
+combine_as_imports = true
+force_sort_within_sections = true
+force_single_line = false
+lines_between_sections = 1
+known_first_party = ["thor"]
+skip_gitignore = true
+skip = ["build", "cmake-build-debug", "cmake-build-release", ".venv"]
+src_paths = ["src"]

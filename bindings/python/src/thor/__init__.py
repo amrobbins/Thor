@@ -10,8 +10,6 @@ from ._thor import *
 from ._thor import __version__, __git_version__
 
 # from . import _thor as _native
-# from ._thor import *  # noqa: F401,F403
-# from ._thor import __version__, __git_version__
 #
 # # Expose native submodules at the top-level (keeps the old UX: thor.layers, thor.activations, etc.)
 # activations = _native.activations

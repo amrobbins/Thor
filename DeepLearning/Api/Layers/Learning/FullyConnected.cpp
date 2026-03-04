@@ -122,31 +122,6 @@ json FullyConnected::architectureJson() const {
     }
     j["outputs"] = outputs;
 
-    // Dump the weights to a file and record its name
-    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
-    if (network->getNumStamps() >= 1) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-        twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-        assert(twbLayer != nullptr);
-    }
-
-    ThorImplementation::Tensor weights;
-    ThorImplementation::Tensor biases;
-    string weightsFile;
-    string biasesFile;
-    if (twbLayer != nullptr) {
-        if (hasBias) {
-            biasesFile = (layerName + "_biases.gds");
-            j["biases_tensor"] = biasesFile;
-            biases = twbLayer->getBiases().get();
-        }
-
-        weightsFile = (layerName + "_weights.gds");
-        j["weights_tensor"] = weightsFile;
-        weights = twbLayer->getWeights();
-    }
-
     if (weightsInitializer != nullptr) {
         j["weights_initializer"] = weightsInitializer->architectureJson();
     }
@@ -184,11 +159,13 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
     if (twbLayer != nullptr) {
         if (hasBias) {
             biasesFile = (layerName + "_biases.gds");
+            j["biases_tensor"] = biasesFile;
             biases = twbLayer->getBiases().get();
             archiveWriter.addArchiveFile(biasesFile, biases);
         }
 
         weightsFile = (layerName + "_weights.gds");
+        j["weights_tensor"] = weightsFile;
         weights = twbLayer->getWeights();
         archiveWriter.addArchiveFile(weightsFile, weights);
     }
@@ -247,9 +224,10 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader
     }
 
     if (j.contains("optimizer")) {
-        fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"));
+        fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
     }
 
+    fullyConnected.network = network;
     fullyConnected.initialized = true;
     fullyConnected.addToNetwork(network);
 }

@@ -36,7 +36,9 @@ class Sgd : public Optimizer {
                                      TrainableWeightsBiasesLayer const *owningLayer,
                                      std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
                                      bool saveOptimizerState) const;
-    static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j);
+    static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader,
+                                                  const nlohmann::json &j,
+                                                  Network *network);
 
     virtual nlohmann::json architectureJson() const;
 
