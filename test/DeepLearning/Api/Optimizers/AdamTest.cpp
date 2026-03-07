@@ -446,6 +446,15 @@ TEST(Adam, SerializeDeserialize) {
         }
         initDoneEvents.clear();
 
+        // Find the API FC to verify original ID
+        uint32_t numTrainableLayers = newNetwork.getNumTrainableLayers();
+        for (uint32_t i = 0; i < numTrainableLayers; ++i) {
+            shared_ptr<Thor::FullyConnected> apiFCLayerDes = dynamic_pointer_cast<Thor::FullyConnected>(newNetwork.getTrainableLayer(i));
+            if (apiFCLayerDes != nullptr)
+                ASSERT_TRUE(apiFCLayerDes->getOptimizer() != nullptr);
+            ASSERT_EQ(apiFCLayerDes->getOptimizer()->getOriginalId(), adam->getId());
+        }
+
         // Find the FC to find the Adam
         ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes;

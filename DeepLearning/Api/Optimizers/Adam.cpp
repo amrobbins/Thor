@@ -10,7 +10,6 @@ Adam::Adam() : Optimizer() {}
 
 Adam::Adam(uint64_t originalId) : Optimizer(originalId) {}
 
-
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
     return make_shared<ThorImplementation::Adam>(getId(), trainableLayer, alpha, beta1, beta2, epsilon);
 }
@@ -146,7 +145,6 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
         throw runtime_error("Unsupported version in Adam::deserialize: " + j["version"].get<string>());
 
     uint64_t originalId = j.at("id").get<uint64_t>();
-
     float t = j.at("t").get<float>();
     float alpha = j.at("alpha").get<float>();
     float beta1 = j.at("beta1").get<float>();

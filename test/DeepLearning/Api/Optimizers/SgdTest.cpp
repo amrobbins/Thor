@@ -670,6 +670,15 @@ TEST(Sgd, SerializeDeserialize) {
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
 
+    // Find the API FC to verify original ID
+    uint32_t numTrainableLayers = newNetwork.getNumTrainableLayers();
+    for (uint32_t i = 0; i < numTrainableLayers; ++i) {
+        shared_ptr<Thor::FullyConnected> apiFCLayerDes = dynamic_pointer_cast<Thor::FullyConnected>(newNetwork.getTrainableLayer(i));
+        if (apiFCLayerDes != nullptr)
+            ASSERT_TRUE(apiFCLayerDes->getOptimizer() != nullptr);
+        ASSERT_EQ(apiFCLayerDes->getOptimizer()->getOriginalId(), sgd->getId());
+    }
+
     // Find the FullyConnected layer and verify its optimizer's parameters
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
