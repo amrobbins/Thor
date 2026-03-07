@@ -64,7 +64,7 @@ class FullPeriodRandom {
 
     // The actual period of the LCG can be bigger than the period. When a number larger than period is returned by the LCG,
     // then it is not returned, instead the LCG is asked for a new number until the number given is within the period.
-    void reseed() {
+    void reseed(Optional<uint64_t> seedValue = Optional<uint64_t>::empty()) {
         uint32_t maxOvershoot;
         if (period > 10000)
             maxOvershoot = 1000 + (period / 1000);
@@ -76,49 +76,62 @@ class FullPeriodRandom {
         if (maxOvershoot > 50000)
             maxOvershoot = 50000;
 
-        implementationPeriod = period + (entropyRand() % maxOvershoot);
+        if (seedValue.isPresent()) {
+            std::mt19937_64 deterministicGen(seedValue.get());
+            implementationPeriod = period + (deterministicGen() % maxOvershoot);
 
-        getFactors(implementationPeriod, periodFactors, periodNonFactors);
-        createBaseAMinusOne();
-        ensureThereIsRoomToRandomizeC();
+            getFactors(implementationPeriod, periodFactors, periodNonFactors);
+            createBaseAMinusOne();
+            ensureThereIsRoomToRandomizeC();
 
-        seedParameters();
+            seedParameters(seedValue, &deterministicGen);
+        } else {
+            implementationPeriod = period + (entropyRand() % maxOvershoot);
+
+            getFactors(implementationPeriod, periodFactors, periodNonFactors);
+            createBaseAMinusOne();
+            ensureThereIsRoomToRandomizeC();
+
+            seedParameters(seedValue, nullptr);
+        }
     }
 
-    void seedParameters(Optional<uint64_t> seedValue = Optional<uint64_t>::empty()) {
+    void seedParameters(Optional<uint64_t> seedValue = Optional<uint64_t>::empty(), std::mt19937_64 *deterministicGen = nullptr) {
         periodCount = 0;
 
         if (period == 1)
             return;
 
-        // a - 1 is divisible by all factors of period
-        // a - 1 is divisible by 4 if period is divisible by 4
-        // a < period
-        // I may multiply aMinusOne by any positive integer so long as aMinusOne + 1 < a
-        a = (baseAMinusOne * ((entropyRand() % maxBaseAMinusOneMultiple) + 1)) + 1;
+        auto rand64 = [&]() -> uint64_t {
+            if (deterministicGen != nullptr)
+                return (*deterministicGen)();
+            return entropyRand();
+        };
+
+        a = (baseAMinusOne * ((rand64() % maxBaseAMinusOneMultiple) + 1)) + 1;
         assert(a < implementationPeriod);
 
-        // period and c share no prime factors
-        // c < period
-        c = periodNonFactors[entropyRand() % periodNonFactors.size()];
+        c = periodNonFactors[rand64() % periodNonFactors.size()];
         for (uint64_t i = 0; i < 3; ++i) {
-            uint64_t selectdNonFactor = periodNonFactors[entropyRand() % periodNonFactors.size()];
-            if (c * selectdNonFactor < implementationPeriod)
-                c *= selectdNonFactor;
+            uint64_t selectedNonFactor = periodNonFactors[rand64() % periodNonFactors.size()];
+            if (c * selectedNonFactor < implementationPeriod)
+                c *= selectedNonFactor;
         }
-        while (entropyRand() % 5 != 0) {
-            uint64_t selectdNonFactor = periodNonFactors[entropyRand() % periodNonFactors.size()];
-            if (c * selectdNonFactor < implementationPeriod)
-                c *= selectdNonFactor;
+        while (rand64() % 5 != 0) {
+            uint64_t selectedNonFactor = periodNonFactors[rand64() % periodNonFactors.size()];
+            if (c * selectedNonFactor < implementationPeriod)
+                c *= selectedNonFactor;
         }
         assert(c < implementationPeriod);
 
-        // Use a different randomSeed for X compared to the randomSeed used for c.
         if (seedValue.isEmpty())
-            seedValue = entropyRand();
+            seedValue = rand64();
 
         X = seedValue;
+        currentSeed = seedValue;
     }
+
+    uint64_t getSeed() const { return currentSeed; }
 
    private:
     const uint64_t period;
@@ -134,6 +147,8 @@ class FullPeriodRandom {
 
     std::vector<uint64_t> periodFactors;
     std::vector<uint64_t> periodNonFactors;
+
+    uint64_t currentSeed;
 
     const bool synchronized;
     std::mutex mtx;
