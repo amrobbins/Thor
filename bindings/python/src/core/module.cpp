@@ -19,6 +19,7 @@ void bind_losses(nb::module_ &losses);
 void bind_metrics(nb::module_ &metrics);
 void bind_optimizers(nb::module_ &optimizers);
 void bind_physical(nb::module_ &physical);
+void bind_random(nb::module_ &random);
 
 NB_MODULE(_thor, thor) {
     thor.doc() = "Thor Python bindings";
@@ -68,4 +69,7 @@ NB_MODULE(_thor, thor) {
 
     auto physical = thor.def_submodule("physical");
     bind_physical(physical);
+
+    auto random = thor.def_submodule("random");
+    bind_random(random);
 }
