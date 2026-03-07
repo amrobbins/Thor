@@ -69,13 +69,14 @@ def test_full_period_random_reseed_without_seed_keeps_working():
 
 
 def test_full_period_random_reseed_explicit_seed_is_repeatable():
-    rng1 = thor.random.FullPeriodRandom(10)
-    rng2 = thor.random.FullPeriodRandom(10)
+    period = 10
+    rng1 = thor.random.FullPeriodRandom(period)
+    rng2 = thor.random.FullPeriodRandom(period)
 
     rng1.reseed(999)
     rng2.reseed(999)
 
-    seq1 = [rng1.get_random_number() for _ in range(10)]
-    seq2 = [rng2.get_random_number() for _ in range(10)]
+    seq1 = [rng1.get_random_number() for _ in range(3 * period)]
+    seq2 = [rng2.get_random_number() for _ in range(3 * period)]
 
     assert seq1 == seq2
