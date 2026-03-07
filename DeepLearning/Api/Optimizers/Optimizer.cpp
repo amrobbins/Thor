@@ -8,9 +8,21 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-Optimizer::Optimizer() : id(nextId.fetch_add(1)) {}
-
 atomic<int64_t> Optimizer::nextId(2);
+unordered_map<uint64_t, uint64_t> Optimizer::orignalIdToId;
+
+Optimizer::Optimizer() : id(nextId.fetch_add(1)) {
+    originalId = id;
+}
+
+Optimizer::Optimizer(uint64_t originalId) {
+    if (orignalIdToId.contains(originalId)) {
+        id = orignalIdToId[originalId];
+    } else {
+        id = nextId.fetch_add(1);
+        orignalIdToId[originalId] = id;
+    }
+}
 
 void Optimizer::addToNetwork(Network *network) {
     assert(network != nullptr);

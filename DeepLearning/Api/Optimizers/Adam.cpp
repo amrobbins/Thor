@@ -6,6 +6,11 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+Adam::Adam() : Optimizer() {}
+
+Adam::Adam(uint64_t originalId) : Optimizer(originalId) {}
+
+
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
     return make_shared<ThorImplementation::Adam>(getId(), trainableLayer, alpha, beta1, beta2, epsilon);
 }
@@ -73,6 +78,8 @@ json Adam::architectureJson() const {
     j["optimizer_type"] = string("adam");
     j["version"] = getVersion();
 
+    j["id"] = getId();
+
     // Get the params and weights from the physical layer.
     // Record the params and dump the weights to files.
     j["t"] = t;
@@ -138,6 +145,8 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     if (j.at("version").get<string>() != "1.0.0")
         throw runtime_error("Unsupported version in Adam::deserialize: " + j["version"].get<string>());
 
+    uint64_t originalId = j.at("id").get<uint64_t>();
+
     float t = j.at("t").get<float>();
     float alpha = j.at("alpha").get<float>();
     float beta1 = j.at("beta1").get<float>();
@@ -159,7 +168,7 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
         vBiasFile = j.at("v_bias_tensor").get<string>();
     }
 
-    Adam adam;
+    Adam adam(originalId);
     adam.t = t;
     adam.alpha = alpha;
     adam.beta1 = beta1;

@@ -14,6 +14,8 @@ namespace Thor {
 class Adam : public Optimizer {
    public:
     class Builder;
+    Adam();
+    Adam(uint64_t originalId);
     virtual ~Adam() = default;
 
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
