@@ -63,9 +63,7 @@ class Optimizer {
 
     virtual std::string getType() const = 0;
 
-    uint64_t getOriginalId() const {
-        return originalId;
-    }
+    uint64_t getOriginalId() const { return originalId; }
 
    protected:
     // Only subclasses can be instantiated
