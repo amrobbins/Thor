@@ -40,7 +40,7 @@ A Network that contains layers. FIXME.
 )nbdoc");
 
     network.def("get_network_name", &Network::getNetworkName);
-    // network.def("get_num_stamps", &Network::getNumStamps);
+    network.def("get_num_trainable_layers", &Network::getNumTrainableLayers);
     network.def("status_code_to_string", &Network::statusCodeToString, "status_code"_a);
 
     network.def("get_architecture_json", &Network::architectureJsonString);
