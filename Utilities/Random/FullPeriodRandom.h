@@ -51,7 +51,10 @@ class FullPeriodRandom {
             std::unique_lock<std::mutex> lck(mtx);
 
         if (periodCount == period) {
-            reseed();
+            if (deterministic)
+                reseed(deterministicGen());
+            else
+                reseed();
         }
 
         do {
@@ -65,6 +68,11 @@ class FullPeriodRandom {
     // The actual period of the LCG can be bigger than the period. When a number larger than period is returned by the LCG,
     // then it is not returned, instead the LCG is asked for a new number until the number given is within the period.
     void reseed(Optional<uint64_t> seedValue = Optional<uint64_t>::empty()) {
+        if (seedValue.isPresent())
+            deterministic = true;
+        else
+            deterministic = false;
+
         uint32_t maxOvershoot;
         if (period > 10000)
             maxOvershoot = 1000 + (period / 1000);
@@ -76,8 +84,8 @@ class FullPeriodRandom {
         if (maxOvershoot > 50000)
             maxOvershoot = 50000;
 
-        if (seedValue.isPresent()) {
-            std::mt19937_64 deterministicGen(seedValue.get());
+        if (deterministic) {
+            deterministicGen = std::mt19937_64(seedValue.get());
             implementationPeriod = period + (deterministicGen() % maxOvershoot);
 
             getFactors(implementationPeriod, periodFactors, periodNonFactors);
@@ -148,7 +156,9 @@ class FullPeriodRandom {
     std::vector<uint64_t> periodFactors;
     std::vector<uint64_t> periodNonFactors;
 
+    bool deterministic = false;
     uint64_t currentSeed;
+    std::mt19937_64 deterministicGen;
 
     const bool synchronized;
     std::mutex mtx;
