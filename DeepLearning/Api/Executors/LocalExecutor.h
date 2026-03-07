@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Executors/Executor.h"
 #include "DeepLearning/Api/Loaders/Loader.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Visualizers/ConsoleVisualizer.h"
 #include "DeepLearning/Api/Visualizers/Visualizer.h"
@@ -62,7 +63,7 @@ class LocalExecutor : public Executor {
    private:
     bool initialized;
 
-    Network* network;
+    std::shared_ptr<PlacedNetwork> placedNetwork;
     std::shared_ptr<Loader> loader;
     std::shared_ptr<Optimizer> optimizer;
     // FIXME: shared_ptr, however how do I deal with singletons then?

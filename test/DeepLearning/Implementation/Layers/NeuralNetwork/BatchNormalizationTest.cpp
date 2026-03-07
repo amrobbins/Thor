@@ -60,7 +60,7 @@ TEST(BatchNormalization, DISABLED_2dYieldsFiniteValues) {
             ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorInputs());
         ThorImplementation::Tensor anErrorOutput =
             ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorOutputs());
-        shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(batchNormalizationLayer, 0.1, 0, 0, false, 0);
+        shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(5, batchNormalizationLayer, 0.1, 0, 0, false, 0);
         batchNormalizationLayer->setOptimizer(sgd);
         sgd->updateHyperParameters(0, 0, 1);
 
@@ -155,7 +155,7 @@ TEST(BatchNormalization, DISABLED_4dYieldsFiniteValues) {
             ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorInputs());
         ThorImplementation::Tensor anErrorOutput =
             ThorImplementation::MultiConnectionLayer::getFirstPresentTensor(batchNormalizationLayer->getErrorOutputs());
-        shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(batchNormalizationLayer, 0.1, 0, 0, false, 0);
+        shared_ptr<Optimizer> sgd = make_shared<ThorImplementation::Sgd>(6, batchNormalizationLayer, 0.1, 0, 0, false, 0);
         batchNormalizationLayer->setOptimizer(sgd);
         sgd->updateHyperParameters(0, 0, 1);
 

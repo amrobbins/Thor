@@ -38,7 +38,10 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
 
     virtual std::shared_ptr<Layer> clone() const { return std::make_shared<FullyConnected>(*this); }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     bool saveOptimizerState,
+                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
 
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
 
@@ -51,7 +54,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
 
-    virtual void buildSupportLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork(Network *network);
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
@@ -153,14 +156,12 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation> activation;
-    std::shared_ptr<Optimizer> layerOptimizer;
 
     DropOut dropOut;
     BatchNormalization batchNormalization;
 
     float dropProportion;
 
-    Network *network;
     bool useBatchNormalization;
     Optional<double> batchNormExponentialRunningAverageFactor;
     Optional<double> batchNormEpsilon;
@@ -199,7 +200,6 @@ class FullyConnected::Builder {
 
         FullyConnected fullyConnected;
 
-        fullyConnected.network = _network;
         fullyConnected.featureInputs = _featureInputs;
         fullyConnected.numOutputFeatures = _numOutputFeatures;
 
@@ -223,7 +223,7 @@ class FullyConnected::Builder {
         // is added to support the config. It is important that after this happens then the getFeatureOutput() function, called on this
         // stand-in pseudo layer returns the actual featureOut of the real subnetwork.
         if (fullyConnected.isMultiLayer()) {
-            fullyConnected.buildSupportLayersAndAddToNetwork();
+            fullyConnected.buildSupportLayersAndAddToNetwork(_network);
         } else {
             for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
                 fullyConnected.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {fullyConnected.numOutputFeatures}));

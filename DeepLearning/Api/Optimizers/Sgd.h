@@ -20,14 +20,14 @@ class Sgd : public Optimizer {
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
         std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer);
 
-    virtual void setConstantLearningRate(float newCurrentLearningRate);
-    virtual void setInitialLearningRate(float newInitialLearningRate);
+    virtual void setConstantLearningRate(float newCurrentLearningRate, PlacedNetwork *placedNetwork);
+    virtual void setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *placedNetwork);
     virtual float getInitialLearningRate();
-    virtual void setDecay(float newDecay);
+    virtual void setDecay(float newDecay, PlacedNetwork *placedNetwork);
     virtual float getDecay();
-    virtual void setMomentum(float newMomentum);
+    virtual void setMomentum(float newMomentum, PlacedNetwork *placedNetwork);
     virtual float getMomentum();
-    virtual void setUseNesterovMomentum(bool newUseNesterovMomentum);
+    virtual void setUseNesterovMomentum(bool newUseNesterovMomentum, PlacedNetwork *placedNetwork);
     virtual bool getUseNesterovMomentum();
     virtual uint64_t getEpoch();
 
@@ -47,7 +47,7 @@ class Sgd : public Optimizer {
    protected:
     virtual std::shared_ptr<Optimizer> clone() const;
 
-    void updateParameters();
+    void updateParameters(PlacedNetwork *placedNetwork);
 
    private:
     float initialLearningRate;

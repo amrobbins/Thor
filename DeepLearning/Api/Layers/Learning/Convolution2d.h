@@ -35,7 +35,10 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
 
     virtual std::string getLayerType() const { return "Convolution2d"; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     bool saveOptimizerState,
+                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
     virtual nlohmann::json architectureJson() const;
 
@@ -44,7 +47,7 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
         return useBatchNormalization || dropProportion > 0.0f || activation ||
                featureInputs.front().getDataType() != Tensor::DataType::FP16;
     }
-    virtual void buildSupportLayersAndAddToNetwork();
+    virtual void buildSupportLayersAndAddToNetwork(Network *network);
 
     virtual void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) {
         std::vector<uint64_t> inputDimensions = inputTensor.getDimensions();
@@ -123,7 +126,6 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
     std::vector<Tensor> standaloneLayerFeatureOutputs;
 
    private:
-    Network *network;
     uint32_t numOutputChannels;
     uint32_t filterHeight;
     uint32_t filterWidth;
@@ -185,7 +187,6 @@ class Convolution2d::Builder {
 
         Convolution2d convolution2d;
 
-        convolution2d.network = _network;
         convolution2d.featureInputs = _featureInputs;
         convolution2d.numOutputChannels = _numOutputChannels;
         convolution2d.filterHeight = _filterHeight;
@@ -236,7 +237,7 @@ class Convolution2d::Builder {
         convolution2d.initialized = true;
 
         if (convolution2d.isMultiLayer()) {
-            convolution2d.buildSupportLayersAndAddToNetwork();
+            convolution2d.buildSupportLayersAndAddToNetwork(_network);
         } else {
             for (uint32_t i = 0; i < convolution2d.featureInputs.size(); ++i) {
                 convolution2d.featureOutputs.push_back(Tensor(Tensor::DataType::FP16, {_numOutputChannels, outputHeight, outputWidth}));

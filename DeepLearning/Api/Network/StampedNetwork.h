@@ -11,6 +11,7 @@
 
 namespace Thor {
 class Network;
+class PlacedNetwork;
 class LocalExecutor;
 }  // namespace Thor
 
@@ -77,6 +78,7 @@ class StampedNetwork {
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkInput>> inputNamedShared;
     std::map<std::string, std::shared_ptr<ThorImplementation::NetworkOutput>> outputNamedShared;
 
+    // FIXME: get rid of raw pointers
     // For performance, store and use the raw pointers
     std::vector<ThorImplementation::NetworkInput *> inputs;
     std::vector<ThorImplementation::NetworkOutput *> outputs;
@@ -98,6 +100,7 @@ class StampedNetwork {
     uint64_t floatingPointOperationsPerExampleBackward;
 
     friend class Thor::Network;
+    friend class Thor::PlacedNetwork;
     friend class Thor::LocalExecutor;
 };
 

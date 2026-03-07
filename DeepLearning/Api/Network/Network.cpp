@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -22,14 +23,6 @@ string Network::statusCodeToString(StatusCode statusCode) {
     else if (statusCode == StatusCode::DEADLOCK_CYCLE)
         return "DEADLOCK CYCLE";
     assert(false);
-}
-
-Network::~Network() {
-    for (uint32_t i = 0; i < stampedNetworks.size(); ++i) {
-        // Calls parentCleanup then cleanUp then clears all the shared pointers:
-        stampedNetworks[i].clear();
-    }
-    stampedNetworks.clear();
 }
 
 // Records the layers in sorted DAG order.
@@ -58,7 +51,10 @@ void Network::preOptimize(uint32_t gpuNum, uint32_t batchSize) {
 }
 
 // Returns 0 on success, returns an error code (i.e. out of memory) on failure
-Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &initDoneEvents, uint32_t batchSize) {
+Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
+                                          vector<Event> &initDoneEvents,
+                                          uint32_t batchSize,
+                                          vector<ThorImplementation::StampedNetwork> &stampedNetworks) {
     ThorImplementation::StampedNetwork stampedNetwork;
     stampedNetwork.gpuNum = gpuNum;
 
@@ -109,7 +105,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
         }
 
         // 3. Now that all layers have been constructed and connected, compile all layers
-        for (const std::shared_ptr<Layer> &apiLayer : allLayersInNetworkList) {
+        for (const shared_ptr<Layer> &apiLayer : allLayersInNetworkList) {
             // It is possible for an implementation layer to have no physical layer, for example a stub layer
             if (stampedNetwork.apiLayerToPhysicalLayerShared.count(apiLayer->getId()) == 0)
                 continue;
@@ -151,7 +147,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum, std::vector<Event> &i
 }
 
 Network::StatusCode Network::connect(bool inferenceOnly) {
-    if (optimizer != nullptr) {
+    if (defaultOptimizer != nullptr) {
         attachOptimizerToLayers(false);
     }
 
@@ -161,7 +157,7 @@ Network::StatusCode Network::connect(bool inferenceOnly) {
                 string message = "A layer of type ";
                 message += trainableLayer->getLayerType();
                 message += " does not have an optimizer assigned, but the network is being placed for training.";
-                throw std::runtime_error(message);
+                throw runtime_error(message);
             }
         }
     }
@@ -175,14 +171,12 @@ Network::StatusCode Network::connect(bool inferenceOnly) {
     return dagStatus;
 }
 
-Network::StatusCode Network::place(uint32_t batchSize,
-                                   std::vector<Event> &initDoneEvents,
-                                   bool inferenceOnly,
-                                   std::vector<int32_t> forcedDevices,
-                                   uint32_t forcedNumStampsPerGpu) {
+shared_ptr<PlacedNetwork> Network::place(
+    uint32_t batchSize, vector<Event> &initDoneEvents, bool inferenceOnly, vector<int32_t> forcedDevices, uint32_t forcedNumStampsPerGpu) {
     if (!frozen) {
         StatusCode dagStatus = connect(inferenceOnly);
-        assert(dagStatus == StatusCode::SUCCESS);
+        if (dagStatus != StatusCode::SUCCESS)
+            throw logic_error("Network graph is invalid, error: " + statusCodeToString(dagStatus));
     }
     assert(frozen);
 
@@ -206,67 +200,101 @@ Network::StatusCode Network::place(uint32_t batchSize,
         }
     }
 
+    vector<ThorImplementation::StampedNetwork> stampedNetworks;
+
     // FIXME: pull preOptimize into initialize
     for (uint32_t i = 0; i < devices.size(); ++i) {
         preOptimize(devices[i], batchSize);
     }
     for (uint32_t i = 0; i < devices.size(); ++i) {
         for (uint32_t j = 0; j < numStampsPerDevice[i]; ++j) {
-            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize);
-            if (statusCode != StatusCode::SUCCESS) {
-                return statusCode;
-            }
+            StatusCode statusCode = stampNetwork(devices[i], initDoneEvents, batchSize, stampedNetworks);
+            if (statusCode != StatusCode::SUCCESS)
+                throw logic_error("Error when stamping network, error: " + statusCodeToString(statusCode));
         }
     }
 
-    return StatusCode::SUCCESS;
+    return make_shared<PlacedNetwork>(networkName, *this, stampedNetworks);
 }
 
-void Network::save(const std::string &directory, bool overwrite, bool saveOptimizerState) {
-    if (!frozen)
-        connect(false);
+// Save the architecture only, does not use a stamped network so no state
+void Network::save(const string &directory, const bool overwrite) {
+    if (defaultOptimizer != nullptr)
+        attachOptimizerToLayers(false);
 
-    if (archiveWriter == nullptr) {
-        archiveWriter = make_shared<thor_file::TarWriter>(networkName);
+    thor_file::TarWriter archiveWriter(networkName);
 
-        // For the initial implementation, I will just force GPU 0.
-        // I will optimize from there, but I need changes elsewhere first anyway.
-        Stream stream = Stream::getNextDownloadStream(0);
-        json modelJson;
-        modelJson["layers"] = json::array();
-        for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
-            // FIXME: Network provides serialize with the stamp to use - to choose the gpu - among other speed ups
-            modelJson["layers"].push_back(layer->serialize(*archiveWriter, stream, saveOptimizerState));
-        }
+    // string modelJsonDump = architectureJsonString();
+    json modelJson = architectureJson();
+    if (defaultOptimizer != nullptr)
+        modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
+    string modelJsonDump = modelJson.dump(4);
 
-        string qualifiedModelName = networkName + ".thor.json";
-        string jsonDump = modelJson.dump(4);
-        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-        ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {jsonDump.size()});
-        ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
-        memcpy(jsonDumpTensor.getMemPtr<void>(), jsonDump.data(), jsonDump.size());
-        archiveWriter->addArchiveFile(qualifiedModelName, jsonDumpTensor);
+    string qualifiedModelName = networkName + ".thor.json";
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8,
+                                                              {modelJsonDump.size()});
+    ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
+    memcpy(jsonDumpTensor.getMemPtr<void>(), modelJsonDump.data(), modelJsonDump.size());
+    archiveWriter.addArchiveFile(qualifiedModelName, jsonDumpTensor);
+
+    archiveWriter.createArchive(directory, overwrite);
+}
+
+// Save the architecture and state - requires a stamped network.
+void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
+                   const string &directory,
+                   const bool overwrite,
+                   const bool saveOptimizerState) const {
+    thor_file::TarWriter archiveWriter(networkName);
+
+    // For the initial implementation, I will just force GPU 0.
+    // I will optimize from there, but I need changes elsewhere first anyway.
+    Stream stream = Stream::getNextDownloadStream(0);
+    json modelJson;
+    modelJson["layers"] = json::array();
+    uint32_t stampIndex = 0;
+    for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
+        modelJson["layers"].push_back(layer->serialize(archiveWriter, stream, saveOptimizerState, stampedNetworks[stampIndex]));
+        stampIndex += 1;
+        if (stampIndex >= stampedNetworks.size())
+            stampIndex = 0;
     }
+    if (defaultOptimizer != nullptr)
+        modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
+
+    string qualifiedModelName = networkName + ".thor.json";
+    string jsonDump = modelJson.dump(4);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor jsonTensorDescriptor(ThorImplementation::TensorDescriptor::DataType::UINT8, {jsonDump.size()});
+    ThorImplementation::Tensor jsonDumpTensor(cpuPlacement, jsonTensorDescriptor);
+    memcpy(jsonDumpTensor.getMemPtr<void>(), jsonDump.data(), jsonDump.size());
+    archiveWriter.addArchiveFile(qualifiedModelName, jsonDumpTensor);
 
     // First I must synchronize with all devices to make sure the final batch is completely finished updating the weights.
     uint32_t numGpus = MachineEvaluator::instance().getNumGpus();
     for (uint32_t gpu = 0; gpu < numGpus; ++gpu)
         Stream::deviceSynchronize(gpu);
 
-    archiveWriter->createArchive(directory, overwrite);
+    archiveWriter.createArchive(directory, overwrite);
 }
 
-string Network::architectureJson() {
+json Network::architectureJson() const {
     json modelJson;
     modelJson["layers"] = json::array();
     for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
         modelJson["layers"].push_back(layer->architectureJson());
     }
+    return modelJson;
+}
+
+string Network::architectureJsonString() const {
+    json modelJson = architectureJson();
     string jsonDump = modelJson.dump(4);
     return jsonDump;
 }
 
-void Network::load(const std::string &directory) {
+void Network::load(const string &directory) {
     // Read the model json from the archive
     archiveReader = make_shared<thor_file::TarReader>(networkName, directory);
     string modelJsonFileName = networkName + ".thor.json";
@@ -282,8 +310,10 @@ void Network::load(const std::string &directory) {
     json modelJson = json::parse(jsonStr, jsonStr + modelJsonNumBytes);
     const json layers = modelJson["layers"];
     if (!layers.is_array()) {
-        throw std::runtime_error("\"layers\" is not a JSON array");
+        throw runtime_error("\"layers\" is not a JSON array");
     }
+    if (modelJson.contains("default_optimizer"))
+        defaultOptimizer = Optimizer::deserialize(archiveReader, modelJson["default_optimizer"], this);
 
     for (const json &layerJson : layers) {
         // printf("%s\n", layerJson.dump(4).c_str());
@@ -705,17 +735,17 @@ void Network::addLayerToNetwork(const Layer *layer) {
 // An optimizer is used to optimize all weights and biases in a network
 void Network::addToNetwork(Optimizer *optimizer) {
     // If the default optimizer is specified more than once, the user has an error in their code, call it out.
-    if (this->optimizer != nullptr) {
+    if (this->defaultOptimizer != nullptr) {
         string errorMessage = "Error: Multiple default optimizers specified on network " + this->getNetworkName() +
-                              ". You may specify at most one default optimizer. Had " + this->optimizer->getType() + " and tried to add " +
-                              optimizer->getType();
+                              ". You may specify at most one default optimizer. Had " + this->defaultOptimizer->getType() +
+                              " and tried to add " + optimizer->getType();
         throw(runtime_error(errorMessage.c_str()));
     }
 
-    this->optimizer = optimizer->clone();
+    this->defaultOptimizer = optimizer->clone();
 }
 
-shared_ptr<Optimizer> Network::getDefaultOptimizer() { return optimizer; }
+shared_ptr<Optimizer> Network::getDefaultOptimizer() { return defaultOptimizer; }
 
 // For future multi-gpu support, optimizers for the same layer on different GPU's will need to accumulate into a single weights memory
 // and then broadcast the updated weights to the optimizers on the other gpus.
@@ -725,11 +755,11 @@ shared_ptr<Optimizer> Network::getDefaultOptimizer() { return optimizer; }
 void Network::attachOptimizerToLayers(bool replaceIfExisting) {
     // Once the optimizer is distributed to the layers, the layers own the optimizer instances.
     // If additional layers are added later on, attachOptimizerToLayers(false) will need to be called before training more.
-    assert(optimizer != nullptr);
+    assert(defaultOptimizer != nullptr);
 
-    for (std::shared_ptr<TrainableWeightsBiasesLayer> &trainableLayer : allTrainableLayersInNetwork) {
+    for (shared_ptr<TrainableWeightsBiasesLayer> &trainableLayer : allTrainableLayersInNetwork) {
         if (replaceIfExisting or !trainableLayer->hasOptimizer())
-            trainableLayer->attachOptimizer(optimizer);
+            trainableLayer->attachOptimizer(defaultOptimizer);
     }
 }
 

@@ -1,8 +1,8 @@
-#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
 #include "gtest/gtest.h"
 
@@ -272,17 +272,16 @@ TEST(FullyConnected, SerializeDeserialize) {
         Stream stream(0);
         uint32_t batchSize = 1 + (rand() % 16);
         vector<Event> initDoneEvents;
-        Network::StatusCode statusCode;
-        statusCode = initialNetwork.place(batchSize, initDoneEvents);
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+        shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(initialPlacedNetwork != nullptr);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
         // Fetch the fully connected layer from the network and write to its weights
-        ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
-        ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+        ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
+        ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
         ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), useBatchNorm ? 2UL : 1UL);
         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
@@ -327,7 +326,7 @@ TEST(FullyConnected, SerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
             if (initalNetworkFC) {
-                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
+                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
                 fcFound = true;
                 break;
             }
@@ -343,7 +342,7 @@ TEST(FullyConnected, SerializeDeserialize) {
                 shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
                 batchNorm = dynamic_pointer_cast<BatchNormalization>(layer);
                 if (batchNorm) {
-                    batchNormJ = batchNorm->serialize(archiveWriter, stream, true);
+                    batchNormJ = batchNorm->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
                     bnFound = true;
                     break;
                 }
@@ -482,18 +481,18 @@ TEST(FullyConnected, SerializeDeserialize) {
         Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
-        statusCode = newNetwork.place(batchSize, initDoneEvents);
+        shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(newPlacedNetwork != nullptr);
 
         archiveReader->executeReadRequests();
 
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
-        ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-        stampedNetwork = newNetwork.getStampedNetwork(0);
+        ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
+        stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
         if (useBatchNorm) {
             ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 2UL);
         } else {
@@ -673,17 +672,16 @@ TEST(FullyConnected, SerializeDeserialize_LayerSpecificOptimizer) {
         Stream stream(0);
         uint32_t batchSize = 1 + (rand() % 16);
         vector<Event> initDoneEvents;
-        Network::StatusCode statusCode;
-        statusCode = initialNetwork.place(batchSize, initDoneEvents);
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+        shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(initialPlacedNetwork != nullptr);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
         // Fetch the fully connected layer from the network and write to its weights
-        ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
-        ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+        ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
+        ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
         ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), useBatchNorm ? 2UL : 1UL);
         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
@@ -728,7 +726,7 @@ TEST(FullyConnected, SerializeDeserialize_LayerSpecificOptimizer) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
             if (initalNetworkFC) {
-                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
+                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
                 fcFound = true;
                 break;
             }
@@ -744,7 +742,7 @@ TEST(FullyConnected, SerializeDeserialize_LayerSpecificOptimizer) {
                 shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
                 batchNorm = dynamic_pointer_cast<BatchNormalization>(layer);
                 if (batchNorm) {
-                    batchNormJ = batchNorm->serialize(archiveWriter, stream, true);
+                    batchNormJ = batchNorm->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
                     bnFound = true;
                     break;
                 }
@@ -901,18 +899,18 @@ TEST(FullyConnected, SerializeDeserialize_LayerSpecificOptimizer) {
         Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
-        statusCode = newNetwork.place(batchSize, initDoneEvents);
+        shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(newPlacedNetwork != nullptr);
 
         archiveReader->executeReadRequests();
 
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
-        ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-        stampedNetwork = newNetwork.getStampedNetwork(0);
+        ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
+        stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
         if (useBatchNorm) {
             ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 2UL);
         } else {

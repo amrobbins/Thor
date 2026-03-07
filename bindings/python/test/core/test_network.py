@@ -1,4 +1,6 @@
 import json
+import shutil
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -87,17 +89,17 @@ def test_network_place_returns_status_code_and_updates_num_stamps():
 
     assert actual_architecture == expected_architecture
 
-    status = n.place(
+    placed_network = n.place(
         batch_size=1,
         inference_only=True,
     )
 
     # Ensure it's the enum type you expect
-    assert isinstance(status, thor.Network.StatusCode)
+    assert isinstance(placed_network, thor.PlacedNetwork)
 
     # If placement succeeds, num_stamps should be non-zero
-    assert status == thor.Network.StatusCode.success
-    assert n.get_num_stamps() >= 1
+    assert placed_network is not None
+    assert placed_network.get_num_stamps() >= 1
 
 
 def test_network_architecture_json_valid_for_partial_network():
@@ -140,31 +142,29 @@ def test_network_architecture_json_valid_for_partial_network():
     assert actual_architecture == expected_architecture
 
 
-def test_network_save_load(tmp_path):
-    from thor.layers import FullyConnected
-    from thor.activations import Relu
-    from thor.optimizers import Adam
-    n = thor.Network("pytest_net")
-    # Minimal graph: NetworkInput -> NetworkOutput
-    ni = thor.layers.NetworkInput(n, "in", [1], thor.DataType.fp16)
-    fc = thor.layers.FullyConnected(n, ni.get_feature_output(), 1, True, thor.activations.Relu(), optimizer=Adam())
-    no = thor.layers.NetworkOutput(n, "out", fc.get_feature_output(), thor.DataType.fp16)
+def test_network_save_load():
+    with TemporaryDirectory(prefix="thor_pytest_") as tmp_path:
+        from thor.layers import FullyConnected
+        from thor.activations import Relu
+        from thor.optimizers import Adam
+        n = thor.Network("pytest_net")
+        ni = thor.layers.NetworkInput(n, "in", [1], thor.DataType.fp16)
+        fc = thor.layers.FullyConnected(n, ni.get_feature_output(), 1, True, thor.activations.Relu(), optimizer=Adam())
+        thor.layers.NetworkOutput(n, "out", fc.get_feature_output(), thor.DataType.fp16)
 
-    print(tmp_path)
+        n.save(tmp_path, overwrite=True)
 
-    n.save(str(tmp_path), overwrite=True, save_optimizer_state=True)
+        n2 = thor.Network("pytest_net")
+        n2.load(tmp_path)
 
-    n2 = thor.Network("pytest_net")
-    n2.load(str(tmp_path))
+        net_structure = json.loads(n2.get_architecture_json())
 
-    net_structure = json.loads(n2.get_architecture_json())
-
-    expected_layers = {
-        'network_input',
-        'fully_connected',
-        'relu',
-        'network_output',
-    }
-    for layer in net_structure['layers']:
-        assert layer['layer_type'] in expected_layers
-        expected_layers.remove(layer['layer_type'])
+        expected_layers = {
+            'network_input',
+            'fully_connected',
+            'relu',
+            'network_output',
+        }
+        for layer in net_structure['layers']:
+            assert layer['layer_type'] in expected_layers
+            expected_layers.remove(layer['layer_type'])

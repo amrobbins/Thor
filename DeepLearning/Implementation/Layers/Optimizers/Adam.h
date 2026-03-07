@@ -11,7 +11,7 @@ namespace ThorImplementation {
 
 class Adam : public Optimizer {
    public:
-    Adam(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer, float alpha, float beta1, float beta2, float epsilon);
+    Adam(uint64_t id, std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer, float alpha, float beta1, float beta2, float epsilon);
 
     virtual void compile();
 

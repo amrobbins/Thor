@@ -9,10 +9,10 @@ namespace ThorImplementation {
 
 class Optimizer {
    public:
-    Optimizer() {
+    Optimizer(uint64_t id) {
         currentEpoch = 0;
         currentBatch = 0;
-        id = nextId.fetch_add(1);
+        this->id = id;
     }
 
     virtual void compile() {

@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 
 #include <stdio.h>
@@ -57,13 +58,23 @@ static Network buildNetwork(uint32_t numFCLayers) {
 
 TEST(Sgd, SetAndGetInitialLearningRate) {
     Network network = buildNetwork(3);
+    // Attach default optimizer
     shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.2f).network(network).build();
 
-    sgd->setInitialLearningRate(0.1f);
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    sgd->setInitialLearningRate(0.1f, placedNetwork.get());
     ASSERT_FLOAT_EQ(0.1f, sgd->getInitialLearningRate());
 
-    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+    for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
@@ -80,11 +91,20 @@ TEST(Sgd, SetAndGetDecay) {
     Network network = buildNetwork(4);
     shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
 
-    sgd->setDecay(0.2f);
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    sgd->setDecay(0.2f, placedNetwork.get());
     ASSERT_FLOAT_EQ(0.2f, sgd->getDecay());
 
-    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+    for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
@@ -101,11 +121,19 @@ TEST(Sgd, SetAndGetMomentum) {
     Network network = buildNetwork(5);
     shared_ptr<Sgd> sgd = Sgd::Builder().decay(0.5f).network(network).build();
 
-    sgd->setMomentum(0.3f);
+    sgd->setMomentum(0.3f, nullptr);
     ASSERT_FLOAT_EQ(0.3f, sgd->getMomentum());
 
-    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+    for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
@@ -122,11 +150,20 @@ TEST(Sgd, SetAndGetUseNesterovMomentum) {
     Network network = buildNetwork(6);
     shared_ptr<Sgd> sgd = Sgd::Builder().useNesterovMomentum(false).network(network).build();
 
-    sgd->setUseNesterovMomentum(true);
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    sgd->setUseNesterovMomentum(true, placedNetwork.get());
     ASSERT_TRUE(sgd->getUseNesterovMomentum());
 
-    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+    for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
@@ -138,11 +175,11 @@ TEST(Sgd, SetAndGetUseNesterovMomentum) {
         }
     }
 
-    sgd->setUseNesterovMomentum(false);
+    sgd->setUseNesterovMomentum(false, placedNetwork.get());
     ASSERT_FALSE(sgd->getUseNesterovMomentum());
 
-    for (uint32_t i = 0; i < network.getNumStamps(); ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network.getStampedNetwork(i);
+    for (uint32_t i = 0; i < placedNetwork->getNumStamps(); ++i) {
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         for (uint32_t j = 0; j < stampedNetwork.getNumTrainableLayers(); ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(j);
             Optional<shared_ptr<ThorImplementation::Optimizer>> maybeOptimizer = trainableLayer->getOptimizer();
@@ -180,14 +217,14 @@ TEST(Sgd, SgdInitializesParametersWithOneStamp) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
+    ASSERT_TRUE(placedNetwork != nullptr);
 
     uint32_t epoch = 0;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 10;
-    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
-    unordered_map<string, float> params = sgd->getAllHyperParameters();
+    Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
 
     // Check that the proper values are reported
     ASSERT_EQ(params.count("currentLearningRate"), 1U);
@@ -240,16 +277,22 @@ TEST(Sgd, SgdUpdatesParameters) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    Optimizer::updateHyperParameters(&network, 0, 0, 10);
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    Optimizer::updateHyperParameters(placedNetwork.get(), 0, 0, 10);
     uint32_t epoch = 5;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
-    unordered_map<string, float> params = sgd->getAllHyperParameters();
+    Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
@@ -276,16 +319,22 @@ TEST(Sgd, SgdInitializesStampedNetworkParameters) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    Optimizer::updateHyperParameters(&network, 0, 0, 10);
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    Optimizer::updateHyperParameters(placedNetwork.get(), 0, 0, 10);
     uint32_t epoch = 1;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 50;
-    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
-    unordered_map<string, float> params = sgd->getAllHyperParameters();
+    Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
 
     // Check that the proper values are reported
@@ -313,12 +362,18 @@ TEST(Sgd, SgdReportsParameters) {
                               .build();
 
     ThorImplementation::StampedNetwork stampedNetwork0;
-    vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
 
-    Optimizer::updateHyperParameters(&network, 0, 1, 10);
-    unordered_map<string, float> params = sgd->getAllHyperParameters();
+    Stream stream(0);
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
+        stream.waitEvent(initDoneEvents[i]);
+    }
+    initDoneEvents.clear();
+
+    Optimizer::updateHyperParameters(placedNetwork.get(), 0, 1, 10);
+    unordered_map<string, float> params = sgd->getAllHyperParameters(placedNetwork.get());
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
@@ -349,14 +404,14 @@ TEST(Sgd, SgdReportsParameters) {
         ASSERT_EQ(sgd->getUseNesterovMomentum(), useNesteroveMomentum);
     }
 
-    Optimizer::updateHyperParameters(&network, 0, 0, 10);
+    Optimizer::updateHyperParameters(placedNetwork.get(), 0, 0, 10);
     uint32_t epoch = 2;
     uint32_t batch = 3;
     uint32_t batchesPerEpoch = 50;
-    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
+    Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
     float expected = initialLearningRate * pow(1.0f - decay, epoch);
     params.clear();
-    params = sgd->getAllHyperParameters();
+    params = sgd->getAllHyperParameters(placedNetwork.get());
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
@@ -450,17 +505,16 @@ TEST(Sgd, SerializeDeserialize) {
     Stream stream(0);
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode;
-    statusCode = initialNetwork.place(batchSize, initDoneEvents);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(initialPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
     initDoneEvents.clear();
 
     // Fetch the fully connected layer from the network and write to its weights
-    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
-    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+    ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
         dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
@@ -496,7 +550,7 @@ TEST(Sgd, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
             fcFound = true;
             break;
         }
@@ -508,7 +562,7 @@ TEST(Sgd, SerializeDeserialize) {
     json networkOutputJ = networkOutput.serialize(archiveWriter, stream);
     json crossEntropyJ = meanAbsoluteError.serialize(archiveWriter, stream);
 
-    ThorImplementation::StampedNetwork &initial_stamped_network = initialNetwork.getStampedNetwork(0);
+    ThorImplementation::StampedNetwork &initial_stamped_network = initialPlacedNetwork->getStampedNetwork(0);
     shared_ptr<ThorImplementation::Layer> initial_phys_layer = initial_stamped_network.getPhysicalLayerFromApiLayer(fullyConnected.getId());
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> initial_phys_twb =
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(initial_phys_layer);
@@ -606,15 +660,15 @@ TEST(Sgd, SerializeDeserialize) {
     Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
-    statusCode = newNetwork.place(batchSize, initDoneEvents);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(newPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
     initDoneEvents.clear();
 
-    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-    ThorImplementation::StampedNetwork &newStampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
 
     // Find the FullyConnected layer and verify its optimizer's parameters
     shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes =

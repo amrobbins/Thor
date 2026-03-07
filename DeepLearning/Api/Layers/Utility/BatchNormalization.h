@@ -23,7 +23,10 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual bool isMultiLayer() const { return false; }
 
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     bool saveOptimizerState,
+                                     ThorImplementation::StampedNetwork &stampedNetwork) const;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
     virtual nlohmann::json architectureJson() const;
 
@@ -75,8 +78,6 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     Optional<std::string> runningMeansFile;
     Optional<std::string> runningVariancesFile;
-
-    Network *network;
 };
 
 class BatchNormalization::Builder {
@@ -95,7 +96,6 @@ class BatchNormalization::Builder {
         batchNormalization.epsilon = 0.0001;
         if (_epsilon.isPresent())
             batchNormalization.epsilon = _epsilon.get();
-        batchNormalization.network = _network.get();
 
         // When this layer gets a specific optimizer, set it now, otherwise network will attach the network default optimizer to it.
         if (_layerOptimizer != nullptr)

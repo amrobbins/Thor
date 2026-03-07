@@ -3,8 +3,6 @@
 using namespace ThorImplementation;
 using namespace std;
 
-atomic<int64_t> Optimizer::nextId(2);
-
 void Optimizer::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) {
     updateWeightsWithScale(weights, biases, 1.0f / batchSize);
 }

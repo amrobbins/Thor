@@ -37,18 +37,18 @@ json BatchNormalization::architectureJson() const {
     return j;
 }
 
-json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
+                                   Stream stream,
+                                   bool saveOptimizerState,
+                                   ThorImplementation::StampedNetwork &stampedNetwork) const {
     json j = architectureJson();
     string layerName = string("layer") + to_string(getId());
 
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::BatchNormalization> batchNorm;
-    if (network->getNumStamps() >= 1) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-        batchNorm = dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
-        assert(batchNorm != nullptr);
-    }
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+    batchNorm = dynamic_pointer_cast<ThorImplementation::BatchNormalization>(physicalLayer);
+    assert(batchNorm != nullptr);
 
     ThorImplementation::Tensor weights;
     ThorImplementation::Tensor biases;
@@ -134,7 +134,6 @@ void BatchNormalization::deserialize(shared_ptr<thor_file::TarReader> &archiveRe
         batchNormalization.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
     }
 
-    batchNormalization.network = network;
     batchNormalization.initialized = true;
     batchNormalization.addToNetwork(network);
 }

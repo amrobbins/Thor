@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Network/StampedNetwork.h"
 
 using namespace std;
@@ -7,23 +8,21 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-Optimizer::Optimizer() : id(nextId.fetch_add(1)) { network = nullptr; }
+Optimizer::Optimizer() : id(nextId.fetch_add(1)) {}
 
 atomic<int64_t> Optimizer::nextId(2);
 
 void Optimizer::addToNetwork(Network *network) {
     assert(network != nullptr);
-    this->network = network;
     network->addToNetwork(this);
 }
 
-unordered_map<string, float> Optimizer::getAllHyperParameters() {
-    assert(network != nullptr);
-    assert(network->getNumStamps() >= 1);
-    assert(network->getNumTrainableLayers() >= 1);
+unordered_map<string, float> Optimizer::getAllHyperParameters(PlacedNetwork *placedNetwork) {
+    assert(placedNetwork->getNumStamps() >= 1);
+    assert(placedNetwork->getNumTrainableLayers() >= 1);
 
     // All optimizer instances must have the same parameters.
-    ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
+    ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer = stampedNetwork.getTrainableLayer(0);
     if (trainableLayer->hasOptimizer()) {
@@ -36,11 +35,11 @@ unordered_map<string, float> Optimizer::getAllHyperParameters() {
 
 // Update all optimizers in the network, each belonging to a trainable layer.
 // The thought with this pattern is that the base optimizer keeps the knowledge about how to properly update all optimizers in the network.
-void Optimizer::updateHyperParameters(Network *network, uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
-    uint32_t numStamps = network->getNumStamps();
+void Optimizer::updateHyperParameters(PlacedNetwork *placedNetwork, uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
+    uint32_t numStamps = placedNetwork->getNumStamps();
     unordered_set<uint32_t> updated;
     for (uint32_t i = 0; i < numStamps; ++i) {
-        ThorImplementation::StampedNetwork &stamp = network->getStampedNetwork(i);
+        ThorImplementation::StampedNetwork &stamp = placedNetwork->getStampedNetwork(i);
         uint32_t gpuNum = stamp.getGpuNum();
         if (!updated.contains(gpuNum)) {
             updated.insert(gpuNum);
