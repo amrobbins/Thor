@@ -6,6 +6,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -39,11 +40,11 @@ A Network that contains layers. FIXME.
 )nbdoc");
 
     network.def("get_network_name", &Network::getNetworkName);
-    network.def("get_num_stamps", &Network::getNumStamps);
+    // network.def("get_num_stamps", &Network::getNumStamps);
     network.def("status_code_to_string", &Network::statusCodeToString, "status_code"_a);
 
-    network.def("get_architecture_json", &Network::architectureJson);
-    network.def("save", &Network::save, "directory"_a, "overwrite"_a = false, "save_optimizer_state"_a = false);
+    network.def("get_architecture_json", &Network::architectureJsonString);
+    network.def("save", nb::overload_cast<const std::string &, bool>(&Network::save), "directory"_a, "overwrite"_a = false);
     network.def("load", &Network::load, "directory"_a);
 
     network.def("get_default_optimizer", &Network::getDefaultOptimizer);
@@ -56,18 +57,9 @@ A Network that contains layers. FIXME.
            std::vector<int32_t> forced_devices,
            uint32_t forced_num_stamps_per_gpu) {
             std::vector<Event> init_done_events;
-            Network::StatusCode status_code =
+            shared_ptr<PlacedNetwork> placedNetwork =
                 self.place(batch_size, init_done_events, inference_only, forced_devices, forced_num_stamps_per_gpu);
-
-            // On the python side, synchronize on the host here for simplicity, host sync vs stream sync is not the hot path here.
-            if (status_code == Network::StatusCode::SUCCESS) {
-                nb::gil_scoped_release release;
-                for (Event &init_done_event : init_done_events) {
-                    init_done_event.synchronize();
-                }
-            }
-
-            return status_code;
+            return placedNetwork;
         },
         "batch_size"_a,
         "inference_only"_a = false,

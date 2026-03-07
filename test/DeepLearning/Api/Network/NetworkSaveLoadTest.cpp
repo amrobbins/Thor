@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 
@@ -165,13 +166,15 @@ TEST(Network, SaveLoadRoundTripUnstamped) {
                                       .build();
 
     bool saveOptimizerState = rand() % 2;
-    initialNetwork.save("/tmp", true, saveOptimizerState);
+    initialNetwork.save("/tmp", true);
 
     ///////////////////////////////
     // Load
     ///////////////////////////////
     Network newNetwork("TestModel");
     newNetwork.load("/tmp");
+
+    assert(newNetwork.getDefaultOptimizer() != nullptr);
 
     // Ensure all the expected layers are in the network and properly connected
     uint32_t expectedNumLayers = 5;
@@ -261,7 +264,8 @@ TEST(Network, SaveLoadRoundTripUnstamped) {
     uint32_t batchSize = 1 + rand() % 10;
     Stream stream(0);
     vector<Event> initDoneEvents;
-    newNetwork.place(batchSize, initDoneEvents);
+    shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(newPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
@@ -269,8 +273,8 @@ TEST(Network, SaveLoadRoundTripUnstamped) {
 
     shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNorm;
     shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected;
-    ASSERT_EQ(newNetwork.getNumStamps(), 1);
-    ThorImplementation::StampedNetwork &stampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1);
+    ThorImplementation::StampedNetwork &stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
     for (uint32_t i = 0; i < stampedNetwork.getNumTrainableLayers(); ++i) {
         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twb = stampedNetwork.getTrainableLayer(i);
         if (dynamic_pointer_cast<ThorImplementation::BatchNormalization>(twb) != nullptr)
@@ -418,7 +422,8 @@ TEST(Network, SaveLoadRoundTripStamped) {
     uint32_t batchSize = 1 + rand() % 10;
     Stream stream(0);
     vector<Event> initDoneEvents;
-    initialNetwork.place(batchSize, initDoneEvents);
+    shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(initialPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
@@ -427,8 +432,8 @@ TEST(Network, SaveLoadRoundTripStamped) {
     // Ensure the stamped network's state has been initialized
     shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNorm;
     shared_ptr<ThorImplementation::FullyConnected> physicalFullyConnected;
-    ASSERT_EQ(initialNetwork.getNumStamps(), 1);
-    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+    ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
     for (uint32_t i = 0; i < stampedNetwork.getNumTrainableLayers(); ++i) {
         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twb = stampedNetwork.getTrainableLayer(i);
         if (dynamic_pointer_cast<ThorImplementation::BatchNormalization>(twb) != nullptr)
@@ -559,13 +564,16 @@ TEST(Network, SaveLoadRoundTripStamped) {
 
     // Save the network
     bool saveOptimizerState = rand() % 2;
-    initialNetwork.save("/tmp", true, saveOptimizerState);
+    vector<ThorImplementation::StampedNetwork> fixmeStamped;
+    initialPlacedNetwork->save("/tmp", true, true);
 
     ///////////////////////////////
     // Load
     ///////////////////////////////
     Network newNetwork("TestModel");
     newNetwork.load("/tmp");
+
+    assert(newNetwork.getDefaultOptimizer() != nullptr);
 
     // Ensure all the expected layers are in the network and properly connected
     uint32_t expectedNumLayers = 5;
@@ -652,7 +660,8 @@ TEST(Network, SaveLoadRoundTripStamped) {
     ASSERT_EQ(outputCount, 1);
 
     // Stamp the loaded network
-    newNetwork.place(batchSize, initDoneEvents);
+    shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(newPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
@@ -660,8 +669,8 @@ TEST(Network, SaveLoadRoundTripStamped) {
 
     shared_ptr<ThorImplementation::BatchNormalization> newPhysicalBatchNorm;
     shared_ptr<ThorImplementation::FullyConnected> newPhysicalFullyConnected;
-    ASSERT_EQ(newNetwork.getNumStamps(), 1);
-    ThorImplementation::StampedNetwork &newStampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1);
+    ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
     for (uint32_t i = 0; i < newStampedNetwork.getNumTrainableLayers(); ++i) {
         shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twb = newStampedNetwork.getTrainableLayer(i);
         if (dynamic_pointer_cast<ThorImplementation::BatchNormalization>(twb) != nullptr)

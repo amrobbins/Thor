@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalCrossEntropy.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Adam.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
 
@@ -78,14 +79,14 @@ TEST(Adam, InitializesParametersWithOneStamp) {
     shared_ptr<Adam> adam = Adam::Builder().alpha(alpha).beta1(beta1).beta2(beta2).epsilon(epsilon).network(network).build();
 
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
+    ASSERT_TRUE(placedNetwork != nullptr);
 
     uint32_t epoch = 0;
     uint32_t batch = 0;
     uint32_t batchesPerEpoch = 10;
-    Optimizer::updateHyperParameters(&network, epoch, batch, batchesPerEpoch);
-    unordered_map<string, float> params = adam->getAllHyperParameters();
+    Optimizer::updateHyperParameters(placedNetwork.get(), epoch, batch, batchesPerEpoch);
+    unordered_map<string, float> params = adam->getAllHyperParameters(placedNetwork.get());
 
     // Check that the proper values are reported
     ASSERT_EQ(params.size(), 5U);
@@ -136,10 +137,10 @@ TEST(Adam, ReportsParameters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
+    ASSERT_TRUE(placedNetwork != nullptr);
 
-    unordered_map<string, float> params = adam->getAllHyperParameters();
+    unordered_map<string, float> params = adam->getAllHyperParameters(placedNetwork.get());
 
     ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("t"), 1U);
@@ -180,10 +181,10 @@ TEST(Adam, SettersAndGetters) {
 
     ThorImplementation::StampedNetwork stampedNetwork0;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(32, initDoneEvents, false, {0}, 1);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(32, initDoneEvents, false, {0}, 1);
+    ASSERT_TRUE(placedNetwork != nullptr);
 
-    unordered_map<string, float> params = adam->getAllHyperParameters();
+    unordered_map<string, float> params = adam->getAllHyperParameters(placedNetwork.get());
 
     ASSERT_EQ(params.size(), 5U);
     ASSERT_EQ(params.count("t"), 1U);
@@ -202,13 +203,13 @@ TEST(Adam, SettersAndGetters) {
     beta1 = 0.65f;
     beta2 = 0.77f;
     epsilon = 1e-4f;
-    adam->setAlpha(alpha);
+    adam->setAlpha(alpha, placedNetwork.get());
     EXPECT_EQ(adam->getAlpha(), alpha);
-    adam->setBeta1(beta1);
+    adam->setBeta1(beta1, placedNetwork.get());
     EXPECT_EQ(adam->getBeta1(), beta1);
-    adam->setBeta2(beta2);
+    adam->setBeta2(beta2, placedNetwork.get());
     EXPECT_EQ(adam->getBeta2(), beta2);
-    adam->setEpsilon(epsilon);
+    adam->setEpsilon(epsilon, placedNetwork.get());
     EXPECT_EQ(adam->getEpsilon(), epsilon);
 
     // Ensure that optimizer is connected to each trainable layer and its paratmeters are initialized properly
@@ -290,17 +291,16 @@ TEST(Adam, SerializeDeserialize) {
         Stream stream(0);
         uint32_t batchSize = 1 + (rand() % 16);
         vector<Event> initDoneEvents;
-        Network::StatusCode statusCode;
-        statusCode = initialNetwork.place(batchSize, initDoneEvents);
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+        shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(initialPlacedNetwork != nullptr);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
         // Fetch the fully connected layer from the network
-        ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
-        ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+        ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
+        ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
         ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayer =
             dynamic_pointer_cast<ThorImplementation::FullyConnected>(stampedNetwork.getTrainableLayer(0));
@@ -384,7 +384,8 @@ TEST(Adam, SerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
             if (initalNetworkFC) {
-                fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, saveOptimizerState);
+                fullyConnectedJ =
+                    initalNetworkFC->serialize(archiveWriter, stream, saveOptimizerState, initialPlacedNetwork->getStampedNetwork(0));
                 fcFound = true;
                 break;
             }
@@ -437,16 +438,16 @@ TEST(Adam, SerializeDeserialize) {
         Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
-        statusCode = newNetwork.place(batchSize, initDoneEvents);
+        shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(newPlacedNetwork != nullptr);
         archiveReader->executeReadRequests();
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
         // Find the FC to find the Adam
-        ThorImplementation::StampedNetwork &newStampedNetwork = newNetwork.getStampedNetwork(0);
+        ThorImplementation::StampedNetwork &newStampedNetwork = newPlacedNetwork->getStampedNetwork(0);
         shared_ptr<ThorImplementation::FullyConnected> physicalFCLayerDes;
         for (uint32_t i = 0; i < newStampedNetwork.getNumTrainableLayers(); ++i) {
             physicalFCLayerDes = dynamic_pointer_cast<ThorImplementation::FullyConnected>(newStampedNetwork.getTrainableLayer(i));

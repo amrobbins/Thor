@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-void Convolution2d::buildSupportLayersAndAddToNetwork() {
+void Convolution2d::buildSupportLayersAndAddToNetwork(Network *network) {
     Convolution2d::Builder convolution2dBuilder;
     convolution2dBuilder.network(*network)
         .numOutputChannels(numOutputChannels)
@@ -135,18 +135,18 @@ json Convolution2d::architectureJson() const {
     return j;
 }
 
-json Convolution2d::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
+                              Stream stream,
+                              bool saveOptimizerState,
+                              ThorImplementation::StampedNetwork &stampedNetwork) const {
     json j = architectureJson();
     string layerName = string("layer") + to_string(getId());
 
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
-    if (network->getNumStamps() >= 1) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-        twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-        assert(twbLayer != nullptr);
-    }
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+    assert(twbLayer != nullptr);
 
     ThorImplementation::Tensor weights;
     ThorImplementation::Tensor biases;
@@ -238,7 +238,6 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
         convolution2d.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
     }
 
-    convolution2d.network = network;
     convolution2d.initialized = true;
     convolution2d.addToNetwork(network);
 }

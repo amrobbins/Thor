@@ -13,7 +13,8 @@ namespace ThorImplementation {
 
 class Sgd : public Optimizer {
    public:
-    Sgd(std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
+    Sgd(uint64_t id,
+        std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
         float initialLearningRate,
         float decay,
         float momentum,

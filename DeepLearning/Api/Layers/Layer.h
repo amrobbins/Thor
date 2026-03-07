@@ -18,6 +18,9 @@
 #include <string>
 #include <utility>
 
+namespace ThorImplementation {
+class StampedNetwork;
+}
 namespace Thor {
 
 class Network;
@@ -75,8 +78,13 @@ class Layer {
 
     virtual std::string getLayerType() const = 0;
 
+    // Serialize for the case that there is no state to save
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const { return architectureJson(); }
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+    // Serialize for the case that there is state to save, defaults to no-state version unless overridden.
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     bool saveOptimizerState,
+                                     ThorImplementation::StampedNetwork &stampedNetwork) const {
         return serialize(archiveWriter, stream);
     }
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);

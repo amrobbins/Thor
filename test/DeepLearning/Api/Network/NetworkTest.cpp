@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/Activation/Sigmoid.h"
 
@@ -69,10 +70,10 @@ TEST(Network, SimplestNetworkProperlyFormed) {
     int stampsPerGpu = 1;
     int batchSize = 32;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    ASSERT_EQ(network.getNumStamps(), 1UL);
-    stampedNetwork = network.getStampedNetwork(0);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    ASSERT_EQ(placedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1u);
@@ -176,11 +177,10 @@ TEST(Network, SimplestNetworkWithGlorotUniformProperlyFormed) {
     int gpuNum = 0;
     int batchSize = 32;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, false, {gpuNum}, 1);
-    for (Event initDoneEvent : initDoneEvents)
-        initDoneEvent.synchronize();
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    stampedNetwork = network.getStampedNetwork(0);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {gpuNum}, 1);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    ASSERT_EQ(placedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
@@ -285,10 +285,10 @@ TEST(Network, SimplestNetworkWithGlorotNormalProperlyFormed) {
     int batchSize = 32;
     uint32_t stampsPerGpu = 1;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    ASSERT_EQ(network.getNumStamps(), 1UL);
-    stampedNetwork = network.getStampedNetwork(0);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    ASSERT_EQ(placedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
@@ -434,10 +434,10 @@ TEST(Network, SimpleNetworkWithCompoundLayerProperlyFormed) {
     int batchSize = 32;
     uint32_t stampsPerGpu = 1;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    ASSERT_EQ(network.getNumStamps(), 1UL);
-    stampedNetwork = network.getStampedNetwork(0);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    ASSERT_EQ(placedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
@@ -549,10 +549,10 @@ TEST(Network, BranchedNetworkProperlyFormed) {
     int batchSize = 32;
     uint32_t stampsPerGpu = 1;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    ASSERT_EQ(network.getNumStamps(), 1UL);
-    stampedNetwork = network.getStampedNetwork(0);
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    ASSERT_EQ(placedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     // Check network structure
     ASSERT_EQ(stampedNetwork.getInputs().size(), 1u);
@@ -731,10 +731,10 @@ TEST(Network, DISABLED_AlexnetIsProperlyFormed) {
     uint64_t batchSize = 128;
     uint32_t stampsPerGpu = 1;
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode = alexNet.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
-    ASSERT_EQ(alexNet.getNumStamps(), 1UL);
-    stampedNetwork = alexNet.getStampedNetwork(0);
+    shared_ptr<PlacedNetwork> placedNetwork = alexNet.place(batchSize, initDoneEvents, false, {gpuNum}, stampsPerGpu);
+    ASSERT_TRUE(placedNetwork != nullptr);
+    ASSERT_EQ(placedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = placedNetwork->getStampedNetwork(0);
 
     // Check network structure
     EXPECT_EQ(stampedNetwork.getInputs().size(), 2u);

@@ -21,7 +21,10 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
     Optional<Tensor> getBiasesGradient() const { return biasesGradient; }
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream) const final { assert(false); }
-    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const = 0;
+    virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
+                                     Stream stream,
+                                     bool saveOptimizerState,
+                                     ThorImplementation::StampedNetwork &stampedNetwork) const = 0;
     static void deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &j, Network *network);
     using Deserializer = std::function<void(std::shared_ptr<thor_file::TarReader> &archiveReader, const nlohmann::json &, Network *)>;
     static std::unordered_map<std::string, Deserializer> &get_registry();
@@ -36,7 +39,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         return MultiConnectionLayer::initialize(layer);
     }
 
-    void attachOptimizer(std::shared_ptr<Optimizer> optimizer) { this->optimizer = optimizer; }
+    void attachOptimizer(std::shared_ptr<Optimizer> optimizer) {
+        this->optimizer = optimizer;
+    }
     bool hasOptimizer() const { return optimizer != nullptr; }
     std::shared_ptr<Optimizer> getOptimizer() { return optimizer; }
 

@@ -9,6 +9,7 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 // Forward declarations for per-feature binders
 void bind_version(nb::module_ &thor);
 void bind_network(nb::module_ &thor);
+void bind_placed_network(nb::module_ &thor);
 void bind_tensor(nb::module_ &thor);
 
 void bind_activations(nb::module_ &activations);
@@ -45,6 +46,7 @@ NB_MODULE(_thor, thor) {
 
     bind_tensor(thor);
     bind_network(thor);
+    bind_placed_network(thor);
 
     auto activations = thor.def_submodule("activations");
     bind_activations(activations);

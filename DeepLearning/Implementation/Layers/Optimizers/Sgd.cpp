@@ -3,12 +3,14 @@
 using namespace ThorImplementation;
 using namespace std;
 
-Sgd::Sgd(shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
+Sgd::Sgd(uint64_t id,
+         shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
          float initialLearningRate,
          float decay,
          float momentum,
          bool useNesterovMomentum,
-         uint64_t startResumeEpoch) {
+         uint64_t startResumeEpoch)
+    : Optimizer(id) {
     // I think the fix here is to just grab params and parent, then lazy compile
 
     assert(trainableLayer != nullptr);

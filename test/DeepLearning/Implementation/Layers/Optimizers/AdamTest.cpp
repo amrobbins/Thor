@@ -62,7 +62,7 @@ void computeBiasesGradientCpu(T *errorIn, T *biasesGradient, uint32_t batchSize,
 // Test the Adam constructor
 TEST(AdamTest, Constructor) {
     shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = constructTrainableLayer();
-    Adam adam(trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
+    Adam adam(0, trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
     EXPECT_EQ(adam.getAlpha(), 0.1f);
     EXPECT_EQ(adam.getBeta1(), 0.9f);
     EXPECT_EQ(adam.getBeta2(), 0.999f);
@@ -75,7 +75,7 @@ TEST(AdamTest, Constructor) {
 // Test the Adam::setAlpha function
 TEST(AdamTest, SetAlpha) {
     shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = constructTrainableLayer();
-    Adam adam(trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
+    Adam adam(1, trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
     adam.setAlpha(0.2f);
     EXPECT_EQ(adam.getAlpha(), 0.2f);
 }
@@ -83,7 +83,7 @@ TEST(AdamTest, SetAlpha) {
 // Test the Adam::setBeta1 function
 TEST(AdamTest, SetBeta1) {
     shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = constructTrainableLayer();
-    Adam adam(trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
+    Adam adam(2, trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
     adam.setBeta1(0.8f);
     EXPECT_EQ(adam.getBeta1(), 0.8f);
 }
@@ -91,7 +91,7 @@ TEST(AdamTest, SetBeta1) {
 // Test the Adam::setBeta2 function
 TEST(AdamTest, SetBeta2) {
     shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = constructTrainableLayer();
-    Adam adam(trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
+    Adam adam(3, trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
     adam.setBeta2(0.998f);
     EXPECT_EQ(adam.getBeta2(), 0.998f);
 }
@@ -99,7 +99,7 @@ TEST(AdamTest, SetBeta2) {
 // Test the Adam::setEpsilon function
 TEST(AdamTest, SetEpsilon) {
     shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = constructTrainableLayer();
-    Adam adam(trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
+    Adam adam(4, trainableLayer, 0.1f, 0.9f, 0.999f, 1e-8f);
     adam.setEpsilon(1e-7f);
     EXPECT_EQ(adam.getEpsilon(), 1e-7f);
 }
@@ -134,7 +134,7 @@ TEST(AdamTest, Adam_SingleStep_FromInjectedGradient_IsCorrect) {
     const float beta2 = 0.999f;
     const float eps_adam = 1e-4f;
 
-    auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
+    auto adam = std::make_shared<Adam>(5, fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
@@ -258,7 +258,7 @@ TEST(AdamTest, Adam_TwoStep_FromInjectedGradient_CarriesMomentsAndBiasCorrection
     const float beta2 = 0.999f;
     const float eps_adam = 2e-4f;
 
-    auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
+    auto adam = std::make_shared<Adam>(6, fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
@@ -446,7 +446,7 @@ TEST(AdamTest, Adam_Integrated_ForwardBackward_SingleStep_IsCorrect) {
     const float beta2 = 0.999f;
     const float eps_adam = 3e-4f;
 
-    auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
+    auto adam = std::make_shared<Adam>(7, fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
@@ -604,7 +604,7 @@ TEST(AdamTest, Adam_Integrated_ForwardBackward_WithBias_Batch3_SingleStep_IsCorr
     const float beta2 = 0.999f;
     const float eps_adam = 1e-4f;
 
-    auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
+    auto adam = std::make_shared<Adam>(8, fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
@@ -866,7 +866,7 @@ TEST(AdamTest, Adam_Integrated_TwoIterations_WithBias_Batch3_CarriesMomentsAndBi
         const float beta2 = 0.999f;
         const float eps_adam = 1e-4f;
 
-        auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
+        auto adam = std::make_shared<Adam>(9, fc, lr0, beta1, beta2, eps_adam);
         adam->testSetDataType(TensorDescriptor::DataType::FP16);
         fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 
@@ -1157,7 +1157,7 @@ TEST(AdamTest, Adam_T_AccumulateValues_DoesNotIncrementUntilFinal) {
     const float beta2 = 0.999f;
     const float eps_adam = 1e-4f;
 
-    auto adam = std::make_shared<Adam>(fc, lr0, beta1, beta2, eps_adam);
+    auto adam = std::make_shared<Adam>(10, fc, lr0, beta1, beta2, eps_adam);
     adam->testSetDataType(TensorDescriptor::DataType::FP16);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(adam));
 

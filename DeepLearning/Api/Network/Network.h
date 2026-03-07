@@ -52,6 +52,8 @@
 
 namespace Thor {
 
+class PlacedNetwork;
+
 class Executor;
 
 class Network {
@@ -67,24 +69,26 @@ class Network {
     };
 
     Network(std::string networkName) : networkName(networkName), frozen(false) {}
-    virtual ~Network();
+    virtual ~Network() = default;
 
     virtual std::string statusCodeToString(StatusCode statusCode);
 
-    virtual StatusCode place(uint32_t batchSize,
-                             std::vector<Event> &initDoneEvents,
-                             bool inferenceOnly = false,
-                             std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
-                             uint32_t forcedNumStampsPerGpu = 0);
-
-    uint64_t getNumStamps() { return stampedNetworks.size(); }
-    ThorImplementation::StampedNetwork &getStampedNetwork(uint64_t i) { return stampedNetworks[i]; }
+    virtual std::shared_ptr<PlacedNetwork> place(uint32_t batchSize,
+                                                 std::vector<Event> &initDoneEvents,
+                                                 bool inferenceOnly = false,
+                                                 std::vector<int32_t> forcedDevices = std::vector<int32_t>(),
+                                                 uint32_t forcedNumStampsPerGpu = 0);
 
     virtual std::string getNetworkName() { return networkName; }
 
-    virtual void save(const std::string &directory, bool overwrite, bool saveOptimizerState);
+    virtual void save(const std::string &directory, const bool overwrite);
+    virtual void save(std::vector<ThorImplementation::StampedNetwork> &stampedNetworks,
+                      const std::string &directory,
+                      const bool overwrite,
+                      const bool saveOptimizerState) const;
     virtual void load(const std::string &directory);
-    virtual std::string architectureJson();
+    virtual nlohmann::json architectureJson() const;
+    virtual std::string architectureJsonString() const;
 
     std::shared_ptr<Optimizer> getDefaultOptimizer();
 
@@ -122,10 +126,7 @@ class Network {
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiOutputTensors;
     std::map<std::shared_ptr<Layer>, std::vector<Tensor>, Network::LayerComparator> apiLayerToApiInputTensors;
 
-    std::shared_ptr<Optimizer> optimizer;
-
-    // FIXME: this should be an unordered_map of gpu -> vector of stamps
-    std::vector<ThorImplementation::StampedNetwork> stampedNetworks;
+    std::shared_ptr<Optimizer> defaultOptimizer;
 
     uint64_t computeFirstInstanceMemRequirements(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement);
     uint64_t computeNonFirstInstanceMemRequirements(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement);
@@ -135,7 +136,10 @@ class Network {
 
     virtual StatusCode createDagAndFreeze();
     virtual void preOptimize(uint32_t gpuNum, uint32_t batchSize);
-    virtual StatusCode stampNetwork(uint32_t gpuNum, std::vector<Event> &initDoneEvents, uint32_t batchSize);
+    virtual StatusCode stampNetwork(uint32_t gpuNum,
+                                    std::vector<Event> &initDoneEvents,
+                                    uint32_t batchSize,
+                                    std::vector<ThorImplementation::StampedNetwork> &stampedNetworks);
 
     virtual StatusCode evaluateGraph();
     virtual StatusCode checkForDuplicateInOutPortNames();
@@ -174,7 +178,6 @@ class Network {
 
     bool frozen;
 
-    std::shared_ptr<thor_file::TarWriter> archiveWriter = nullptr;
     std::shared_ptr<thor_file::TarReader> archiveReader = nullptr;
 
     class GpuOutOfMemoryError {};

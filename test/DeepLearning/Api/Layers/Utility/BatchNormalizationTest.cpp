@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 #include "gtest/gtest.h"
 
@@ -259,17 +260,16 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         // Now stamp the network and test serialization
         uint32_t batchSize = 1 + (rand() % 16);
         vector<Event> initDoneEvents;
-        Network::StatusCode statusCode;
-        statusCode = initialNetwork.place(batchSize, initDoneEvents);
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+        shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(initialPlacedNetwork != nullptr);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
         // Fetch the physical batch norm layer from the stamped network and write to its weights
-        ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
-        ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+        ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
+        ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
         ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
         shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormLayer =
             dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(0));
@@ -324,7 +324,7 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
             shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
             initalNetworkBN = dynamic_pointer_cast<BatchNormalization>(layer);
             if (initalNetworkBN) {
-                batchNormalizationJ = initalNetworkBN->serialize(archiveWriter, stream, true);
+                batchNormalizationJ = initalNetworkBN->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
                 bnFound = true;
                 break;
             }
@@ -410,16 +410,16 @@ TEST(UtilityApiLayers, BatchNormalizationSerializeDeserialize) {
         Layer::deserialize(archiveReader, networkOutputJ, &newNetwork);
 
         batchSize = 1 + (rand() % 16);
-        statusCode = newNetwork.place(batchSize, initDoneEvents);
+        shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+        ASSERT_TRUE(newPlacedNetwork != nullptr);
         archiveReader->executeReadRequests();
-        ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
         for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
             stream.waitEvent(initDoneEvents[i]);
         }
         initDoneEvents.clear();
 
-        ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-        stampedNetwork = newNetwork.getStampedNetwork(0);
+        ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
+        stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
         ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1UL);
         shared_ptr<ThorImplementation::BatchNormalization> physicalBatchNormLayerDes =
             dynamic_pointer_cast<ThorImplementation::BatchNormalization>(stampedNetwork.getTrainableLayer(0));

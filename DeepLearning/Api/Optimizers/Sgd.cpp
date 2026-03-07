@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -9,12 +10,12 @@ namespace Thor {
 
 shared_ptr<ThorImplementation::Optimizer> Sgd::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
     return make_shared<ThorImplementation::Sgd>(
-        trainableLayer, initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch);
+        getId(), trainableLayer, initialLearningRate, decay, momentum, useNesterovMomentum, startResumeEpoch);
 }
 
-void Sgd::setConstantLearningRate(float newCurrentLearningRate) {
-    setDecay(0.0f);
-    setInitialLearningRate(newCurrentLearningRate);
+void Sgd::setConstantLearningRate(float newCurrentLearningRate, PlacedNetwork *placedNetwork) {
+    setDecay(0.0f, placedNetwork);
+    setInitialLearningRate(newCurrentLearningRate, placedNetwork);
 }
 
 shared_ptr<Optimizer> Sgd::clone() const { return make_shared<Sgd>(*this); }
@@ -22,40 +23,44 @@ shared_ptr<Optimizer> Sgd::clone() const { return make_shared<Sgd>(*this); }
 /*
  * decay will still apply from epoch 0.
  */
-void Sgd::setDecay(float newDecay) {
+void Sgd::setDecay(float newDecay, PlacedNetwork *placedNetwork) {
     assert(decay < 1.0);
 
     decay = newDecay;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
 /*
  * decay computation will always apply from epoch 0, not from when setLearningRate() is called.
  */
-void Sgd::setInitialLearningRate(float newInitialLearningRate) {
+void Sgd::setInitialLearningRate(float newInitialLearningRate, PlacedNetwork *placedNetwork) {
     assert(newInitialLearningRate >= 0.0f);
 
     initialLearningRate = newInitialLearningRate;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
-void Sgd::setMomentum(float newMomentum) {
+void Sgd::setMomentum(float newMomentum, PlacedNetwork *placedNetwork) {
     assert(momentum >= 0.0f);
 
     momentum = newMomentum;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
-void Sgd::setUseNesterovMomentum(bool newUseNesterovMomentum) {
+void Sgd::setUseNesterovMomentum(bool newUseNesterovMomentum, PlacedNetwork *placedNetwork) {
     useNesterovMomentum = newUseNesterovMomentum;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
-void Sgd::updateParameters() {
-    assert(network != nullptr);
-    uint32_t numStamps = network->getNumStamps();
+void Sgd::updateParameters(PlacedNetwork *placedNetwork) {
+    assert(placedNetwork != nullptr);
+    uint32_t numStamps = placedNetwork->getNumStamps();
     for (uint32_t i = 0; i < numStamps; ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(i);
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
         for (uint32_t j = 0; j < numTrainableLayers; ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
@@ -84,6 +89,8 @@ bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
 uint64_t Sgd::getEpoch() { return startResumeEpoch; }
 
 json Sgd::architectureJson() const {
+    // FIXME: I need to save id, then I will need originalId like layer.
+
     json j;
     j["optimizer_type"] = string("sgd");
     j["version"] = getVersion();
@@ -132,7 +139,6 @@ shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archive
     sgd.momentum = momentum;
     sgd.useNesterovMomentum = useNesterov;
     sgd.startResumeEpoch = epoch;
-    sgd.network = network;
     return sgd.clone();
 }
 

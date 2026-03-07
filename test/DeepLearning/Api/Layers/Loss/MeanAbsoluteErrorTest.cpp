@@ -1,9 +1,9 @@
-#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
-
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 
 #include "gtest/gtest.h"
 
@@ -174,17 +174,16 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     Stream stream(0);
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;
-    Network::StatusCode placementStatus;
-    placementStatus = initialNetwork.place(batchSize, initDoneEvents);
-    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> initialPlacedNetwork = initialNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(initialPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
     initDoneEvents.clear();
 
     // Fetch the layer from the network
-    ASSERT_EQ(initialNetwork.getNumStamps(), 1UL);
-    ThorImplementation::StampedNetwork &stampedNetwork = initialNetwork.getStampedNetwork(0);
+    ASSERT_EQ(initialPlacedNetwork->getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork &stampedNetwork = initialPlacedNetwork->getStampedNetwork(0);
 
     thor_file::TarWriter archiveWriter("testModel");
 
@@ -224,7 +223,7 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
         shared_ptr<TrainableWeightsBiasesLayer> layer = initialNetwork.getTrainableLayer(i);
         initalNetworkFC = dynamic_pointer_cast<FullyConnected>(layer);
         if (initalNetworkFC) {
-            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true);
+            fullyConnectedJ = initalNetworkFC->serialize(archiveWriter, stream, true, initialPlacedNetwork->getStampedNetwork(0));
             fcFound = true;
             break;
         }
@@ -268,15 +267,15 @@ TEST(MeanAbsoluteError, SerializeDeserialize) {
     Layer::deserialize(archiveReader, lossOutputJ, &newNetwork);
 
     batchSize = 1 + (rand() % 16);
-    placementStatus = newNetwork.place(batchSize, initDoneEvents);
-    ASSERT_EQ(placementStatus, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(newPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
     initDoneEvents.clear();
 
-    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-    stampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
+    stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
 
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
     if (lossShaper)

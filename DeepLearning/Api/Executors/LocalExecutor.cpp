@@ -23,7 +23,6 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
     }
 
     shared_ptr<LocalExecutor> localExecutor = make_shared<LocalExecutor>();
-    localExecutor->network = _network;
     localExecutor->loader = _loader;
     localExecutor->optimizer = _optimizer;
     // localExecutor->hyperparameterController = _hyperparameterController;
@@ -45,15 +44,12 @@ shared_ptr<LocalExecutor> LocalExecutor::Builder::build() {
 
     uint64_t batchSize = localExecutor->loader->getBatchSize();
 
-    // Stamp the network
+    // Place the network
     // FIXME: stamp N networks per GPU, currently just stamping 1 network on gpu 0.
-    // FIXME: save known optimal kernels on disk
-    Network::StatusCode statusCode;
     vector<Event> initDoneEvents;
-    statusCode = localExecutor->network->place(batchSize, initDoneEvents);
-    assert(statusCode == Network::StatusCode::SUCCESS);
+    localExecutor->placedNetwork = _network->place(batchSize, initDoneEvents);
 
-    assert(localExecutor->network->getNumStamps() >= 1);
+    assert(localExecutor->placedNetwork->getNumStamps() >= 1);
 
     localExecutor->batchDataReady = make_shared<map<uint64_t, bool>>();
     localExecutor->batchData = make_shared<unordered_map<uint64_t, unordered_map<string, vector<uint8_t>>>>();
@@ -151,7 +147,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
     // FIXME: this should be based on first expected to be done. Also there should be a GPU side input and output queue.
     uint64_t nextStampToProcess = 0;
 
-    vector<map<string, Event>> outputReadyEvents(network->getNumStamps());
+    vector<map<string, Event>> outputReadyEvents(placedNetwork->getNumStamps());
     map<uint64_t, Event> processingFinishedEvents;
     cudaError_t cudaStatus;
 
@@ -177,7 +173,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
 
         uint64_t epochBatchNum = initialEpochBatchNum + batch;
 
-        Optimizer::updateHyperParameters(network, *currentEpoch, epochBatchNum, *numBatchesInEpoch);
+        Optimizer::updateHyperParameters(placedNetwork.get(), *currentEpoch, epochBatchNum, *numBatchesInEpoch);
 
         // batchNumber ->   batchlet0                              batchlet1
         //               [[input0 -> buffer, output0 -> buffer], [input0 -> buffer, output0 -> buffer]]
@@ -211,7 +207,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
             bufferStampTensorsParams->batchletInput = loader->getBatch(exampleType, epochBatchNum);
 
             // Note that all work is done for a stamp at the end of any input stream belonging to the stamp
-            ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(nextStampToProcess);
+            ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(nextStampToProcess);
             assert(!stampedNetwork.inputs.empty());
             Stream stream = stampedNetwork.inputs[0]->getStream();
 
@@ -233,7 +229,7 @@ void LocalExecutor::trainBatches(uint64_t initialEpochBatchNum, uint64_t batches
             processingFinishedEvents[nextStampToProcess] = stream.putEvent();
 
             nextStampToProcess += 1;
-            nextStampToProcess %= network->getNumStamps();
+            nextStampToProcess %= placedNetwork->getNumStamps();
         }
 
         // FIXME: Reduce gradients and broadcast updated weights
@@ -272,7 +268,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         ExecutionState executionState;
         executionState.outputDirectory = outputDirectory;
         executionState.epochsToTrain = numEpochs;
-        executionState.networkName = network->getNetworkName();
+        executionState.networkName = placedNetwork->getNetworkName();
         executionState.datasetName = loader->getDatasetName();
         executionState.executionMode = ExampleType::TRAIN;
         executionState.epochNum = *currentEpoch;
@@ -283,8 +279,8 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
         executionState.batchesPerEpoch = batchesPerEpoch;
 
-        executionState.flopsPerExample = network->getStampedNetwork(0).floatingPointOperationsPerExampleForward +
-                                         network->getStampedNetwork(0).floatingPointOperationsPerExampleBackward;
+        executionState.flopsPerExample = placedNetwork->getStampedNetwork(0).floatingPointOperationsPerExampleForward +
+                                         placedNetwork->getStampedNetwork(0).floatingPointOperationsPerExampleBackward;
 
         std::chrono::high_resolution_clock::time_point start = std::chrono::high_resolution_clock::now();
 
@@ -299,7 +295,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 else
                     averageTrainingBatchTime = 0.05 * elapsed.count() + 0.95 * averageTrainingBatchTime;
 
-                unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters();
+                unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
                 executionState.learningRate = optimizerParameters["currentLearningRate"];
                 executionState.momentum = optimizerParameters["momentum"];
 
@@ -334,7 +330,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
 
         executionState.outputDirectory = outputDirectory;
         executionState.epochsToTrain = numEpochs;
-        executionState.networkName = network->getNetworkName();
+        executionState.networkName = placedNetwork->getNetworkName();
         executionState.datasetName = loader->getDatasetName();
         executionState.executionMode = ExampleType::VALIDATE;
         executionState.epochNum = *currentEpoch;
@@ -344,7 +340,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
         executionState.numValidationExamples = loader->getNumExamples(ExampleType::VALIDATE);
         executionState.numTestExamples = loader->getNumExamples(ExampleType::TEST);
         executionState.batchesPerEpoch = batchesPerEpoch;
-        executionState.flopsPerExample = network->getStampedNetwork(0).floatingPointOperationsPerExampleForward;
+        executionState.flopsPerExample = placedNetwork->getStampedNetwork(0).floatingPointOperationsPerExampleForward;
 
         start = std::chrono::high_resolution_clock::now();
 
@@ -359,7 +355,7 @@ void LocalExecutor::trainEpochs(uint32_t numEpochs, set<string> tensorsToReturn)
                 else
                     averageValidationBatchTime = 0.05 * elapsed.count() + 0.95 * averageValidationBatchTime;
 
-                unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters();
+                unordered_map<string, float> optimizerParameters = optimizer->getAllHyperParameters(placedNetwork.get());
                 executionState.learningRate = optimizerParameters["currentLearningRate"];
                 executionState.momentum = optimizerParameters["momentum"];
 

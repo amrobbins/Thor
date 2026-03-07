@@ -16,6 +16,7 @@
 namespace Thor {
 
 class Network;
+class PlacedNetwork;
 class TrainableWeightsBiasesLayer;
 
 class Optimizer {
@@ -35,8 +36,8 @@ class Optimizer {
     /*
      * returns a map of updated parameters
      */
-    static void updateHyperParameters(Network *network, uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-    virtual std::unordered_map<std::string, float> getAllHyperParameters();
+    static void updateHyperParameters(PlacedNetwork *placedNetwork, uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
+    virtual std::unordered_map<std::string, float> getAllHyperParameters(PlacedNetwork *placedNetwork);
 
     uint64_t getId() const { return id; }
     bool operator==(const Optimizer &other) const { return id == other.id; }
@@ -69,8 +70,6 @@ class Optimizer {
     virtual std::shared_ptr<Optimizer> clone() const = 0;
 
     void addToNetwork(Network *network);
-
-    Network *network;
 
     // gpuNum -> stampedId -> *optimizer
     // So there is one optimizer per layer, shared by all stamps of the network

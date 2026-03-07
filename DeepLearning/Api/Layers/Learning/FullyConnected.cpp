@@ -5,7 +5,7 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-void FullyConnected::buildSupportLayersAndAddToNetwork() {
+void FullyConnected::buildSupportLayersAndAddToNetwork(Network *network) {
     // current feature inputs needs to go away and every connection gets named
     vector<Tensor> currentFeatureInputs;
 
@@ -136,7 +136,10 @@ json FullyConnected::architectureJson() const {
     return j;
 }
 
-json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream stream, bool saveOptimizerState) const {
+json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
+                               Stream stream,
+                               bool saveOptimizerState,
+                               ThorImplementation::StampedNetwork &stampedNetwork) const {
     // Multi-layers will only serialize the single layer, itself.
     // The other layers will each serialize themselves when walking the api level layer graph that has been added to the network
     json j = architectureJson();
@@ -145,12 +148,9 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter, Stream strea
 
     // Dump the weights to a file and record its name
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> twbLayer = nullptr;
-    if (network->getNumStamps() >= 1) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(0);
-        shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
-        twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
-        assert(twbLayer != nullptr);
-    }
+    shared_ptr<ThorImplementation::Layer> physicalLayer = stampedNetwork.getPhysicalLayerFromApiLayer(getId());
+    twbLayer = dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(physicalLayer);
+    assert(twbLayer != nullptr);
 
     ThorImplementation::Tensor weights;
     ThorImplementation::Tensor biases;
@@ -227,7 +227,6 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader> &archiveReader
         fullyConnected.optimizer = Optimizer::deserialize(archiveReader, j.at("optimizer"), network);
     }
 
-    fullyConnected.network = network;
     fullyConnected.initialized = true;
     fullyConnected.addToNetwork(network);
 }

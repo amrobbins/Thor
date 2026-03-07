@@ -96,7 +96,7 @@ TEST(SgdTest, TestConstrutorSettersGetters) {
 
     LayerTestHelper::connectAndInitializeNetwork(layers);
 
-    shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+    shared_ptr<Sgd> sgd = make_shared<Sgd>(1, fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
     fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     ASSERT_EQ(sgd->getInitialLearningRate(), initialLearningRate);
@@ -235,7 +235,7 @@ TEST(SgdTest, TestWeightsUpdateNoMomentum) {
 
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
-        shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        shared_ptr<Sgd> sgd = make_shared<Sgd>(2, fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         LayerTestHelper::initializeNetwork(layers);
 
@@ -502,7 +502,7 @@ TEST(SgdTest, TestWeightsUpdateWithMomentum) {
         Tensor featureInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getFeatureInputs());
         Tensor errorInput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorInputs());
         // Tensor errorOutput = MultiConnectionLayer::getFirstPresentTensor(fullyConnectedLayer->getErrorOutputs());
-        shared_ptr<Sgd> sgd = make_shared<Sgd>(fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+        shared_ptr<Sgd> sgd = make_shared<Sgd>(3, fullyConnectedLayer, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
         fullyConnectedLayer->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
         LayerTestHelper::initializeNetwork(layers);
 
@@ -772,7 +772,8 @@ TEST(FullyConnectedTest, BackwardProducesCorrectErrorOutputAndWeightGradient) {
 
     // Attach SGD only if needed to expose weightsGradient.
     // Hyperparams don't matter since we won't call update.
-    auto sgd = std::make_shared<Sgd>(fc,
+    auto sgd = std::make_shared<Sgd>(4,
+                                     fc,
                                      /*lr*/ 0.1f,
                                      /*decay*/ 0.0f,
                                      /*momentum*/ 0.0f,
@@ -901,7 +902,7 @@ TEST(FullyConnectedTest, ForwardUsesProjectedWeightsOnlyInTrainingMode) {
     float decay = 0.2;
     float momentum = 0.3;
     bool useNesterovMomentum = true;
-    shared_ptr<Sgd> sgd = make_shared<Sgd>(fc, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
+    shared_ptr<Sgd> sgd = make_shared<Sgd>(5, fc, initialLearningRate, decay, momentum, useNesterovMomentum, 0);
     fc->setOptimizer(dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1064,7 +1065,7 @@ TEST(SgdTest, NesterovMomentum_SingleStep_UpdateAndProjectionAreCorrect) {
     const float mu = 0.5f;
     const bool useNesterov = true;
 
-    auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
+    auto sgd = std::make_shared<Sgd>(6, fc, lr0, decay, mu, useNesterov);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1199,7 +1200,7 @@ TEST(SgdTest, NesterovMomentum_TwoStep_UpdateCarriesMomentum) {
     const float mu = 0.5f;
     const bool useNesterov = true;
 
-    auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
+    auto sgd = std::make_shared<Sgd>(7, fc, lr0, decay, mu, useNesterov);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1390,7 +1391,7 @@ TEST(SgdTest, NesterovMomentum_Integrated_ForwardBackwardUpdate_ProjectedUsedInT
     const float mu = 0.5f;
     const bool useNesterov = true;
 
-    auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
+    auto sgd = std::make_shared<Sgd>(8, fc, lr0, decay, mu, useNesterov);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1631,7 +1632,7 @@ TEST(SgdTest, NesterovMomentum_Integrated_TwoIterations_CarriesMomentumAndUsesPr
     const float mu = 0.5f;
     const bool useNesterov = true;
 
-    auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
+    auto sgd = std::make_shared<Sgd>(9, fc, lr0, decay, mu, useNesterov);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);
@@ -1865,7 +1866,7 @@ TEST(SgdTest, NesterovMomentum_Integrated_TwoIterations_WithBias) {
     const float mu = 0.5f;
     const bool useNesterov = true;
 
-    auto sgd = std::make_shared<Sgd>(fc, lr0, decay, mu, useNesterov);
+    auto sgd = std::make_shared<Sgd>(10, fc, lr0, decay, mu, useNesterov);
     fc->setOptimizer(std::dynamic_pointer_cast<Optimizer>(sgd));
 
     LayerTestHelper::initializeNetwork(layers);

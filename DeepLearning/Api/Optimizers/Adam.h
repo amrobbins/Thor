@@ -22,13 +22,13 @@ class Adam : public Optimizer {
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,
                                           Optional<Event> sisterOptimizerLoadedEvent);
-    virtual void setAlpha(float newAlpha);
+    virtual void setAlpha(float newAlpha, PlacedNetwork *placedNetwork);
     virtual float getAlpha();
-    virtual void setBeta1(float newBeta1);
+    virtual void setBeta1(float newBeta1, PlacedNetwork *placedNetwork);
     virtual float getBeta1();
-    virtual void setBeta2(float newBeta2);
+    virtual void setBeta2(float newBeta2, PlacedNetwork *placedNetwork);
     virtual float getBeta2();
-    virtual void setEpsilon(float newEpsilon);
+    virtual void setEpsilon(float newEpsilon, PlacedNetwork *placedNetwork);
     virtual float getEpsilon();
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
@@ -45,7 +45,7 @@ class Adam : public Optimizer {
     virtual std::string getType() const { return "Adam"; }
 
    protected:
-    void updateParameters();
+    void updateParameters(PlacedNetwork *placedNetwork);
 
     virtual std::shared_ptr<Optimizer> clone() const;
 

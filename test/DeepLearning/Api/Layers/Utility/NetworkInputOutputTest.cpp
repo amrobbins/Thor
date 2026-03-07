@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 #include "gtest/gtest.h"
 
@@ -191,16 +192,15 @@ TEST(UtilityApiLayers, NetworkInputOutputSerializeDeserialize) {
 
     uint32_t batchSize = 1 + (rand() % 16);
     vector<Event> initDoneEvents;
-    Network::StatusCode statusCode;
-    statusCode = newNetwork.place(batchSize, initDoneEvents);
-    ASSERT_EQ(statusCode, Network::StatusCode::SUCCESS);
+    shared_ptr<PlacedNetwork> newPlacedNetwork = newNetwork.place(batchSize, initDoneEvents);
+    ASSERT_TRUE(newPlacedNetwork != nullptr);
     for (uint32_t i = 0; i < initDoneEvents.size(); ++i) {
         stream.waitEvent(initDoneEvents[i]);
     }
     initDoneEvents.clear();
 
-    ASSERT_EQ(newNetwork.getNumStamps(), 1UL);
-    ThorImplementation::StampedNetwork stampedNetwork = newNetwork.getStampedNetwork(0);
+    ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
+    ThorImplementation::StampedNetwork stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
     ASSERT_EQ(otherLayers.size(), 0U);
 

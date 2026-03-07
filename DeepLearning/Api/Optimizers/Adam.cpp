@@ -1,4 +1,5 @@
 #include "DeepLearning/Api/Optimizers/Adam.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 using namespace std;
 using json = nlohmann::json;
@@ -6,27 +7,31 @@ using json = nlohmann::json;
 namespace Thor {
 
 shared_ptr<ThorImplementation::Optimizer> Adam::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
-    return make_shared<ThorImplementation::Adam>(trainableLayer, alpha, beta1, beta2, epsilon);
+    return make_shared<ThorImplementation::Adam>(getId(), trainableLayer, alpha, beta1, beta2, epsilon);
 }
 
-void Adam::setAlpha(float newAlpha) {
+void Adam::setAlpha(float newAlpha, PlacedNetwork *placedNetwork) {
     alpha = newAlpha;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
-void Adam::setBeta1(float newBeta1) {
+void Adam::setBeta1(float newBeta1, PlacedNetwork *placedNetwork) {
     beta1 = newBeta1;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
-void Adam::setBeta2(float newBeta2) {
+void Adam::setBeta2(float newBeta2, PlacedNetwork *placedNetwork) {
     beta2 = newBeta2;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
-void Adam::setEpsilon(float newEpsilon) {
+void Adam::setEpsilon(float newEpsilon, PlacedNetwork *placedNetwork) {
     epsilon = newEpsilon;
-    updateParameters();
+    if (placedNetwork != nullptr)
+        updateParameters(placedNetwork);
 }
 
 float Adam::getAlpha() { return alpha; }
@@ -39,11 +44,11 @@ float Adam::getEpsilon() { return epsilon; }
 
 shared_ptr<Optimizer> Adam::clone() const { return make_shared<Adam>(*this); }
 
-void Adam::updateParameters() {
-    assert(network != nullptr);
-    uint32_t numStamps = network->getNumStamps();
+void Adam::updateParameters(PlacedNetwork *placedNetwork) {
+    assert(placedNetwork != nullptr);
+    uint32_t numStamps = placedNetwork->getNumStamps();
     for (uint32_t i = 0; i < numStamps; ++i) {
-        ThorImplementation::StampedNetwork &stampedNetwork = network->getStampedNetwork(i);
+        ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(i);
         uint32_t numTrainableLayers = stampedNetwork.getNumTrainableLayers();
         for (uint32_t j = 0; j < numTrainableLayers; ++j) {
             shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> &trainableLayer = stampedNetwork.getTrainableLayer(j);
@@ -62,6 +67,8 @@ void Adam::updateParameters() {
 }
 
 json Adam::architectureJson() const {
+    // FIXME: I need to save id, then I will need originalId like layer.
+
     json j;
     j["optimizer_type"] = string("adam");
     j["version"] = getVersion();
@@ -163,7 +170,6 @@ shared_ptr<Optimizer> Adam::deserialize(shared_ptr<thor_file::TarReader> &archiv
     adam.vFile = vFile;
     adam.mBiasFile = mBiasFile;
     adam.vBiasFile = vBiasFile;
-    adam.network = network;
     return adam.clone();
 }
 
