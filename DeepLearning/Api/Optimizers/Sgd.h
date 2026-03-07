@@ -15,6 +15,9 @@ class Sgd : public Optimizer {
    public:
     class Builder;
 
+    Sgd();
+    Sgd(uint64_t originalId);
+
     virtual ~Sgd() = default;
 
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(

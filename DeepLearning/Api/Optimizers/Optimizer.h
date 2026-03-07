@@ -63,13 +63,20 @@ class Optimizer {
 
     virtual std::string getType() const = 0;
 
+    uint64_t getOriginalId() const {
+        return originalId;
+    }
+
    protected:
     // Only subclasses can be instantiated
     Optimizer();
+    Optimizer(uint64_t originalId);
 
     virtual std::shared_ptr<Optimizer> clone() const = 0;
 
     void addToNetwork(Network *network);
+
+    uint64_t originalId;
 
     // gpuNum -> stampedId -> *optimizer
     // So there is one optimizer per layer, shared by all stamps of the network
@@ -82,6 +89,8 @@ class Optimizer {
    private:
     uint64_t id;
     static std::atomic<int64_t> nextId;
+
+    static std::unordered_map<uint64_t, uint64_t> orignalIdToId;
 };
 
 }  // namespace Thor

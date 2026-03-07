@@ -6,6 +6,10 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+Sgd::Sgd() : Optimizer() {}
+
+Sgd::Sgd(uint64_t originalId) : Optimizer(originalId) {}
+
 // Sgd::~Sgd() {}
 
 shared_ptr<ThorImplementation::Optimizer> Sgd::stamp(shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) {
@@ -95,6 +99,8 @@ json Sgd::architectureJson() const {
     j["optimizer_type"] = string("sgd");
     j["version"] = getVersion();
 
+    j["id"] = getId();
+
     j["initial_learning_rate"] = initialLearningRate;
     j["decay"] = decay;
     j["momentum"] = momentum;
@@ -127,13 +133,16 @@ shared_ptr<Optimizer> Sgd::deserialize(shared_ptr<thor_file::TarReader> &archive
     if (j.at("version").get<string>() != "1.0.0")
         throw runtime_error("Unsupported version in Sgd::deserialize: " + j["version"].get<string>());
 
+    uint64_t originalId = j.at("id").get<uint64_t>();
+
     float initialLearningRate = j.at("initial_learning_rate").get<float>();
     float decay = j.at("decay").get<float>();
     float momentum = j.at("momentum").get<float>();
     float useNesterov = j.at("use_nesterov").get<float>();
     float epoch = j.at("epoch").get<float>();
 
-    Sgd sgd;
+    Sgd sgd(originalId);
+    sgd.originalId = originalId;
     sgd.initialLearningRate = initialLearningRate;
     sgd.decay = decay;
     sgd.momentum = momentum;

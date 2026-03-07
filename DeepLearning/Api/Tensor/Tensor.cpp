@@ -11,7 +11,7 @@ json Tensor::architectureJson() const {
 }
 
 Tensor Tensor::deserialize(const json &j, thor_file::TarReader *archiveReader) {
-    uint32_t originalId = j.at("id").get<uint64_t>();
+    uint64_t originalId = j.at("id").get<uint64_t>();
     vector<uint64_t> dimensions = j.at("dimensions").get<vector<uint64_t>>();
     DataType dataType = j.at("data_type").get<DataType>();
     Tensor deserialized(dataType, dimensions);
