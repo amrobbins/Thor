@@ -16,14 +16,12 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
     ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
     ss << "  if (idx >= numel) return;\n\n";
 
-    for (uint32_t i = 0; i < expr.num_inputs; ++i) {
-        ss << "  float t" << i << " = in" << i << "[idx];\n";
-    }
-    ss << "\n";
-
-    for (uint32_t i = expr.num_inputs; i < expr.nodes.size(); ++i) {
+    for (uint32_t i = 0; i < expr.nodes.size(); ++i) {
         const auto& n = expr.nodes[i];
         switch (n.op) {
+            case ExprOp::INPUT:
+                ss << "  float t" << i << " = in" << n.input_index << "[idx];\n";
+                break;
             case ExprOp::SCALAR_F32:
                 ss << "  float t" << i << " = " << setprecision(9) << n.scalar_f32 << "f;\n";
                 break;
@@ -55,12 +53,13 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
                 ss << "  float t" << i << " = powf(" << ref(n.lhs) << ", " << setprecision(9) << n.scalar_f32 << "f);\n";
                 break;
             default:
-                throw runtime_error("Unsupported op in emitter");
+                throw runtime_error("Unsupported op in emitter: " + to_string((int32_t)n.op) + "\n" + ss.str());
         }
     }
 
     ss << "\n  out[idx] = " << ref(expr.output_node) << ";\n";
     ss << "}\n";
+    // printf("%s\n", ss.str().c_str());
     return ss.str();
 }
 
