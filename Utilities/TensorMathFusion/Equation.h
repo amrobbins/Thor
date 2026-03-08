@@ -35,7 +35,9 @@ struct CompiledEquation {
     CUmodule module = nullptr;
     CUfunction kernel = nullptr;
     std::string kernel_name;
-    TensorDescriptor::DataType dtype;
+
+    TensorDescriptor outputDescriptor;
+    TensorDescriptor::DataType dtype;  // FIXME: dtype redundant with descriptor
     int deviceNum = 0;
     uint32_t num_inputs = 0;
 
@@ -58,6 +60,7 @@ class Equation {
         : compiledEquation(std::move(compiledEquation)), output(output), stream(stream) {}
 
     void run(const std::vector<Tensor>& inputs);
+    Tensor getOutputTensor() const { return output; }
 
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;

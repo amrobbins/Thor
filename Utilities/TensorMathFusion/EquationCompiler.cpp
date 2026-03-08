@@ -20,6 +20,31 @@ static void cacheInsert(const EquationCacheKey& key, shared_ptr<CompiledEquation
     compiledEquationCache[key] = compiledEquation;
 }
 
+static void ensureCudaContextCurrent(int device_num) {
+    CU_CHECK(cuInit(0));
+
+    CUdevice device;
+    CU_CHECK(cuDeviceGet(&device, device_num));
+
+    CUcontext ctx = nullptr;
+    CU_CHECK(cuCtxGetCurrent(&ctx));
+
+    if (ctx == nullptr) {
+        CUcontext primary;
+        CU_CHECK(cuDevicePrimaryCtxRetain(&primary, device));
+        CU_CHECK(cuCtxSetCurrent(primary));
+        return;
+    }
+
+    CUdevice currentDevice;
+    CU_CHECK(cuCtxGetDevice(&currentDevice));
+    if ((int)currentDevice != device_num) {
+        CUcontext primary;
+        CU_CHECK(cuDevicePrimaryCtxRetain(&primary, device));
+        CU_CHECK(cuCtxSetCurrent(primary));
+    }
+}
+
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
@@ -94,6 +119,8 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 }
 
 shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression& expr, const EquationSignature& sig) {
+    ensureCudaContextCurrent(sig.device_num);
+
     EquationCacheKey key{canonicalize(expr), sig};
     if (auto hit = cacheLookup(key))
         return hit;
