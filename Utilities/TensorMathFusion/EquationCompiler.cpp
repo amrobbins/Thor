@@ -23,7 +23,9 @@ static void cacheInsert(const EquationCacheKey& key, shared_ptr<CompiledEquation
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
-                                                         uint32_t num_inputs) {
+                                                         uint32_t num_inputs,
+                                                         TensorDescriptor::DataType dtype,
+                                                         int device_num) {
     CUmodule module;
     CUfunction fn;
 
@@ -36,6 +38,8 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     out->kernel = fn;
     out->kernel_name = kernel_name;
     out->num_inputs = num_inputs;
+    out->dtype = dtype;
+    out->deviceNum = device_num;
     return out;
 }
 
@@ -99,7 +103,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, expr.num_inputs);
+    auto compiled = loadCubin(key, cubin, kernel_name, expr.num_inputs, TensorDescriptor::DataType::FP32, sig.device_num);
 
     cacheInsert(key, compiled);
     return compiled;

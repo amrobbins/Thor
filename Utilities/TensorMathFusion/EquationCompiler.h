@@ -7,7 +7,8 @@
 #include <nvJitLink.h>
 #include <nvrtc.h>
 
-#include "Utilities/TensorMathFusion/EquationInstance.h"
+#include "Utilities/TensorMathFusion/Equation.h"
+#include "Utilities/TensorMathFusion/Expression.h"
 
 namespace ThorImplementation {
 class EquationCompiler {
@@ -18,7 +19,9 @@ class EquationCompiler {
     std::shared_ptr<CompiledEquation> loadCubin(const EquationCacheKey& key,
                                                 const std::vector<char>& cubin,
                                                 const std::string& kernel_name,
-                                                uint32_t num_inputs);
+                                                uint32_t num_inputs,
+                                                TensorDescriptor::DataType dtype,
+                                                int device_num);
 };
 
 }  // namespace ThorImplementation
