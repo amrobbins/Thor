@@ -1,8 +1,8 @@
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 
-#include "Utilities/TensorMathFusion/Equation.h"
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
 #include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/StampedEquation.h"
 
 #include <cuda_runtime.h>
 
@@ -21,10 +21,7 @@ cudaDataType_t toCudaDataType(TensorDescriptor::DataType dtype) {
 }
 }  // namespace
 
-FusedEquation FusedEquation::compile(const PhysicalExpression& expr,
-                                     const std::vector<Tensor>& inputs,
-                                     TensorDescriptor::DataType dtype,
-                                     int device_num) {
+FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num) {
     if (dtype != TensorDescriptor::DataType::FP32) {
         throw std::runtime_error("FusedEquation::compile V1 currently only supports FP32.");
     }
@@ -61,39 +58,63 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr,
     sig.sm_minor = prop.minor;
     sig.device_num = device_num;
 
-    if (inputs.empty()) {
-        throw std::runtime_error("FusedEquation::compile requires at least one input tensor.");
-    }
-    const Tensor& firstInput = inputs[0];
-    if (!firstInput.isInitialized()) {
-        throw std::runtime_error("First input tensor is not initialized.");
-    }
-    if (firstInput.getPlacement().getDeviceNum() != device_num) {
-        throw std::runtime_error("First input tensor device does not match requested compile device.");
-    }
-
     EquationCompiler compiler;
     std::shared_ptr<CompiledEquation> compiledEquation = compiler.compile(expr, sig);
-    compiledEquation->outputDescriptor = firstInput.getDescriptor();
 
     return FusedEquation(std::move(compiledEquation));
 }
 
-Equation FusedEquation::instantiate(Stream stream) const {
+StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, Stream stream) const {
     if (!compiledEquation) {
-        throw std::runtime_error("Cannot instantiate an empty FusedEquation.");
+        throw std::runtime_error("Cannot stamp an empty FusedEquation.");
     }
 
-    TensorPlacement placement(TensorPlacement::MemDevices::GPU, compiledEquation->deviceNum);
-    Tensor output(placement, compiledEquation->outputDescriptor);
+    if (inputs.empty()) {
+        throw std::runtime_error("FusedEquation::stamp requires at least one input tensor.");
+    }
+
+    if (inputs.size() != compiledEquation->num_inputs) {
+        throw std::runtime_error("Wrong number of inputs passed to FusedEquation::stamp.");
+    }
+
+    const Tensor& firstInput = inputs[0];
+    if (!firstInput.isInitialized()) {
+        throw std::runtime_error("First input tensor is not initialized.");
+    }
+
+    if (firstInput.getDescriptor().getDataType() != compiledEquation->dtype) {
+        throw std::runtime_error("Input tensor data type does not match compiled equation data type.");
+    }
+
+    if (firstInput.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+        throw std::runtime_error("Input tensor GPU does not match compiled equation device.");
+    }
+
+    for (uint64_t i = 1; i < inputs.size(); ++i) {
+        if (!inputs[i].isInitialized()) {
+            throw std::runtime_error("Input tensor is not initialized.");
+        }
+        if (inputs[i].getDescriptor().getDataType() != compiledEquation->dtype) {
+            throw std::runtime_error("Input tensor data type mismatch.");
+        }
+        if (inputs[i].getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+            throw std::runtime_error("Input tensor GPU mismatch.");
+        }
+        if (inputs[i].getDescriptor().getTotalNumElements() != firstInput.getDescriptor().getTotalNumElements()) {
+            throw std::runtime_error("All input tensors must have the same number of elements in V1.");
+        }
+    }
+
+    TensorDescriptor outputDescriptor = firstInput.getDescriptor();
+    Tensor output(firstInput.getPlacement(), outputDescriptor);
 
     if (!output.isInitialized()) {
-        throw std::runtime_error("FusedEquation::instantiate requires an initialized output tensor.");
+        throw std::runtime_error("Failed to allocate output tensor during FusedEquation::stamp.");
     }
 
-    if (output.getDescriptor().getDataType() != compiledEquation->dtype) {
-        throw std::runtime_error("Output tensor data type does not match fused equation data type.");
-    }
+    return StampedEquation(compiledEquation, output, stream);
+}
 
-    return Equation(compiledEquation, output, stream);
+void FusedEquation::run(const std::vector<Tensor>& inputs, Tensor output, Stream stream) const {
+    EquationRunner::run(compiledEquation, inputs, output, stream);
 }

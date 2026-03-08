@@ -1,11 +1,15 @@
-#include "Utilities/TensorMathFusion/Equation.h"
+#include "Utilities/TensorMathFusion/StampedEquation.h"
 
 #include <stdexcept>
 #include <vector>
 
 namespace ThorImplementation {
 
-void Equation::run(const std::vector<Tensor>& inputs) {
+void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquation,
+                         const std::vector<Tensor>& inputs,
+                         Tensor& output,
+                         Stream& stream) {
+    void run();
     if (!compiledEquation) {
         throw std::runtime_error("EquationInstance has no compiled equation.");
     }
@@ -64,6 +68,8 @@ void Equation::run(const std::vector<Tensor>& inputs) {
 
     CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid, 1, 1, block, 1, 1, 0, stream, args.data(), nullptr));
 }
+
+void StampedEquation::run() { EquationRunner::run(compiledEquation, inputs, output, stream); }
 
 void hashCombine(std::size_t& seed, std::size_t value) { seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2); }
 

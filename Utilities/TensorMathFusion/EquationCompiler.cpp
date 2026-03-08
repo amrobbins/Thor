@@ -131,6 +131,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
     auto compiled = loadCubin(key, cubin, kernel_name, expr.num_inputs, TensorDescriptor::DataType::FP32, sig.device_num);
+    compiled->num_inputs = expr.num_inputs;
 
     cacheInsert(key, compiled);
     return compiled;

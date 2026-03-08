@@ -3,8 +3,8 @@
 #include <cstdint>
 #include <string>
 
-#include "Utilities/TensorMathFusion/Equation.h"
 #include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/StampedEquation.h"
 
 namespace ThorImplementation {
 
