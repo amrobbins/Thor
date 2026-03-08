@@ -9,7 +9,6 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
                          const std::vector<Tensor>& inputs,
                          Tensor& output,
                          Stream& stream) {
-    void run();
     if (!compiledEquation) {
         throw std::runtime_error("EquationInstance has no compiled equation.");
     }
@@ -18,27 +17,39 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         throw std::runtime_error("Wrong number of inputs");
     }
 
-    uint64_t numel = output.getDescriptor().getTotalNumElements();
+    const TensorDescriptor& outputDescriptor = output.getDescriptor();
+    if (output.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+        throw std::runtime_error("Output tensor is not located on a GPU.");
+    }
+
+    uint64_t numel = outputDescriptor.getTotalNumElements();
 
     for (const auto& t : inputs) {
         if (!t.isInitialized()) {
             throw std::runtime_error("All input tensors must be initialized.");
         }
 
-        if (t.getDescriptor().getDataType() != TensorDescriptor::DataType::FP32) {
+        if (t.getDescriptor().getDataType() != compiledEquation->dtype) {
             throw std::runtime_error("V1 fused equations require FP32 tensors");
         }
 
-        if (t.getDescriptor().getTotalNumElements() != numel) {
-            throw std::runtime_error("Input numel mismatch");
+        if (t.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+            throw std::runtime_error("Input tensor is not located on a GPU.");
         }
 
         if (t.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
             throw std::runtime_error("Input tensor GPU does not match compiled fused equation device.");
         }
+
+        if (t.getDescriptor() != outputDescriptor) {
+            throw std::runtime_error("All input tensor descriptors must exactly match the output tensor descriptor in V1.");
+        }
+        // if (t.getDescriptor().getTotalNumElements() != numel) {
+        //     throw std::runtime_error("Input numel mismatch");
+        // }
     }
 
-    if (output.getDataType() != TensorDescriptor::DataType::FP32) {
+    if (output.getDataType() != compiledEquation->dtype) {
         throw std::runtime_error("Output must be FP32");
     }
 
