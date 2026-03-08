@@ -7,8 +7,8 @@
 #include <nvJitLink.h>
 #include <nvrtc.h>
 
-#include "Utilities/TensorMathFusion/Equation.h"
 #include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/StampedEquation.h"
 
 namespace ThorImplementation {
 class EquationCompiler {

@@ -2,15 +2,15 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/vector.h>
 
-#include "Utilities/TensorMathFusion/Equation.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
+#include "Utilities/TensorMathFusion/StampedEquation.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 
 using Expression = ThorImplementation::Expression;
 using FusedEquation = ThorImplementation::FusedEquation;
-using Equation = ThorImplementation::Equation;
+using StampedEquation = ThorImplementation::StampedEquation;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using Tensor = ThorImplementation::Tensor;
 
@@ -31,7 +31,7 @@ void bind_physical_expression(nb::module_& physical) {
 
             Returns
             -------
-            thor.physical.Expr
+            thor.physical.Expression
                 Expression representing that input.
         )nbdoc");
 
@@ -62,28 +62,37 @@ void bind_fused_equation(nb::module_& physical) {
     auto fused_equation = nb::class_<FusedEquation>(physical, "FusedEquation");
     fused_equation.attr("__module__") = "thor.physical";
 
-    fused_equation.def("instantiate",
-                       &FusedEquation::instantiate,
+    fused_equation.def("stamp",
+                       &FusedEquation::stamp,
+                       "inputs"_a,
                        "stream"_a,
                        R"nbdoc(
-Create an executable instance of this fused equation.
+Create an executable instance of this fused equation with bound tensors.
+)nbdoc");
+
+    fused_equation.def("run",
+                       &FusedEquation::run,
+                       "inputs"_a,
+                       "output"_a,
+                       "stream"_a,
+                       R"nbdoc(
+Run a fused equation with the tensors provided.
 )nbdoc");
 }
 
 void bind_equation_instance(nb::module_& physical) {
-    auto equation = nb::class_<Equation>(physical, "Equation");
+    auto equation = nb::class_<StampedEquation>(physical, "Equation");
     equation.attr("__module__") = "thor.physical";
 
     equation.def("run",
-                 &Equation::run,
-                 "inputs"_a,
+                 &StampedEquation::run,
                  R"nbdoc(
-Execute the fused equation with the given input tensors.
+Execute the stamped fused equation on the bound tensors.
         )nbdoc");
 
-    equation.def("get_output_tensor",
-                 &Equation::getOutputTensor,
-                 R"nbdoc(
+    equation.def_prop_ro("output_tensor",
+                         &StampedEquation::getOutputTensor,
+                         R"nbdoc(
 Return the output tensor owned by this equation instance.
         )nbdoc");
 }
@@ -91,11 +100,8 @@ Return the output tensor owned by this equation instance.
 void bind_physical_compile(nb::module_& physical) {
     physical.def(
         "compile",
-        [](const Expression& expr, const std::vector<Tensor>& inputs, DataType dtype, int device_num) {
-            return FusedEquation::compile(expr.expression(), inputs, dtype, device_num);
-        },
+        [](const Expression& expr, DataType dtype, int device_num) { return FusedEquation::compile(expr.expression(), dtype, device_num); },
         "expr"_a,
-        "inputs"_a,
         "dtype"_a,
         "device_num"_a = 0,
         R"nbdoc(
@@ -103,10 +109,8 @@ void bind_physical_compile(nb::module_& physical) {
 
             Parameters
             ----------
-            expr : thor.physical.Expr
+            expr : thor.physical.Expression
                 The expression to compile.
-            inputs :
-                The list of input tensors
             dtype : thor.DataType
                 The tensor data type to target.
             device_num : int, default 0

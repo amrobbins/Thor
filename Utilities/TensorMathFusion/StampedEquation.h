@@ -36,7 +36,6 @@ struct CompiledEquation {
     CUfunction kernel = nullptr;
     std::string kernel_name;
 
-    TensorDescriptor outputDescriptor;
     TensorDescriptor::DataType dtype;  // FIXME: dtype redundant with descriptor
     int deviceNum = 0;
     uint32_t num_inputs = 0;
@@ -54,16 +53,25 @@ struct CompiledEquation {
     }
 };
 
-class Equation {
+class EquationRunner {
    public:
-    Equation(std::shared_ptr<CompiledEquation> compiledEquation, const Tensor& output, const Stream& stream)
+    static void run(const std::shared_ptr<CompiledEquation>& compiledEquation,
+                    const std::vector<Tensor>& inputs,
+                    Tensor& output,
+                    Stream& stream);
+};
+
+class StampedEquation {
+   public:
+    StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation, const Tensor& output, const Stream& stream)
         : compiledEquation(std::move(compiledEquation)), output(output), stream(stream) {}
 
-    void run(const std::vector<Tensor>& inputs);
+    void run();
     Tensor getOutputTensor() const { return output; }
 
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
+    std::vector<Tensor> inputs;
     Tensor output;
     Stream stream;
 };
