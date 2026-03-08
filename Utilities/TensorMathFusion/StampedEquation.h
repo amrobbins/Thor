@@ -36,7 +36,7 @@ struct CompiledEquation {
     CUfunction kernel = nullptr;
     std::string kernel_name;
 
-    TensorDescriptor::DataType dtype;  // FIXME: dtype redundant with descriptor
+    TensorDescriptor::DataType dtype;
     int deviceNum = 0;
     uint32_t num_inputs = 0;
 
