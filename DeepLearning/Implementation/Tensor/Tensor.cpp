@@ -355,35 +355,78 @@ template <typename ElementDataType>
 ElementDataType *Tensor::getMemPtr() {
     assert(isInitialized());
     assert(mem != nullptr);
+
+    using BaseT = std::remove_cv_t<ElementDataType>;
+    static_assert(!std::is_const_v<ElementDataType>, "Non-const getMemPtr() should not return const pointer type");
+
     // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
-    if (!(is_same<ElementDataType, void>::value)) {
+    if (!(is_same<BaseT, void>::value)) {
         if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
-            assert((is_same<ElementDataType, half>::value));
+            assert((is_same<BaseT, half>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
-            assert((is_same<ElementDataType, float>::value));
-        else if (is_same<ElementDataType, char>::value)
+            assert((is_same<BaseT, float>::value));
+        else if (is_same<BaseT, char>::value)
             assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
                    descriptor.getDataType() == TensorDescriptor::DataType::INT8);
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
-            assert((is_same<ElementDataType, int8_t>::value));
+            assert((is_same<BaseT, int8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
-            assert((is_same<ElementDataType, int16_t>::value));
+            assert((is_same<BaseT, int16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
-            assert((is_same<ElementDataType, int32_t>::value));
+            assert((is_same<BaseT, int32_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
-            assert((is_same<ElementDataType, uint8_t>::value));
+            assert((is_same<BaseT, uint8_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
-            assert((is_same<ElementDataType, uint16_t>::value));
+            assert((is_same<BaseT, uint16_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
-            assert((is_same<ElementDataType, uint32_t>::value));
+            assert((is_same<BaseT, uint32_t>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
-            assert((is_same<ElementDataType, bool>::value));
+            assert((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
-            assert((is_same<ElementDataType, uint8_t>::value));
+            assert((is_same<BaseT, uint8_t>::value));
         else
             assert(false);
     }
-    return (ElementDataType *)mem;
+    return reinterpret_cast<ElementDataType *>(mem);
+}
+
+template <typename ElementDataType>
+const ElementDataType *Tensor::getMemPtr() const {
+    assert(isInitialized());
+    assert(mem != nullptr);
+
+    using BaseT = std::remove_cv_t<ElementDataType>;
+
+    // Ensure that if the convenience template parameter ElementDataType is used that it agrees with the descriptor
+    if (!(is_same<BaseT, void>::value)) {
+        if (descriptor.getDataType() == TensorDescriptor::DataType::FP16)
+            assert((is_same<BaseT, half>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP32)
+            assert((is_same<BaseT, float>::value));
+        else if (is_same<BaseT, char>::value)
+            assert(descriptor.getDataType() == TensorDescriptor::DataType::UINT8 ||
+                   descriptor.getDataType() == TensorDescriptor::DataType::INT8);
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT8)
+            assert((is_same<BaseT, int8_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT16)
+            assert((is_same<BaseT, int16_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::INT32)
+            assert((is_same<BaseT, int32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT8)
+            assert((is_same<BaseT, uint8_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT16)
+            assert((is_same<BaseT, uint16_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::UINT32)
+            assert((is_same<BaseT, uint32_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::BOOLEAN)
+            assert((is_same<BaseT, bool>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
+            assert((is_same<BaseT, uint8_t>::value));
+        else
+            assert(false);
+    }
+
+    return reinterpret_cast<const ElementDataType *>(mem);
 }
 
 template <typename ElementDataType>
@@ -1646,8 +1689,18 @@ template int32_t *Tensor::getMemPtr();
 template uint8_t *Tensor::getMemPtr();
 template uint16_t *Tensor::getMemPtr();
 template uint32_t *Tensor::getMemPtr();
-
 template char *Tensor::getMemPtr();
+
+template const void *Tensor::getMemPtr<void>() const;
+template const half *Tensor::getMemPtr<half>() const;
+template const float *Tensor::getMemPtr<float>() const;
+template const int8_t *Tensor::getMemPtr<int8_t>() const;
+template const int16_t *Tensor::getMemPtr<int16_t>() const;
+template const int32_t *Tensor::getMemPtr<int32_t>() const;
+template const uint8_t *Tensor::getMemPtr<uint8_t>() const;
+template const uint16_t *Tensor::getMemPtr<uint16_t>() const;
+template const uint32_t *Tensor::getMemPtr<uint32_t>() const;
+template const char *Tensor::getMemPtr<char>() const;
 
 template half Tensor::getElement(vector<unsigned long> dimensionIndex);
 template float Tensor::getElement(vector<unsigned long> dimensionIndex);

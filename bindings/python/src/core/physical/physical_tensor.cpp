@@ -81,8 +81,6 @@ dimensions : list[int]
         "data_type"_a,
         R"nbdoc(
 Return the number of bytes required to store num_elements of data_type.
-
-Note: packed_boolean is handled correctly.
 )nbdoc");
 
     tensor_descriptor.def_static(
@@ -113,15 +111,65 @@ Note: packed_boolean is handled correctly.
         "new_dimensions"_a);
 
     tensor_descriptor.def(
-        "flat_index", [](TensorDescriptor &self, const vector<uint64_t> &element) { return self.getFlatIndex(element); }, "element"_a);
+        "flat_index",
+        [](TensorDescriptor &self, const std::vector<uint64_t> &element) { return self.getFlatIndex(element); },
+        "element"_a,
+        R"nbdoc(
+Return the flat index corresponding to a multidimensional element index.
+
+Parameters
+----------
+element : Sequence[int]
+    One index per tensor dimension. Its length must match the number
+    of dimensions, and each index must be within bounds.
+
+Returns
+-------
+int
+    The flattened linear index of the element in row-major order.
+    )nbdoc");
 
     tensor_descriptor.def(
         "dimensional_index",
         [](TensorDescriptor &self, uint64_t flat_index) { return self.getDimensionalIndex(flat_index); },
-        "flat_index"_a);
+        "flat_index"_a,
+        R"nbdoc(
+Return the per dimension indexes of an element, given its flat index (element offset from the beginning of the tensor).
+
+Parameters
+----------
+flat_index : int
+    Offset of the element from the beginning of the tensor.
+
+Returns
+-------
+Sequence[int]
+    One index per tensor dimension, that addresses the element at offset flat_index.
+    )nbdoc");
 
     tensor_descriptor.def(
-        "dimension_stride", [](TensorDescriptor &self, uint32_t axis) { return self.getDimensionStride(axis); }, "axis"_a);
+        "dimension_stride",
+        [](TensorDescriptor &self, uint32_t axis) { return self.getDimensionStride(axis); },
+        "axis"_a,
+        R"nbdoc(
+Return the number of elements contained at the specified axis, before the next index in the axis.
+For example:
+
+    if tensor has shape [2][3][4]
+    tensor.dimension_stride(axis=0) == 12
+    tensor.dimension_stride(axis=1) == 4
+    tensor.dimension_stride(axis=2) == 1
+
+Parameters
+----------
+axis : int
+    The dimension for which the stride is computed.
+
+Returns
+-------
+int
+    The number of elements between subsequent indexes in the specified dimension.
+    )nbdoc");
 
     // Physical Tensor
     auto physical_tensor = nb::class_<PhysicalTensor>(physical, "PhysicalTensor");

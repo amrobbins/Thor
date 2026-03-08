@@ -143,9 +143,11 @@ find_package(CUDAToolkit REQUIRED)
 
 target_link_libraries(Thor PRIVATE
         CUDA::cudart
+        CUDA::cuda_driver
         CUDA::cublas
         CUDA::cublasLt
         CUDA::cusolver
+        CUDA::nvrtc
 )
 
 # Manually include cuDNN and cuFile

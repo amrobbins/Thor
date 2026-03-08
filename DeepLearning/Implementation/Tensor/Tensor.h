@@ -51,7 +51,7 @@ class Tensor : private ReferenceCounted {
     Tensor &operator=(const Tensor &tensorInstance);
     virtual ~Tensor();
 
-    bool isInitialized() { return !uninitialized(); }
+    bool isInitialized() const { return !uninitialized(); }
 
     Tensor clone() const { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
     Tensor clone(TensorPlacement newPlacement) const { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
@@ -68,6 +68,8 @@ class Tensor : private ReferenceCounted {
     TensorPlacement getPlacement() const { return placement; }
     template <typename ElementDataType = void>
     ElementDataType *getMemPtr();
+    template <typename ElementDataType = void>
+    const ElementDataType *getMemPtr() const;
     template <typename ElementDataType>
     ElementDataType getElement(std::vector<uint64_t> dimensionIndex);
     template <typename ElementDataType>
