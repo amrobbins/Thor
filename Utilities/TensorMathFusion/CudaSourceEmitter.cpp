@@ -61,11 +61,8 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
             case ExprOp::SQRT:
                 ss << "  float t" << i << " = sqrtf(" << ref(n.lhs) << ");\n";
                 break;
-            case ExprOp::POW_SCALAR_EXPONENT:
-                ss << "  float t" << i << " = powf(" << ref(n.lhs) << ", " << setprecision(9) << n.scalar_f32 << "f);\n";
-                break;
-            case ExprOp::POW_SCALAR_BASE:
-                ss << "  float t" << i << " = powf(" << std::setprecision(9) << n.scalar_f32 << "f, " << ref(n.lhs) << ");\n";
+            case ExprOp::POW:
+                ss << "  float t" << i << " = powf(" << ref(n.lhs) << ", " << ref(n.rhs) << ");\n";
                 break;
             default:
                 throw runtime_error("Unsupported op in emitter: " + to_string((int32_t)n.op) + "\n" + ss.str());
