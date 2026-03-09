@@ -14,14 +14,31 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
-enum class ExprOp : uint16_t { INPUT = 3, SCALAR_F32, ADD, SUB, MUL, DIV, POW_SCALAR, NEG, EXP, LOG, SQRT };
+enum class ExprOp : uint16_t {
+    INPUT = 3,
+    SCALAR_F32,
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    POW_SCALAR_EXPONENT,
+    POW_SCALAR_BASE,
+    NEG,
+    EXP,
+    EXP2,
+    EXP10,
+    LOG,
+    LOG2,
+    LOG10,
+    SQRT
+};
 
 struct ExprNode {
     ExprOp op;
     uint32_t lhs = UINT32_MAX;
     uint32_t rhs = UINT32_MAX;  // unused for unary/scalar ops
     uint32_t input_index = UINT32_MAX;
-    float scalar_f32 = 0.0f;  // used for SCALAR_F32 or POW_SCALAR exponent
+    float scalar_f32 = 0.0f;
 };
 
 struct PhysicalExpression {
@@ -47,19 +64,35 @@ class Expression {
     Expression operator*(float scalar) const;
     Expression operator/(float scalar) const;
 
+    Expression operator-() const;
+
+    [[nodiscard]] Expression log() const;  // natural log
+    [[nodiscard]] Expression log2() const;
+    [[nodiscard]] Expression log10() const;
+    [[nodiscard]] Expression log(float base) const;
+    [[nodiscard]] Expression exp() const;
+    [[nodiscard]] Expression exp2() const;
+    [[nodiscard]] Expression exp10() const;
+    [[nodiscard]] Expression exp(float base) const;
+    [[nodiscard]] Expression sqrt() const;
+    [[nodiscard]] Expression pow(float exponent) const;
+
    private:
     std::shared_ptr<PhysicalExpression> expr;
-    uint32_t nodeIndex = -1;
+    uint32_t nodeIndex = UINT32_MAX;
 
     Expression(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) : expr(std::move(expr)), nodeIndex(nodeIndex) {}
 
     static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
+    static Expression unaryOp(const Expression& inputExpr, ExprOp op);
+    static Expression powScalarOp(const Expression& baseExpr, float exponent);
 };
 
 inline Expression operator+(float lhs, const Expression& rhs) { return Expression::scalar(lhs) + rhs; }
 inline Expression operator-(float lhs, const Expression& rhs) { return Expression::scalar(lhs) - rhs; }
 inline Expression operator*(float lhs, const Expression& rhs) { return Expression::scalar(lhs) * rhs; }
 inline Expression operator/(float lhs, const Expression& rhs) { return Expression::scalar(lhs) / rhs; }
+inline Expression pow(float base, const Expression& exponent) { return exponent.exp(base); }
 
 std::string formatFloatCanonical(float x);
 bool isCommutative(ExprOp op);

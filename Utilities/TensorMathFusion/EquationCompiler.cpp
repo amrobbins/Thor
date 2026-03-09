@@ -95,7 +95,9 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "--use_fast_math"};
+    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17"};
+    if (sig.use_fast_math)
+        opts.push_back("--use_fast_math");
 
     nvrtcResult res = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
 
@@ -121,7 +123,7 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression& expr, const EquationSignature& sig) {
     ensureCudaContextCurrent(sig.device_num);
 
-    EquationCacheKey key{canonicalize(expr), sig};
+    EquationCacheKey key(canonicalize(expr), sig);
     if (auto hit = cacheLookup(key))
         return hit;
 

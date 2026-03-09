@@ -43,14 +43,29 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
             case ExprOp::EXP:
                 ss << "  float t" << i << " = expf(" << ref(n.lhs) << ");\n";
                 break;
+            case ExprOp::EXP2:
+                ss << "  float t" << i << " = exp2f(" << ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::EXP10:
+                ss << "  float t" << i << " = exp10f(" << ref(n.lhs) << ");\n";
+                break;
             case ExprOp::LOG:
                 ss << "  float t" << i << " = logf(" << ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::LOG2:
+                ss << "  float t" << i << " = log2f(" << ref(n.lhs) << ");\n";
+                break;
+            case ExprOp::LOG10:
+                ss << "  float t" << i << " = log10f(" << ref(n.lhs) << ");\n";
                 break;
             case ExprOp::SQRT:
                 ss << "  float t" << i << " = sqrtf(" << ref(n.lhs) << ");\n";
                 break;
-            case ExprOp::POW_SCALAR:
+            case ExprOp::POW_SCALAR_EXPONENT:
                 ss << "  float t" << i << " = powf(" << ref(n.lhs) << ", " << setprecision(9) << n.scalar_f32 << "f);\n";
+                break;
+            case ExprOp::POW_SCALAR_BASE:
+                ss << "  float t" << i << " = powf(" << std::setprecision(9) << n.scalar_f32 << "f, " << ref(n.lhs) << ");\n";
                 break;
             default:
                 throw runtime_error("Unsupported op in emitter: " + to_string((int32_t)n.op) + "\n" + ss.str());
@@ -59,7 +74,7 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
 
     ss << "\n  out[idx] = " << ref(expr.output_node) << ";\n";
     ss << "}\n";
-    // printf("%s\n", ss.str().c_str());
+    printf("%s\n", ss.str().c_str());
     return ss.str();
 }
 

@@ -14,7 +14,9 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     if (inputs.size() != compiledEquation->num_inputs) {
-        throw std::runtime_error("Wrong number of inputs");
+        std::string error_message = "Wrong number of inputs actual " + std::to_string(inputs.size()) + " vs expected " +
+                                    std::to_string(compiledEquation->num_inputs) + "\n";
+        throw std::runtime_error(error_message.c_str());
     }
 
     const TensorDescriptor& outputDescriptor = output.getDescriptor();
@@ -74,7 +76,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     args.push_back((void*)&out_ptr);
     args.push_back((void*)&numel);
 
-    uint32_t block = 256;
+    uint32_t block = std::min(numel, 256UL);
     uint32_t grid = static_cast<uint32_t>((numel + block - 1) / block);
 
     CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid, 1, 1, block, 1, 1, 0, stream, args.data(), nullptr));
