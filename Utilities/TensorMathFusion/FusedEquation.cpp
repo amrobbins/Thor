@@ -21,7 +21,7 @@ cudaDataType_t toCudaDataType(TensorDescriptor::DataType dtype) {
 }
 }  // namespace
 
-FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num) {
+FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
     if (dtype != TensorDescriptor::DataType::FP32) {
         throw std::runtime_error("FusedEquation::compile V1 currently only supports FP32.");
     }
@@ -57,6 +57,7 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
     sig.sm_major = prop.major;
     sig.sm_minor = prop.minor;
     sig.device_num = device_num;
+    sig.use_fast_math = use_fast_math;
 
     EquationCompiler compiler;
     std::shared_ptr<CompiledEquation> compiledEquation = compiler.compile(expr, sig);
@@ -64,7 +65,7 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
     return FusedEquation(std::move(compiledEquation));
 }
 
-StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, Stream stream) const {
+StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, const Stream& stream) const {
     if (!compiledEquation) {
         throw std::runtime_error("Cannot stamp an empty FusedEquation.");
     }
@@ -112,7 +113,7 @@ StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, Stream s
         throw std::runtime_error("Failed to allocate output tensor during FusedEquation::stamp.");
     }
 
-    return StampedEquation(compiledEquation, output, stream);
+    return StampedEquation(compiledEquation, inputs, output, stream);
 }
 
 void FusedEquation::run(const std::vector<Tensor>& inputs, Tensor output, Stream stream) const {

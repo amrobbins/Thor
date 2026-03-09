@@ -10,6 +10,7 @@ void bind_machine_evaluator(nb::module_ &physical);
 void bind_scoped_gpu(nb::module_ &physical);
 void bind_physical_expression(nb::module_ &physical);
 void bind_fused_equation(nb::module_ &physical);
+void bind_stamped_equation(nb::module_ &physical);
 void bind_physical_compile(nb::module_ &physical);
 
 void bind_physical(nb::module_ &physical) {
@@ -23,5 +24,6 @@ void bind_physical(nb::module_ &physical) {
 
     bind_physical_expression(physical);
     bind_fused_equation(physical);
+    bind_stamped_equation(physical);
     bind_physical_compile(physical);
 }

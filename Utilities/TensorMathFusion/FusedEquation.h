@@ -6,9 +6,12 @@
 namespace ThorImplementation {
 class FusedEquation {
    public:
-    static FusedEquation compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num);
+    static FusedEquation compile(const PhysicalExpression& expr,
+                                 TensorDescriptor::DataType dtype,
+                                 int device_num,
+                                 bool use_fast_math = false);
 
-    StampedEquation stamp(const std::vector<Tensor>& inputs, Stream stream) const;
+    [[nodiscard]] StampedEquation stamp(const std::vector<Tensor>& inputs, const Stream& stream) const;
     void run(const std::vector<Tensor>& inputs, Tensor output, Stream stream) const;
 
    private:

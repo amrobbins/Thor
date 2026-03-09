@@ -17,11 +17,19 @@ struct EquationSignature {
     int sm_major;
     int sm_minor;
     int device_num;
+    bool use_fast_math;
 
     bool operator==(const EquationSignature& other) const = default;
 };
 
 struct EquationCacheKey {
+    EquationCacheKey() = default;
+
+    EquationCacheKey(const std::string& canonical_expr, const EquationSignature& sig) {
+        this->canonical_expr = canonical_expr;
+        this->sig = sig;
+        this->sig.device_num = 0;  // Device num is not part of the kernel signature in terms of compiling, instead uses sm_major/minor
+    }
     std::string canonical_expr;
     EquationSignature sig;
 
@@ -63,8 +71,11 @@ class EquationRunner {
 
 class StampedEquation {
    public:
-    StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation, const Tensor& output, const Stream& stream)
-        : compiledEquation(std::move(compiledEquation)), output(output), stream(stream) {}
+    StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
+                    const std::vector<Tensor>& inputs,
+                    const Tensor& output,
+                    const Stream& stream)
+        : compiledEquation(std::move(compiledEquation)), inputs(inputs), output(output), stream(stream) {}
 
     void run();
     Tensor getOutputTensor() const { return output; }
