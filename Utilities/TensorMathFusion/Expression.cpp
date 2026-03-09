@@ -24,10 +24,8 @@ std::string opName(ExprOp op) {
             return "MUL";
         case ExprOp::DIV:
             return "DIV";
-        case ExprOp::POW_SCALAR_EXPONENT:
-            return "POW_SCALAR_EXPONENT";
-        case ExprOp::POW_SCALAR_BASE:
-            return "POW_SCALAR_BASE";
+        case ExprOp::POW:
+            return "POW";
         case ExprOp::NEG:
             return "NEG";
         case ExprOp::EXP:
@@ -77,14 +75,11 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo) + ")";
             break;
 
-        case ExprOp::POW_SCALAR_EXPONENT:
-            out = "POW_SCALAR_EXPONENT(" + canonicalizeNode(expr, n.lhs, memo) + "," + formatFloatCanonical(n.scalar_f32) + ")";
-            break;
-
         case ExprOp::ADD:
         case ExprOp::SUB:
         case ExprOp::MUL:
-        case ExprOp::DIV: {
+        case ExprOp::DIV:
+        case ExprOp::POW: {
             std::string a = canonicalizeNode(expr, n.lhs, memo);
             std::string b = canonicalizeNode(expr, n.rhs, memo);
 
@@ -114,10 +109,10 @@ bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_F3
 
 bool isUnaryOp(ExprOp op) {
     return op == ExprOp::NEG || op == ExprOp::EXP || op == ExprOp::EXP2 || op == ExprOp::EXP10 || op == ExprOp::LOG || op == ExprOp::LOG2 ||
-           op == ExprOp::LOG10 || op == ExprOp::SQRT || op == ExprOp::POW_SCALAR_EXPONENT || op == ExprOp::POW_SCALAR_BASE;
+           op == ExprOp::LOG10 || op == ExprOp::SQRT;
 }
 
-bool isBinaryOp(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::SUB || op == ExprOp::MUL || op == ExprOp::DIV; }
+bool isBinaryOp(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::SUB || op == ExprOp::MUL || op == ExprOp::DIV || op == ExprOp::POW; }
 
 uint32_t cloneSubtree(const PhysicalExpression& src,
                       uint32_t srcNodeIndex,
@@ -239,55 +234,6 @@ Expression Expression::unaryOp(const Expression& inputExpr, ExprOp op) {
     return Expression(out, newIndex);
 }
 
-Expression Expression::powScalarOp(const Expression& baseExpr, float exponent) {
-    if (!baseExpr.expr)
-        throw std::runtime_error("Cannot apply pow() to empty expression");
-
-    auto out = std::make_shared<PhysicalExpression>();
-    out->num_inputs = baseExpr.expr->num_inputs;
-
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    uint32_t newLhsIndex = cloneSubtree(*baseExpr.expr, baseExpr.nodeIndex, *out, oldToNew);
-
-    ExprNode node;
-    node.op = ExprOp::POW_SCALAR_EXPONENT;
-    node.lhs = newLhsIndex;
-    node.scalar_f32 = exponent;
-
-    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = newIndex;
-
-    return Expression(out, newIndex);
-}
-
-Expression Expression::exp(float base) const {
-    if (base < 0.0f) {
-        throw std::runtime_error("scalar base for exponentiation must be non-negative, received base = " + std::to_string(base));
-    }
-
-    if (!expr) {
-        throw std::runtime_error("Cannot apply exp(base) to empty expression");
-    }
-
-    auto out = std::make_shared<PhysicalExpression>();
-    out->num_inputs = expr->num_inputs;
-
-    std::unordered_map<uint32_t, uint32_t> oldToNew;
-    uint32_t newLhsIndex = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
-
-    ExprNode node;
-    node.op = ExprOp::POW_SCALAR_BASE;
-    node.lhs = newLhsIndex;
-    node.scalar_f32 = base;
-
-    uint32_t newIndex = static_cast<uint32_t>(out->nodes.size());
-    out->nodes.push_back(node);
-    out->output_node = newIndex;
-
-    return Expression(out, newIndex);
-}
-
 Expression Expression::operator+(const Expression& other) const { return binaryOp(*this, other, ExprOp::ADD); }
 Expression Expression::operator-(const Expression& other) const { return binaryOp(*this, other, ExprOp::SUB); }
 Expression Expression::operator*(const Expression& other) const { return binaryOp(*this, other, ExprOp::MUL); }
@@ -298,8 +244,10 @@ Expression Expression::operator*(float scalarValue) const { return *this * Expre
 Expression Expression::operator/(float scalarValue) const { return *this / Expression::scalar(scalarValue); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
-// x_i^exponent
-Expression Expression::pow(float exponent) const { return powScalarOp(*this, exponent); }
+// x_i^y_i  both tensors
+Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
+// x_i^scalar_exponent
+Expression Expression::pow(float exponent) const { return this->pow(Expression::scalar(exponent)); }
 
 Expression Expression::log() const { return unaryOp(*this, ExprOp::LOG); }
 Expression Expression::log2() const { return unaryOp(*this, ExprOp::LOG2); }

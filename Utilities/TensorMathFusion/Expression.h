@@ -14,24 +14,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
-enum class ExprOp : uint16_t {
-    INPUT = 3,
-    SCALAR_F32,
-    ADD,
-    SUB,
-    MUL,
-    DIV,
-    POW_SCALAR_EXPONENT,
-    POW_SCALAR_BASE,
-    NEG,
-    EXP,
-    EXP2,
-    EXP10,
-    LOG,
-    LOG2,
-    LOG10,
-    SQRT
-};
+enum class ExprOp : uint16_t { INPUT = 3, SCALAR_F32, ADD, SUB, MUL, DIV, POW, NEG, EXP, EXP2, EXP10, LOG, LOG2, LOG10, SQRT };
 
 struct ExprNode {
     ExprOp op;
@@ -73,9 +56,9 @@ class Expression {
     [[nodiscard]] Expression exp() const;
     [[nodiscard]] Expression exp2() const;
     [[nodiscard]] Expression exp10() const;
-    [[nodiscard]] Expression exp(float base) const;
     [[nodiscard]] Expression sqrt() const;
     [[nodiscard]] Expression pow(float exponent) const;
+    [[nodiscard]] Expression pow(const Expression& exponent) const;
 
    private:
     std::shared_ptr<PhysicalExpression> expr;
@@ -92,7 +75,7 @@ inline Expression operator+(float lhs, const Expression& rhs) { return Expressio
 inline Expression operator-(float lhs, const Expression& rhs) { return Expression::scalar(lhs) - rhs; }
 inline Expression operator*(float lhs, const Expression& rhs) { return Expression::scalar(lhs) * rhs; }
 inline Expression operator/(float lhs, const Expression& rhs) { return Expression::scalar(lhs) / rhs; }
-inline Expression pow(float base, const Expression& exponent) { return exponent.exp(base); }
+inline Expression pow(float base, const Expression& exponent) { return Expression::scalar(base).pow(exponent); }
 
 std::string formatFloatCanonical(float x);
 bool isCommutative(ExprOp op);

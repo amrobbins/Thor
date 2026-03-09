@@ -65,18 +65,6 @@ void bind_physical_expression(nb::module_& physical) {
 Return the elementwise natural exponential of this expression: e^x_i for a tensor of x_i's.
 )nbdoc");
 
-    expr.def("exp",
-             nb::overload_cast<float>(&Expression::exp, nb::const_),
-             "base"_a,
-             R"nbdoc(
-Return the elementwise exponential of this expression with the given scalar base: base^x_i for a tensor of x_i's.
-
-Parameters
-----------
-base : float
-    The scalar base.
-)nbdoc");
-
     expr.def("exp2",
              nb::overload_cast<>(&Expression::exp2, nb::const_),
              R"nbdoc(
@@ -126,11 +114,21 @@ Return the elementwise square root of this expression: sqrt(x_i) for a tensor of
 )nbdoc");
 
     expr.def("pow",
-             &Expression::pow,
+             nb::overload_cast<const Expression&>(&Expression::pow, nb::const_),
              "exponent"_a,
              R"nbdoc(
-Raise this expression elementwise to a scalar exponent: x_i^p for a tensor of x_i's.
+from thor.physical.Expression.scalar import input, scalar
+
+x = input(0)
+y = input(1)
+
+expr1 = x.pow(y)      # t1 ^ t2
+expr2 = x.pow(2.0)    # t1 ^ s
+expr3 = scalar(2.0).pow(x)   # s ^ t1
+expr4 = scalar(2.0).pow(3.0)  # s1 ^ s2
 )nbdoc");
+
+    expr.def("pow", nb::overload_cast<float>(&Expression::pow, nb::const_), "exponent"_a);
 }
 
 void bind_fused_equation(nb::module_& physical) {
