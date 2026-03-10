@@ -2,19 +2,22 @@
 
 namespace ThorImplementation {
 
-std::string formatFloatCanonical(float x) {
+std::string formatFloatCanonical(double x) {
     std::ostringstream ss;
     ss << std::setprecision(9) << x;
     return ss.str();
 }
 
-bool isCommutative(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::MUL; }
+bool isCommutative(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX; }
 
 std::string opName(ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
             return "IN";
-        case ExprOp::SCALAR_F32:
+        case ExprOp::SCALAR_FP:
+            return "F32";
+        case ExprOp::SCALAR_INT:
+            // FIXME:
             return "F32";
         case ExprOp::ADD:
             return "ADD";
@@ -30,7 +33,7 @@ std::string opName(ExprOp op) {
             return "NEG";
         case ExprOp::EXP:
             return "EXP";
-        case ExprOp::LOG:
+        case ExprOp::LN:
             return "LOG";
         case ExprOp::SQRT:
             return "SQRT";
@@ -42,6 +45,10 @@ std::string opName(ExprOp op) {
             return "LOG2";
         case ExprOp::LOG10:
             return "LOG10";
+        case ExprOp::MIN:
+            return "MIN";
+        case ExprOp::MAX:
+            return "MAX";
         default:
             throw std::runtime_error("Unknown ExprOp");
     }
@@ -60,15 +67,19 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
             out = "IN" + std::to_string(n.input_index);
             break;
 
-        case ExprOp::SCALAR_F32:
-            out = "F32(" + formatFloatCanonical(n.scalar_f32) + ")";
+        case ExprOp::SCALAR_FP:
+            out = "F32(" + formatFloatCanonical(n.scalar_fp) + ")";
+            break;
+        case ExprOp::SCALAR_INT:
+            // FIXME: don't convert to a float, but this is fp32 only now
+            out = "F32(" + formatFloatCanonical(n.scalar_int) + ")";
             break;
 
         case ExprOp::NEG:
         case ExprOp::EXP:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
-        case ExprOp::LOG:
+        case ExprOp::LN:
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
@@ -79,7 +90,9 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
         case ExprOp::SUB:
         case ExprOp::MUL:
         case ExprOp::DIV:
-        case ExprOp::POW: {
+        case ExprOp::POW:
+        case ExprOp::MIN:
+        case ExprOp::MAX: {
             std::string a = canonicalizeNode(expr, n.lhs, memo);
             std::string b = canonicalizeNode(expr, n.rhs, memo);
 
@@ -91,7 +104,8 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
         }
 
         default:
-            throw std::runtime_error("Unsupported ExprOp in canonicalizeNode");
+            std::string error_message = "Unsupported ExprOp in canonicalizeNode: " + std::to_string((int)n.op);
+            throw std::runtime_error(error_message.c_str());
     }
 
     memo[nodeIndex] = out;
@@ -105,14 +119,17 @@ std::string canonicalize(const PhysicalExpression& expr) {
 
 namespace {
 
-bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_F32; }
+bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_FP || op == ExprOp::SCALAR_INT; }
 
 bool isUnaryOp(ExprOp op) {
-    return op == ExprOp::NEG || op == ExprOp::EXP || op == ExprOp::EXP2 || op == ExprOp::EXP10 || op == ExprOp::LOG || op == ExprOp::LOG2 ||
+    return op == ExprOp::NEG || op == ExprOp::EXP || op == ExprOp::EXP2 || op == ExprOp::EXP10 || op == ExprOp::LN || op == ExprOp::LOG2 ||
            op == ExprOp::LOG10 || op == ExprOp::SQRT;
 }
 
-bool isBinaryOp(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::SUB || op == ExprOp::MUL || op == ExprOp::DIV || op == ExprOp::POW; }
+bool isBinaryOp(ExprOp op) {
+    return op == ExprOp::ADD || op == ExprOp::SUB || op == ExprOp::MUL || op == ExprOp::DIV || op == ExprOp::POW || op == ExprOp::MIN ||
+           op == ExprOp::MAX;
+}
 
 uint32_t cloneSubtree(const PhysicalExpression& src,
                       uint32_t srcNodeIndex,
@@ -140,7 +157,8 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     } else if (isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
-        throw std::runtime_error("Malformed expression: unsupported op in cloneSubtree");
+        std::string error_message = "Malformed expression: unsupported op in cloneSubtree: " + std::to_string((int)srcNode.op);
+        throw std::runtime_error(error_message.c_str());
     }
 
     uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
@@ -165,19 +183,34 @@ Expression Expression::input(uint32_t inputIndex) {
     return Expression(out, 0);
 }
 
-Expression Expression::scalar(float value) {
-    auto out = std::make_shared<PhysicalExpression>();
+Expression::Expression(double value) {
+    expr = std::make_shared<PhysicalExpression>();
+    expr->num_inputs = 0;
 
-    ExprNode node;
-    node.op = ExprOp::SCALAR_F32;
-    node.scalar_f32 = value;
+    ExprNode node{};
+    node.op = ExprOp::SCALAR_FP;
+    node.scalar_fp = value;
 
-    out->nodes.push_back(node);
-    out->output_node = 0;
-    out->num_inputs = 0;
-
-    return Expression(out, 0);
+    nodeIndex = static_cast<uint32_t>(expr->nodes.size());
+    expr->nodes.push_back(node);
+    expr->output_node = nodeIndex;
 }
+
+Expression::Expression(int64_t value) {
+    expr = std::make_shared<PhysicalExpression>();
+    expr->num_inputs = 0;
+
+    ExprNode node{};
+    node.op = ExprOp::SCALAR_INT;
+    node.scalar_int = value;
+
+    nodeIndex = static_cast<uint32_t>(expr->nodes.size());
+    expr->nodes.push_back(node);
+    expr->output_node = nodeIndex;
+}
+
+Expression Expression::scalar(double value) { return Expression(value); }
+Expression Expression::scalar(int64_t value) { return Expression(value); }
 
 PhysicalExpression Expression::expression() const {
     if (!expr)
@@ -238,26 +271,29 @@ Expression Expression::operator+(const Expression& other) const { return binaryO
 Expression Expression::operator-(const Expression& other) const { return binaryOp(*this, other, ExprOp::SUB); }
 Expression Expression::operator*(const Expression& other) const { return binaryOp(*this, other, ExprOp::MUL); }
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
-Expression Expression::operator+(float scalarValue) const { return *this + Expression::scalar(scalarValue); }
-Expression Expression::operator-(float scalarValue) const { return *this - Expression::scalar(scalarValue); }
-Expression Expression::operator*(float scalarValue) const { return *this * Expression::scalar(scalarValue); }
-Expression Expression::operator/(float scalarValue) const { return *this / Expression::scalar(scalarValue); }
+// Expression Expression::operator+(double scalarValue) const { return *this + Expression::scalar(scalarValue); }
+// Expression Expression::operator-(double scalarValue) const { return *this - Expression::scalar(scalarValue); }
+// Expression Expression::operator*(double scalarValue) const { return *this * Expression::scalar(scalarValue); }
+// Expression Expression::operator/(double scalarValue) const { return *this / Expression::scalar(scalarValue); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
-// x_i^y_i  both tensors
+// x_i^y_i  both tensors <- deprecated comment
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
 // x_i^scalar_exponent
-Expression Expression::pow(float exponent) const { return this->pow(Expression::scalar(exponent)); }
+// Expression Expression::pow(double exponent) const { return this->pow(Expression::scalar(exponent)); }
 
-Expression Expression::log() const { return unaryOp(*this, ExprOp::LOG); }
+Expression Expression::ln() const { return unaryOp(*this, ExprOp::LN); }
 Expression Expression::log2() const { return unaryOp(*this, ExprOp::LOG2); }
 Expression Expression::log10() const { return unaryOp(*this, ExprOp::LOG10); }
-Expression Expression::log(float base) const {
+Expression Expression::log(double base) const {
     if (base <= 0.0f || base == 1.0f) {
         throw std::runtime_error("log base must be positive and not equal to 1, received base = " + std::to_string(base));
     }
-    return this->log() / Expression::scalar(std::log(base));
+    return this->ln() / Expression::scalar(std::log(base));
 }
+
+Expression Expression::min(const Expression& other) const { return binaryOp(*this, other, ExprOp::MIN); }
+Expression Expression::max(const Expression& other) const { return binaryOp(*this, other, ExprOp::MAX); }
 
 // e^x_i
 Expression Expression::exp() const { return unaryOp(*this, ExprOp::EXP); }

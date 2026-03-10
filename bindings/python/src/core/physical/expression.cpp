@@ -18,6 +18,9 @@ void bind_physical_expression(nb::module_& physical) {
     auto expr = nb::class_<Expression>(physical, "Expression");
     expr.attr("__module__") = "thor.physical";
 
+    expr.def(nb::init_implicit<double>());
+    expr.def(nb::init_implicit<int64_t>());
+
     expr.def_static("input",
                     &Expression::input,
                     "input_index"_a,
@@ -35,100 +38,61 @@ void bind_physical_expression(nb::module_& physical) {
                 Expression representing that input.
         )nbdoc");
 
-    expr.def_static("scalar",
-                    &Expression::scalar,
-                    "value"_a,
-                    R"nbdoc(
-            Create a scalar constant expression.
-        )nbdoc");
+    expr.def_static(
+        "scalar",
+        [](double value) { return Expression::scalar(value); },
+        "value"_a,
+        R"nbdoc(
+Create a floating-point scalar constant expression.
+)nbdoc");
+
+    expr.def_static(
+        "scalar",
+        [](int64_t value) { return Expression::scalar(value); },
+        "value"_a,
+        R"nbdoc(
+Create an integer scalar constant expression.
+)nbdoc");
 
     expr.def("__add__", [](const Expression& a, const Expression& b) { return a + b; }, "other"_a);
     expr.def("__sub__", [](const Expression& a, const Expression& b) { return a - b; }, "other"_a);
     expr.def("__mul__", [](const Expression& a, const Expression& b) { return a * b; }, "other"_a);
     expr.def("__truediv__", [](const Expression& a, const Expression& b) { return a / b; }, "other"_a);
+    expr.def("__pow__", [](const Expression& a, const Expression& b) { return a.pow(b); });
 
-    expr.def("__add__", [](const Expression& a, float b) { return a + b; }, "other"_a);
-    expr.def("__sub__", [](const Expression& a, float b) { return a - b; }, "other"_a);
-    expr.def("__mul__", [](const Expression& a, float b) { return a * b; }, "other"_a);
-    expr.def("__truediv__", [](const Expression& a, float b) { return a / b; }, "other"_a);
-
-    expr.def("__radd__", [](const Expression& a, float b) { return Expression::scalar(b) + a; }, "other"_a);
-    expr.def("__rsub__", [](const Expression& a, float b) { return Expression::scalar(b) - a; }, "other"_a);
-    expr.def("__rmul__", [](const Expression& a, float b) { return Expression::scalar(b) * a; }, "other"_a);
-    expr.def("__rtruediv__", [](const Expression& a, float b) { return Expression::scalar(b) / a; }, "other"_a);
+    expr.def("__radd__", [](const Expression& a, const Expression& b) { return b + a; }, "other"_a);
+    expr.def("__rsub__", [](const Expression& a, const Expression& b) { return b - a; }, "other"_a);
+    expr.def("__rmul__", [](const Expression& a, const Expression& b) { return b * a; }, "other"_a);
+    expr.def("__rtruediv__", [](const Expression& a, const Expression& b) { return b / a; }, "other"_a);
+    expr.def("__rpow__", [](const Expression& a, const Expression& b) { return b.pow(a); }, "other"_a);
 
     expr.def("__neg__", [](const Expression& a) { return -a; });
 
-    expr.def("exp",
-             nb::overload_cast<>(&Expression::exp, nb::const_),
-             R"nbdoc(
-Return the elementwise natural exponential of this expression: e^x_i for a tensor of x_i's.
+    expr.def_static("min", [](const Expression& a, const Expression& b) { return a.min(b); }, "a"_a, "b"_a);
+    expr.def_static("max", [](const Expression& a, const Expression& b) { return a.max(b); }, "a"_a, "b"_a);
+
+    expr.def_static("exp", [](const Expression& x) { return x.exp(); }, "x"_a);
+    expr.def_static("exp2", [](const Expression& x) { return x.exp2(); }, "x"_a);
+    expr.def_static("exp10", [](const Expression& x) { return x.exp10(); }, "x"_a);
+
+    expr.def_static(
+        "ln",
+        [](const Expression& x) { return x.ln(); },
+        "x"_a,
+        R"nbdoc(
+Return the elementwise natural logarithm of the input expression x
 )nbdoc");
+    expr.def_static("log", [](const Expression& x, double base) { return x.log(base); }, "x"_a, "base"_a = std::numbers::e);
+    expr.def_static("log2", [](const Expression& x) { return x.log2(); }, "x"_a);
+    expr.def_static("log10", [](const Expression& x) { return x.log10(); }, "x"_a);
 
-    expr.def("exp2",
-             nb::overload_cast<>(&Expression::exp2, nb::const_),
-             R"nbdoc(
-Return the elementwise base-2 exponential of this expression: 2^x_i for a tensor of x_i's.
+    expr.def_static(
+        "sqrt",
+        [](const Expression& x) { return x.sqrt(); },
+        "x"_a,
+        R"nbdoc(
+Return the elementwise square root of the input expression x
 )nbdoc");
-
-    expr.def("exp10",
-             nb::overload_cast<>(&Expression::exp10, nb::const_),
-             R"nbdoc(
-Return the elementwise base-10 exponential of this expression: 10^x_i for a tensor of x_i's.
-)nbdoc");
-
-    expr.def("log",
-             nb::overload_cast<>(&Expression::log, nb::const_),
-             R"nbdoc(
-Return the elementwise natural logarithm of this expression: ln(x_i) for a tensor of x_i's.
-)nbdoc");
-
-    expr.def("log",
-             nb::overload_cast<float>(&Expression::log, nb::const_),
-             "base"_a,
-             R"nbdoc(
-Return the elementwise logarithm of this expression with the given base: log_base(x_i) for a tensor of x_i's.
-
-Parameters
-----------
-base : float
-    The logarithm base. Must be positive and not equal to 1.
-)nbdoc");
-
-    expr.def("log2",
-             nb::overload_cast<>(&Expression::log2, nb::const_),
-             R"nbdoc(
-Return the elementwise base-2 logarithm of this expression: lg(x_i) for a tensor of x_i's.
-)nbdoc");
-
-    expr.def("log10",
-             nb::overload_cast<>(&Expression::log10, nb::const_),
-             R"nbdoc(
-Return the elementwise base-10 logarithm of this expression: log_10(x_i) for a tensor of x_i's.
-)nbdoc");
-
-    expr.def("sqrt",
-             &Expression::sqrt,
-             R"nbdoc(
-Return the elementwise square root of this expression: sqrt(x_i) for a tensor of x_i's.
-)nbdoc");
-
-    expr.def("pow",
-             nb::overload_cast<const Expression&>(&Expression::pow, nb::const_),
-             "exponent"_a,
-             R"nbdoc(
-from thor.physical.Expression.scalar import input, scalar
-
-x = input(0)
-y = input(1)
-
-expr1 = x.pow(y)      # t1 ^ t2
-expr2 = x.pow(2.0)    # t1 ^ s
-expr3 = scalar(2.0).pow(x)   # s ^ t1
-expr4 = scalar(2.0).pow(3.0)  # s1 ^ s2
-)nbdoc");
-
-    expr.def("pow", nb::overload_cast<float>(&Expression::pow, nb::const_), "exponent"_a);
 }
 
 void bind_fused_equation(nb::module_& physical) {
