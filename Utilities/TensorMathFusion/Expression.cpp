@@ -16,9 +16,9 @@ std::string opName(ExprOp op) {
             return "IN";
         case ExprOp::SCALAR_FP:
             return "F32";
-        case ExprOp::SCALAR_INT:
-            // FIXME:
-            return "F32";
+        // case ExprOp::SCALAR_INT:
+        //     // FIXME:
+        //     return "F32";
         case ExprOp::ADD:
             return "ADD";
         case ExprOp::SUB:
@@ -70,10 +70,10 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
         case ExprOp::SCALAR_FP:
             out = "F32(" + formatFloatCanonical(n.scalar_fp) + ")";
             break;
-        case ExprOp::SCALAR_INT:
-            // FIXME: don't convert to a float, but this is fp32 only now
-            out = "F32(" + formatFloatCanonical(n.scalar_int) + ")";
-            break;
+            // case ExprOp::SCALAR_INT:
+            //     // FIXME: don't convert to a float, but this is fp32 only now
+            //     out = "F32(" + formatFloatCanonical(n.scalar_int) + ")";
+            //     break;
 
         case ExprOp::NEG:
         case ExprOp::EXP:
@@ -119,7 +119,8 @@ std::string canonicalize(const PhysicalExpression& expr) {
 
 namespace {
 
-bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_FP || op == ExprOp::SCALAR_INT; }
+//|| op == ExprOp::SCALAR_INT
+bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_FP; }
 
 bool isUnaryOp(ExprOp op) {
     return op == ExprOp::NEG || op == ExprOp::EXP || op == ExprOp::EXP2 || op == ExprOp::EXP10 || op == ExprOp::LN || op == ExprOp::LOG2 ||
@@ -196,21 +197,21 @@ Expression::Expression(double value) {
     expr->output_node = nodeIndex;
 }
 
-Expression::Expression(int64_t value) {
-    expr = std::make_shared<PhysicalExpression>();
-    expr->num_inputs = 0;
-
-    ExprNode node{};
-    node.op = ExprOp::SCALAR_INT;
-    node.scalar_int = value;
-
-    nodeIndex = static_cast<uint32_t>(expr->nodes.size());
-    expr->nodes.push_back(node);
-    expr->output_node = nodeIndex;
-}
+// Expression::Expression(int64_t value) {
+//     expr = std::make_shared<PhysicalExpression>();
+//     expr->num_inputs = 0;
+//
+//     ExprNode node{};
+//     node.op = ExprOp::SCALAR_INT;
+//     node.scalar_int = value;
+//
+//     nodeIndex = static_cast<uint32_t>(expr->nodes.size());
+//     expr->nodes.push_back(node);
+//     expr->output_node = nodeIndex;
+// }
 
 Expression Expression::scalar(double value) { return Expression(value); }
-Expression Expression::scalar(int64_t value) { return Expression(value); }
+// Expression Expression::scalar(int64_t value) { return Expression(value); }
 
 PhysicalExpression Expression::expression() const {
     if (!expr)

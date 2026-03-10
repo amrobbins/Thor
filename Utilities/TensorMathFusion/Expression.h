@@ -17,7 +17,7 @@ namespace ThorImplementation {
 enum class ExprOp : uint16_t {
     INPUT = 3,
     SCALAR_FP,
-    SCALAR_INT,
+    // SCALAR_INT,
     ADD,
     SUB,
     MUL,
@@ -41,7 +41,7 @@ struct ExprNode {
     uint32_t rhs = UINT32_MAX;  // unused for unary/scalar ops
     uint32_t input_index = UINT32_MAX;
     double scalar_fp = 0.0;
-    int64_t scalar_int = 0;
+    // int64_t scalar_int = 0;
 };
 
 struct PhysicalExpression {
@@ -53,11 +53,11 @@ struct PhysicalExpression {
 class Expression {
    public:
     Expression(double value);
-    Expression(int64_t value);
+    // Expression(int64_t value);
 
     static Expression input(uint32_t inputIndex);
     static Expression scalar(double value);
-    static Expression scalar(int64_t value);
+    // static Expression scalar(int64_t value);
 
     [[nodiscard]] PhysicalExpression expression() const;
 

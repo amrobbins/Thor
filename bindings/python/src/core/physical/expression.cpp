@@ -19,7 +19,7 @@ void bind_physical_expression(nb::module_& physical) {
     expr.attr("__module__") = "thor.physical";
 
     expr.def(nb::init_implicit<double>());
-    expr.def(nb::init_implicit<int64_t>());
+    // expr.def(nb::init_implicit<int64_t>());
 
     expr.def_static("input",
                     &Expression::input,
@@ -46,13 +46,13 @@ void bind_physical_expression(nb::module_& physical) {
 Create a floating-point scalar constant expression.
 )nbdoc");
 
-    expr.def_static(
-        "scalar",
-        [](int64_t value) { return Expression::scalar(value); },
-        "value"_a,
-        R"nbdoc(
-Create an integer scalar constant expression.
-)nbdoc");
+//     expr.def_static(
+//         "scalar",
+//         [](int64_t value) { return Expression::scalar(value); },
+//         "value"_a,
+//         R"nbdoc(
+// Create an integer scalar constant expression.
+// )nbdoc");
 
     expr.def("__add__", [](const Expression& a, const Expression& b) { return a + b; }, "other"_a);
     expr.def("__sub__", [](const Expression& a, const Expression& b) { return a - b; }, "other"_a);
