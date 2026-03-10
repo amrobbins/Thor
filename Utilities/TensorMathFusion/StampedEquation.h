@@ -63,6 +63,7 @@ struct CompiledEquation {
 
 class EquationRunner {
    public:
+    // FIXME: Eventually: This is hard coded to FP32
     static void run(const std::shared_ptr<CompiledEquation>& compiledEquation,
                     const std::vector<Tensor>& inputs,
                     Tensor& output,

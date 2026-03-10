@@ -1,5 +1,5 @@
 #include <nanobind/nanobind.h>
-
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
@@ -204,6 +204,48 @@ int
     physical_tensor.def("get_descriptor", &PhysicalTensor::getDescriptor);
     physical_tensor.def("get_placement", &PhysicalTensor::getPlacement);
     physical_tensor.def("get_size_in_bytes", &PhysicalTensor::getArraySizeInBytes);
+
+    physical_tensor.def("numpy", [](PhysicalTensor &self) {
+        if (self.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU)
+            throw nb::value_error("PhysicalTensor.numpy() requires CPU placement");
+
+        TensorDescriptor desc = self.getDescriptor();
+        if (desc.getDataType() != DataType::FP32)
+            throw nb::value_error("PhysicalTensor.numpy() currently only supports fp32");
+
+        std::vector<size_t> shape;
+        for (uint64_t d : desc.getDimensions())
+            shape.push_back(static_cast<size_t>(d));
+
+        std::vector<int64_t> strides(shape.size());
+        int64_t stride = 1;
+        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+            strides[i] = stride;
+            stride *= static_cast<int64_t>(shape[i]);
+        }
+
+        nb::object owner = nb::find(&self);
+        if (!owner.is_valid())
+            throw std::runtime_error("PhysicalTensor.numpy(): could not find Python owner object");
+
+        return nb::ndarray<nb::numpy, float>(self.getMemPtr<float>(), shape.size(), shape.data(), owner, strides.data());
+    });
+
+    physical_tensor.def(
+        "copy_from_async",
+        [](PhysicalTensor &self, const PhysicalTensor &source, Stream stream) { self.copyFromAsync(source, stream); },
+        "source"_a,
+        "stream"_a,
+        R"nbdoc(
+Asynchronously copy tensor contents from source into this tensor using the provided stream.
+
+Parameters
+----------
+source : thor.physical.PhysicalTensor
+    Source tensor to copy from.
+stream : thor.physical.Stream
+    Stream used for the copy.
+)nbdoc");
 
     // physical_tensor.attr("Placement") = placement;
     // placement.attr("__qualname__") = "PhysicalTensor.Placement";

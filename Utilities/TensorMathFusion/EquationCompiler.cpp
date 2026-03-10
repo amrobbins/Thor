@@ -95,7 +95,7 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17"};
+    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true"};
     if (sig.use_fast_math)
         opts.push_back("--use_fast_math");
 
