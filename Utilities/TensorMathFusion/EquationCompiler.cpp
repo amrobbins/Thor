@@ -128,7 +128,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
         return hit;
 
     string kernel_name = "fused_kernel";
-    string cuda_src = CudaSourceEmitter::emit(expr, kernel_name);
+    string cuda_src = CudaSourceEmitter::emit(expr, kernel_name, false);
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);

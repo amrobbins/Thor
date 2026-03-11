@@ -46,13 +46,13 @@ void bind_physical_expression(nb::module_& physical) {
 Create a floating-point scalar constant expression.
 )nbdoc");
 
-//     expr.def_static(
-//         "scalar",
-//         [](int64_t value) { return Expression::scalar(value); },
-//         "value"_a,
-//         R"nbdoc(
-// Create an integer scalar constant expression.
-// )nbdoc");
+    //     expr.def_static(
+    //         "scalar",
+    //         [](int64_t value) { return Expression::scalar(value); },
+    //         "value"_a,
+    //         R"nbdoc(
+    // Create an integer scalar constant expression.
+    // )nbdoc");
 
     expr.def("__add__", [](const Expression& a, const Expression& b) { return a + b; }, "other"_a);
     expr.def("__sub__", [](const Expression& a, const Expression& b) { return a - b; }, "other"_a);
@@ -93,6 +93,57 @@ Return the elementwise natural logarithm of the input expression x
         R"nbdoc(
 Return the elementwise square root of the input expression x
 )nbdoc");
+
+    expr.def_static(
+        "compile",
+        [](const Expression& expr, DataType dtype, int device_num, bool use_fast_math) {
+            nb::gil_scoped_release release;
+            return FusedEquation::compile(expr.expression(), dtype, device_num, use_fast_math);
+        },
+        "expr"_a,
+        "dtype"_a,
+        "device_num"_a = 0,
+        "use_fast_math"_a = false,
+        R"nbdoc(
+Compile an expression into a fused equation.
+
+Parameters
+----------
+expr : thor.physical.Expression
+    The expression to compile.
+dtype : thor.DataType
+    The tensor data type to target.
+device_num : int, default 0
+    The GPU device number.
+use_fast_math : bool, default False
+    Whether to enable fast-math optimizations during compilation.
+
+Returns
+-------
+thor.physical.FusedEquation
+    The compiled fused equation.
+
+Example
+-------
+x = thor.physical.Expression.input(0)
+y = thor.physical.Expression.input(1)
+z = thor.physical.Expression.input(2)
+
+expr = (x / y) * z + 1.5
+eq = thor.physical.Expression.compile(
+    expr,
+    dtype=thor.DataType.fp32,
+    device_num=0,
+)
+
+eq.run([x_tensor, y_tensor, z_tensor], out_tensor, stream)
+
+# or
+
+stamped = eq.stamp([x_tensor, y_tensor, z_tensor], stream)
+stamped.run()
+out = stamped.output_tensor
+)nbdoc");
 }
 
 void bind_fused_equation(nb::module_& physical) {
@@ -103,6 +154,7 @@ void bind_fused_equation(nb::module_& physical) {
                        &FusedEquation::stamp,
                        "inputs"_a,
                        "stream"_a,
+                       "requestedOutputShape"_a = std::vector<uint64_t>{},
                        R"nbdoc(
 Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
 )nbdoc");
@@ -131,67 +183,5 @@ Execute the stamped fused equation on the bound tensors.
                                  &StampedEquation::getOutputTensor,
                                  R"nbdoc(
 Return the output tensor owned by this equation instance.
-        )nbdoc");
-}
-
-void bind_physical_compile(nb::module_& physical) {
-    physical.def(
-        "compile",
-        [](const Expression& expr, DataType dtype, int device_num, bool use_fast_math) {
-            return FusedEquation::compile(expr.expression(), dtype, device_num, use_fast_math);
-        },
-        "expr"_a,
-        "dtype"_a,
-        "device_num"_a = 0,
-        "use_fast_math"_a = false,
-        R"nbdoc(
-            Compile an expression into a fused equation.
-
-            Parameters
-            ----------
-            expr : thor.physical.Expression
-                The expression to compile.
-            dtype : thor.DataType
-                The tensor data type to target.
-            device_num : int, default 0
-                The GPU device number.
-
-            Returns
-            -------
-            thor.physical.FusedEquation
-                The compiled fused equation.
-
-            Example
-            -------
-            x = thor.physical.Expression.input(0)
-            y = thor.physical.Expression.input(1)
-            z = thor.physical.Expression.input(1)
-            expr = (x / y) * z + 1.5
-            eq = thor.physical.compile(expr, dtype=thor.DataType.fp32, device_num=0)
-
-            eq.run([x_tensor, y_tensor, z_tensor], out_tensor, stream)
-
-            -- or --
-
-            stamped = eq.stamp([x_tensor, y_tensor, z_tensor], stream)
-            stamped.run()
-            out = stamped.output_tensor
-
-            Example Kernel:
-                extern "C" __global__
-                void fused_kernel(const float* in0, const float* in1, const float* in2, float* out, unsigned long long numel) {
-                  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;
-                  if (idx >= numel) return;
-
-                  float t0 = in0[idx];
-                  float t1 = in1[idx];
-                  float t2 = t0 / t1;
-                  float t3 = in2[idx];
-                  float t4 = t2 * t3;
-                  float t5 = 1.5f;
-                  float t6 = t4 + t5;
-
-                  out[idx] = t6;
-}
         )nbdoc");
 }

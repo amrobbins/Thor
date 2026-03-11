@@ -12,7 +12,7 @@ namespace ThorImplementation {
 // FIXME: Eventually: This is hard coded to FP32
 class CudaSourceEmitter {
    public:
-    static std::string emit(const PhysicalExpression& expr, const std::string& kernel_name);
+    static std::string emit(const PhysicalExpression& expr, const std::string& kernel_name, const bool broadcast_support);
 
    private:
     static std::string ref(uint32_t idx);
