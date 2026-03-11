@@ -65,7 +65,31 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
     return FusedEquation(std::move(compiledEquation));
 }
 
-StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, const Stream& stream) const {
+static std::vector<uint64_t> stripSingletonDimensions(const std::vector<uint64_t>& dims) {
+    std::vector<uint64_t> stripped;
+    stripped.reserve(dims.size());
+
+    for (uint64_t dim : dims) {
+        if (dim != 1)
+            stripped.push_back(dim);
+    }
+
+    return stripped;
+}
+
+static bool outputDimensionsMatchIgnoringSingletons(const std::vector<uint64_t>& actual, const std::vector<uint64_t>& expected) {
+    return stripSingletonDimensions(actual) == stripSingletonDimensions(expected);
+}
+
+static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimensions, const std::vector<uint64_t>& expectedDimensions) {
+    if (!outputDimensionsMatchIgnoringSingletons(outputDimensions, expectedDimensions)) {
+        throw std::runtime_error("Output tensor dimensions are incompatible with the fused equation result.");
+    }
+}
+
+StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
+                                     const Stream& stream,
+                                     const std::vector<uint64_t>& requestedOutputShape) const {
     if (!compiledEquation) {
         throw std::runtime_error("Cannot stamp an empty FusedEquation.");
     }
@@ -101,13 +125,22 @@ StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, const St
         if (inputs[i].getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
             throw std::runtime_error("Input tensor GPU mismatch.");
         }
-        if (inputs[i].getDescriptor().getTotalNumElements() != firstInput.getDescriptor().getTotalNumElements()) {
-            throw std::runtime_error("All input tensors must have the same number of elements in V1.");
-        }
+        // Removed to support broadcasting
+        // if (inputs[i].getDescriptor().getTotalNumElements() != firstInput.getDescriptor().getTotalNumElements()) {
+        //     throw std::runtime_error("All input tensors must have the same number of elements in V1.");
+        // }
     }
 
-    TensorDescriptor outputDescriptor = firstInput.getDescriptor();
-    Tensor output(firstInput.getPlacement(), outputDescriptor);
+    std::vector<uint64_t> outputDimensions = resolveLayout(inputs);
+
+    // Ensure the output shape is valid, when specified explicitly (can only add or remove singleton dimensions)
+    if (!requestedOutputShape.empty()) {
+        verifyRequestedOutputLayout(requestedOutputShape, outputDimensions);
+        outputDimensions = requestedOutputShape;
+    }
+
+    TensorPlacement outputPlacement = firstInput.getPlacement();
+    Tensor output(outputPlacement, TensorDescriptor(compiledEquation->dtype, outputDimensions));
 
     if (!output.isInitialized()) {
         throw std::runtime_error("Failed to allocate output tensor during FusedEquation::stamp.");
@@ -116,6 +149,80 @@ StampedEquation FusedEquation::stamp(const std::vector<Tensor>& inputs, const St
     return StampedEquation(compiledEquation, inputs, output, stream);
 }
 
-void FusedEquation::run(const std::vector<Tensor>& inputs, Tensor output, Stream stream) const {
+void FusedEquation::run(std::vector<Tensor> inputs, Tensor output, Stream stream) const {
+    std::vector<uint64_t> outputDimensions = resolveLayout(inputs);
+    verifyRequestedOutputLayout(output.getDimensions(), outputDimensions);
     EquationRunner::run(compiledEquation, inputs, output, stream);
+}
+
+std::vector<uint64_t> FusedEquation::resolveLayout(std::vector<Tensor>& inputs) {
+    if (inputs.empty())
+        throw std::runtime_error("Tried to create a FusedEquation with 0 tensor inputs. You must have at least one.");
+
+    std::vector<std::vector<uint64_t>> originalInputDimensions;
+    originalInputDimensions.reserve(inputs.size());
+    for (const Tensor& input : inputs) {
+        originalInputDimensions.push_back(input.getDimensions());
+    }
+
+    // Find the maximum rank among all inputs.
+    uint64_t maxRank = 0;
+    for (const Tensor& input : inputs) {
+        const std::vector<uint64_t>& dims = input.getDimensions();
+        if (dims.empty())
+            throw std::runtime_error("Input tensor has 0 dimensions, which is not supported.");
+        maxRank = std::max<uint64_t>(maxRank, dims.size());
+    }
+
+    // Left-pad each input shape with singleton dimensions so all inputs have the same rank.
+    for (Tensor& input : inputs) {
+        const std::vector<uint64_t>& oldDims = input.getDimensions();
+        if (oldDims.size() == maxRank)
+            continue;
+
+        std::vector<uint64_t> paddedDims(maxRank - oldDims.size(), 1);
+        paddedDims.insert(paddedDims.end(), oldDims.begin(), oldDims.end());
+        input.reshape(paddedDims);
+    }
+
+    // Resolve output shape axis by axis, NumPy-style.
+    std::vector<uint64_t> outputDimensions(maxRank, 1);
+
+    for (uint64_t axis = 0; axis < maxRank; ++axis) {
+        uint64_t resolvedDim = 1;
+
+        for (const Tensor& input : inputs) {
+            const std::vector<uint64_t>& dims = input.getDimensions();
+            uint64_t dim = dims[axis];
+
+            if (dim == 1)
+                continue;
+
+            if (resolvedDim == 1) {
+                resolvedDim = dim;
+            } else if (resolvedDim != dim) {
+                std::ostringstream err;
+                err << "Input tensors are not broadcast-compatible at axis " << axis << ". "
+                    << "Encountered dimension " << resolvedDim << " and dimension " << dim << ". "
+                    << "Input shapes: ";
+                for (size_t i = 0; i < inputs.size(); ++i) {
+                    const std::vector<uint64_t>& inDims = originalInputDimensions[i];
+                    err << "[";
+                    for (size_t j = 0; j < inDims.size(); ++j) {
+                        err << inDims[j];
+                        if (j + 1 < inDims.size())
+                            err << ", ";
+                    }
+                    err << "]";
+                    if (i + 1 < inputs.size())
+                        err << ", ";
+                }
+                throw std::runtime_error(err.str());
+            }
+        }
+
+        outputDimensions[axis] = resolvedDim;
+    }
+
+    return outputDimensions;
 }

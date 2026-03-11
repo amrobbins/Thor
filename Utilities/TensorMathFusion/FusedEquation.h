@@ -11,11 +11,15 @@ class FusedEquation {
                                  int device_num,
                                  bool use_fast_math = false);
 
-    [[nodiscard]] StampedEquation stamp(const std::vector<Tensor>& inputs, const Stream& stream) const;
-    void run(const std::vector<Tensor>& inputs, Tensor output, Stream stream) const;
+    [[nodiscard]] StampedEquation stamp(std::vector<Tensor> inputs,
+                                        const Stream& stream,
+                                        const std::vector<uint64_t>& requestedOutputShape = {}) const;
+    void run(std::vector<Tensor> inputs, Tensor output, Stream stream) const;
 
    private:
     explicit FusedEquation(std::shared_ptr<CompiledEquation> compiledEquation) : compiledEquation(std::move(compiledEquation)) {}
+
+    static std::vector<uint64_t> resolveLayout(std::vector<Tensor>& inputs);
 
     std::shared_ptr<CompiledEquation> compiledEquation;
 

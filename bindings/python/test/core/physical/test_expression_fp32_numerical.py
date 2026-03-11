@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import thor
 from thor.physical import Expression as ex
+from thor.physical import PhysicalTensor, Stream, Placement, DeviceType
 
 
 def _cpu_tensor(shape: list[int]) -> thor.physical.PhysicalTensor:
@@ -52,7 +53,7 @@ def _run_expr(expr, *inputs: np.ndarray, gpu_num: int = 0, use_fast_math: bool =
         assert arr.dtype == np.float32
         assert tuple(arr.shape) == first_shape
 
-    eq = thor.physical.compile(
+    eq = ex.compile(
         expr,
         dtype=thor.DataType.fp32,
         device_num=gpu_num,
@@ -230,6 +231,67 @@ def test_nested_expression_fp32_numerical():
     got = _run_expr(expr, x_np, y_np, z_np)
 
     _assert_close(got, expected, rtol=3e-5, atol=3e-6)
+
+
+@pytest.mark.cuda
+def test_nested_expression_fp32_numerical_stamped():
+    gpu_num = 0
+    stream = Stream(gpu_num=gpu_num)
+    gpu_placement = Placement(DeviceType.gpu, gpu_num)
+    cpu_placement = Placement(DeviceType.cpu)
+    descriptor = PhysicalTensor.Descriptor(thor.DataType.fp32, dimensions=[2, 4])
+
+    # Allocate Tensors
+    x_host = PhysicalTensor(cpu_placement, descriptor)
+    y_host = PhysicalTensor(cpu_placement, descriptor)
+    z_host = PhysicalTensor(cpu_placement, descriptor)
+    x_gpu = PhysicalTensor(gpu_placement, descriptor)
+    y_gpu = PhysicalTensor(gpu_placement, descriptor)
+    z_gpu = PhysicalTensor(gpu_placement, descriptor)
+
+    # Initialize cpu tensors, then copy to gpu tensors
+    x_np_view = x_host.numpy()
+    y_np_view = y_host.numpy()
+    z_np_view = z_host.numpy()
+    x_np_view[:] = [[0.5, 1.0, 1.5, 2.0], [0.8, 0.7, 2.5, 4.1]]
+    y_np_view[:] = [[2.0, 3.0, 4.0, 5.0], [8.0, 2.1, 0.6, 2.0]]
+    z_np_view[:] = [[2.0, 4.0, 6.0, 8.0], [1.0, 2.5, 3.2, 3.3]]
+    x_gpu.copy_from_async(x_host, stream)
+    y_gpu.copy_from_async(y_host, stream)
+    z_gpu.copy_from_async(z_host, stream)
+
+    # thor expression
+    x = ex.input(0)
+    y = ex.input(1)
+    z = ex.input(2)
+    expr = ex.max(
+        ex.sqrt(ex.exp2((x + 3.0) * (y - 1.0))),
+        ex.min((z / 2.0)**2.0, ex.log2(y + 8.0)),
+    )
+
+    # Corresponding numpy expression
+    expected = np.maximum(
+        np.sqrt(np.exp2((x_np_view + 3.0) * (y_np_view - 1.0))),
+        np.minimum(np.power(z_np_view / 2.0, 2.0), np.log2(y_np_view + 8.0)),
+    )
+
+    fused_equation = ex.compile(
+        expr,
+        dtype=thor.DataType.fp32,
+        device_num=gpu_num,
+        use_fast_math=False,
+    )
+
+    stamped_equation = fused_equation.stamp([x_gpu, y_gpu, z_gpu], stream)
+
+    stamped_equation.run()
+
+    out_gpu = stamped_equation.output_tensor
+    out_cpu = out_gpu.clone(cpu_placement)  # allocate matching CPU tensor for copy-back
+    out_cpu.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+
+    np.testing.assert_allclose(out_cpu.numpy(), expected.astype(np.float32), rtol=3e-5, atol=3e-6)
 
 
 @pytest.mark.cuda

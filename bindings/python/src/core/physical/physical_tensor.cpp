@@ -256,4 +256,61 @@ stream : thor.physical.Stream
     physical_tensor.attr("Descriptor") = tensor_descriptor;
     tensor_descriptor.attr("__qualname__") = "PhysicalTensor.Descriptor";
     nb::delattr(physical, "Descriptor");
+
+    physical_tensor.def("clone",
+                        nb::overload_cast<>(&PhysicalTensor::clone, nb::const_),
+                        R"nbdoc(
+Create another tensor like this one with the same placement, data type, and dimensions.
+)nbdoc");
+
+    physical_tensor.def("clone",
+                        nb::overload_cast<TensorPlacement>(&PhysicalTensor::clone, nb::const_),
+                        "new_placement"_a,
+                        R"nbdoc(
+Create another tensor like this one but with a different placement.
+
+Parameters
+----------
+new_placement : thor.physical.Placement
+    Destination placement for the cloned tensor.
+)nbdoc");
+
+    physical_tensor.def("clone",
+                        nb::overload_cast<TensorDescriptor::DataType>(&PhysicalTensor::clone, nb::const_),
+                        "new_data_type"_a,
+                        R"nbdoc(
+Create another tensor like this one but with a different data type.
+
+Parameters
+----------
+new_data_type : thor.DataType
+    Destination data type for the cloned tensor.
+)nbdoc");
+
+    physical_tensor.def("clone",
+                        nb::overload_cast<TensorPlacement, TensorDescriptor::DataType>(&PhysicalTensor::clone, nb::const_),
+                        "new_placement"_a,
+                        "new_data_type"_a,
+                        R"nbdoc(
+Create another tensor like this one but with a different placement and data type.
+
+Parameters
+----------
+new_placement : thor.physical.Placement
+    Destination placement for the cloned tensor.
+new_data_type : thor.DataType
+    Destination data type for the cloned tensor.
+)nbdoc");
+
+    physical_tensor.def("clone",
+                        nb::overload_cast<std::vector<uint64_t>>(&PhysicalTensor::clone, nb::const_),
+                        "new_dimensions"_a,
+                        R"nbdoc(
+Create another tensor like this one but with a different dimensions.
+
+Parameters
+----------
+new_dimensions : list[int]
+    New tensor dimensions.
+)nbdoc");
 }

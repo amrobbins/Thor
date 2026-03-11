@@ -5,7 +5,7 @@ from thor.physical import Expression as ex
 
 
 def _compile(expr, *, use_fast_math: bool = False):
-    return thor.physical.compile(
+    return ex.compile(
         expr,
         dtype=thor.DataType.fp32,
         device_num=0,
