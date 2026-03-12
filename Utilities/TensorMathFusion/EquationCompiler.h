@@ -7,6 +7,7 @@
 #include <nvJitLink.h>
 #include <nvrtc.h>
 
+#include "Utilities/TensorMathFusion/CudaHelpers.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
 
