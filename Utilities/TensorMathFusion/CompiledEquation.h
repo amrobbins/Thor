@@ -19,13 +19,15 @@ struct EquationSignature {
 struct EquationCacheKey {
     EquationCacheKey() = default;
 
-    EquationCacheKey(const std::string& canonical_expr, const EquationSignature& sig) {
+    EquationCacheKey(const std::string& canonical_expr, const EquationSignature& sig, const bool broadcast_support) {
         this->canonical_expr = canonical_expr;
         this->sig = sig;
         this->sig.device_num = 0;  // Device num is not part of the kernel signature in terms of compiling, instead uses sm_major/minor
+        this->broadcast_support = broadcast_support;
     }
     std::string canonical_expr;
     EquationSignature sig;
+    bool broadcast_support;
 
     bool operator==(const EquationCacheKey& other) const = default;
 };
@@ -78,6 +80,7 @@ struct hash<ThorImplementation::EquationCacheKey> {
     std::size_t operator()(const ThorImplementation::EquationCacheKey& k) const {
         std::size_t h = std::hash<std::string>{}(k.canonical_expr);
         hashCombine(h, std::hash<ThorImplementation::EquationSignature>{}(k.sig));
+        hashCombine(h, std::hash<bool>{}(k.broadcast_support));
         return h;
     }
 };

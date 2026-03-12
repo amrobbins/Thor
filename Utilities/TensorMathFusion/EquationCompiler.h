@@ -14,7 +14,7 @@
 namespace ThorImplementation {
 class EquationCompiler {
    public:
-    std::shared_ptr<CompiledEquation> compile(const PhysicalExpression& expr, const EquationSignature& sig);
+    std::shared_ptr<CompiledEquation> compile(const PhysicalExpression& expr, const EquationSignature& sig, const bool broadcast_support);
     std::vector<char> compileToLtoIr(const std::string& src, const std::string& kernel_name, const EquationSignature& sig);
     std::vector<char> linkToCubin(const std::vector<char>& ltoir, const EquationSignature& sig);
     std::shared_ptr<CompiledEquation> loadCubin(const EquationCacheKey& key,

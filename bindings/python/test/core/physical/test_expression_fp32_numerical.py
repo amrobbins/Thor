@@ -1,5 +1,3 @@
-# test/core/physical/test_fused_math_fp32_numerical.py
-
 import math
 import numpy as np
 import pytest

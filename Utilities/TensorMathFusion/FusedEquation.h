@@ -18,13 +18,17 @@ class FusedEquation {
     void run(std::vector<Tensor> inputs, Tensor output, Stream stream) const;
 
    private:
-    explicit FusedEquation(std::shared_ptr<CompiledEquation> compiledEquation) : compiledEquation(std::move(compiledEquation)) {}
+    explicit FusedEquation(std::shared_ptr<CompiledEquation> flatEquation, std::shared_ptr<CompiledEquation> broadcastEquation)
+        : compiledFlatEquation(std::move(flatEquation)), compiledBroadcastEquation(std::move(broadcastEquation)) {}
 
-    static std::vector<uint64_t> resolveLayout(std::vector<Tensor>& inputs);
+    static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
+    static BroadcastInfo buildBroadcastInfo(const std::vector<Tensor>& inputs, const std::vector<uint64_t>& outputDimensions);
+    static Tensor createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
+                                            const std::vector<uint64_t>& outputDimensions,
+                                            Stream stream);
 
-    std::shared_ptr<CompiledEquation> compiledEquation;
-
-    friend class EquationCompiler;
+    std::shared_ptr<CompiledEquation> compiledFlatEquation;
+    std::shared_ptr<CompiledEquation> compiledBroadcastEquation;
 };
 
 }  // namespace ThorImplementation

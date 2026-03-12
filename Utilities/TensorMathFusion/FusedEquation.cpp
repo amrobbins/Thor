@@ -60,9 +60,11 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
     sig.use_fast_math = use_fast_math;
 
     EquationCompiler compiler;
-    std::shared_ptr<CompiledEquation> compiledEquation = compiler.compile(expr, sig);
 
-    return FusedEquation(std::move(compiledEquation));
+    std::shared_ptr<CompiledEquation> flatEquation = compiler.compile(expr, sig, false);
+    std::shared_ptr<CompiledEquation> broadcastEquation = compiler.compile(expr, sig, true);
+
+    return FusedEquation(std::move(flatEquation), std::move(broadcastEquation));
 }
 
 static std::vector<uint64_t> stripSingletonDimensions(const std::vector<uint64_t>& dims) {
@@ -90,7 +92,7 @@ static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimen
 StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
                                      const Stream& stream,
                                      const std::vector<uint64_t>& requestedOutputShape) const {
-    if (!compiledEquation) {
+    if (!compiledFlatEquation) {
         throw std::runtime_error("Cannot stamp an empty FusedEquation.");
     }
 
@@ -98,7 +100,7 @@ StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
         throw std::runtime_error("FusedEquation::stamp requires at least one input tensor.");
     }
 
-    if (inputs.size() != compiledEquation->num_inputs) {
+    if (inputs.size() != compiledFlatEquation->num_inputs) {
         throw std::runtime_error("Wrong number of inputs passed to FusedEquation::stamp.");
     }
 
@@ -107,11 +109,11 @@ StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
         throw std::runtime_error("First input tensor is not initialized.");
     }
 
-    if (firstInput.getDescriptor().getDataType() != compiledEquation->dtype) {
+    if (firstInput.getDescriptor().getDataType() != compiledFlatEquation->dtype) {
         throw std::runtime_error("Input tensor data type does not match compiled equation data type.");
     }
 
-    if (firstInput.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+    if (firstInput.getPlacement().getDeviceNum() != compiledFlatEquation->deviceNum) {
         throw std::runtime_error("Input tensor GPU does not match compiled equation device.");
     }
 
@@ -119,43 +121,167 @@ StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
         if (!inputs[i].isInitialized()) {
             throw std::runtime_error("Input tensor is not initialized.");
         }
-        if (inputs[i].getDescriptor().getDataType() != compiledEquation->dtype) {
+        if (inputs[i].getDescriptor().getDataType() != compiledFlatEquation->dtype) {
             throw std::runtime_error("Input tensor data type mismatch.");
         }
-        if (inputs[i].getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+        if (inputs[i].getPlacement().getDeviceNum() != compiledFlatEquation->deviceNum) {
             throw std::runtime_error("Input tensor GPU mismatch.");
         }
-        // Removed to support broadcasting
-        // if (inputs[i].getDescriptor().getTotalNumElements() != firstInput.getDescriptor().getTotalNumElements()) {
-        //     throw std::runtime_error("All input tensors must have the same number of elements in V1.");
-        // }
     }
 
-    std::vector<uint64_t> outputDimensions = resolveLayout(inputs);
+    std::vector<uint64_t> outputDimensions;
+    bool requiresBroadcast = resolveLayout(inputs, outputDimensions);
 
     // Ensure the output shape is valid, when specified explicitly (can only add or remove singleton dimensions)
     if (!requestedOutputShape.empty()) {
         verifyRequestedOutputLayout(requestedOutputShape, outputDimensions);
-        outputDimensions = requestedOutputShape;
+        // outputDimensions = requestedOutputShape;
     }
 
     TensorPlacement outputPlacement = firstInput.getPlacement();
-    Tensor output(outputPlacement, TensorDescriptor(compiledEquation->dtype, outputDimensions));
+    Tensor output(outputPlacement,
+                  TensorDescriptor(compiledFlatEquation->dtype, requestedOutputShape.empty() ? outputDimensions : requestedOutputShape));
 
-    if (!output.isInitialized()) {
-        throw std::runtime_error("Failed to allocate output tensor during FusedEquation::stamp.");
+    if (requiresBroadcast)
+        return StampedEquation(
+            compiledBroadcastEquation, inputs, output, stream, createDeviceBroadcastInfo(inputs, outputDimensions, stream));
+    else
+        return StampedEquation(compiledFlatEquation, inputs, output, stream);
+}
+
+static std::array<unsigned long long, MAX_BROADCAST_DIMS> computeContiguousStrides(const std::vector<uint64_t>& dims) {
+    if (dims.empty()) {
+        throw std::runtime_error("Cannot compute strides for empty shape.");
+    }
+    if (dims.size() > MAX_BROADCAST_DIMS) {
+        throw std::runtime_error("Shape rank exceeds MAX_BROADCAST_DIMS.");
     }
 
-    return StampedEquation(compiledEquation, inputs, output, stream);
+    std::array<unsigned long long, MAX_BROADCAST_DIMS> strides{};
+    strides.fill(0);
+
+    unsigned long long running = 1;
+    for (int64_t axis = static_cast<int64_t>(dims.size()) - 1; axis >= 0; --axis) {
+        strides[axis] = running;
+        running *= static_cast<unsigned long long>(dims[axis]);
+    }
+
+    return strides;
+}
+
+static unsigned long long computeNumel(const std::vector<uint64_t>& dims) {
+    unsigned long long numel = 1;
+    for (uint64_t d : dims) {
+        numel *= static_cast<unsigned long long>(d);
+    }
+    return numel;
+}
+
+BroadcastInfo FusedEquation::buildBroadcastInfo(const std::vector<Tensor>& inputs, const std::vector<uint64_t>& outputDimensions) {
+    if (inputs.empty()) {
+        throw std::runtime_error("buildBroadcastInfo requires at least one input.");
+    }
+    if (outputDimensions.empty()) {
+        throw std::runtime_error("buildBroadcastInfo requires non-empty outputDimensions.");
+    }
+    if (outputDimensions.size() > MAX_BROADCAST_DIMS) {
+        throw std::runtime_error("Output rank exceeds MAX_BROADCAST_DIMS.");
+    }
+    if (inputs.size() > MAX_FUSED_INPUTS) {
+        throw std::runtime_error("Number of inputs exceeds MAX_FUSED_INPUTS.");
+    }
+
+    BroadcastInfo info{};
+    info.rank = static_cast<unsigned int>(outputDimensions.size());
+    info.num_inputs = static_cast<unsigned int>(inputs.size());
+    info.numel = computeNumel(outputDimensions);
+
+    for (uint32_t axis = 0; axis < MAX_BROADCAST_DIMS; ++axis) {
+        info.output_strides[axis] = 0ULL;
+    }
+
+    auto outputStrides = computeContiguousStrides(outputDimensions);
+    for (uint32_t axis = 0; axis < info.rank; ++axis) {
+        info.output_strides[axis] = outputStrides[axis];
+    }
+
+    for (uint32_t inputIdx = 0; inputIdx < inputs.size(); ++inputIdx) {
+        const std::vector<uint64_t>& dims = inputs[inputIdx].getDimensions();
+
+        if (dims.size() != info.rank) {
+            throw std::runtime_error("Input rank does not match resolved output rank in buildBroadcastInfo.");
+        }
+
+        auto inputStrides = computeContiguousStrides(dims);
+
+        for (uint32_t axis = 0; axis < MAX_BROADCAST_DIMS; ++axis) {
+            info.inputs[inputIdx].strides[axis] = 0ULL;
+        }
+
+        for (uint32_t axis = 0; axis < info.rank; ++axis) {
+            const uint64_t inDim = dims[axis];
+            const uint64_t outDim = outputDimensions[axis];
+
+            if (inDim == outDim) {
+                info.inputs[inputIdx].strides[axis] = inputStrides[axis];
+            } else if (inDim == 1) {
+                info.inputs[inputIdx].strides[axis] = 0ULL;
+            } else {
+                std::ostringstream err;
+                err << "Input " << inputIdx << " is not broadcast-compatible at axis " << axis << ": input dim = " << inDim
+                    << ", output dim = " << outDim;
+                throw std::runtime_error(err.str());
+            }
+        }
+    }
+
+    return info;
+}
+
+struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
+    Tensor hostBroadcastInfo;
+    Tensor deviceBroadcastInfo;
+
+    explicit BroadcastInfoHostFunctionArgs(Tensor hostBroadcastInfo, Tensor deviceBroadcastInfo)
+        : hostBroadcastInfo(hostBroadcastInfo), deviceBroadcastInfo(deviceBroadcastInfo) {}
+};
+
+Tensor FusedEquation::createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
+                                                const std::vector<uint64_t>& outputDimensions,
+                                                Stream stream) {
+    BroadcastInfo broadcastInfo = buildBroadcastInfo(inputs, outputDimensions);
+    TensorDescriptor broadcastInfoDescriptor = TensorDescriptor(TensorDescriptor::DataType::UINT8, {sizeof(broadcastInfo)});
+
+    TensorPlacement cpuPlacement = TensorPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement devicePlacement = inputs[0].getPlacement();
+    Tensor hostBroadcastInfo = Tensor(cpuPlacement, broadcastInfoDescriptor);
+    Tensor deviceBroadcastInfo(devicePlacement, broadcastInfoDescriptor);
+
+    // Initialize cpu mem and copy to gpu
+    memcpy(hostBroadcastInfo.getMemPtr(), &broadcastInfo, sizeof(BroadcastInfo));
+    deviceBroadcastInfo.copyFromAsync(hostBroadcastInfo, stream);
+
+    // free tensor memory at the end of the stream
+    stream.launchCleanUpHostFunctionArgs(std::make_unique<BroadcastInfoHostFunctionArgs>(hostBroadcastInfo, deviceBroadcastInfo));
+
+    return deviceBroadcastInfo;
 }
 
 void FusedEquation::run(std::vector<Tensor> inputs, Tensor output, Stream stream) const {
-    std::vector<uint64_t> outputDimensions = resolveLayout(inputs);
+    std::vector<uint64_t> outputDimensions;
+
+    bool requiresBroadcast = resolveLayout(inputs, outputDimensions);
     verifyRequestedOutputLayout(output.getDimensions(), outputDimensions);
-    EquationRunner::run(compiledEquation, inputs, output, stream);
+
+    if (requiresBroadcast) {
+        Tensor broadcastInfo = createDeviceBroadcastInfo(inputs, outputDimensions, stream);
+        EquationRunner::run(compiledBroadcastEquation, inputs, output, stream, broadcastInfo);
+    } else {
+        EquationRunner::run(compiledFlatEquation, inputs, output, stream);
+    }
 }
 
-std::vector<uint64_t> FusedEquation::resolveLayout(std::vector<Tensor>& inputs) {
+bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions) {
     if (inputs.empty())
         throw std::runtime_error("Tried to create a FusedEquation with 0 tensor inputs. You must have at least one.");
 
@@ -186,7 +312,9 @@ std::vector<uint64_t> FusedEquation::resolveLayout(std::vector<Tensor>& inputs) 
     }
 
     // Resolve output shape axis by axis, NumPy-style.
-    std::vector<uint64_t> outputDimensions(maxRank, 1);
+    outputDimensions.clear();
+    outputDimensions.assign(maxRank, 1);
+    bool requiresBroadcast = false;
 
     for (uint64_t axis = 0; axis < maxRank; ++axis) {
         uint64_t resolvedDim = 1;
@@ -195,11 +323,15 @@ std::vector<uint64_t> FusedEquation::resolveLayout(std::vector<Tensor>& inputs) 
             const std::vector<uint64_t>& dims = input.getDimensions();
             uint64_t dim = dims[axis];
 
-            if (dim == 1)
+            if (dim == 1) {
+                if (resolvedDim != 1)
+                    requiresBroadcast = true;
                 continue;
+            }
 
             if (resolvedDim == 1) {
                 resolvedDim = dim;
+                requiresBroadcast = true;
             } else if (resolvedDim != dim) {
                 std::ostringstream err;
                 err << "Input tensors are not broadcast-compatible at axis " << axis << ". "
@@ -224,5 +356,5 @@ std::vector<uint64_t> FusedEquation::resolveLayout(std::vector<Tensor>& inputs) 
         outputDimensions[axis] = resolvedDim;
     }
 
-    return outputDimensions;
+    return requiresBroadcast;
 }

@@ -53,7 +53,8 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
         ss << "  unsigned int _pad;\n";
         ss << "  unsigned long long numel;\n";
         ss << "  unsigned long long output_strides[10];\n";
-        ss << "  BroadcastInputInfo inputs[" << expr.num_inputs << "];\n";
+        const uint32_t emitted_num_inputs = std::max<uint32_t>(expr.num_inputs, 1);
+        ss << "  BroadcastInputInfo inputs[" << emitted_num_inputs << "];\n";
         ss << "};\n\n";
     }
 
@@ -172,7 +173,7 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, const string& ker
     ss << "\n  out[idx] = " << ref(expr.output_node) << ";\n";
     ss << "}\n";
 
-    printf("%s\n", ss.str().c_str());
+    // printf("%s\n", ss.str().c_str());
     return ss.str();
 }
 

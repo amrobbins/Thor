@@ -14,8 +14,13 @@ class StampedEquation {
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
                     const std::vector<Tensor>& inputs,
                     const Tensor& output,
-                    const Stream& stream)
-        : compiledEquation(std::move(compiledEquation)), inputs(inputs), output(output), stream(stream) {}
+                    const Stream& stream,
+                    Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty())
+        : compiledEquation(std::move(compiledEquation)),
+          inputs(inputs),
+          output(output),
+          stream(stream),
+          deviceBroadcastInfo(deviceBroadcastInfo) {}
 
     void run();
     Tensor getOutputTensor() const { return output; }
@@ -25,6 +30,7 @@ class StampedEquation {
     std::vector<Tensor> inputs;
     Tensor output;
     Stream stream;
+    Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty();
 };
 
 }  // namespace ThorImplementation
