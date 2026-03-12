@@ -120,15 +120,17 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     return ltoir;
 }
 
-shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression& expr, const EquationSignature& sig) {
+shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression& expr,
+                                                       const EquationSignature& sig,
+                                                       const bool broadcast_support) {
     ensureCudaContextCurrent(sig.device_num);
 
-    EquationCacheKey key(canonicalize(expr), sig);
+    EquationCacheKey key(canonicalize(expr), sig, broadcast_support);
     if (auto hit = cacheLookup(key))
         return hit;
 
     string kernel_name = "fused_kernel";
-    string cuda_src = CudaSourceEmitter::emit(expr, kernel_name, false);
+    string cuda_src = CudaSourceEmitter::emit(expr, kernel_name, broadcast_support);
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);

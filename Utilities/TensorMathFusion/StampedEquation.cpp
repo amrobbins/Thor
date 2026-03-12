@@ -6,6 +6,11 @@
 
 namespace ThorImplementation {
 
-void StampedEquation::run() { EquationRunner::run(compiledEquation, inputs, output, stream); }
+void StampedEquation::run() {
+    if (deviceBroadcastInfo.isPresent())
+        EquationRunner::run(compiledEquation, inputs, output, stream, deviceBroadcastInfo);
+    else
+        EquationRunner::run(compiledEquation, inputs, output, stream);
+}
 
 }  // namespace ThorImplementation
