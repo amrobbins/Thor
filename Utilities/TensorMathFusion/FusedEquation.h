@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
 
