@@ -95,7 +95,8 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     string arch = "--gpu-architecture=compute_" + to_string(sig.sm_major) + to_string(sig.sm_minor);
 
-    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true"};
+    std::string cuda_include_path = std::string("--include-path=") + THOR_CUDA_INCLUDE_DIR;
+    vector<const char*> opts = {arch.c_str(), "-dlto", "--std=c++17", "-fmad=true", cuda_include_path.c_str()};
     if (sig.use_fast_math)
         opts.push_back("--use_fast_math");
 
@@ -130,11 +131,11 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
         return hit;
 
     string kernel_name = "fused_kernel";
-    string cuda_src = CudaSourceEmitter::emit(expr, kernel_name, broadcast_support);
+    string cuda_src = CudaSourceEmitter::emit(expr, sig.dtype, kernel_name, broadcast_support);
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, expr.num_inputs, TensorDescriptor::DataType::FP32, sig.device_num);
+    auto compiled = loadCubin(key, cubin, kernel_name, expr.num_inputs, sig.dtype, sig.device_num);
     compiled->num_inputs = expr.num_inputs;
 
     cacheInsert(key, compiled);

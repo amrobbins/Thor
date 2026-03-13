@@ -5,6 +5,8 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include "bindings/python/src/core/physical/NanobindDTypes.h"
+
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -205,13 +207,11 @@ int
     physical_tensor.def("get_placement", &PhysicalTensor::getPlacement);
     physical_tensor.def("get_size_in_bytes", &PhysicalTensor::getArraySizeInBytes);
 
-    physical_tensor.def("numpy", [](PhysicalTensor &self) {
+    physical_tensor.def("numpy", [](PhysicalTensor &self) -> nb::object {
         if (self.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU)
             throw nb::value_error("PhysicalTensor.numpy() requires CPU placement");
 
         TensorDescriptor desc = self.getDescriptor();
-        if (desc.getDataType() != DataType::FP32)
-            throw nb::value_error("PhysicalTensor.numpy() currently only supports fp32");
 
         std::vector<size_t> shape;
         for (uint64_t d : desc.getDimensions())
@@ -228,7 +228,55 @@ int
         if (!owner.is_valid())
             throw std::runtime_error("PhysicalTensor.numpy(): could not find Python owner object");
 
-        return nb::ndarray<nb::numpy, float>(self.getMemPtr<float>(), shape.size(), shape.data(), owner, strides.data());
+        auto make_shape_tuple = [&]() -> nb::tuple {
+            nb::list lst;
+            for (size_t d : shape)
+                lst.append(nb::int_(d));
+            return nb::tuple(lst);
+        };
+
+        auto numel = [&]() -> size_t {
+            size_t n = 1;
+            for (size_t d : shape)
+                n *= d;
+            return n;
+        };
+
+        auto view_bytes_as_ml_dtype = [&](void *ptr, size_t itemsize, nb::object dtype_obj) -> nb::object {
+            size_t nbytes = numel() * itemsize;
+
+            // Zero-copy 1D byte array whose base object is the tensor owner.
+            nb::object raw = nb::cast(nb::ndarray<uint8_t, nb::numpy>(static_cast<uint8_t *>(ptr), 1, &nbytes, owner, nullptr));
+
+            // Reinterpret bytes as the requested ml_dtypes dtype, then reshape.
+            return raw.attr("view")(dtype_obj).attr("reshape")(make_shape_tuple());
+        };
+
+        switch (desc.getDataType()) {
+            case DataType::FP32:
+                return nb::cast(nb::ndarray<float, nb::numpy>(self.getMemPtr<float>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::FP16:
+                return nb::cast(nb::ndarray<half, nb::numpy>(self.getMemPtr<half>(), shape.size(), shape.data(), owner, strides.data()));
+
+            case DataType::BF16: {
+                nb::module_ mld = nb::module_::import_("ml_dtypes");
+                return view_bytes_as_ml_dtype(self.getMemPtr<__nv_bfloat16>(), sizeof(__nv_bfloat16), mld.attr("bfloat16"));
+            }
+
+            case DataType::FP8_E4M3: {
+                nb::module_ mld = nb::module_::import_("ml_dtypes");
+                return view_bytes_as_ml_dtype(self.getMemPtr<__nv_fp8_e4m3>(), sizeof(__nv_fp8_e4m3), mld.attr("float8_e4m3fn"));
+            }
+
+            case DataType::FP8_E5M2: {
+                nb::module_ mld = nb::module_::import_("ml_dtypes");
+                return view_bytes_as_ml_dtype(self.getMemPtr<__nv_fp8_e5m2>(), sizeof(__nv_fp8_e5m2), mld.attr("float8_e5m2"));
+            }
+
+            default:
+                throw nb::value_error("PhysicalTensor.numpy() does not support this dtype");
+        }
     });
 
     physical_tensor.def(

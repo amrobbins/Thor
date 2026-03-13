@@ -22,10 +22,6 @@ cudaDataType_t toCudaDataType(TensorDescriptor::DataType dtype) {
 }  // namespace
 
 FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
-    if (dtype != TensorDescriptor::DataType::FP32) {
-        throw std::runtime_error("FusedEquation::compile V1 currently only supports FP32.");
-    }
-
     if (device_num < 0) {
         throw std::runtime_error("FusedEquation::compile requires device_num >= 0.");
     }
@@ -52,7 +48,8 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
     EquationSignature sig{};
     sig.rank = 1;  // V1 assumes flattened contiguous tensors
     sig.num_inputs = expr.num_inputs;
-    sig.dtype = toCudaDataType(dtype);
+    // sig.dtype = toCudaDataType(dtype);
+    sig.dtype = dtype;
     sig.contiguous = true;
     sig.sm_major = prop.major;
     sig.sm_minor = prop.minor;

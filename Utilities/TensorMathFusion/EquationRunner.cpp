@@ -28,7 +28,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
 
         if (t.getDescriptor().getDataType() != compiledEquation->dtype) {
-            throw std::runtime_error("V1 fused equations require FP32 tensors");
+            throw std::runtime_error("V1 fused equations dtype mismatch");
         }
 
         if (t.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
@@ -45,20 +45,20 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     if (output.getDataType() != compiledEquation->dtype) {
-        throw std::runtime_error("Output must be FP32");
+        throw std::runtime_error("Output type mismatch");
     }
 
     if (output.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
         throw std::runtime_error("Output tensor GPU does not match compiled fused equation device.");
     }
 
-    std::vector<const float*> input_ptrs;
+    std::vector<const void*> input_ptrs;
     input_ptrs.reserve(inputs.size());
     for (const auto& t : inputs) {
-        input_ptrs.push_back(t.getMemPtr<float>());
+        input_ptrs.push_back(t.getMemPtr());
     }
 
-    float* out_ptr = output.getMemPtr<float>();
+    void* out_ptr = output.getMemPtr();
 
     std::vector<void*> args;
     args.reserve(inputs.size() + 2);
@@ -125,7 +125,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         return;
     }
 
-    std::vector<const float*> input_ptrs;
+    std::vector<const void*> input_ptrs;
     input_ptrs.reserve(inputs.size());
     for (const auto& t : inputs) {
         if (!t.isInitialized()) {
@@ -144,10 +144,10 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
             throw std::runtime_error("Input tensor GPU does not match compiled fused equation device.");
         }
 
-        input_ptrs.push_back(t.getMemPtr<float>());
+        input_ptrs.push_back(t.getMemPtr());
     }
 
-    float* out_ptr = output.getMemPtr<float>();
+    void* out_ptr = output.getMemPtr();
     BroadcastInfo* deviceBroadcastInfoPtr = reinterpret_cast<BroadcastInfo*>(deviceBroadcastInfo.getMemPtr());
 
     std::vector<void*> args;

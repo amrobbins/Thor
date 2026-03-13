@@ -164,6 +164,10 @@ target_include_directories(Thor PUBLIC
         $<BUILD_INTERFACE:${CUDAToolkit_INCLUDE_DIRS}>
 )
 
+target_compile_definitions(Thor PRIVATE
+        THOR_CUDA_INCLUDE_DIR="${CUDAToolkit_INCLUDE_DIRS}"
+)
+
 find_package(Curses REQUIRED)
 target_include_directories(Thor PUBLIC ${CURSES_INCLUDE_DIRS})
 target_link_libraries(Thor PUBLIC ${CURSES_LIBRARIES})
