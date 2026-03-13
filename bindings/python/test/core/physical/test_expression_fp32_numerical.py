@@ -1,6 +1,5 @@
 import math
 import numpy as np
-import ml_dtypes
 import pytest
 import thor
 from thor.physical import Expression as ex
@@ -16,17 +15,7 @@ FLOAT_DTYPES = [
 
 
 def _numpy_storage_dtype(dtype: thor.DataType):
-    if dtype == thor.DataType.fp32:
-        return np.float32
-    if dtype == thor.DataType.fp16:
-        return np.float16
-    if dtype == thor.DataType.bf16:
-        return ml_dtypes.bfloat16
-    if dtype == thor.DataType.fp8_e4m3:
-        return ml_dtypes.float8_e4m3fn
-    if dtype == thor.DataType.fp8_e5m2:
-        return ml_dtypes.float8_e5m2
-    raise AssertionError(f"Unhandled dtype: {dtype}")
+    return thor.physical.numpy_dtypes.from_thor(dtype)
 
 
 def _rtol_atol(dtype: thor.DataType) -> tuple[float, float]:
@@ -44,10 +33,8 @@ def _rtol_atol(dtype: thor.DataType) -> tuple[float, float]:
 
 
 def _compute_dtype_for_reference(dtype: thor.DataType):
-    if dtype == thor.DataType.fp8_e4m3:
-        return ml_dtypes.bfloat16
-    if dtype == thor.DataType.fp8_e5m2:
-        return ml_dtypes.bfloat16
+    if dtype == thor.DataType.fp8_e4m3 or dtype == thor.DataType.fp8_e5m2:
+        return thor.physical.numpy_dtypes.bf16
     return _numpy_storage_dtype(dtype)
 
 
@@ -66,12 +53,12 @@ def _gpu_tensor(shape: list[int], gpu_num: int = 0) -> thor.physical.PhysicalTen
 def _cpu_numpy_view(t: thor.physical.PhysicalTensor) -> np.ndarray:
     arr = t.numpy()
     assert isinstance(arr, np.ndarray)
-    assert arr.dtype == np.float32
+    assert arr.dtype == thor.physical.numpy_dtypes.fp32
     return arr
 
 
 def _copy_numpy_to_gpu(values: np.ndarray, gpu_num: int = 0) -> thor.physical.PhysicalTensor:
-    values = np.asarray(values, dtype=np.float32, order="C")
+    values = np.asarray(values, dtype=thor.physical.numpy_dtypes.fp32, order="C")
     cpu = _cpu_tensor(list(values.shape))
     gpu = _gpu_tensor(list(values.shape), gpu_num=gpu_num)
     stream = thor.physical.Stream(gpu_num)
@@ -93,7 +80,7 @@ def _run_expr(expr, *inputs: np.ndarray, gpu_num: int = 0, use_fast_math: bool =
     assert len(inputs) >= 1
     first_shape = tuple(inputs[0].shape)
     for arr in inputs:
-        assert arr.dtype == np.float32
+        assert arr.dtype == thor.physical.numpy_dtypes.fp32
         assert tuple(arr.shape) == first_shape
 
     eq = ex.compile(
@@ -112,7 +99,7 @@ def _run_expr(expr, *inputs: np.ndarray, gpu_num: int = 0, use_fast_math: bool =
 
 
 def _assert_close(got: np.ndarray, expected: np.ndarray, *, rtol=1e-5, atol=1e-6):
-    np.testing.assert_allclose(got, expected.astype(np.float32), rtol=rtol, atol=atol)
+    np.testing.assert_allclose(got, expected.astype(thor.physical.numpy_dtypes.fp32), rtol=rtol, atol=atol)
 
 
 @pytest.mark.cuda
@@ -121,8 +108,8 @@ def test_add_sub_mul_div_fp32_numerical():
     y = ex.input(1)
     expr = ((x + y) - 2.0) * (x / (y + 1.0))
 
-    x_np = np.array([1, 2, 3, 4, 5, 6], dtype=np.float32)
-    y_np = np.array([2, 3, 4, 5, 6, 7], dtype=np.float32)
+    x_np = np.array([1, 2, 3, 4, 5, 6], dtype=thor.physical.numpy_dtypes.fp32)
+    y_np = np.array([2, 3, 4, 5, 6, 7], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = ((x_np + y_np) - 2.0) * (x_np / (y_np + 1.0))
     got = _run_expr(expr, x_np, y_np)
@@ -136,8 +123,8 @@ def test_pow_fp32_numerical():
     y = ex.input(1)
     expr = x**y
 
-    x_np = np.array([1.5, 2.0, 3.0, 4.0, 5.5], dtype=np.float32)
-    y_np = np.array([2.0, 3.0, 1.5, 0.5, 2.0], dtype=np.float32)
+    x_np = np.array([1.5, 2.0, 3.0, 4.0, 5.5], dtype=thor.physical.numpy_dtypes.fp32)
+    y_np = np.array([2.0, 3.0, 1.5, 0.5, 2.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = np.power(x_np, y_np)
     got = _run_expr(expr, x_np, y_np)
@@ -150,7 +137,7 @@ def test_rpow_fp32_numerical():
     x = ex.input(0)
     expr = 2.0**x
 
-    x_np = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    x_np = np.array([0.0, 1.0, 2.0, 3.0, 4.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = np.power(2.0, x_np)
     got = _run_expr(expr, x_np)
@@ -164,8 +151,8 @@ def test_negation_fp32_numerical():
     y = ex.input(1)
     expr = -(x**y) + 3.0
 
-    x_np = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-    y_np = np.array([2.0, 2.0, 2.0, 2.0], dtype=np.float32)
+    x_np = np.array([1.0, 2.0, 3.0, 4.0], dtype=thor.physical.numpy_dtypes.fp32)
+    y_np = np.array([2.0, 2.0, 2.0, 2.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = -(np.power(x_np, y_np)) + 3.0
     got = _run_expr(expr, x_np, y_np)
@@ -179,8 +166,8 @@ def test_min_max_fp32_numerical():
     y = ex.input(1)
     expr = ex.max(ex.min(x, y), 3.0)
 
-    x_np = np.array([1, 5, 2, 8, 4, 6], dtype=np.float32)
-    y_np = np.array([2, 4, 7, 1, 3, 9], dtype=np.float32)
+    x_np = np.array([1, 5, 2, 8, 4, 6], dtype=thor.physical.numpy_dtypes.fp32)
+    y_np = np.array([2, 4, 7, 1, 3, 9], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = np.maximum(np.minimum(x_np, y_np), 3.0)
     got = _run_expr(expr, x_np, y_np)
@@ -192,7 +179,7 @@ def test_min_max_fp32_numerical():
 def test_exp_family_fp32_numerical():
     x = ex.input(0)
 
-    x_np = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+    x_np = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     got_exp = _run_expr(ex.exp(x), x_np)
     got_exp2 = _run_expr(ex.exp2(x), x_np)
@@ -207,7 +194,7 @@ def test_exp_family_fp32_numerical():
 def test_log_family_fp32_numerical():
     x = ex.input(0)
 
-    x_np = np.array([0.25, 0.5, 1.0, 2.0, 8.0, 10.0], dtype=np.float32)
+    x_np = np.array([0.25, 0.5, 1.0, 2.0, 8.0, 10.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     got_ln = _run_expr(ex.ln(x), x_np)
     got_log_default = _run_expr(ex.log(x), x_np)
@@ -227,7 +214,7 @@ def test_sqrt_fp32_numerical():
     x = ex.input(0)
     expr = ex.sqrt(x)
 
-    x_np = np.array([0.0, 0.25, 1.0, 4.0, 9.0, 16.0], dtype=np.float32)
+    x_np = np.array([0.0, 0.25, 1.0, 4.0, 9.0, 16.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = np.sqrt(x_np)
     got = _run_expr(expr, x_np)
@@ -244,9 +231,10 @@ def test_scalar_only_expression_fp32_numerical():
     x = ex.input(0)
     lifted_expr = (x * 0.0) + expr
 
-    x_np = np.zeros((6,), dtype=np.float32)
-    expected_value = np.exp(np.float32(2.0)) + np.log2(np.float32(8.0)) - np.sqrt(np.float32(9.0))
-    expected = np.full_like(x_np, expected_value, dtype=np.float32)
+    x_np = np.zeros((6,), dtype=thor.physical.numpy_dtypes.fp32)
+    expected_value = np.exp(thor.physical.numpy_dtypes.fp32(2.0)) + np.log2(
+        thor.physical.numpy_dtypes.fp32(8.0)) - np.sqrt(thor.physical.numpy_dtypes.fp32(9.0))
+    expected = np.full_like(x_np, expected_value, dtype=thor.physical.numpy_dtypes.fp32)
 
     got = _run_expr(lifted_expr, x_np)
     _assert_close(got, expected)
@@ -263,9 +251,9 @@ def test_nested_expression_fp32_numerical():
         ex.min((z / 2.0)**2.0, ex.log2(y + 8.0)),
     )
 
-    x_np = np.array([0.5, 1.0, 1.5, 2.0], dtype=np.float32)
-    y_np = np.array([2.0, 3.0, 4.0, 5.0], dtype=np.float32)
-    z_np = np.array([2.0, 4.0, 6.0, 8.0], dtype=np.float32)
+    x_np = np.array([0.5, 1.0, 1.5, 2.0], dtype=thor.physical.numpy_dtypes.fp32)
+    y_np = np.array([2.0, 3.0, 4.0, 5.0], dtype=thor.physical.numpy_dtypes.fp32)
+    z_np = np.array([2.0, 4.0, 6.0, 8.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     expected = np.maximum(
         np.sqrt(np.exp2((x_np + 3.0) * (y_np - 1.0))),
@@ -334,7 +322,7 @@ def test_nested_expression_fp32_numerical_stamped():
     out_cpu.copy_from_async(out_gpu, stream)
     stream.synchronize()
 
-    np.testing.assert_allclose(out_cpu.numpy(), expected.astype(np.float32), rtol=3e-5, atol=3e-6)
+    np.testing.assert_allclose(out_cpu.numpy(), expected.astype(thor.physical.numpy_dtypes.fp32), rtol=3e-5, atol=3e-6)
 
 
 @pytest.mark.cuda
@@ -344,8 +332,8 @@ def test_fast_math_toggle_fp32_numerical(use_fast_math: bool):
     y = ex.input(1)
     expr = ex.exp(ex.log2(x + 8.0) + (y**2.0) / 3.0)
 
-    x_np = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-    y_np = np.array([1.5, 2.0, 2.5, 3.0], dtype=np.float32)
+    x_np = np.array([1.0, 2.0, 3.0, 4.0], dtype=thor.physical.numpy_dtypes.fp32)
+    y_np = np.array([1.5, 2.0, 2.5, 3.0], dtype=thor.physical.numpy_dtypes.fp32)
 
     got = _run_expr(expr, x_np, y_np, use_fast_math=use_fast_math)
     expected = np.exp(np.log2(x_np + 8.0) + np.power(y_np, 2.0) / 3.0)
@@ -378,9 +366,9 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
     y_np_view = y_host.numpy()
     z_np_view = z_host.numpy()
 
-    x_init = np.array([[0.1, 0.2, 0.3, 0.4], [0.2, 0.3, 0.4, 0.5]], dtype=np.float32)
-    y_init = np.array([[1.1, 1.2, 1.3, 1.4], [1.5, 1.2, 1.1, 1.3]], dtype=np.float32)
-    z_init = np.array([[1.0, 1.5, 2.0, 2.5], [0.8, 1.2, 1.6, 2.0]], dtype=np.float32)
+    x_init = np.array([[0.1, 0.2, 0.3, 0.4], [0.2, 0.3, 0.4, 0.5]], dtype=thor.physical.numpy_dtypes.fp32)
+    y_init = np.array([[1.1, 1.2, 1.3, 1.4], [1.5, 1.2, 1.1, 1.3]], dtype=thor.physical.numpy_dtypes.fp32)
+    z_init = np.array([[1.0, 1.5, 2.0, 2.5], [0.8, 1.2, 1.6, 2.0]], dtype=thor.physical.numpy_dtypes.fp32)
 
     host_np_dtype = _numpy_storage_dtype(dtype)
     x_np_view[:] = x_init.astype(host_np_dtype)

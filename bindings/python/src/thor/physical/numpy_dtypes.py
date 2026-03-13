@@ -1,0 +1,56 @@
+import numpy as np
+import thor
+
+try:
+    import ml_dtypes
+except ImportError:
+    ml_dtypes = None
+
+import thor
+
+fp16 = np.float16
+fp32 = np.float32
+
+if ml_dtypes is not None:
+    bf16 = ml_dtypes.bfloat16
+    fp8_e4m3 = ml_dtypes.float8_e4m3fn
+    fp8_e5m2 = ml_dtypes.float8_e5m2
+else:
+    bf16 = None
+    fp8_e4m3 = None
+    fp8_e5m2 = None
+
+
+def from_thor(dtype: thor.DataType):
+    if dtype == thor.DataType.fp16:
+        return fp16
+    if dtype == thor.DataType.bf16:
+        if bf16 is None:
+            raise RuntimeError("ml_dtypes is required for bf16 NumPy dtype support")
+        return bf16
+    if dtype == thor.DataType.fp8_e4m3:
+        if fp8_e4m3 is None:
+            raise RuntimeError("ml_dtypes is required for fp8 NumPy dtype support")
+        return fp8_e4m3
+    if dtype == thor.DataType.fp8_e5m2:
+        if fp8_e5m2 is None:
+            raise RuntimeError("ml_dtypes is required for fp8 NumPy dtype support")
+        return fp8_e5m2
+    if dtype == thor.DataType.fp32:
+        return fp32
+    raise TypeError(f"Unsupported Thor dtype: {dtype}")
+
+
+def to_thor(dtype):
+    if dtype == np.float16:
+        return thor.DataType.fp16
+    if dtype == np.float32:
+        return thor.DataType.fp32
+    if ml_dtypes is not None:
+        if dtype == ml_dtypes.bfloat16:
+            return thor.DataType.bf16
+        if dtype == ml_dtypes.float8_e4m3fn:
+            return thor.DataType.fp8_e4m3
+        if dtype == ml_dtypes.float8_e5m2:
+            return thor.DataType.fp8_e5m2
+    raise TypeError(f"Unsupported NumPy/ml_dtypes dtype: {dtype}")
