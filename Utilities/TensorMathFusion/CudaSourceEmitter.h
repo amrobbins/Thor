@@ -7,12 +7,18 @@
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
 
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
+
 namespace ThorImplementation {
 
-// FIXME: Eventually: This is hard coded to FP32
 class CudaSourceEmitter {
    public:
-    static std::string emit(const PhysicalExpression& expr, const std::string& kernel_name, const bool broadcast_support);
+    static std::string emit(const PhysicalExpression& expr,
+                            TensorDescriptor::DataType dtype,
+                            const std::string& kernel_name,
+                            const bool broadcast_support);
 
    private:
     static std::string ref(uint32_t idx);

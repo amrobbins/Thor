@@ -1,9 +1,54 @@
 import math
 import numpy as np
+import ml_dtypes
 import pytest
 import thor
 from thor.physical import Expression as ex
 from thor.physical import PhysicalTensor, Stream, Placement, DeviceType
+
+FLOAT_DTYPES = [
+    thor.DataType.fp16,
+    thor.DataType.bf16,
+    thor.DataType.fp8_e4m3,
+    thor.DataType.fp8_e5m2,
+    thor.DataType.fp32,
+]
+
+
+def _numpy_storage_dtype(dtype: thor.DataType):
+    if dtype == thor.DataType.fp32:
+        return np.float32
+    if dtype == thor.DataType.fp16:
+        return np.float16
+    if dtype == thor.DataType.bf16:
+        return ml_dtypes.bfloat16
+    if dtype == thor.DataType.fp8_e4m3:
+        return ml_dtypes.float8_e4m3fn
+    if dtype == thor.DataType.fp8_e5m2:
+        return ml_dtypes.float8_e5m2
+    raise AssertionError(f"Unhandled dtype: {dtype}")
+
+
+def _rtol_atol(dtype: thor.DataType) -> tuple[float, float]:
+    if dtype == thor.DataType.fp32:
+        return 3e-5, 3e-6
+    if dtype == thor.DataType.fp16:
+        return 5e-3, 5e-3
+    if dtype == thor.DataType.bf16:
+        return 2e-2, 2e-2
+    if dtype == thor.DataType.fp8_e4m3:
+        return 1.5e-1, 1.5e-1
+    if dtype == thor.DataType.fp8_e5m2:
+        return 2.5e-1, 2.5e-1
+    raise AssertionError(f"Unhandled dtype: {dtype}")
+
+
+def _compute_dtype_for_reference(dtype: thor.DataType):
+    if dtype == thor.DataType.fp8_e4m3:
+        return ml_dtypes.bfloat16
+    if dtype == thor.DataType.fp8_e5m2:
+        return ml_dtypes.bfloat16
+    return _numpy_storage_dtype(dtype)
 
 
 def _cpu_tensor(shape: list[int]) -> thor.physical.PhysicalTensor:
@@ -311,3 +356,76 @@ def test_fast_math_toggle_fp32_numerical(use_fast_math: bool):
         rtol=8e-4 if use_fast_math else 3e-5,
         atol=5e-5 if use_fast_math else 3e-6,
     )
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_nested_expression_numerical_stamped(dtype: thor.DataType):
+    gpu_num = 0
+    stream = Stream(gpu_num=gpu_num)
+    gpu_placement = Placement(DeviceType.gpu, gpu_num)
+    cpu_placement = Placement(DeviceType.cpu)
+    descriptor = PhysicalTensor.Descriptor(dtype, dimensions=[2, 4])
+
+    x_host = PhysicalTensor(cpu_placement, descriptor)
+    y_host = PhysicalTensor(cpu_placement, descriptor)
+    z_host = PhysicalTensor(cpu_placement, descriptor)
+    x_gpu = PhysicalTensor(gpu_placement, descriptor)
+    y_gpu = PhysicalTensor(gpu_placement, descriptor)
+    z_gpu = PhysicalTensor(gpu_placement, descriptor)
+
+    x_np_view = x_host.numpy()
+    y_np_view = y_host.numpy()
+    z_np_view = z_host.numpy()
+
+    x_init = np.array([[0.1, 0.2, 0.3, 0.4], [0.2, 0.3, 0.4, 0.5]], dtype=np.float32)
+    y_init = np.array([[1.1, 1.2, 1.3, 1.4], [1.5, 1.2, 1.1, 1.3]], dtype=np.float32)
+    z_init = np.array([[1.0, 1.5, 2.0, 2.5], [0.8, 1.2, 1.6, 2.0]], dtype=np.float32)
+
+    host_np_dtype = _numpy_storage_dtype(dtype)
+    x_np_view[:] = x_init.astype(host_np_dtype)
+    y_np_view[:] = y_init.astype(host_np_dtype)
+    z_np_view[:] = z_init.astype(host_np_dtype)
+
+    x_gpu.copy_from_async(x_host, stream)
+    y_gpu.copy_from_async(y_host, stream)
+    z_gpu.copy_from_async(z_host, stream)
+
+    x = ex.input(0)
+    y = ex.input(1)
+    z = ex.input(2)
+    expr = ex.max(
+        ex.sqrt(ex.exp2((x + 3.0) * (y - 1.0))),
+        ex.min((z / 2.0)**2.0, ex.log2(y + 8.0)),
+    )
+
+    compute_np_dtype = _compute_dtype_for_reference(dtype)
+    x_ref = x_np_view.astype(compute_np_dtype)
+    y_ref = y_np_view.astype(compute_np_dtype)
+    z_ref = z_np_view.astype(compute_np_dtype)
+
+    expected = np.maximum(
+        np.sqrt(np.exp2((x_ref + 3.0) * (y_ref - 1.0))),
+        np.minimum((z_ref / 2.0)**2.0, np.log2(y_ref + 8.0)),
+    )
+
+    # Mirror the kernel's final store dtype.
+    expected = expected.astype(_numpy_storage_dtype(dtype))
+
+    fused_equation = ex.compile(
+        expr,
+        dtype=dtype,
+        device_num=gpu_num,
+        use_fast_math=False,
+    )
+
+    stamped_equation = fused_equation.stamp([x_gpu, y_gpu, z_gpu], stream)
+    stamped_equation.run()
+
+    out_gpu = stamped_equation.output_tensor
+    out_cpu = out_gpu.clone(cpu_placement)
+    out_cpu.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+
+    rtol, atol = _rtol_atol(dtype)
+    np.testing.assert_allclose(out_cpu.numpy(), expected, rtol=rtol, atol=atol)

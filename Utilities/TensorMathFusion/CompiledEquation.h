@@ -6,7 +6,7 @@ namespace ThorImplementation {
 struct EquationSignature {
     uint32_t rank;  // maybe just 1 for flattened contiguous V1
     uint32_t num_inputs;
-    cudaDataType_t dtype;  // FP32 only for now
+    TensorDescriptor::DataType dtype;
     bool contiguous;
     int sm_major;
     int sm_minor;

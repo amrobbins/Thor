@@ -12,6 +12,9 @@
 #include <nlohmann/json.hpp>
 
 #include <assert.h>
+#include <cuda_bf16.h>
+
+#include <cuda_fp8.h>
 #include <cstdint>
 #include <type_traits>
 
@@ -93,6 +96,12 @@ class TensorDescriptor {
                 return "bool";
             case DataType::PACKED_BOOLEAN:
                 return "packed_boolean";
+            case DataType::BF16:
+                return "bf16";
+            case DataType::FP8_E4M3:
+                return "fp8_e4m3";
+            case DataType::FP8_E5M2:
+                return "fp8_e5m2";
             default:
                 assert(false);
         }
@@ -122,7 +131,7 @@ class TensorDescriptor {
             case DataType::UINT64:
                 return std::to_string(*((uint64_t *)basePointer + elementIndex));
             case DataType::FP16:
-                return std::to_string((float)*(((half *)basePointer + elementIndex)));
+                return std::to_string(static_cast<float>(*(((const half *)basePointer) + elementIndex)));
             case DataType::FP32:
                 return std::to_string(*((float *)basePointer + elementIndex));
             case DataType::FP64:
@@ -131,6 +140,12 @@ class TensorDescriptor {
                 return *((bool *)basePointer + elementIndex) ? "1" : "0";
             case DataType::PACKED_BOOLEAN:
                 return PackedBoolean::getElement(elementIndex % 8, (uint8_t *)basePointer + elementIndex / 8) ? "1" : "0";
+            case DataType::BF16:
+                return std::to_string(static_cast<float>(*(((const __nv_bfloat16 *)basePointer) + elementIndex)));
+            case DataType::FP8_E4M3:
+                return std::to_string(static_cast<float>(*(((const __nv_fp8_e4m3 *)basePointer) + elementIndex)));
+            case DataType::FP8_E5M2:
+                return std::to_string(static_cast<float>(*(((const __nv_fp8_e5m2 *)basePointer) + elementIndex)));
             default:
                 assert(false);
         }
@@ -155,6 +170,9 @@ class TensorDescriptor {
             case DataType::FP16:
             case DataType::FP32:
             case DataType::FP64:
+            case DataType::BF16:
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
                 return false;
             default:
                 assert(false);
@@ -178,6 +196,9 @@ class TensorDescriptor {
             case DataType::FP16:
             case DataType::FP32:
             case DataType::FP64:
+            case DataType::BF16:
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
                 return true;
 
             case DataType::UINT8:
@@ -264,8 +285,11 @@ class TensorDescriptor {
             case DataType::BOOLEAN:
             case DataType::INT8:
             case DataType::UINT8:
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
                 return 1;
             case DataType::FP16:
+            case DataType::BF16:
             case DataType::INT16:
             case DataType::UINT16:
                 return 2;
@@ -324,6 +348,9 @@ NLOHMANN_JSON_SERIALIZE_ENUM(TensorDescriptor::DataType,
                                  {TensorDescriptor::DataType::FP16, "fp16"},
                                  {TensorDescriptor::DataType::FP32, "fp32"},
                                  {TensorDescriptor::DataType::FP64, "fp64"},
+                                 {TensorDescriptor::DataType::BF16, "bf16"},
+                                 {TensorDescriptor::DataType::FP8_E4M3, "fp8_e4m3"},
+                                 {TensorDescriptor::DataType::FP8_E5M2, "fp8_e5m2"},
                              })
 
 }  // namespace ThorImplementation

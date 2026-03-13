@@ -1,4 +1,8 @@
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 
 namespace nb = nanobind;
 
@@ -42,7 +46,10 @@ NB_MODULE(_thor, thor) {
                   // .value("bf16", DataType::BF16)
                   .value("fp16", DataType::FP16)
                   .value("fp32", DataType::FP32)
-                  .value("fp64", DataType::FP64);
+                  .value("fp64", DataType::FP64)
+                  .value("bf16", DataType::BF16)
+                  .value("fp8_e4m3", DataType::FP8_E4M3)
+                  .value("fp8_e5m2", DataType::FP8_E5M2);
     dt.attr("__module__") = "thor";
 
     bind_tensor(thor);

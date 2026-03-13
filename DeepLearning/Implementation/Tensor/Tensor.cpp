@@ -384,6 +384,12 @@ ElementDataType *Tensor::getMemPtr() {
             assert((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
             assert((is_same<BaseT, uint8_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+            assert((is_same<BaseT, __nv_bfloat16>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+            assert((is_same<BaseT, __nv_fp8_e4m3>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+            assert((is_same<BaseT, __nv_fp8_e5m2>::value));
         else
             assert(false);
     }
@@ -422,6 +428,12 @@ const ElementDataType *Tensor::getMemPtr() const {
             assert((is_same<BaseT, bool>::value));
         else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
             assert((is_same<BaseT, uint8_t>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+            assert((is_same<BaseT, __nv_bfloat16>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+            assert((is_same<BaseT, __nv_fp8_e4m3>::value));
+        else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+            assert((is_same<BaseT, __nv_fp8_e5m2>::value));
         else
             assert(false);
     }
@@ -455,6 +467,12 @@ ElementDataType Tensor::getElement(vector<unsigned long> dimensionIndex) {
         assert((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
         assert((is_same<ElementDataType, uint8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+        assert((is_same<ElementDataType, __nv_bfloat16>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+        assert((is_same<ElementDataType, __nv_fp8_e4m3>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+        assert((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
         assert(false);
 #endif
@@ -489,6 +507,12 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
         assert((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
         assert((is_same<ElementDataType, uint8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+        assert((is_same<ElementDataType, __nv_bfloat16>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+        assert((is_same<ElementDataType, __nv_fp8_e4m3>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+        assert((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
         assert(false);
 #endif
@@ -523,6 +547,12 @@ ElementDataType *Tensor::getElementPointer(std::vector<unsigned long> dimensionI
         assert((is_same<ElementDataType, bool>::value));
     else if (descriptor.getDataType() == TensorDescriptor::DataType::PACKED_BOOLEAN)
         assert((is_same<ElementDataType, uint8_t>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::BF16)
+        assert((is_same<ElementDataType, __nv_bfloat16>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E4M3)
+        assert((is_same<ElementDataType, __nv_fp8_e4m3>::value));
+    else if (descriptor.getDataType() == TensorDescriptor::DataType::FP8_E5M2)
+        assert((is_same<ElementDataType, __nv_fp8_e5m2>::value));
     else
         assert(false);
 #endif
@@ -1690,6 +1720,9 @@ template uint8_t *Tensor::getMemPtr();
 template uint16_t *Tensor::getMemPtr();
 template uint32_t *Tensor::getMemPtr();
 template char *Tensor::getMemPtr();
+template __nv_bfloat16 *Tensor::getMemPtr();
+template __nv_fp8_e4m3 *Tensor::getMemPtr();
+template __nv_fp8_e5m2 *Tensor::getMemPtr();
 
 template const void *Tensor::getMemPtr<void>() const;
 template const half *Tensor::getMemPtr<half>() const;
@@ -1701,6 +1734,9 @@ template const uint8_t *Tensor::getMemPtr<uint8_t>() const;
 template const uint16_t *Tensor::getMemPtr<uint16_t>() const;
 template const uint32_t *Tensor::getMemPtr<uint32_t>() const;
 template const char *Tensor::getMemPtr<char>() const;
+template const __nv_bfloat16 *Tensor::getMemPtr<__nv_bfloat16>() const;
+template const __nv_fp8_e4m3 *Tensor::getMemPtr<__nv_fp8_e4m3>() const;
+template const __nv_fp8_e5m2 *Tensor::getMemPtr<__nv_fp8_e5m2>() const;
 
 template half Tensor::getElement(vector<unsigned long> dimensionIndex);
 template float Tensor::getElement(vector<unsigned long> dimensionIndex);
@@ -1710,6 +1746,10 @@ template int32_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template uint8_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template uint16_t Tensor::getElement(vector<unsigned long> dimensionIndex);
 template uint32_t Tensor::getElement(vector<unsigned long> dimensionIndex);
+template char Tensor::getElement(vector<unsigned long> dimensionIndex);
+template __nv_bfloat16 Tensor::getElement(vector<unsigned long> dimensionIndex);
+template __nv_fp8_e4m3 Tensor::getElement(vector<unsigned long> dimensionIndex);
+template __nv_fp8_e5m2 Tensor::getElement(vector<unsigned long> dimensionIndex);
 
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const half &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const float &value);
@@ -1719,6 +1759,10 @@ template void Tensor::setElement(vector<unsigned long> dimensionIndex, const int
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint8_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint16_t &value);
 template void Tensor::setElement(vector<unsigned long> dimensionIndex, const uint32_t &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const char &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const __nv_bfloat16 &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const __nv_fp8_e4m3 &value);
+template void Tensor::setElement(vector<unsigned long> dimensionIndex, const __nv_fp8_e5m2 &value);
 
 template void *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template half *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
@@ -1729,3 +1773,7 @@ template int32_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex
 template uint8_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template uint16_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
 template uint32_t *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template char *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template __nv_bfloat16 *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template __nv_fp8_e4m3 *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
+template __nv_fp8_e5m2 *Tensor::getElementPointer(vector<unsigned long> dimensionIndex);
