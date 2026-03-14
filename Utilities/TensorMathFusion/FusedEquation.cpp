@@ -168,13 +168,13 @@ static std::vector<uint64_t> computePackedOutputStrides(const std::vector<uint64
     return strides;
 }
 
-BroadcastInfoHostBuffer FusedEquation::buildBroadcastInfo(const std::vector<Tensor>& inputs,
-                                                          const std::vector<uint64_t>& outputDimensions) {
+static void buildBroadcastInfo(BroadcastInfoBufferView& buffer,
+                               const std::vector<Tensor>& inputs,
+                               const std::vector<uint64_t>& outputDimensions) {
     const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
     const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
-    const uint64_t numel = product(outputDimensions);
 
-    BroadcastInfoHostBuffer buffer(rank, numInputs, numel);
+    buffer.header()->numel = product(outputDimensions);
 
     const std::vector<uint64_t> outputStrides = computePackedOutputStrides(outputDimensions);
     for (uint32_t axis = 0; axis < rank; ++axis) {
@@ -183,19 +183,15 @@ BroadcastInfoHostBuffer FusedEquation::buildBroadcastInfo(const std::vector<Tens
 
     for (uint32_t inputIdx = 0; inputIdx < numInputs; ++inputIdx) {
         const std::vector<uint64_t>& inputDims = inputs[inputIdx].getDimensions();
-
         if (inputDims.size() > outputDimensions.size()) {
             throw std::runtime_error("Input rank exceeds output rank in buildBroadcastInfo.");
         }
 
         const uint32_t rankDiff = rank - static_cast<uint32_t>(inputDims.size());
 
-        // Walk output axes from left to right.
-        // Missing leading dimensions in the input are treated as broadcasted (stride 0).
         uint64_t runningStride = 1;
         std::vector<uint64_t> inputPackedStrides(rank, 0);
 
-        // First determine the packed element stride per aligned axis.
         for (int64_t axis = static_cast<int64_t>(rank) - 1; axis >= 0; --axis) {
             if (static_cast<uint32_t>(axis) < rankDiff) {
                 inputPackedStrides[static_cast<size_t>(axis)] = 0;
@@ -220,8 +216,6 @@ BroadcastInfoHostBuffer FusedEquation::buildBroadcastInfo(const std::vector<Tens
             buffer.inputStride(inputIdx, axis) = inputPackedStrides[axis];
         }
     }
-
-    return buffer;
 }
 
 struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
@@ -235,19 +229,21 @@ struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
 Tensor FusedEquation::createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
                                                 const std::vector<uint64_t>& outputDimensions,
                                                 Stream stream) {
-    BroadcastInfoHostBuffer broadcastInfo = buildBroadcastInfo(inputs, outputDimensions);
+    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
+    const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
+    const uint64_t numBytes = BroadcastInfoBufferView::bytesRequired(rank, numInputs);
 
-    TensorDescriptor broadcastInfoDescriptor =
-        TensorDescriptor(TensorDescriptor::DataType::UINT8, {static_cast<uint64_t>(broadcastInfo.sizeBytes())});
+    TensorDescriptor broadcastInfoDescriptor(TensorDescriptor::DataType::UINT8, {numBytes});
 
-    TensorPlacement cpuPlacement = TensorPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement devicePlacement = inputs[0].getPlacement();
 
     Tensor hostBroadcastInfo(cpuPlacement, broadcastInfoDescriptor);
     Tensor deviceBroadcastInfo(devicePlacement, broadcastInfoDescriptor);
 
-    // FIXME: Avoid the extra copy, build it in tensor mem
-    std::memcpy(hostBroadcastInfo.getMemPtr(), broadcastInfo.data(), broadcastInfo.sizeBytes());
+    BroadcastInfoBufferView buffer(hostBroadcastInfo.getMemPtr(), rank, numInputs);
+    buildBroadcastInfo(buffer, inputs, outputDimensions);
+
     deviceBroadcastInfo.copyFromAsync(hostBroadcastInfo, stream);
 
     stream.launchCleanUpHostFunctionArgs(std::make_unique<BroadcastInfoHostFunctionArgs>(hostBroadcastInfo, deviceBroadcastInfo));
