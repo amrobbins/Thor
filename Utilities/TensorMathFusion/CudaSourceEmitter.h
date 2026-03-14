@@ -20,6 +20,11 @@ class CudaSourceEmitter {
                             const std::string& kernel_name,
                             const bool broadcast_support);
 
+    static std::string emitVector2Flat(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, const std::string& kernel_name);
+    static std::string emitVector2Broadcast(const PhysicalExpression& expr,
+                                            TensorDescriptor::DataType dtype,
+                                            const std::string& kernel_name);
+
    private:
     static std::string ref(uint32_t idx);
 };
