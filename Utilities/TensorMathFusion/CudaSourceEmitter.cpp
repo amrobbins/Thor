@@ -79,7 +79,7 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
-    for (uint32_t i = 0; i < expr.num_inputs; ++i) {
+    for (uint32_t i = 0; i < expr.numInputs(); ++i) {
         ss << "const " << inout_dtype << "* in" << i << ", ";
     }
 
@@ -101,7 +101,7 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
 
         )DEVICE";
 
-        for (uint32_t inputIdx = 0; inputIdx < expr.num_inputs; ++inputIdx) {
+        for (uint32_t inputIdx = 0; inputIdx < expr.numInputs(); ++inputIdx) {
             ss << "  unsigned long long in" << inputIdx << "_offset = 0ULL;\n";
         }
 
@@ -113,7 +113,7 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
             remaining %= stride;
         )DEVICE";
 
-        for (uint32_t inputIdx = 0; inputIdx < expr.num_inputs; ++inputIdx) {
+        for (uint32_t inputIdx = 0; inputIdx < expr.numInputs(); ++inputIdx) {
             if (inputIdx == 0)
                 ss << "    in" << inputIdx << "_offset += c * input_strides[axis];\n";
             else if (inputIdx == 1)
@@ -135,9 +135,9 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
         switch (n.op) {
             case ExprOp::INPUT:
                 if (broadcast_support) {
-                    ss << "  " << fp_type << " t" << i << "(in" << n.input_index << "[in" << n.input_index << "_offset]);\n";
+                    ss << "  " << fp_type << " t" << i << "(in" << n.input_slot << "[in" << n.input_slot << "_offset]);\n";
                 } else {
-                    ss << "  " << fp_type << " t" << i << "(in" << n.input_index << "[idx]);\n";
+                    ss << "  " << fp_type << " t" << i << "(in" << n.input_slot << "[idx]);\n";
                 }
                 break;
             case ExprOp::SCALAR_FP:

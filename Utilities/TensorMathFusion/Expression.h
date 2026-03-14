@@ -14,50 +14,37 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
-enum class ExprOp : uint16_t {
-    INPUT = 3,
-    SCALAR_FP,
-    // SCALAR_INT,
-    ADD,
-    SUB,
-    MUL,
-    DIV,
-    POW,
-    NEG,
-    EXP,
-    EXP2,
-    EXP10,
-    LN,
-    LOG2,
-    LOG10,
-    SQRT,
-    MIN,
-    MAX
-};
+enum class ExprOp : uint16_t { INPUT = 3, SCALAR_FP, ADD, SUB, MUL, DIV, POW, NEG, EXP, EXP2, EXP10, LN, LOG2, LOG10, SQRT, MIN, MAX };
 
 struct ExprNode {
     ExprOp op;
     uint32_t lhs = UINT32_MAX;
     uint32_t rhs = UINT32_MAX;  // unused for unary/scalar ops
-    uint32_t input_index = UINT32_MAX;
+    uint32_t input_slot = UINT32_MAX;
     double scalar_fp = 0.0;
-    // int64_t scalar_int = 0;
+};
+
+struct NamedInput {
+    std::string name;
+    uint32_t slot;
 };
 
 struct PhysicalExpression {
     std::vector<ExprNode> nodes;
-    uint32_t output_node;
-    uint32_t num_inputs;
+    std::vector<NamedInput> inputs;
+    uint32_t output_node = UINT32_MAX;
+
+    uint32_t numInputs() const { return static_cast<uint32_t>(inputs.size()); }
+
+    uint32_t getOrCreateInputSlot(const std::string& name);
 };
 
 class Expression {
    public:
     Expression(double value);
-    // Expression(int64_t value);
 
-    static Expression input(uint32_t inputIndex);
+    static Expression input(const std::string& name);
     static Expression scalar(double value);
-    // static Expression scalar(int64_t value);
 
     [[nodiscard]] PhysicalExpression expression() const;
 
@@ -65,11 +52,6 @@ class Expression {
     Expression operator-(const Expression& other) const;
     Expression operator*(const Expression& other) const;
     Expression operator/(const Expression& other) const;
-
-    // Expression operator+(double scalar) const;
-    // Expression operator-(double scalar) const;
-    // Expression operator*(double scalar) const;
-    // Expression operator/(double scalar) const;
 
     Expression operator-() const;
 
@@ -81,7 +63,6 @@ class Expression {
     [[nodiscard]] Expression exp2() const;
     [[nodiscard]] Expression exp10() const;
     [[nodiscard]] Expression sqrt() const;
-    // [[nodiscard]] Expression pow(double exponent) const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
     Expression min(const Expression& other) const;
@@ -96,12 +77,6 @@ class Expression {
     static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
     static Expression unaryOp(const Expression& inputExpr, ExprOp op);
 };
-
-// inline Expression operator+(double lhs, const Expression& rhs) { return Expression::scalar(lhs) + rhs; }
-// inline Expression operator-(double lhs, const Expression& rhs) { return Expression::scalar(lhs) - rhs; }
-// inline Expression operator*(double lhs, const Expression& rhs) { return Expression::scalar(lhs) * rhs; }
-// inline Expression operator/(double lhs, const Expression& rhs) { return Expression::scalar(lhs) / rhs; }
-// inline Expression pow(double base, const Expression& exponent) { return Expression::scalar(base).pow(exponent); }
 
 std::string formatFloatCanonical(double x);
 bool isCommutative(ExprOp op);
