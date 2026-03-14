@@ -118,8 +118,8 @@ def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType, *
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_add_sub_mul_div_numerical(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = ((x + y) - 2.0) * (x / (y + 1.0))
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -140,8 +140,8 @@ def test_add_sub_mul_div_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_pow_numerical(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x**y
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -162,7 +162,7 @@ def test_pow_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_rpow_numerical(dtype: thor.DataType):
-    x = ex.input(0)
+    x = ex.input("x")
     expr = 2.0**x
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -180,8 +180,8 @@ def test_rpow_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_negation_numerical(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = -(x**y) + 3.0
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -202,8 +202,8 @@ def test_negation_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_min_max_numerical(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = ex.max(ex.min(x, y), 3.0)
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -224,7 +224,7 @@ def test_min_max_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_exp_family_numerical(dtype: thor.DataType):
-    x = ex.input(0)
+    x = ex.input("x")
 
     storage_dtype = _numpy_storage_dtype(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
@@ -244,7 +244,7 @@ def test_exp_family_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_log_family_numerical(dtype: thor.DataType):
-    x = ex.input(0)
+    x = ex.input("x")
 
     storage_dtype = _numpy_storage_dtype(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
@@ -268,7 +268,7 @@ def test_log_family_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_sqrt_numerical(dtype: thor.DataType):
-    x = ex.input(0)
+    x = ex.input("x")
     expr = ex.sqrt(x)
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -290,7 +290,7 @@ def test_scalar_only_expression_numerical(dtype: thor.DataType):
 
     # Need a tensor shape for execution. Use a dummy input expression plus a zero multiplier
     # so the result stays scalar-valued elementwise.
-    x = ex.input(0)
+    x = ex.input("x")
     lifted_expr = (x * 0.0) + expr
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -307,9 +307,9 @@ def test_scalar_only_expression_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_nested_expression_numerical(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
-    z = ex.input(2)
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
 
     expr = ex.max(
         ex.sqrt(ex.exp2((x + 3.0) * (y - 1.0))),
@@ -340,8 +340,8 @@ def test_nested_expression_numerical(dtype: thor.DataType):
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 @pytest.mark.parametrize("use_fast_math", [False, True])
 def test_fast_math_toggle_numerical(dtype: thor.DataType, use_fast_math: bool):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = ex.exp(ex.log2(x + 8.0) + (y**2.0) / 3.0)
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -401,9 +401,9 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
     y_gpu.copy_from_async(y_host, stream)
     z_gpu.copy_from_async(z_host, stream)
 
-    x = ex.input(0)
-    y = ex.input(1)
-    z = ex.input(2)
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
     expr = ex.max(
         ex.sqrt(ex.exp2((x + 3.0) * (y - 1.0))),
         ex.min((z / 2.0)**2.0, ex.log2(y + 8.0)),

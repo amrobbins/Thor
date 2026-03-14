@@ -115,8 +115,8 @@ def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType, *
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_same_rank_singleton_axis_add(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + y
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -135,8 +135,8 @@ def test_broadcast_same_rank_singleton_axis_add(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_left_pad_add(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + y
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -161,9 +161,9 @@ def test_broadcast_left_pad_add(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_multi_axis_nested_expression(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
-    z = ex.input(2)
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
 
     expr = ex.max((x + y) * (z + 1.0), 2.0)
 
@@ -199,8 +199,8 @@ def test_broadcast_multi_axis_nested_expression(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_div_pow_expression(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = (x / (y + 1.0))**2.0
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -229,8 +229,8 @@ def test_broadcast_div_pow_expression(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_scalar_lift_like_expression(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = (x * 0.5) + y - 3.0
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -249,9 +249,9 @@ def test_broadcast_scalar_lift_like_expression(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_three_inputs_mixed_ranks(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
-    z = ex.input(2)
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
     expr = x + y * z
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -288,8 +288,8 @@ def test_broadcast_requested_output_shape_add_singletons(dtype: thor.DataType):
     gpu_num = 0
     stream = Stream(gpu_num=gpu_num)
 
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + y
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -362,9 +362,9 @@ def test_broadcast_nested_expression_fp32_numerical_stamped():
     y_gpu.copy_from_async(y_host, stream)
     z_gpu.copy_from_async(z_host, stream)
 
-    x = ex.input(0)
-    y = ex.input(1)
-    z = ex.input(2)
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
 
     expr = ex.max(
         ex.sqrt(ex.exp2((x + 3.0) * (y - 1.0))),
@@ -399,8 +399,8 @@ def test_broadcast_nested_expression_fp32_numerical_stamped():
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_incompatible_shapes_raises(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + y
 
     x_np = np.zeros((2, 3), dtype=thor.physical.numpy_dtypes.fp32).astype(_numpy_storage_dtype(dtype))
@@ -425,8 +425,8 @@ def test_broadcast_incompatible_shapes_raises(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_four_dimensional_multi_axis(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = (x + y) * 0.5
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -447,8 +447,8 @@ def test_broadcast_four_dimensional_multi_axis(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_all_singleton_axes_rhs(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + (y * 2.0) - 1.0
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -467,8 +467,8 @@ def test_broadcast_all_singleton_axes_rhs(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_rightmost_vector(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = (x * 2.0) + y
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -487,8 +487,8 @@ def test_broadcast_rightmost_vector(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_broadcast_repeated_same_input(dtype: thor.DataType):
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + x * y - ex.min(x, y + 100.0)
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -523,8 +523,8 @@ def test_broadcast_direct_run_requested_output_shape_add_singletons(dtype: thor.
     gpu_num = 0
     stream = Stream(gpu_num=gpu_num)
 
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = x + y
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -588,8 +588,8 @@ def test_broadcast_stamped_reused_twice(dtype: thor.DataType):
     x_gpu.copy_from_async(x_host, stream)
     y_gpu.copy_from_async(y_host, stream)
 
-    x = ex.input(0)
-    y = ex.input(1)
+    x = ex.input("x")
+    y = ex.input("y")
     expr = (x + y) * (x - y + 2.0)
 
     fused_equation = ex.compile(

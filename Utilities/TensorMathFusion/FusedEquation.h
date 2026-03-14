@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unordered_set>
+
 #include "Utilities/TensorMathFusion/BroadcastStructs.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/Expression.h"
@@ -13,10 +15,18 @@ class FusedEquation {
                                  int device_num,
                                  bool use_fast_math = false);
 
-    [[nodiscard]] StampedEquation stamp(std::vector<Tensor> inputs,
+    // DEPRECATED: FIXME Delete: or make private actually
+    [[nodiscard]] StampedEquation stamp(std::vector<Tensor>& inputs,
                                         const Stream& stream,
                                         const std::vector<uint64_t>& requestedOutputShape = {}) const;
+    // DEPRECATED: FIXME Delete: or make private actually
     void run(std::vector<Tensor> inputs, Tensor output, Stream stream) const;
+
+    [[nodiscard]] StampedEquation stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                        const Stream& stream,
+                                        const std::vector<uint64_t>& requestedOutputShape = {}) const;
+
+    void run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const;
 
    private:
     explicit FusedEquation(std::shared_ptr<CompiledEquation> flatEquation, std::shared_ptr<CompiledEquation> broadcastEquation)
@@ -26,6 +36,7 @@ class FusedEquation {
     static Tensor createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
                                             const std::vector<uint64_t>& outputDimensions,
                                             Stream stream);
+    [[nodiscard]] std::vector<Tensor> bindNamedInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
 
     std::shared_ptr<CompiledEquation> compiledFlatEquation;
     std::shared_ptr<CompiledEquation> compiledBroadcastEquation;

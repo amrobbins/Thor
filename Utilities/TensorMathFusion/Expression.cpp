@@ -16,9 +16,6 @@ std::string opName(ExprOp op) {
             return "IN";
         case ExprOp::SCALAR_FP:
             return "F32";
-        // case ExprOp::SCALAR_INT:
-        //     // FIXME:
-        //     return "F32";
         case ExprOp::ADD:
             return "ADD";
         case ExprOp::SUB:
@@ -64,16 +61,12 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
 
     switch (n.op) {
         case ExprOp::INPUT:
-            out = "IN" + std::to_string(n.input_index);
+            out = "IN" + std::to_string(n.input_slot);
             break;
 
         case ExprOp::SCALAR_FP:
             out = "F32(" + formatFloatCanonical(n.scalar_fp) + ")";
             break;
-            // case ExprOp::SCALAR_INT:
-            //     // FIXME: don't convert to a float, but this is fp32 only now
-            //     out = "F32(" + formatFloatCanonical(n.scalar_int) + ")";
-            //     break;
 
         case ExprOp::NEG:
         case ExprOp::EXP:
@@ -119,7 +112,6 @@ std::string canonicalize(const PhysicalExpression& expr) {
 
 namespace {
 
-//|| op == ExprOp::SCALAR_INT
 bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_FP; }
 
 bool isUnaryOp(ExprOp op) {
@@ -170,23 +162,21 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
 
 }  // namespace
 
-Expression Expression::input(uint32_t inputIndex) {
+Expression Expression::input(const std::string& name) {
     auto out = std::make_shared<PhysicalExpression>();
 
     ExprNode node;
     node.op = ExprOp::INPUT;
-    node.input_index = inputIndex;
+    node.input_slot = out->getOrCreateInputSlot(name);
 
     out->nodes.push_back(node);
     out->output_node = 0;
-    out->num_inputs = inputIndex + 1;
 
     return Expression(out, 0);
 }
 
 Expression::Expression(double value) {
     expr = std::make_shared<PhysicalExpression>();
-    expr->num_inputs = 0;
 
     ExprNode node{};
     node.op = ExprOp::SCALAR_FP;
@@ -196,19 +186,6 @@ Expression::Expression(double value) {
     expr->nodes.push_back(node);
     expr->output_node = nodeIndex;
 }
-
-// Expression::Expression(int64_t value) {
-//     expr = std::make_shared<PhysicalExpression>();
-//     expr->num_inputs = 0;
-//
-//     ExprNode node{};
-//     node.op = ExprOp::SCALAR_INT;
-//     node.scalar_int = value;
-//
-//     nodeIndex = static_cast<uint32_t>(expr->nodes.size());
-//     expr->nodes.push_back(node);
-//     expr->output_node = nodeIndex;
-// }
 
 Expression Expression::scalar(double value) { return Expression(value); }
 // Expression Expression::scalar(int64_t value) { return Expression(value); }
@@ -222,12 +199,68 @@ PhysicalExpression Expression::expression() const {
     return out;
 }
 
+struct MergeInputsResult {
+    std::vector<NamedInput> mergedInputs;
+    std::vector<uint32_t> lhsSlotRemap;
+    std::vector<uint32_t> rhsSlotRemap;
+};
+
+static MergeInputsResult mergeInputsByName(const PhysicalExpression& lhs, const PhysicalExpression& rhs) {
+    MergeInputsResult result;
+
+    std::unordered_map<std::string, uint32_t> mergedByName;
+    mergedByName.reserve(lhs.inputs.size() + rhs.inputs.size());
+
+    auto getOrCreateMergedSlot = [&](const std::string& name) -> uint32_t {
+        auto it = mergedByName.find(name);
+        if (it != mergedByName.end())
+            return it->second;
+
+        const uint32_t slot = static_cast<uint32_t>(result.mergedInputs.size());
+        mergedByName.emplace(name, slot);
+        result.mergedInputs.push_back(NamedInput{name, slot});
+        return slot;
+    };
+
+    result.lhsSlotRemap.resize(lhs.inputs.size());
+    for (size_t i = 0; i < lhs.inputs.size(); ++i) {
+        result.lhsSlotRemap[i] = getOrCreateMergedSlot(lhs.inputs[i].name);
+    }
+
+    result.rhsSlotRemap.resize(rhs.inputs.size());
+    for (size_t i = 0; i < rhs.inputs.size(); ++i) {
+        result.rhsSlotRemap[i] = getOrCreateMergedSlot(rhs.inputs[i].name);
+    }
+
+    return result;
+}
+
+static void remapClonedInputSlots(const PhysicalExpression& sourceExpr,
+                                  const std::unordered_map<uint32_t, uint32_t>& oldToNewNodeMap,
+                                  const std::vector<uint32_t>& slotRemap,
+                                  PhysicalExpression& outExpr) {
+    for (const auto& [oldNodeIndex, newNodeIndex] : oldToNewNodeMap) {
+        const ExprNode& oldNode = sourceExpr.nodes.at(oldNodeIndex);
+        if (oldNode.op != ExprOp::INPUT)
+            continue;
+
+        if (oldNode.input_slot >= slotRemap.size()) {
+            throw std::runtime_error("Input slot out of range while remapping cloned expression.");
+        }
+
+        ExprNode& newNode = outExpr.nodes.at(newNodeIndex);
+        newNode.input_slot = slotRemap[oldNode.input_slot];
+    }
+}
+
 Expression Expression::binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op) {
     if (!lhsExpr.expr || !rhsExpr.expr)
         throw std::runtime_error("Cannot combine empty expressions");
 
     auto out = std::make_shared<PhysicalExpression>();
-    out->num_inputs = std::max(lhsExpr.expr->num_inputs, rhsExpr.expr->num_inputs);
+
+    const MergeInputsResult mergedInputs = mergeInputsByName(*lhsExpr.expr, *rhsExpr.expr);
+    out->inputs = mergedInputs.mergedInputs;
 
     std::unordered_map<uint32_t, uint32_t> lhsMap;
     std::unordered_map<uint32_t, uint32_t> rhsMap;
@@ -235,7 +268,10 @@ Expression Expression::binaryOp(const Expression& lhsExpr, const Expression& rhs
     uint32_t newLhsIndex = cloneSubtree(*lhsExpr.expr, lhsExpr.nodeIndex, *out, lhsMap);
     uint32_t newRhsIndex = cloneSubtree(*rhsExpr.expr, rhsExpr.nodeIndex, *out, rhsMap);
 
-    ExprNode node;
+    remapClonedInputSlots(*lhsExpr.expr, lhsMap, mergedInputs.lhsSlotRemap, *out);
+    remapClonedInputSlots(*rhsExpr.expr, rhsMap, mergedInputs.rhsSlotRemap, *out);
+
+    ExprNode node{};
     node.op = op;
     node.lhs = newLhsIndex;
     node.rhs = newRhsIndex;
@@ -252,12 +288,12 @@ Expression Expression::unaryOp(const Expression& inputExpr, ExprOp op) {
         throw std::runtime_error("Cannot apply unary op to empty expression");
 
     auto out = std::make_shared<PhysicalExpression>();
-    out->num_inputs = inputExpr.expr->num_inputs;
+    out->inputs = inputExpr.expr->inputs;
 
     std::unordered_map<uint32_t, uint32_t> oldToNew;
     uint32_t newLhsIndex = cloneSubtree(*inputExpr.expr, inputExpr.nodeIndex, *out, oldToNew);
 
-    ExprNode node;
+    ExprNode node{};
     node.op = op;
     node.lhs = newLhsIndex;
 
@@ -272,16 +308,9 @@ Expression Expression::operator+(const Expression& other) const { return binaryO
 Expression Expression::operator-(const Expression& other) const { return binaryOp(*this, other, ExprOp::SUB); }
 Expression Expression::operator*(const Expression& other) const { return binaryOp(*this, other, ExprOp::MUL); }
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
-// Expression Expression::operator+(double scalarValue) const { return *this + Expression::scalar(scalarValue); }
-// Expression Expression::operator-(double scalarValue) const { return *this - Expression::scalar(scalarValue); }
-// Expression Expression::operator*(double scalarValue) const { return *this * Expression::scalar(scalarValue); }
-// Expression Expression::operator/(double scalarValue) const { return *this / Expression::scalar(scalarValue); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
-// x_i^y_i  both tensors <- deprecated comment
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
-// x_i^scalar_exponent
-// Expression Expression::pow(double exponent) const { return this->pow(Expression::scalar(exponent)); }
 
 Expression Expression::ln() const { return unaryOp(*this, ExprOp::LN); }
 Expression Expression::log2() const { return unaryOp(*this, ExprOp::LOG2); }
@@ -302,5 +331,16 @@ Expression Expression::exp() const { return unaryOp(*this, ExprOp::EXP); }
 Expression Expression::exp2() const { return unaryOp(*this, ExprOp::EXP2); }
 Expression Expression::exp10() const { return unaryOp(*this, ExprOp::EXP10); }
 // Can also use Expression::scalar(s).pow(x) for s^x_i
+
+uint32_t PhysicalExpression::getOrCreateInputSlot(const std::string& name) {
+    for (const NamedInput& input : inputs) {
+        if (input.name == name)
+            return input.slot;
+    }
+
+    const uint32_t slot = static_cast<uint32_t>(inputs.size());
+    inputs.push_back(NamedInput{name, slot});
+    return slot;
+}
 
 }  // namespace ThorImplementation

@@ -8,8 +8,9 @@
 
 #include <stdexcept>
 
-using namespace ThorImplementation;
+using namespace std;
 
+namespace ThorImplementation {
 namespace {
 cudaDataType_t toCudaDataType(TensorDescriptor::DataType dtype) {
     switch (dtype) {
@@ -47,7 +48,7 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
 
     EquationSignature sig{};
     sig.rank = 1;  // V1 assumes flattened contiguous tensors
-    sig.num_inputs = expr.num_inputs;
+    sig.num_inputs = expr.numInputs();
     // sig.dtype = toCudaDataType(dtype);
     sig.dtype = dtype;
     sig.contiguous = true;
@@ -86,7 +87,7 @@ static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimen
     }
 }
 
-StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
+StampedEquation FusedEquation::stamp(std::vector<Tensor>& inputs,
                                      const Stream& stream,
                                      const std::vector<uint64_t>& requestedOutputShape) const {
     if (!compiledFlatEquation) {
@@ -342,3 +343,49 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
 
     return requiresBroadcast;
 }
+
+std::vector<Tensor> FusedEquation::bindNamedInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
+    if (!compiledFlatEquation) {
+        throw std::runtime_error("Cannot bind inputs for an empty FusedEquation.");
+    }
+
+    const std::vector<std::string>& expectedNames = compiledFlatEquation->input_names;
+
+    std::vector<Tensor> orderedInputs;
+    orderedInputs.reserve(expectedNames.size());
+
+    for (const std::string& name : expectedNames) {
+        auto it = namedInputs.find(name);
+        if (it == namedInputs.end()) {
+            throw std::runtime_error("Missing required fused equation input: " + name);
+        }
+        orderedInputs.push_back(it->second);
+    }
+
+    std::unordered_set<std::string> expected_input_set;
+    expected_input_set.reserve(namedInputs.size());
+    for (const auto& [name, _] : namedInputs) {
+        expected_input_set.insert(name);
+    }
+    for (const auto& [name, _] : namedInputs) {
+        if (!expected_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected input sent to fused equation: " + name);
+        }
+    }
+
+    return orderedInputs;
+}
+
+StampedEquation FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                     const Stream& stream,
+                                     const std::vector<uint64_t>& requestedOutputShape) const {
+    std::vector<Tensor> orderedInputs = bindNamedInputs(inputs);
+    return stamp(orderedInputs, stream, requestedOutputShape);
+}
+
+void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
+    std::vector<Tensor> orderedInputs = bindNamedInputs(inputs);
+    run(std::move(orderedInputs), output, stream);
+}
+
+}  // namespace ThorImplementation
