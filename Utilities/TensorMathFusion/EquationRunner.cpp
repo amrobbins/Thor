@@ -153,7 +153,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     void* out_ptr = output.getMemPtr();
-    BroadcastInfoHostBuffer* deviceBroadcastInfoPtr = reinterpret_cast<BroadcastInfoHostBuffer*>(deviceBroadcastInfo.getMemPtr());
+    BroadcastInfoBufferView* deviceBroadcastInfoPtr = reinterpret_cast<BroadcastInfoBufferView*>(deviceBroadcastInfo.getMemPtr());
 
     std::vector<void*> args;
     args.reserve(inputs.size() + 2);
