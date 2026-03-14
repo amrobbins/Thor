@@ -55,18 +55,25 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
     }
 
     if (broadcast_support) {
-        ss << "struct BroadcastInputInfo {\n";
-        ss << "  unsigned long long strides[10];\n";
-        ss << "};\n\n";
+        ss << R"DEVICE(
+            struct BroadcastInfoHeader {
+              unsigned int rank;
+              unsigned int num_inputs;
+              unsigned long long numel;
+            };
 
-        ss << "struct BroadcastInfo {\n";
-        ss << "  unsigned int rank;\n";
-        ss << "  unsigned int _pad;\n";
-        ss << "  unsigned long long numel;\n";
-        ss << "  unsigned long long output_strides[10];\n";
-        const uint32_t emitted_num_inputs = std::max<uint32_t>(expr.num_inputs, 1);
-        ss << "  BroadcastInputInfo inputs[" << emitted_num_inputs << "];\n";
-        ss << "};\n\n";
+            __device__ __forceinline__
+            const unsigned long long* broadcast_output_strides(const BroadcastInfoHeader* broadcast) {
+              return reinterpret_cast<const unsigned long long*>(
+                  reinterpret_cast<const char*>(broadcast) + sizeof(BroadcastInfoHeader));
+            }
+
+            __device__ __forceinline__
+            const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* broadcast) {
+              return broadcast_output_strides(broadcast) + broadcast->rank;
+            }
+
+        )DEVICE";
     }
 
     ss << "extern \"C\" __global__\n";
@@ -77,7 +84,7 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
     }
 
     if (broadcast_support) {
-        ss << inout_dtype << "* out, const BroadcastInfo* broadcast) {\n";
+        ss << inout_dtype << "* out, const BroadcastInfoHeader* broadcast) {\n";
     } else {
         ss << inout_dtype << "* out, unsigned long long numel) {\n";
     }
@@ -85,35 +92,40 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
     ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
 
     if (broadcast_support) {
-        ss << "  if (idx >= broadcast->numel) return;\n\n";
+        ss << R"DEVICE(
+          if (idx >= broadcast->numel) return;
 
-        ss << "  unsigned long long coord[10];\n";
-        ss << "  #pragma unroll\n";
-        ss << "  for (unsigned int axis = 0; axis < 10; ++axis) {\n";
-        ss << "    coord[axis] = 0ULL;\n";
-        ss << "  }\n\n";
+          const unsigned int rank = broadcast->rank;
+          const unsigned long long* output_strides = broadcast_output_strides(broadcast);
+          const unsigned long long* input_strides = broadcast_input_strides(broadcast);
 
-        ss << "  unsigned long long remaining = idx;\n";
-        ss << "  #pragma unroll\n";
-        ss << "  for (unsigned int axis = 0; axis < 10; ++axis) {\n";
-        ss << "    if (axis < broadcast->rank) {\n";
-        ss << "      const unsigned long long stride = broadcast->output_strides[axis];\n";
-        ss << "      coord[axis] = remaining / stride;\n";
-        ss << "      remaining = remaining % stride;\n";
-        ss << "    }\n";
-        ss << "  }\n\n";
+        )DEVICE";
 
         for (uint32_t inputIdx = 0; inputIdx < expr.num_inputs; ++inputIdx) {
             ss << "  unsigned long long in" << inputIdx << "_offset = 0ULL;\n";
-            ss << "  #pragma unroll\n";
-            ss << "  for (unsigned int axis = 0; axis < 10; ++axis) {\n";
-            ss << "    if (axis < broadcast->rank) {\n";
-            ss << "      in" << inputIdx << "_offset += coord[axis] * broadcast->inputs[" << inputIdx << "].strides[axis];\n";
-            ss << "    }\n";
-            ss << "  }\n";
         }
 
-        ss << "\n";
+        ss << R"DEVICE(
+          unsigned long long remaining = idx;
+          for (unsigned int axis = 0; axis < rank; ++axis) {
+            const unsigned long long stride = output_strides[axis];
+            const unsigned long long c = remaining / stride;
+            remaining %= stride;
+        )DEVICE";
+
+        for (uint32_t inputIdx = 0; inputIdx < expr.num_inputs; ++inputIdx) {
+            if (inputIdx == 0)
+                ss << "    in" << inputIdx << "_offset += c * input_strides[axis];\n";
+            else if (inputIdx == 1)
+                ss << "    in" << inputIdx << "_offset += c * input_strides[rank + axis];\n";
+            else
+                ss << "    in" << inputIdx << "_offset += c * input_strides[" << inputIdx << " * rank + axis];\n";
+        }
+
+        ss << R"DEVICE(
+          }
+
+        )DEVICE";
     } else {
         ss << "  if (idx >= numel) return;\n\n";
     }
@@ -123,10 +135,9 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
         switch (n.op) {
             case ExprOp::INPUT:
                 if (broadcast_support) {
-                    ss << "  " << fp_type << " t" << i << " = " << fp_type << "(in" << n.input_index << "[in" << n.input_index
-                       << "_offset]);\n";
+                    ss << "  " << fp_type << " t" << i << "(in" << n.input_index << "[in" << n.input_index << "_offset]);\n";
                 } else {
-                    ss << "  " << fp_type << " t" << i << " = " << fp_type << "(in" << n.input_index << "[idx]);\n";
+                    ss << "  " << fp_type << " t" << i << "(in" << n.input_index << "[idx]);\n";
                 }
                 break;
             case ExprOp::SCALAR_FP:

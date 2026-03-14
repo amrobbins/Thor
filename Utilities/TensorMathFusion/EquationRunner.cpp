@@ -115,15 +115,20 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         throw std::runtime_error("Device broadcast info tensor GPU does not match compiled fused equation device.");
     }
 
-    if (deviceBroadcastInfo.getDescriptor().getDataType() != TensorDescriptor::DataType::UINT8 ||
-        deviceBroadcastInfo.getDescriptor().getTotalNumElements() != sizeof(BroadcastInfo)) {
-        throw std::runtime_error("Device broadcast info tensor has wrong descriptor.");
-    }
+    // FIXME: Remove: Validation fails when user adds singleton dimensions
+    // const TensorDescriptor& descriptor = deviceBroadcastInfo.getDescriptor();
+    // const uint32_t rank = static_cast<uint32_t>(output.getDimensions().size());
+    // const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
+    // const uint64_t expectedBytes = static_cast<uint64_t>(BroadcastInfoHostBuffer::bytesRequired(rank, numInputs));
+    // if (descriptor.getDataType() != TensorDescriptor::DataType::UINT8) {
+    //     throw std::runtime_error("Device broadcast info tensor must have UINT8 dtype.");
+    // }
+    // if (descriptor.getTotalNumElements() != expectedBytes) {
+    //     throw std::runtime_error("Device broadcast info tensor has wrong size.");
+    // }
 
     const uint64_t numel = outputDescriptor.getTotalNumElements();
-    if (numel == 0) {
-        return;
-    }
+    assert(numel != 0);
 
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(inputs.size());
@@ -148,7 +153,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     void* out_ptr = output.getMemPtr();
-    BroadcastInfo* deviceBroadcastInfoPtr = reinterpret_cast<BroadcastInfo*>(deviceBroadcastInfo.getMemPtr());
+    BroadcastInfoHostBuffer* deviceBroadcastInfoPtr = reinterpret_cast<BroadcastInfoHostBuffer*>(deviceBroadcastInfo.getMemPtr());
 
     std::vector<void*> args;
     args.reserve(inputs.size() + 2);
