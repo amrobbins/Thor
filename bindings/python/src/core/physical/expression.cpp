@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
 #include "Utilities/TensorMathFusion/FusedEquation.h"
@@ -143,19 +144,19 @@ void bind_fused_equation(nb::module_& physical) {
     auto fused_equation = nb::class_<FusedEquation>(physical, "FusedEquation");
     fused_equation.attr("__module__") = "thor.physical";
 
-    fused_equation.def(
-        "stamp",
-        nb::overload_cast<std::vector<Tensor>&, const Stream&, const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
-        "inputs"_a,
-        "stream"_a,
-        "requestedOutputShape"_a = std::vector<uint64_t>{},
-        R"nbdoc(
-Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
-
-inputs may be either:
-- a list of tensors in the compiled input order
-- or a dict mapping input names to tensors
-)nbdoc");
+    //     fused_equation.def(
+    //         "stamp",
+    //         nb::overload_cast<std::vector<Tensor>&, const Stream&, const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
+    //         "inputs"_a,
+    //         "stream"_a,
+    //         "requestedOutputShape"_a = std::vector<uint64_t>{},
+    //         R"nbdoc(
+    // Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
+    //
+    // inputs may be either:
+    // - a list of tensors in the compiled input order
+    // - or a dict mapping input names to tensors
+    // )nbdoc");
 
     fused_equation.def("stamp",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, const Stream&, const std::vector<uint64_t>&>(
@@ -166,23 +167,22 @@ inputs may be either:
                        R"nbdoc(
 Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
 
-inputs may be either:
-- a list of tensors in the compiled input order
-- or a dict mapping input names to tensors
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
 )nbdoc");
 
-    fused_equation.def("run",
-                       nb::overload_cast<std::vector<Tensor>, Tensor, Stream>(&FusedEquation::run, nb::const_),
-                       "inputs"_a,
-                       "output"_a,
-                       "stream"_a,
-                       R"nbdoc(
-Run a fused equation with the thor.physical.PhysicalTensor's provided.
-
-inputs may be either:
-- a list of tensors in the compiled input order
-- or a dict mapping input names to tensors
-)nbdoc");
+    //     fused_equation.def("run",
+    //                        nb::overload_cast<std::vector<Tensor>, Tensor, Stream>(&FusedEquation::run, nb::const_),
+    //                        "inputs"_a,
+    //                        "output"_a,
+    //                        "stream"_a,
+    //                        R"nbdoc(
+    // Run a fused equation with the thor.physical.PhysicalTensor's provided.
+    //
+    // inputs may be either:
+    // - a list of tensors in the compiled input order
+    // - or a dict mapping input names to tensors
+    // )nbdoc");
 
     fused_equation.def("run",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),

@@ -98,7 +98,7 @@ StampedEquation FusedEquation::stamp(std::vector<Tensor>& inputs,
         throw std::runtime_error("FusedEquation::stamp requires at least one input tensor.");
     }
 
-    if (inputs.size() != compiledFlatEquation->num_inputs) {
+    if (inputs.size() != compiledFlatEquation->numInputs()) {
         throw std::runtime_error("Wrong number of inputs passed to FusedEquation::stamp.");
     }
 
@@ -351,6 +351,10 @@ std::vector<Tensor> FusedEquation::bindNamedInputs(const std::unordered_map<std:
 
     const std::vector<std::string>& expectedNames = compiledFlatEquation->input_names;
 
+    if (expectedNames.empty()) {
+        throw std::runtime_error("This fused equation has no compiled named inputs.");
+    }
+
     std::vector<Tensor> orderedInputs;
     orderedInputs.reserve(expectedNames.size());
 
@@ -363,8 +367,8 @@ std::vector<Tensor> FusedEquation::bindNamedInputs(const std::unordered_map<std:
     }
 
     std::unordered_set<std::string> expected_input_set;
-    expected_input_set.reserve(namedInputs.size());
-    for (const auto& [name, _] : namedInputs) {
+    expected_input_set.reserve(expectedNames.size());
+    for (const std::string& name : expectedNames) {
         expected_input_set.insert(name);
     }
     for (const auto& [name, _] : namedInputs) {

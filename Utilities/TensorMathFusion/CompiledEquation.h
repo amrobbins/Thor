@@ -40,8 +40,9 @@ struct CompiledEquation {
 
     TensorDescriptor::DataType dtype;
     int deviceNum = 0;
-    uint32_t num_inputs = 0;
     std::vector<std::string> input_names;
+
+    uint64_t numInputs() { return input_names.size(); }
 
     CompiledEquation() = default;
     CompiledEquation(const CompiledEquation&) = delete;

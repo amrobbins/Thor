@@ -76,6 +76,7 @@ def _copy_gpu_to_numpy(t: thor.physical.PhysicalTensor, stream, dtype: thor.Data
 
 def _run_expr_broadcast(
     expr,
+    input_names: list[str],
     *inputs: np.ndarray,
     dtype: thor.DataType,
     gpu_num: int = 0,
@@ -94,7 +95,9 @@ def _run_expr_broadcast(
     )
 
     stream = thor.physical.Stream(gpu_num)
-    gpu_inputs = [_copy_numpy_to_gpu(arr, stream, dtype, gpu_num=gpu_num) for arr in inputs]
+    gpu_inputs = {
+        input_names[i]: _copy_numpy_to_gpu(inputs[i], stream, dtype, gpu_num=gpu_num) for i in range(len(inputs))
+    }
     gpu_output = _gpu_tensor(list(expected_shape), dtype, gpu_num=gpu_num)
 
     eq.run(gpu_inputs, gpu_output, stream)
@@ -126,7 +129,7 @@ def test_broadcast_same_rank_singleton_axis_add(dtype: thor.DataType):
     y_np = np.array([[10.0, 20.0, 30.0, 40.0]], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
 
     expected = x_np.astype(compute_dtype) + y_np.astype(compute_dtype)
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -152,7 +155,7 @@ def test_broadcast_left_pad_add(dtype: thor.DataType):
     ).astype(storage_dtype)
 
     expected = x_np.astype(compute_dtype) + y_np.astype(compute_dtype)
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -190,7 +193,7 @@ def test_broadcast_multi_axis_nested_expression(dtype: thor.DataType):
     z_ref = z_np.astype(compute_dtype)
 
     expected = np.maximum((x_ref + y_ref) * (z_ref + 1.0), 2.0)
-    got = _run_expr_broadcast(expr, x_np, y_np, z_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y', 'z'], x_np, y_np, z_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -220,7 +223,7 @@ def test_broadcast_div_pow_expression(dtype: thor.DataType):
     y_ref = y_np.astype(compute_dtype)
 
     expected = np.power(x_ref / (y_ref + 1.0), 2.0)
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -240,7 +243,7 @@ def test_broadcast_scalar_lift_like_expression(dtype: thor.DataType):
     y_np = np.array([[10.0]], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
 
     expected = (x_np.astype(compute_dtype) * 0.5) + y_np.astype(compute_dtype) - 3.0
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -276,7 +279,7 @@ def test_broadcast_three_inputs_mixed_ranks(dtype: thor.DataType):
     z_np = np.array([0.1, 0.2, 0.3], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
 
     expected = x_np.astype(compute_dtype) + y_np.astype(compute_dtype) * z_np.astype(compute_dtype)
-    got = _run_expr_broadcast(expr, x_np, y_np, z_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y', 'z'], x_np, y_np, z_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -309,7 +312,10 @@ def test_broadcast_requested_output_shape_add_singletons(dtype: thor.DataType):
         use_fast_math=False,
     )
 
-    stamped_equation = fused_equation.stamp([x_gpu, y_gpu], stream, requestedOutputShape=[1, 1, 3])
+    stamped_equation = fused_equation.stamp({
+        'x': x_gpu,
+        'y': y_gpu
+    }, stream, requestedOutputShape=[1, 1, 3])
     stamped_equation.run()
 
     out_gpu = stamped_equation.output_tensor
@@ -383,7 +389,11 @@ def test_broadcast_nested_expression_fp32_numerical_stamped():
         use_fast_math=False,
     )
 
-    stamped_equation = fused_equation.stamp([x_gpu, y_gpu, z_gpu], stream)
+    stamped_equation = fused_equation.stamp({
+        'x': x_gpu,
+        'y': y_gpu,
+        'z': z_gpu
+    }, stream)
     stamped_equation.run()
 
     out_gpu = stamped_equation.output_tensor
@@ -419,7 +429,10 @@ def test_broadcast_incompatible_shapes_raises(dtype: thor.DataType):
     out_gpu = _gpu_tensor([2, 4], dtype, gpu_num=0)
 
     with pytest.raises(RuntimeError, match="broadcast|compatible|axis|dimension"):
-        eq.run([x_gpu, y_gpu], out_gpu, stream)
+        eq.run({
+            'x': x_gpu,
+            'y': y_gpu
+        }, out_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -438,7 +451,7 @@ def test_broadcast_four_dimensional_multi_axis(dtype: thor.DataType):
             10.0).astype(storage_dtype)
 
     expected = (x_np.astype(compute_dtype) + y_np.astype(compute_dtype)) * 0.5
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -458,7 +471,7 @@ def test_broadcast_all_singleton_axes_rhs(dtype: thor.DataType):
     y_np = np.array([[[3.5]]], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
 
     expected = x_np.astype(compute_dtype) + (y_np.astype(compute_dtype) * 2.0) - 1.0
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -478,7 +491,7 @@ def test_broadcast_rightmost_vector(dtype: thor.DataType):
     y_np = np.array([10.0, 20.0, 30.0, 40.0], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
 
     expected = (x_np.astype(compute_dtype) * 2.0) + y_np.astype(compute_dtype)
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -511,7 +524,7 @@ def test_broadcast_repeated_same_input(dtype: thor.DataType):
     y_ref = y_np.astype(compute_dtype)
 
     expected = x_ref + x_ref * y_ref - np.minimum(x_ref, y_ref + 100.0)
-    got = _run_expr_broadcast(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr_broadcast(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
@@ -545,7 +558,10 @@ def test_broadcast_direct_run_requested_output_shape_add_singletons(dtype: thor.
         use_fast_math=False,
     )
 
-    fused_equation.run([x_gpu, y_gpu], out_gpu, stream)
+    fused_equation.run({
+        'x': x_gpu,
+        'y': y_gpu
+    }, out_gpu, stream)
 
     got = _copy_gpu_to_numpy(out_gpu, stream, dtype)
     assert got.shape == expected.shape
@@ -599,7 +615,10 @@ def test_broadcast_stamped_reused_twice(dtype: thor.DataType):
         use_fast_math=False,
     )
 
-    stamped_equation = fused_equation.stamp([x_gpu, y_gpu], stream)
+    stamped_equation = fused_equation.stamp({
+        'x': x_gpu,
+        'y': y_gpu
+    }, stream)
 
     compute_np_dtype = _numpy_compute_dtype(dtype)
     expected_first = (x_np_view.astype(compute_np_dtype) + y_np_view.astype(compute_np_dtype)) * (

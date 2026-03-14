@@ -20,7 +20,7 @@ class EquationCompiler {
     std::shared_ptr<CompiledEquation> loadCubin(const EquationCacheKey& key,
                                                 const std::vector<char>& cubin,
                                                 const std::string& kernel_name,
-                                                uint32_t num_inputs,
+                                                const std::vector<std::string>& input_names,
                                                 TensorDescriptor::DataType dtype,
                                                 int device_num);
 };

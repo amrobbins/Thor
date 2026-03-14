@@ -15,13 +15,6 @@ class FusedEquation {
                                  int device_num,
                                  bool use_fast_math = false);
 
-    // DEPRECATED: FIXME Delete: or make private actually
-    [[nodiscard]] StampedEquation stamp(std::vector<Tensor>& inputs,
-                                        const Stream& stream,
-                                        const std::vector<uint64_t>& requestedOutputShape = {}) const;
-    // DEPRECATED: FIXME Delete: or make private actually
-    void run(std::vector<Tensor> inputs, Tensor output, Stream stream) const;
-
     [[nodiscard]] StampedEquation stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                         const Stream& stream,
                                         const std::vector<uint64_t>& requestedOutputShape = {}) const;
@@ -31,6 +24,11 @@ class FusedEquation {
    private:
     explicit FusedEquation(std::shared_ptr<CompiledEquation> flatEquation, std::shared_ptr<CompiledEquation> broadcastEquation)
         : compiledFlatEquation(std::move(flatEquation)), compiledBroadcastEquation(std::move(broadcastEquation)) {}
+
+    [[nodiscard]] StampedEquation stamp(std::vector<Tensor>& inputs,
+                                    const Stream& stream,
+                                    const std::vector<uint64_t>& requestedOutputShape = {}) const;
+    void run(std::vector<Tensor> inputs, Tensor output, Stream stream) const;
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
     static Tensor createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,

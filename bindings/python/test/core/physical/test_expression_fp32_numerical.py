@@ -57,11 +57,14 @@ def _cpu_numpy_view(t: thor.physical.PhysicalTensor, dtype: thor.DataType) -> np
     return arr
 
 
-def _copy_numpy_to_gpu(values: np.ndarray, dtype: thor.DataType, gpu_num: int = 0) -> thor.physical.PhysicalTensor:
+def _copy_numpy_to_gpu(
+        values: np.ndarray,
+        stream: thor.physical.Stream,
+        dtype: thor.DataType,
+        gpu_num: int = 0) -> thor.physical.PhysicalTensor:
     values = np.asarray(values, dtype=_numpy_storage_dtype(dtype), order="C")
     cpu = _cpu_tensor(list(values.shape), dtype)
     gpu = _gpu_tensor(list(values.shape), dtype, gpu_num=gpu_num)
-    stream = thor.physical.Stream(gpu_num)
 
     cpu_view = _cpu_numpy_view(cpu, dtype)
     cpu_view[...] = values
@@ -78,6 +81,7 @@ def _copy_gpu_to_numpy(t: thor.physical.PhysicalTensor, dtype: thor.DataType, st
 
 def _run_expr(
     expr,
+    input_names: list[str],
     *inputs: np.ndarray,
     dtype: thor.DataType,
     gpu_num: int = 0,
@@ -96,9 +100,11 @@ def _run_expr(
         use_fast_math=use_fast_math,
     )
 
-    gpu_inputs = [_copy_numpy_to_gpu(arr, dtype, gpu_num=gpu_num) for arr in inputs]
-    gpu_output = _gpu_tensor(list(first_shape), dtype, gpu_num=gpu_num)
     stream = thor.physical.Stream(gpu_num)
+    gpu_inputs = {
+        input_names[i]: _copy_numpy_to_gpu(inputs[i], stream, dtype, gpu_num=gpu_num) for i in range(len(inputs))
+    }
+    gpu_output = _gpu_tensor(list(first_shape), dtype, gpu_num=gpu_num)
 
     eq.run(gpu_inputs, gpu_output, stream)
     return _copy_gpu_to_numpy(gpu_output, dtype, stream)
@@ -132,7 +138,7 @@ def test_add_sub_mul_div_numerical(dtype: thor.DataType):
     y_ref = y_np.astype(compute_dtype)
 
     expected = ((x_ref + y_ref) - 2.0) * (x_ref / (y_ref + 1.0))
-    got = _run_expr(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -154,7 +160,7 @@ def test_pow_numerical(dtype: thor.DataType):
     y_ref = y_np.astype(compute_dtype)
 
     expected = np.power(x_ref, y_ref)
-    got = _run_expr(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -172,7 +178,7 @@ def test_rpow_numerical(dtype: thor.DataType):
     x_ref = x_np.astype(compute_dtype)
 
     expected = np.power(2.0, x_ref)
-    got = _run_expr(expr, x_np, dtype=dtype)
+    got = _run_expr(expr, ['x'], x_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -194,7 +200,7 @@ def test_negation_numerical(dtype: thor.DataType):
     y_ref = y_np.astype(compute_dtype)
 
     expected = -(np.power(x_ref, y_ref)) + 3.0
-    got = _run_expr(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -216,7 +222,7 @@ def test_min_max_numerical(dtype: thor.DataType):
     y_ref = y_np.astype(compute_dtype)
 
     expected = np.maximum(np.minimum(x_ref, y_ref), 3.0)
-    got = _run_expr(expr, x_np, y_np, dtype=dtype)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -232,9 +238,9 @@ def test_exp_family_numerical(dtype: thor.DataType):
     x_np = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
     x_ref = x_np.astype(compute_dtype)
 
-    got_exp = _run_expr(ex.exp(x), x_np, dtype=dtype)
-    got_exp2 = _run_expr(ex.exp2(x), x_np, dtype=dtype)
-    got_exp10 = _run_expr(ex.exp10(x), x_np, dtype=dtype)
+    got_exp = _run_expr(ex.exp(x), ['x'], x_np, dtype=dtype)
+    got_exp2 = _run_expr(ex.exp2(x), ['x'], x_np, dtype=dtype)
+    got_exp10 = _run_expr(ex.exp10(x), ['x'], x_np, dtype=dtype)
 
     _assert_close(got_exp, np.exp(x_ref), dtype)
     _assert_close(got_exp2, np.exp2(x_ref), dtype)
@@ -252,11 +258,11 @@ def test_log_family_numerical(dtype: thor.DataType):
     x_np = np.array([0.25, 0.5, 1.0, 2.0, 8.0, 10.0], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
     x_ref = x_np.astype(compute_dtype)
 
-    got_ln = _run_expr(ex.ln(x), x_np, dtype=dtype)
-    got_log_default = _run_expr(ex.log(x), x_np, dtype=dtype)
-    got_log2 = _run_expr(ex.log2(x), x_np, dtype=dtype)
-    got_log10 = _run_expr(ex.log10(x), x_np, dtype=dtype)
-    got_log_base7 = _run_expr(ex.log(x, 7.0), x_np, dtype=dtype)
+    got_ln = _run_expr(ex.ln(x), ['x'], x_np, dtype=dtype)
+    got_log_default = _run_expr(ex.log(x), ['x'], x_np, dtype=dtype)
+    got_log2 = _run_expr(ex.log2(x), ['x'], x_np, dtype=dtype)
+    got_log10 = _run_expr(ex.log10(x), ['x'], x_np, dtype=dtype)
+    got_log_base7 = _run_expr(ex.log(x, 7.0), ['x'], x_np, dtype=dtype)
 
     _assert_close(got_ln, np.log(x_ref), dtype)
     _assert_close(got_log_default, np.log(x_ref), dtype)
@@ -278,7 +284,7 @@ def test_sqrt_numerical(dtype: thor.DataType):
     x_ref = x_np.astype(compute_dtype)
 
     expected = np.sqrt(x_ref)
-    got = _run_expr(expr, x_np, dtype=dtype)
+    got = _run_expr(expr, ['x'], x_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -300,7 +306,7 @@ def test_scalar_only_expression_numerical(dtype: thor.DataType):
     expected_value = np.exp(compute_dtype(2.0)) + np.log2(compute_dtype(8.0)) - np.sqrt(compute_dtype(9.0))
     expected = np.full(x_np.shape, expected_value, dtype=compute_dtype)
 
-    got = _run_expr(lifted_expr, x_np, dtype=dtype)
+    got = _run_expr(lifted_expr, ['x'], x_np, dtype=dtype)
     _assert_close(got, expected, dtype)
 
 
@@ -331,7 +337,7 @@ def test_nested_expression_numerical(dtype: thor.DataType):
         np.sqrt(np.exp2((x_ref + 3.0) * (y_ref - 1.0))),
         np.minimum(np.power(z_ref / 2.0, 2.0), np.log2(y_ref + 8.0)),
     )
-    got = _run_expr(expr, x_np, y_np, z_np, dtype=dtype)
+    got = _run_expr(expr, ['x', 'y', 'z'], x_np, y_np, z_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
 
@@ -353,7 +359,7 @@ def test_fast_math_toggle_numerical(dtype: thor.DataType, use_fast_math: bool):
     x_ref = x_np.astype(compute_dtype)
     y_ref = y_np.astype(compute_dtype)
 
-    got = _run_expr(expr, x_np, y_np, dtype=dtype, use_fast_math=use_fast_math)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype, use_fast_math=use_fast_math)
     expected = np.exp(np.log2(x_ref + 8.0) + np.power(y_ref, 2.0) / 3.0)
 
     rtol, atol = _rtol_atol(dtype)
@@ -428,7 +434,11 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
         use_fast_math=False,
     )
 
-    stamped_equation = fused_equation.stamp([x_gpu, y_gpu, z_gpu], stream)
+    stamped_equation = fused_equation.stamp({
+        'x': x_gpu,
+        'y': y_gpu,
+        'z': z_gpu
+    }, stream)
     stamped_equation.run()
 
     out_gpu = stamped_equation.output_tensor

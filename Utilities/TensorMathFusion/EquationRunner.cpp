@@ -9,9 +9,9 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         throw std::runtime_error("EquationInstance has no compiled equation.");
     }
 
-    if (inputs.size() != compiledEquation->num_inputs) {
+    if (inputs.size() != compiledEquation->numInputs()) {
         std::string error_message = "Wrong number of inputs actual " + std::to_string(inputs.size()) + " vs expected " +
-                                    std::to_string(compiledEquation->num_inputs) + "\n";
+                                    std::to_string(compiledEquation->numInputs()) + "\n";
         throw std::runtime_error(error_message.c_str());
     }
 
@@ -84,9 +84,9 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         throw std::runtime_error("EquationRunner::run has no compiled broadcast equation.");
     }
 
-    if (inputs.size() != compiledEquation->num_inputs) {
+    if (inputs.size() != compiledEquation->numInputs()) {
         throw std::runtime_error("Wrong number of inputs actual " + std::to_string(inputs.size()) + " vs expected " +
-                                 std::to_string(compiledEquation->num_inputs));
+                                 std::to_string(compiledEquation->numInputs()));
     }
 
     const TensorDescriptor& outputDescriptor = output.getDescriptor();

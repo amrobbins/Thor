@@ -48,7 +48,7 @@ static void ensureCudaContextCurrent(int device_num) {
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
-                                                         uint32_t num_inputs,
+                                                         const vector<string>& input_names,
                                                          TensorDescriptor::DataType dtype,
                                                          int device_num) {
     CUmodule module;
@@ -62,9 +62,10 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     out->module = module;
     out->kernel = fn;
     out->kernel_name = kernel_name;
-    out->num_inputs = num_inputs;
+    out->input_names = input_names;
     out->dtype = dtype;
     out->deviceNum = device_num;
+
     return out;
 }
 
@@ -133,10 +134,19 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
     string kernel_name = "fused_kernel";
     string cuda_src = CudaSourceEmitter::emit(expr, sig.dtype, kernel_name, broadcast_support);
 
+    vector<string> input_names;
+    input_names.reserve(expr.inputs.size());
+    for (uint32_t i = 0; i < expr.inputs.size(); ++i)
+        input_names.push_back(expr.inputs[i].name);
+
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, expr.numInputs(), sig.dtype, sig.device_num);
-    compiled->num_inputs = expr.numInputs();
+    auto compiled = loadCubin(key, cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+    compiled->input_names.clear();
+    compiled->input_names.reserve(expr.inputs.size());
+    for (const NamedInput& input : expr.inputs) {
+        compiled->input_names.push_back(input.name);
+    }
 
     cacheInsert(key, compiled);
     return compiled;
