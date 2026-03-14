@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Utilities/TensorMathFusion/BroadcastStructs.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
@@ -22,7 +23,7 @@ class FusedEquation {
         : compiledFlatEquation(std::move(flatEquation)), compiledBroadcastEquation(std::move(broadcastEquation)) {}
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
-    static BroadcastInfo buildBroadcastInfo(const std::vector<Tensor>& inputs, const std::vector<uint64_t>& outputDimensions);
+    static BroadcastInfoHostBuffer buildBroadcastInfo(const std::vector<Tensor>& inputs, const std::vector<uint64_t>& outputDimensions);
     static Tensor createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
                                             const std::vector<uint64_t>& outputDimensions,
                                             Stream stream);

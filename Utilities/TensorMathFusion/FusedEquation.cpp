@@ -146,93 +146,82 @@ StampedEquation FusedEquation::stamp(std::vector<Tensor> inputs,
         return StampedEquation(compiledFlatEquation, inputs, output, stream);
 }
 
-static std::array<unsigned long long, MAX_BROADCAST_DIMS> computeContiguousStrides(const std::vector<uint64_t>& dims) {
-    if (dims.empty()) {
-        throw std::runtime_error("Cannot compute strides for empty shape.");
-    }
-    if (dims.size() > MAX_BROADCAST_DIMS) {
-        throw std::runtime_error("Shape rank exceeds MAX_BROADCAST_DIMS.");
-    }
+static uint64_t product(const std::vector<uint64_t>& dims) {
+    uint64_t p = 1;
+    for (uint64_t d : dims)
+        p *= d;
+    return p;
+}
 
-    std::array<unsigned long long, MAX_BROADCAST_DIMS> strides{};
-    strides.fill(0);
+static std::vector<uint64_t> computePackedOutputStrides(const std::vector<uint64_t>& outputDimensions) {
+    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
+    std::vector<uint64_t> strides(rank, 1);
 
-    unsigned long long running = 1;
-    for (int64_t axis = static_cast<int64_t>(dims.size()) - 1; axis >= 0; --axis) {
-        strides[axis] = running;
-        running *= static_cast<unsigned long long>(dims[axis]);
+    if (rank == 0)
+        return strides;
+
+    strides[rank - 1] = 1;
+    for (int64_t i = static_cast<int64_t>(rank) - 2; i >= 0; --i) {
+        strides[i] = strides[i + 1] * outputDimensions[static_cast<size_t>(i) + 1];
     }
 
     return strides;
 }
 
-static unsigned long long computeNumel(const std::vector<uint64_t>& dims) {
-    unsigned long long numel = 1;
-    for (uint64_t d : dims) {
-        numel *= static_cast<unsigned long long>(d);
-    }
-    return numel;
-}
+BroadcastInfoHostBuffer FusedEquation::buildBroadcastInfo(const std::vector<Tensor>& inputs,
+                                                          const std::vector<uint64_t>& outputDimensions) {
+    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
+    const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
+    const uint64_t numel = product(outputDimensions);
 
-BroadcastInfo FusedEquation::buildBroadcastInfo(const std::vector<Tensor>& inputs, const std::vector<uint64_t>& outputDimensions) {
-    if (inputs.empty()) {
-        throw std::runtime_error("buildBroadcastInfo requires at least one input.");
-    }
-    if (outputDimensions.empty()) {
-        throw std::runtime_error("buildBroadcastInfo requires non-empty outputDimensions.");
-    }
-    if (outputDimensions.size() > MAX_BROADCAST_DIMS) {
-        throw std::runtime_error("Output rank exceeds MAX_BROADCAST_DIMS.");
-    }
-    if (inputs.size() > MAX_FUSED_INPUTS) {
-        throw std::runtime_error("Number of inputs exceeds MAX_FUSED_INPUTS.");
+    BroadcastInfoHostBuffer buffer(rank, numInputs, numel);
+
+    const std::vector<uint64_t> outputStrides = computePackedOutputStrides(outputDimensions);
+    for (uint32_t axis = 0; axis < rank; ++axis) {
+        buffer.outputStrides()[axis] = outputStrides[axis];
     }
 
-    BroadcastInfo info{};
-    info.rank = static_cast<unsigned int>(outputDimensions.size());
-    info.num_inputs = static_cast<unsigned int>(inputs.size());
-    info.numel = computeNumel(outputDimensions);
+    for (uint32_t inputIdx = 0; inputIdx < numInputs; ++inputIdx) {
+        const std::vector<uint64_t>& inputDims = inputs[inputIdx].getDimensions();
 
-    for (uint32_t axis = 0; axis < MAX_BROADCAST_DIMS; ++axis) {
-        info.output_strides[axis] = 0ULL;
-    }
-
-    auto outputStrides = computeContiguousStrides(outputDimensions);
-    for (uint32_t axis = 0; axis < info.rank; ++axis) {
-        info.output_strides[axis] = outputStrides[axis];
-    }
-
-    for (uint32_t inputIdx = 0; inputIdx < inputs.size(); ++inputIdx) {
-        const std::vector<uint64_t>& dims = inputs[inputIdx].getDimensions();
-
-        if (dims.size() != info.rank) {
-            throw std::runtime_error("Input rank does not match resolved output rank in buildBroadcastInfo.");
+        if (inputDims.size() > outputDimensions.size()) {
+            throw std::runtime_error("Input rank exceeds output rank in buildBroadcastInfo.");
         }
 
-        auto inputStrides = computeContiguousStrides(dims);
+        const uint32_t rankDiff = rank - static_cast<uint32_t>(inputDims.size());
 
-        for (uint32_t axis = 0; axis < MAX_BROADCAST_DIMS; ++axis) {
-            info.inputs[inputIdx].strides[axis] = 0ULL;
-        }
+        // Walk output axes from left to right.
+        // Missing leading dimensions in the input are treated as broadcasted (stride 0).
+        uint64_t runningStride = 1;
+        std::vector<uint64_t> inputPackedStrides(rank, 0);
 
-        for (uint32_t axis = 0; axis < info.rank; ++axis) {
-            const uint64_t inDim = dims[axis];
-            const uint64_t outDim = outputDimensions[axis];
+        // First determine the packed element stride per aligned axis.
+        for (int64_t axis = static_cast<int64_t>(rank) - 1; axis >= 0; --axis) {
+            if (static_cast<uint32_t>(axis) < rankDiff) {
+                inputPackedStrides[static_cast<size_t>(axis)] = 0;
+                continue;
+            }
 
-            if (inDim == outDim) {
-                info.inputs[inputIdx].strides[axis] = inputStrides[axis];
-            } else if (inDim == 1) {
-                info.inputs[inputIdx].strides[axis] = 0ULL;
+            const uint32_t inputAxis = static_cast<uint32_t>(axis) - rankDiff;
+            const uint64_t inputDim = inputDims[inputAxis];
+            const uint64_t outputDim = outputDimensions[static_cast<size_t>(axis)];
+
+            if (inputDim == outputDim) {
+                inputPackedStrides[static_cast<size_t>(axis)] = runningStride;
+                runningStride *= inputDim;
+            } else if (inputDim == 1) {
+                inputPackedStrides[static_cast<size_t>(axis)] = 0;
             } else {
-                std::ostringstream err;
-                err << "Input " << inputIdx << " is not broadcast-compatible at axis " << axis << ": input dim = " << inDim
-                    << ", output dim = " << outDim;
-                throw std::runtime_error(err.str());
+                throw std::runtime_error("Input shape is not broadcast-compatible with output shape.");
             }
         }
+
+        for (uint32_t axis = 0; axis < rank; ++axis) {
+            buffer.inputStride(inputIdx, axis) = inputPackedStrides[axis];
+        }
     }
 
-    return info;
+    return buffer;
 }
 
 struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
@@ -246,19 +235,21 @@ struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
 Tensor FusedEquation::createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
                                                 const std::vector<uint64_t>& outputDimensions,
                                                 Stream stream) {
-    BroadcastInfo broadcastInfo = buildBroadcastInfo(inputs, outputDimensions);
-    TensorDescriptor broadcastInfoDescriptor = TensorDescriptor(TensorDescriptor::DataType::UINT8, {sizeof(broadcastInfo)});
+    BroadcastInfoHostBuffer broadcastInfo = buildBroadcastInfo(inputs, outputDimensions);
+
+    TensorDescriptor broadcastInfoDescriptor =
+        TensorDescriptor(TensorDescriptor::DataType::UINT8, {static_cast<uint64_t>(broadcastInfo.sizeBytes())});
 
     TensorPlacement cpuPlacement = TensorPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement devicePlacement = inputs[0].getPlacement();
-    Tensor hostBroadcastInfo = Tensor(cpuPlacement, broadcastInfoDescriptor);
+
+    Tensor hostBroadcastInfo(cpuPlacement, broadcastInfoDescriptor);
     Tensor deviceBroadcastInfo(devicePlacement, broadcastInfoDescriptor);
 
-    // Initialize cpu mem and copy to gpu
-    memcpy(hostBroadcastInfo.getMemPtr(), &broadcastInfo, sizeof(BroadcastInfo));
+    // FIXME: Avoid the extra copy, build it in tensor mem
+    std::memcpy(hostBroadcastInfo.getMemPtr(), broadcastInfo.data(), broadcastInfo.sizeBytes());
     deviceBroadcastInfo.copyFromAsync(hostBroadcastInfo, stream);
 
-    // free tensor memory at the end of the stream
     stream.launchCleanUpHostFunctionArgs(std::make_unique<BroadcastInfoHostFunctionArgs>(hostBroadcastInfo, deviceBroadcastInfo));
 
     return deviceBroadcastInfo;
