@@ -26,8 +26,8 @@ class FusedEquation {
         : compiledFlatEquation(std::move(flatEquation)), compiledBroadcastEquation(std::move(broadcastEquation)) {}
 
     [[nodiscard]] StampedEquation stamp(std::vector<Tensor>& inputs,
-                                    const Stream& stream,
-                                    const std::vector<uint64_t>& requestedOutputShape = {}) const;
+                                        const Stream& stream,
+                                        const std::vector<uint64_t>& requestedOutputShape = {}) const;
     void run(std::vector<Tensor> inputs, Tensor output, Stream stream) const;
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
