@@ -12,52 +12,6 @@ using namespace std;
 
 namespace ThorImplementation {
 
-static cudnnDataType_t toCudnnDataType(TensorDescriptor::DataType dtype) {
-    switch (dtype) {
-        case TensorDescriptor::DataType::FP32:
-            return CUDNN_DATA_FLOAT;
-
-        case TensorDescriptor::DataType::FP16:
-            return CUDNN_DATA_HALF;
-
-        case TensorDescriptor::DataType::BF16:
-            return CUDNN_DATA_BFLOAT16;
-
-        case TensorDescriptor::DataType::FP8_E4M3:
-            return CUDNN_DATA_FP8_E4M3;
-
-        case TensorDescriptor::DataType::FP8_E5M2:
-            return CUDNN_DATA_FP8_E5M2;
-
-        default:
-            throw std::runtime_error("toCudnnDataType: unsupported TensorDescriptor::DataType value " +
-                                     std::to_string(static_cast<int>(dtype)));
-    }
-}
-
-static cudnnReduceTensorOp_t toCudnnReduceTensorOp(ExprOp op) {
-    switch (op) {
-        case ExprOp::REDUCE_SUM:
-            return CUDNN_REDUCE_TENSOR_ADD;
-        case ExprOp::REDUCE_PROD:
-            return CUDNN_REDUCE_TENSOR_MUL;
-        case ExprOp::REDUCE_MIN:
-            return CUDNN_REDUCE_TENSOR_MIN;
-        case ExprOp::REDUCE_MAX:
-            return CUDNN_REDUCE_TENSOR_MAX;
-        case ExprOp::REDUCE_AMAX:
-            return CUDNN_REDUCE_TENSOR_AMAX;
-        case ExprOp::REDUCE_AVG:
-            return CUDNN_REDUCE_TENSOR_AVG;
-        case ExprOp::REDUCE_NORM1:
-            return CUDNN_REDUCE_TENSOR_NORM1;
-        case ExprOp::REDUCE_NORM2:
-            return CUDNN_REDUCE_TENSOR_NORM2;
-        default:
-            throw std::runtime_error("ExprOp is not a supported cuDNN reduction op.");
-    }
-}
-
 FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
     if (device_num < 0) {
         throw std::runtime_error("FusedEquation::compile requires device_num >= 0.");
@@ -79,24 +33,31 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
         throw std::runtime_error(std::string("cudaGetDeviceProperties failed: ") + cudaGetErrorString(cuda_status));
     }
 
-    if (expr.nodes.size() == 1 && isCudnnReduceOp(expr.nodes[0].op)) {
-        assert(expr.numInputs() == 1);
-        shared_ptr<CompiledReduction> compiledReduction = EquationCompiler::compileReduction(expr, dtype);
-        return FusedEquation(compiledReduction);
+    std::vector<PhysicalExecutionStage> physicalStages = EquationCompiler::splitAtReductionBoundaries(expr);
+
+    std::vector<CompiledExecutionStage> stages;
+    stages.reserve(physicalStages.size());
+
+    for (const PhysicalExecutionStage& stage : physicalStages) {
+        if (stage.kind == PhysicalExecutionStage::Kind::Reduction) {
+            auto compiledReduction = EquationCompiler::compileReduction(stage.expr, dtype);
+            stages.emplace_back(compiledReduction, stage.input_value_ids, stage.output_value_id);
+        } else {
+            EquationSignature sig{};
+            sig.num_inputs = stage.expr.numInputs();
+            sig.dtype = dtype;
+            sig.sm_major = prop.major;
+            sig.sm_minor = prop.minor;
+            sig.device_num = device_num;
+            sig.use_fast_math = use_fast_math;
+
+            auto flat = EquationCompiler::compile(stage.expr, sig, false);
+            auto broadcast = EquationCompiler::compile(stage.expr, sig, true);
+            stages.emplace_back(flat, broadcast, stage.input_value_ids, stage.output_value_id);
+        }
     }
 
-    EquationSignature sig{};
-    sig.num_inputs = expr.numInputs();
-    sig.dtype = dtype;
-    sig.sm_major = prop.major;
-    sig.sm_minor = prop.minor;
-    sig.device_num = device_num;
-    sig.use_fast_math = use_fast_math;
-
-    std::shared_ptr<CompiledEquation> flatEquation = EquationCompiler::compile(expr, sig, false);
-    std::shared_ptr<CompiledEquation> broadcastEquation = EquationCompiler::compile(expr, sig, true);
-
-    return FusedEquation(std::move(flatEquation), std::move(broadcastEquation));
+    return FusedEquation(std::move(stages), expr.inputs);
 }
 
 static std::vector<uint64_t> stripSingletonDimensions(const std::vector<uint64_t>& dims) {
@@ -121,9 +82,54 @@ static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimen
     }
 }
 
-StampedEquation FusedEquation::stampEquation(std::vector<Tensor>& inputs,
-                                             const Stream& stream,
-                                             const std::vector<uint64_t>& requestedOutputShape) const {
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const Stream& stream,
+                                          const std::vector<uint64_t>& requestedOutputShape) const {
+    std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
+    std::vector<StampedExecutionStage> stampedStages;
+    stampedStages.reserve(stages.size());
+
+    for (size_t i = 0; i < stages.size(); ++i) {
+        const CompiledExecutionStage& stage = stages[i];
+
+        std::vector<Tensor> stageInputs;
+        stageInputs.reserve(stage.input_value_ids.size());
+        for (uint32_t value_id : stage.input_value_ids) {
+            auto it = values.find(value_id);
+            if (it == values.end()) {
+                throw std::runtime_error("Missing input value for staged execution plan.");
+            }
+            stageInputs.push_back(it->second);
+        }
+
+        const bool is_last_stage = (i + 1 == stages.size());
+
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            std::shared_ptr<StampedEquation> stamped = stampEquation(
+                stage.flat, stage.broadcast, stageInputs, stream, is_last_stage ? requestedOutputShape : std::vector<uint64_t>{});
+
+            values[stage.output_value_id] = stamped->getOutputTensor();
+            stampedStages.emplace_back(stamped);
+        } else {
+            if (stageInputs.size() != 1) {
+                throw std::runtime_error("Reduction stage expected exactly one input tensor.");
+            }
+
+            std::shared_ptr<StampedReduction> stamped = stampReduction(stage.reduction, stageInputs[0], stream);
+
+            values[stage.output_value_id] = stamped->getOutputTensor();
+            stampedStages.emplace_back(stamped);
+        }
+    }
+
+    return StampedExecutionPlan(std::move(stampedStages));
+}
+
+shared_ptr<StampedEquation> FusedEquation::stampEquation(const shared_ptr<CompiledEquation>& compiledFlatEquation,
+                                                         const shared_ptr<CompiledEquation>& compiledBroadcastEquation,
+                                                         vector<Tensor>& inputs,
+                                                         const Stream& stream,
+                                                         const std::vector<uint64_t>& requestedOutputShape) const {
     if (!compiledFlatEquation) {
         throw std::runtime_error("Cannot stamp an empty FusedEquation.");
     }
@@ -167,7 +173,6 @@ StampedEquation FusedEquation::stampEquation(std::vector<Tensor>& inputs,
     // Ensure the output shape is valid, when specified explicitly (can only add or remove singleton dimensions)
     if (!requestedOutputShape.empty()) {
         verifyRequestedOutputLayout(requestedOutputShape, outputDimensions);
-        // outputDimensions = requestedOutputShape;
     }
 
     TensorPlacement outputPlacement = firstInput.getPlacement();
@@ -175,10 +180,10 @@ StampedEquation FusedEquation::stampEquation(std::vector<Tensor>& inputs,
                   TensorDescriptor(compiledFlatEquation->dtype, requestedOutputShape.empty() ? outputDimensions : requestedOutputShape));
 
     if (requiresBroadcast)
-        return StampedEquation(
+        return make_shared<StampedEquation>(
             compiledBroadcastEquation, inputs, output, stream, createDeviceBroadcastInfo(inputs, outputDimensions, stream));
     else
-        return StampedEquation(compiledFlatEquation, inputs, output, stream);
+        return make_shared<StampedEquation>(compiledFlatEquation, inputs, output, stream);
 }
 
 static uint64_t product(const std::vector<uint64_t>& dims) {
@@ -286,20 +291,6 @@ Tensor FusedEquation::createDeviceBroadcastInfo(const std::vector<Tensor>& input
     return deviceBroadcastInfo;
 }
 
-void FusedEquation::runEquation(std::vector<Tensor> inputs, Tensor output, Stream stream) const {
-    std::vector<uint64_t> outputDimensions;
-
-    bool requiresBroadcast = resolveLayout(inputs, outputDimensions);
-    verifyRequestedOutputLayout(output.getDimensions(), outputDimensions);
-
-    if (requiresBroadcast) {
-        Tensor broadcastInfo = createDeviceBroadcastInfo(inputs, outputDimensions, stream);
-        EquationRunner::run(compiledBroadcastEquation, inputs, output, stream, broadcastInfo);
-    } else {
-        EquationRunner::run(compiledFlatEquation, inputs, output, stream);
-    }
-}
-
 bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions) {
     if (inputs.empty())
         throw std::runtime_error("Tried to create a FusedEquation with 0 tensor inputs. You must have at least one.");
@@ -378,92 +369,36 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
     return requiresBroadcast;
 }
 
-std::vector<Tensor> FusedEquation::bindNamedInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
-    if (!compiledFlatEquation) {
-        throw std::runtime_error("Cannot bind inputs for an empty FusedEquation.");
-    }
+std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
+    std::unordered_map<uint32_t, Tensor> values;
+    values.reserve(root_inputs.size());
 
-    const std::vector<std::string>& expectedNames = compiledFlatEquation->input_names;
-
-    if (expectedNames.empty()) {
-        throw std::runtime_error("This fused equation has no compiled named inputs.");
-    }
-
-    std::vector<Tensor> orderedInputs;
-    orderedInputs.reserve(expectedNames.size());
-
-    for (const std::string& name : expectedNames) {
-        auto it = namedInputs.find(name);
+    for (const NamedInput& input : root_inputs) {
+        auto it = namedInputs.find(input.name);
         if (it == namedInputs.end()) {
-            throw std::runtime_error("Missing required fused equation input: " + name);
+            throw std::runtime_error("Missing required fused equation input: " + input.name);
         }
-        orderedInputs.push_back(it->second);
+        values.emplace(input.slot, it->second);
     }
 
     std::unordered_set<std::string> expected_input_set;
-    expected_input_set.reserve(expectedNames.size());
-    for (const std::string& name : expectedNames) {
-        expected_input_set.insert(name);
+    expected_input_set.reserve(root_inputs.size());
+    for (const NamedInput& input : root_inputs) {
+        expected_input_set.insert(input.name);
     }
+
     for (const auto& [name, _] : namedInputs) {
         if (!expected_input_set.contains(name)) {
             throw std::runtime_error("Unexpected input sent to fused equation: " + name);
         }
     }
 
-    return orderedInputs;
+    return values;
 }
 
-StampedEquation FusedEquation::stampEquation(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const Stream& stream,
-                                             const std::vector<uint64_t>& requestedOutputShape) const {
-    std::vector<Tensor> orderedInputs = bindNamedInputs(inputs);
-    return stampEquation(orderedInputs, stream, requestedOutputShape);
-}
-
-static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
-static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
-    auto it = builtReductionCache.find(key);
-    if (it == builtReductionCache.end()) {
-        return nullptr;
-    }
-    return it->second;
-}
-
-std::shared_ptr<BuiltReduction> FusedEquation::buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,
-                                                              const Tensor& input,
-                                                              int device_num) {
-    const std::vector<uint64_t> input_dims = input.getDimensions();
-
-    ReductionCacheKey key(compiled_reduction->op,
-                          input_dims,
-                          compiled_reduction->reduction_axes,
-                          compiled_reduction->keepdim,
-                          compiled_reduction->inout_dtype,
-                          compiled_reduction->compute_dtype,
-                          device_num);
-
-    std::shared_ptr<BuiltReduction> hit = cacheLookup(key);
-    if (hit)
-        return hit;
-
-    auto built = std::make_shared<BuiltReduction>(key);
-
-    const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
-                                                                         compiled_reduction->reduction_axes,
-                                                                         /*internal_keepdim=*/true);
-
-    built->a_desc = createCudnnTensorDescriptor(input_dims, compiled_reduction->inout_dtype);
-    built->c_desc = createCudnnTensorDescriptor(output_dims, compiled_reduction->inout_dtype);
-    built->reduce_desc = createCudnnReduceDescriptor(compiled_reduction->op, compiled_reduction->compute_dtype);
-
-    built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
-
-    builtReductionCache.emplace(key, built);
-    return built;
-}
-
-StampedReduction FusedEquation::stampReduction(Tensor& input, const Stream& stream) const {
+std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
+                                                                Tensor& input,
+                                                                const Stream& stream) const {
     if (!compiledReduction)
         throw std::runtime_error("Tried to stamp reduction on a non-reduction FusedEquation.");
 
@@ -471,7 +406,7 @@ StampedReduction FusedEquation::stampReduction(Tensor& input, const Stream& stre
         throw std::runtime_error("Input dtype does not match compiled reduction dtype.");
     }
 
-    std::shared_ptr<BuiltReduction> built = buildReduction(compiledReduction, input, stream.getGpuNum());
+    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiledReduction, input, stream.getGpuNum());
 
     Optional<Tensor> workspace = Optional<Tensor>::empty();
     if (built->workspace_bytes > 0) {
@@ -479,82 +414,45 @@ StampedReduction FusedEquation::stampReduction(Tensor& input, const Stream& stre
         workspace = Tensor(input.getPlacement(), workspaceDescriptor);
     }
 
-    vector<uint64_t> outputDimensions = computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.keepdim);
+    vector<uint64_t> outputDimensions =
+        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.keepdim);
     TensorDescriptor outputDescriptor(input.getDataType(), outputDimensions);
     Tensor output = Tensor(input.getPlacement(), outputDescriptor);
 
-    return StampedReduction(std::move(built), input, output, stream, workspace);
+    return make_shared<StampedReduction>(std::move(built), input, output, stream, workspace);
 }
 
-std::vector<uint64_t> FusedEquation::computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
-                                                                const std::vector<uint64_t>& reduction_axes,
-                                                                bool keepdim) {
-    std::vector<uint64_t> output_dims = input_dims;
-
-    for (uint64_t axis : reduction_axes) {
-        if (axis >= output_dims.size())
-            throw std::runtime_error("Reduction axis out of range.");
-        output_dims[axis] = 1;
+void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
+    if (stages.size() != 1 || stages[0].kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error(
+            "FusedEquation::run only supports single-stage fused expressions. "
+            "Use stamp(...).run() for staged expressions.");
     }
 
-    if (keepdim)
-        return output_dims;
+    const CompiledExecutionStage& stage = stages[0];
+    std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
 
-    std::vector<uint64_t> squeezed;
-    squeezed.reserve(output_dims.size());
-    for (uint64_t d : output_dims) {
-        if (d != 1)
-            squeezed.push_back(d);
+    std::vector<Tensor> orderedInputs;
+    orderedInputs.reserve(stage.input_value_ids.size());
+    for (uint32_t value_id : stage.input_value_ids) {
+        auto it = values.find(value_id);
+        if (it == values.end()) {
+            throw std::runtime_error("Missing input value for fused equation run.");
+        }
+        orderedInputs.push_back(it->second);
     }
-    if (squeezed.empty())
-        squeezed.push_back(1);
-    return squeezed;
-}
 
-cudnnTensorDescriptor_t FusedEquation::createCudnnTensorDescriptor(const std::vector<uint64_t>& dims, TensorDescriptor::DataType dtype) {
-    if (dims.empty())
-        throw std::runtime_error("cuDNN reduction does not support empty-rank tensor descriptor here.");
-    if (dims.size() > 8)
-        throw std::runtime_error("cuDNN reduction only supports rank <= 8.");
+    std::vector<uint64_t> resolvedOutputDims;
+    std::vector<Tensor> layoutInputs = orderedInputs;
+    bool requiresBroadcast = resolveLayout(layoutInputs, resolvedOutputDims);
+    verifyRequestedOutputLayout(output.getDimensions(), resolvedOutputDims);
 
-    std::vector<int> cudnn_dims(dims.begin(), dims.end());
-    std::vector<int> strides(cudnn_dims.size());
-    strides.back() = 1;
-    for (int i = static_cast<int>(cudnn_dims.size()) - 2; i >= 0; --i)
-        strides[i] = strides[i + 1] * cudnn_dims[i + 1];
-
-    cudnnTensorDescriptor_t desc;
-    CUDNN_CHECK(cudnnCreateTensorDescriptor(&desc));
-    CUDNN_CHECK(
-        cudnnSetTensorNdDescriptor(desc, toCudnnDataType(dtype), static_cast<int>(cudnn_dims.size()), cudnn_dims.data(), strides.data()));
-    return desc;
-}
-
-cudnnReduceTensorDescriptor_t FusedEquation::createCudnnReduceDescriptor(ExprOp op, TensorDescriptor::DataType compute_dtype) {
-    cudnnReduceTensorDescriptor_t desc;
-    CUDNN_CHECK(cudnnCreateReduceTensorDescriptor(&desc));
-    CUDNN_CHECK(cudnnSetReduceTensorDescriptor(desc,
-                                               toCudnnReduceTensorOp(op),
-                                               toCudnnDataType(compute_dtype),
-                                               CUDNN_PROPAGATE_NAN,
-                                               CUDNN_REDUCE_TENSOR_NO_INDICES,
-                                               CUDNN_32BIT_INDICES));
-    return desc;
-}
-
-size_t FusedEquation::getReductionWorkspaceSize(int device_num,
-                                                cudnnReduceTensorDescriptor_t reduce_desc,
-                                                cudnnTensorDescriptor_t a_desc,
-                                                cudnnTensorDescriptor_t c_desc) {
-    Stream stream(device_num);
-    size_t workspace_bytes = 0;
-    CUDNN_CHECK(cudnnGetReductionWorkspaceSize(stream.getCudnnHandle(), reduce_desc, a_desc, c_desc, &workspace_bytes));
-    return workspace_bytes;
-}
-
-void FusedEquation::runEquation(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
-    std::vector<Tensor> orderedInputs = bindNamedInputs(inputs);
-    runEquation(std::move(orderedInputs), output, stream);
+    if (requiresBroadcast) {
+        Tensor broadcastInfo = createDeviceBroadcastInfo(layoutInputs, resolvedOutputDims, stream);
+        EquationRunner::run(stage.broadcast, layoutInputs, output, stream, broadcastInfo);
+    } else {
+        EquationRunner::run(stage.flat, layoutInputs, output, stream);
+    }
 }
 
 }  // namespace ThorImplementation
