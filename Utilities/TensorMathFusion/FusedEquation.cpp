@@ -11,16 +11,52 @@
 using namespace std;
 
 namespace ThorImplementation {
-namespace {
-cudaDataType_t toCudaDataType(TensorDescriptor::DataType dtype) {
+
+static cudnnDataType_t toCudnnDataType(TensorDescriptor::DataType dtype) {
     switch (dtype) {
         case TensorDescriptor::DataType::FP32:
-            return CUDA_R_32F;
+            return CUDNN_DATA_FLOAT;
+
+        case TensorDescriptor::DataType::FP16:
+            return CUDNN_DATA_HALF;
+
+        case TensorDescriptor::DataType::BF16:
+            return CUDNN_DATA_BFLOAT16;
+
+        case TensorDescriptor::DataType::FP8_E4M3:
+            return CUDNN_DATA_FP8_E4M3;
+
+        case TensorDescriptor::DataType::FP8_E5M2:
+            return CUDNN_DATA_FP8_E5M2;
+
         default:
-            throw std::runtime_error("Unsupported tensor data type for fused equation.");
+            throw std::runtime_error("toCudnnDataType: unsupported TensorDescriptor::DataType value " +
+                                     std::to_string(static_cast<int>(dtype)));
     }
 }
-}  // namespace
+
+static cudnnReduceTensorOp_t toCudnnReduceTensorOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::REDUCE_SUM:
+            return CUDNN_REDUCE_TENSOR_ADD;
+        case ExprOp::REDUCE_PROD:
+            return CUDNN_REDUCE_TENSOR_MUL;
+        case ExprOp::REDUCE_MIN:
+            return CUDNN_REDUCE_TENSOR_MIN;
+        case ExprOp::REDUCE_MAX:
+            return CUDNN_REDUCE_TENSOR_MAX;
+        case ExprOp::REDUCE_AMAX:
+            return CUDNN_REDUCE_TENSOR_AMAX;
+        case ExprOp::REDUCE_AVG:
+            return CUDNN_REDUCE_TENSOR_AVG;
+        case ExprOp::REDUCE_NORM1:
+            return CUDNN_REDUCE_TENSOR_NORM1;
+        case ExprOp::REDUCE_NORM2:
+            return CUDNN_REDUCE_TENSOR_NORM2;
+        default:
+            throw std::runtime_error("ExprOp is not a supported cuDNN reduction op.");
+    }
+}
 
 FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
     if (device_num < 0) {
@@ -43,24 +79,22 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
         throw std::runtime_error(std::string("cudaGetDeviceProperties failed: ") + cudaGetErrorString(cuda_status));
     }
 
-    // FIXME add:
-    // PhysicalExpressionValidator::validate(expr);
+    if (expr.nodes.size() == 1 && isCudnnReduceOp(expr.nodes[0].op)) {
+        assert(expr.numInputs() == 1);
+        shared_ptr<CompiledReduction> compiledReduction = EquationCompiler::compileReduction(expr, dtype);
+        return FusedEquation(compiledReduction);
+    }
 
     EquationSignature sig{};
-    sig.rank = 1;  // V1 assumes flattened contiguous tensors
     sig.num_inputs = expr.numInputs();
-    // sig.dtype = toCudaDataType(dtype);
     sig.dtype = dtype;
-    sig.contiguous = true;
     sig.sm_major = prop.major;
     sig.sm_minor = prop.minor;
     sig.device_num = device_num;
     sig.use_fast_math = use_fast_math;
 
-    EquationCompiler compiler;
-
-    std::shared_ptr<CompiledEquation> flatEquation = compiler.compile(expr, sig, false);
-    std::shared_ptr<CompiledEquation> broadcastEquation = compiler.compile(expr, sig, true);
+    std::shared_ptr<CompiledEquation> flatEquation = EquationCompiler::compile(expr, sig, false);
+    std::shared_ptr<CompiledEquation> broadcastEquation = EquationCompiler::compile(expr, sig, true);
 
     return FusedEquation(std::move(flatEquation), std::move(broadcastEquation));
 }
@@ -87,9 +121,9 @@ static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimen
     }
 }
 
-StampedEquation FusedEquation::stamp(std::vector<Tensor>& inputs,
-                                     const Stream& stream,
-                                     const std::vector<uint64_t>& requestedOutputShape) const {
+StampedEquation FusedEquation::stampEquation(std::vector<Tensor>& inputs,
+                                             const Stream& stream,
+                                             const std::vector<uint64_t>& requestedOutputShape) const {
     if (!compiledFlatEquation) {
         throw std::runtime_error("Cannot stamp an empty FusedEquation.");
     }
@@ -252,7 +286,7 @@ Tensor FusedEquation::createDeviceBroadcastInfo(const std::vector<Tensor>& input
     return deviceBroadcastInfo;
 }
 
-void FusedEquation::run(std::vector<Tensor> inputs, Tensor output, Stream stream) const {
+void FusedEquation::runEquation(std::vector<Tensor> inputs, Tensor output, Stream stream) const {
     std::vector<uint64_t> outputDimensions;
 
     bool requiresBroadcast = resolveLayout(inputs, outputDimensions);
@@ -380,16 +414,147 @@ std::vector<Tensor> FusedEquation::bindNamedInputs(const std::unordered_map<std:
     return orderedInputs;
 }
 
-StampedEquation FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                     const Stream& stream,
-                                     const std::vector<uint64_t>& requestedOutputShape) const {
+StampedEquation FusedEquation::stampEquation(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const Stream& stream,
+                                             const std::vector<uint64_t>& requestedOutputShape) const {
     std::vector<Tensor> orderedInputs = bindNamedInputs(inputs);
-    return stamp(orderedInputs, stream, requestedOutputShape);
+    return stampEquation(orderedInputs, stream, requestedOutputShape);
 }
 
-void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
+static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
+static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
+    auto it = builtReductionCache.find(key);
+    if (it == builtReductionCache.end()) {
+        return nullptr;
+    }
+    return it->second;
+}
+
+std::shared_ptr<BuiltReduction> FusedEquation::buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,
+                                                              const Tensor& input,
+                                                              int device_num) {
+    const std::vector<uint64_t> input_dims = input.getDimensions();
+
+    ReductionCacheKey key(compiled_reduction->op,
+                          input_dims,
+                          compiled_reduction->reduction_axes,
+                          compiled_reduction->keepdim,
+                          compiled_reduction->inout_dtype,
+                          compiled_reduction->compute_dtype,
+                          device_num);
+
+    std::shared_ptr<BuiltReduction> hit = cacheLookup(key);
+    if (hit)
+        return hit;
+
+    auto built = std::make_shared<BuiltReduction>(key);
+
+    const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
+                                                                         compiled_reduction->reduction_axes,
+                                                                         /*internal_keepdim=*/true);
+
+    built->a_desc = createCudnnTensorDescriptor(input_dims, compiled_reduction->inout_dtype);
+    built->c_desc = createCudnnTensorDescriptor(output_dims, compiled_reduction->inout_dtype);
+    built->reduce_desc = createCudnnReduceDescriptor(compiled_reduction->op, compiled_reduction->compute_dtype);
+
+    built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
+
+    builtReductionCache.emplace(key, built);
+    return built;
+}
+
+StampedReduction FusedEquation::stampReduction(Tensor& input, const Stream& stream) const {
+    if (!compiledReduction)
+        throw std::runtime_error("Tried to stamp reduction on a non-reduction FusedEquation.");
+
+    if (input.getDataType() != compiledReduction->inout_dtype) {
+        throw std::runtime_error("Input dtype does not match compiled reduction dtype.");
+    }
+
+    std::shared_ptr<BuiltReduction> built = buildReduction(compiledReduction, input, stream.getGpuNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        workspace = Tensor(input.getPlacement(), workspaceDescriptor);
+    }
+
+    vector<uint64_t> outputDimensions = computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.keepdim);
+    TensorDescriptor outputDescriptor(input.getDataType(), outputDimensions);
+    Tensor output = Tensor(input.getPlacement(), outputDescriptor);
+
+    return StampedReduction(std::move(built), input, output, stream, workspace);
+}
+
+std::vector<uint64_t> FusedEquation::computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
+                                                                const std::vector<uint64_t>& reduction_axes,
+                                                                bool keepdim) {
+    std::vector<uint64_t> output_dims = input_dims;
+
+    for (uint64_t axis : reduction_axes) {
+        if (axis >= output_dims.size())
+            throw std::runtime_error("Reduction axis out of range.");
+        output_dims[axis] = 1;
+    }
+
+    if (keepdim)
+        return output_dims;
+
+    std::vector<uint64_t> squeezed;
+    squeezed.reserve(output_dims.size());
+    for (uint64_t d : output_dims) {
+        if (d != 1)
+            squeezed.push_back(d);
+    }
+    if (squeezed.empty())
+        squeezed.push_back(1);
+    return squeezed;
+}
+
+cudnnTensorDescriptor_t FusedEquation::createCudnnTensorDescriptor(const std::vector<uint64_t>& dims, TensorDescriptor::DataType dtype) {
+    if (dims.empty())
+        throw std::runtime_error("cuDNN reduction does not support empty-rank tensor descriptor here.");
+    if (dims.size() > 8)
+        throw std::runtime_error("cuDNN reduction only supports rank <= 8.");
+
+    std::vector<int> cudnn_dims(dims.begin(), dims.end());
+    std::vector<int> strides(cudnn_dims.size());
+    strides.back() = 1;
+    for (int i = static_cast<int>(cudnn_dims.size()) - 2; i >= 0; --i)
+        strides[i] = strides[i + 1] * cudnn_dims[i + 1];
+
+    cudnnTensorDescriptor_t desc;
+    CUDNN_CHECK(cudnnCreateTensorDescriptor(&desc));
+    CUDNN_CHECK(
+        cudnnSetTensorNdDescriptor(desc, toCudnnDataType(dtype), static_cast<int>(cudnn_dims.size()), cudnn_dims.data(), strides.data()));
+    return desc;
+}
+
+cudnnReduceTensorDescriptor_t FusedEquation::createCudnnReduceDescriptor(ExprOp op, TensorDescriptor::DataType compute_dtype) {
+    cudnnReduceTensorDescriptor_t desc;
+    CUDNN_CHECK(cudnnCreateReduceTensorDescriptor(&desc));
+    CUDNN_CHECK(cudnnSetReduceTensorDescriptor(desc,
+                                               toCudnnReduceTensorOp(op),
+                                               toCudnnDataType(compute_dtype),
+                                               CUDNN_PROPAGATE_NAN,
+                                               CUDNN_REDUCE_TENSOR_NO_INDICES,
+                                               CUDNN_32BIT_INDICES));
+    return desc;
+}
+
+size_t FusedEquation::getReductionWorkspaceSize(int device_num,
+                                                cudnnReduceTensorDescriptor_t reduce_desc,
+                                                cudnnTensorDescriptor_t a_desc,
+                                                cudnnTensorDescriptor_t c_desc) {
+    Stream stream(device_num);
+    size_t workspace_bytes = 0;
+    CUDNN_CHECK(cudnnGetReductionWorkspaceSize(stream.getCudnnHandle(), reduce_desc, a_desc, c_desc, &workspace_bytes));
+    return workspace_bytes;
+}
+
+void FusedEquation::runEquation(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
     std::vector<Tensor> orderedInputs = bindNamedInputs(inputs);
-    run(std::move(orderedInputs), output, stream);
+    runEquation(std::move(orderedInputs), output, stream);
 }
 
 }  // namespace ThorImplementation

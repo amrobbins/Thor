@@ -8,6 +8,7 @@
 #include "Utilities/TensorMathFusion/CompiledEquation.h"
 
 namespace ThorImplementation {
+struct BuiltReduction;
 
 class StampedEquation {
    public:
@@ -33,4 +34,57 @@ class StampedEquation {
     Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty();
 };
 
+class StampedReduction {
+   public:
+    void run();
+    Tensor getOutputTensor() const { return output; }
+
+    StampedReduction(
+        std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, Optional<Tensor> workspace);
+
+   private:
+    const std::shared_ptr<BuiltReduction> built_reduction;
+    const Tensor input;
+    Tensor output;
+    const Optional<Tensor> workspace;
+    Stream stream;
+
+    const float alpha_1 = 1.0f;
+    const float beta_1 = 0.0f;
+    const void* alpha = &alpha_1;
+    const void* beta = &beta_1;
+};
+
+struct StampedExecutionStage {
+    enum class Kind { FusedKernel, Reduction };
+    const Kind kind;
+
+    const std::shared_ptr<StampedEquation> fused = nullptr;
+    const std::shared_ptr<StampedReduction> reduction = nullptr;
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused) : kind(Kind::FusedKernel), fused(fused) {}
+    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction) : kind(Kind::Reduction), reduction(reduction) {}
+};
+
+class StampedExecutionPlan {
+   public:
+    StampedExecutionPlan(std::vector<StampedExecutionStage> steps) : steps(std::move(steps)) {}
+
+    void run() {
+        for (const StampedExecutionStage& step : steps) {
+            if (step.kind == StampedExecutionStage::Kind::FusedKernel) {
+                assert(step.fused != nullptr);
+                step.fused->run();
+            } else if (step.kind == StampedExecutionStage::Kind::Reduction) {
+                assert(step.reduction != nullptr);
+                step.reduction->run();
+            } else {
+                throw std::runtime_error("Unknown StampedExecutionStep kind: " + std::to_string((int)step.kind));
+            }
+        }
+    }
+
+   private:
+    const std::vector<StampedExecutionStage> steps;
+};
 }  // namespace ThorImplementation
