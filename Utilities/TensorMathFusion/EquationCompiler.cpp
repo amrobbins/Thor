@@ -128,7 +128,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
     ensureCudaContextCurrent(sig.device_num);
 
     EquationCacheKey key(canonicalize(expr), sig, broadcast_support);
-    if (auto hit = cacheLookup(key))
+    shared_ptr<CompiledEquation> hit = cacheLookup(key);
+    if (hit)
         return hit;
 
     string kernel_name = "fused_kernel";
@@ -150,6 +151,17 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
 
     cacheInsert(key, compiled);
     return compiled;
+}
+
+shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype) {
+    // Compile stage knows dtype, but is tensor shape agnostic
+
+    assert(expr.nodes.size() == 1);
+    const ExprNode node = expr.nodes[0];
+    assert(isCudnnReduceOp(node.op));
+    assert(expr.numInputs() == 1);
+
+    return make_shared<CompiledReduction>(node.op, node.reduction_axes, node.keepdim, inout_dtype, node.compute_dtype);
 }
 
 }  // namespace ThorImplementation

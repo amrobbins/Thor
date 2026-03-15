@@ -14,15 +14,19 @@
 namespace ThorImplementation {
 class EquationCompiler {
    public:
-    std::shared_ptr<CompiledEquation> compile(const PhysicalExpression& expr, const EquationSignature& sig, const bool broadcast_support);
-    std::vector<char> compileToLtoIr(const std::string& src, const std::string& kernel_name, const EquationSignature& sig);
-    std::vector<char> linkToCubin(const std::vector<char>& ltoir, const EquationSignature& sig);
-    std::shared_ptr<CompiledEquation> loadCubin(const EquationCacheKey& key,
-                                                const std::vector<char>& cubin,
-                                                const std::string& kernel_name,
-                                                const std::vector<std::string>& input_names,
-                                                TensorDescriptor::DataType dtype,
-                                                int device_num);
+    static std::shared_ptr<CompiledEquation> compile(const PhysicalExpression& expr,
+                                                     const EquationSignature& sig,
+                                                     const bool broadcast_support);
+    static std::vector<char> compileToLtoIr(const std::string& src, const std::string& kernel_name, const EquationSignature& sig);
+    static std::vector<char> linkToCubin(const std::vector<char>& ltoir, const EquationSignature& sig);
+    static std::shared_ptr<CompiledEquation> loadCubin(const EquationCacheKey& key,
+                                                       const std::vector<char>& cubin,
+                                                       const std::string& kernel_name,
+                                                       const std::vector<std::string>& input_names,
+                                                       TensorDescriptor::DataType dtype,
+                                                       int device_num);
+
+    static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype);
 };
 
 }  // namespace ThorImplementation

@@ -1,13 +1,12 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "Utilities/TensorMathFusion/Expression.h"
 
 namespace ThorImplementation {
 struct EquationSignature {
-    uint32_t rank;  // maybe just 1 for flattened contiguous V1
     uint32_t num_inputs;
     TensorDescriptor::DataType dtype;
-    bool contiguous;
     int sm_major;
     int sm_minor;
     int device_num;
@@ -57,6 +56,28 @@ struct CompiledEquation {
     }
 };
 
+struct CompiledReduction {
+    const ExprOp op;
+    std::vector<uint64_t> reduction_axes;
+    const bool keepdim;
+    const TensorDescriptor::DataType inout_dtype;
+    const TensorDescriptor::DataType compute_dtype;
+
+    bool operator==(const CompiledReduction& other) const = default;
+
+    CompiledReduction(ExprOp op,
+                      std::vector<uint64_t> reduction_axes,
+                      bool keepdim,
+                      TensorDescriptor::DataType input_dtype,
+                      TensorDescriptor::DataType compute_dtype)
+        : op(op), keepdim(keepdim), inout_dtype(input_dtype), compute_dtype(compute_dtype) {
+        // Canonical representation: sorted and uniquified
+        std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
+        // Remove adjacent duplicates:
+        this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
+    }
+};
+
 }  // namespace ThorImplementation
 
 inline void hashCombine(std::size_t& seed, std::size_t value) { seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2); }
@@ -64,12 +85,10 @@ inline void hashCombine(std::size_t& seed, std::size_t value) { seed ^= value + 
 namespace std {
 template <>
 struct hash<ThorImplementation::EquationSignature> {
-    size_t operator()(const ThorImplementation::EquationSignature& s) const {
+    size_t operator()(const ThorImplementation::EquationSignature& s) const noexcept {
         size_t h = 0;
-        hashCombine(h, std::hash<uint32_t>{}(s.rank));
         hashCombine(h, std::hash<uint32_t>{}(s.num_inputs));
         hashCombine(h, std::hash<int>{}(static_cast<int>(s.dtype)));
-        hashCombine(h, std::hash<bool>{}(s.contiguous));
         hashCombine(h, std::hash<int>{}(s.sm_major));
         hashCombine(h, std::hash<int>{}(s.sm_minor));
         hashCombine(h, std::hash<int>{}(s.device_num));
@@ -79,7 +98,7 @@ struct hash<ThorImplementation::EquationSignature> {
 
 template <>
 struct hash<ThorImplementation::EquationCacheKey> {
-    std::size_t operator()(const ThorImplementation::EquationCacheKey& k) const {
+    std::size_t operator()(const ThorImplementation::EquationCacheKey& k) const noexcept {
         std::size_t h = std::hash<std::string>{}(k.canonical_expr);
         hashCombine(h, std::hash<ThorImplementation::EquationSignature>{}(k.sig));
         hashCombine(h, std::hash<bool>{}(k.broadcast_support));

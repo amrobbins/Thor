@@ -14,7 +14,61 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
-enum class ExprOp : uint16_t { INPUT = 3, SCALAR_FP, ADD, SUB, MUL, DIV, POW, NEG, EXP, EXP2, EXP10, LN, LOG2, LOG10, SQRT, MIN, MAX };
+enum class ExprOp : uint16_t {
+    INPUT = 3,
+    SCALAR_FP,
+    ADD,
+    SUB,
+    MUL,
+    DIV,
+    POW,
+    NEG,
+    EXP,
+    EXP2,
+    EXP10,
+    LN,
+    LOG2,
+    LOG10,
+    SQRT,
+    MIN,
+    MAX,
+    REDUCE_SUM,
+    REDUCE_PROD,
+    REDUCE_MIN,
+    REDUCE_MAX,
+    REDUCE_AMAX,
+    REDUCE_AVG,
+    REDUCE_NORM1,
+    REDUCE_NORM2,
+};
+
+inline bool isCudnnReduceOp(ExprOp op) {
+    return op == ExprOp::REDUCE_SUM || op == ExprOp::REDUCE_PROD || op == ExprOp::REDUCE_MIN || op == ExprOp::REDUCE_MAX ||
+           op == ExprOp::REDUCE_AMAX || op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2;
+}
+
+inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
+    switch (op) {
+        case ExprOp::REDUCE_SUM:
+            return CUDNN_REDUCE_TENSOR_ADD;
+        case ExprOp::REDUCE_PROD:
+            return CUDNN_REDUCE_TENSOR_MUL;
+        case ExprOp::REDUCE_MIN:
+            return CUDNN_REDUCE_TENSOR_MIN;
+        case ExprOp::REDUCE_MAX:
+            return CUDNN_REDUCE_TENSOR_MAX;
+        case ExprOp::REDUCE_AMAX:
+            return CUDNN_REDUCE_TENSOR_AMAX;
+        case ExprOp::REDUCE_AVG:
+            return CUDNN_REDUCE_TENSOR_AVG;
+        case ExprOp::REDUCE_NORM1:
+            return CUDNN_REDUCE_TENSOR_NORM1;
+        case ExprOp::REDUCE_NORM2:
+            return CUDNN_REDUCE_TENSOR_NORM2;
+        default:
+            throw;
+    }
+}
 
 struct ExprNode {
     ExprOp op;
@@ -22,6 +76,11 @@ struct ExprNode {
     uint32_t rhs = UINT32_MAX;  // unused for unary/scalar ops
     uint32_t input_slot = UINT32_MAX;
     double scalar_fp = 0.0;
+
+    // for reduction nodes only
+    std::vector<uint64_t> reduction_axes;
+    bool keepdim = true;
+    TensorDescriptor::DataType compute_dtype;
 };
 
 struct NamedInput {

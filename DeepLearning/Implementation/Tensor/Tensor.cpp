@@ -189,11 +189,8 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
-    // All tensors end on a 32 byte boundary so that kernels can overshoot when writing arrays in chunks of the maximum sized type
-    // (double4) without risking accessing another memory block. Consider the overhead of having 1 million tensors instantiated: the
-    // overhead is less than 32 MB of GPU memory.
-    memBytes = (memBytes + 31) / 32;
-    memBytes *= 32;
+    // All tensors add 32 bytes of padding to make writing up to a full double4 past the end safe.
+    memBytes += 32;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         if (alignmentBytes <= 256) {

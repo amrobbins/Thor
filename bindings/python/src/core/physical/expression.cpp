@@ -160,7 +160,7 @@ void bind_fused_equation(nb::module_& physical) {
 
     fused_equation.def("stamp",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, const Stream&, const std::vector<uint64_t>&>(
-                           &FusedEquation::stamp, nb::const_),
+                           &FusedEquation::stampEquation, nb::const_),
                        "inputs"_a,
                        "stream"_a,
                        "requestedOutputShape"_a = std::vector<uint64_t>{},
@@ -184,12 +184,13 @@ inputs: dict[str, PhysicalTensor]
     // - or a dict mapping input names to tensors
     // )nbdoc");
 
-    fused_equation.def("run",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
-                       "inputs"_a,
-                       "output"_a,
-                       "stream"_a,
-                       R"nbdoc(
+    fused_equation.def(
+        "run",
+        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, Tensor&, Stream&>(&FusedEquation::runEquation, nb::const_),
+        "inputs"_a,
+        "output"_a,
+        "stream"_a,
+        R"nbdoc(
 Run a fused equation with the thor.physical.PhysicalTensor's provided.
 
 inputs: dict[str, PhysicalTensor]
