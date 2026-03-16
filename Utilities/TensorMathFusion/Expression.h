@@ -36,7 +36,7 @@ enum class ExprOp : uint16_t {
     REDUCE_PROD,
     REDUCE_MIN,
     REDUCE_MAX,
-    REDUCE_AMAX,
+    // REDUCE_AMAX, <-- requires indices, not doing for now.
     REDUCE_AVG,
     REDUCE_NORM1,
     REDUCE_NORM2,
@@ -44,7 +44,7 @@ enum class ExprOp : uint16_t {
 
 inline bool isCudnnReduceOp(ExprOp op) {
     return op == ExprOp::REDUCE_SUM || op == ExprOp::REDUCE_PROD || op == ExprOp::REDUCE_MIN || op == ExprOp::REDUCE_MAX ||
-           op == ExprOp::REDUCE_AMAX || op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2;
+           op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2;
 }
 
 inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
@@ -57,8 +57,6 @@ inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
             return CUDNN_REDUCE_TENSOR_MIN;
         case ExprOp::REDUCE_MAX:
             return CUDNN_REDUCE_TENSOR_MAX;
-        case ExprOp::REDUCE_AMAX:
-            return CUDNN_REDUCE_TENSOR_AMAX;
         case ExprOp::REDUCE_AVG:
             return CUDNN_REDUCE_TENSOR_AVG;
         case ExprOp::REDUCE_NORM1:
@@ -79,8 +77,8 @@ struct ExprNode {
 
     // for reduction nodes only
     std::vector<uint64_t> reduction_axes;
-    bool keepdim = true;
-    TensorDescriptor::DataType compute_dtype;
+    std::vector<uint64_t> squeeze_axes;
+    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty();
 };
 
 struct NamedInput {
@@ -124,8 +122,43 @@ class Expression {
     [[nodiscard]] Expression sqrt() const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
-    Expression min(const Expression& other) const;
-    Expression max(const Expression& other) const;
+    [[nodiscard]] Expression reduce_sum(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression reduce_prod(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression reduce_min(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression reduce_max(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression reduce_mean(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression reduce_norm1(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression reduce_norm2(
+        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+
+    [[nodiscard]] Expression min(const Expression& other) const;
+    [[nodiscard]] Expression max(const Expression& other) const;
+
+    static bool isLeafOp(ExprOp op);
+
+    static bool isUnaryOp(ExprOp op);
+
+    static bool isBinaryOp(ExprOp op);
 
    private:
     std::shared_ptr<PhysicalExpression> expr;

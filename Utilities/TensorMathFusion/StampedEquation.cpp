@@ -85,8 +85,6 @@ static cudnnReduceTensorOp_t toCudnnReduceTensorOp(ExprOp op) {
             return CUDNN_REDUCE_TENSOR_MIN;
         case ExprOp::REDUCE_MAX:
             return CUDNN_REDUCE_TENSOR_MAX;
-        case ExprOp::REDUCE_AMAX:
-            return CUDNN_REDUCE_TENSOR_AMAX;
         case ExprOp::REDUCE_AVG:
             return CUDNN_REDUCE_TENSOR_AVG;
         case ExprOp::REDUCE_NORM1:
@@ -100,7 +98,7 @@ static cudnnReduceTensorOp_t toCudnnReduceTensorOp(ExprOp op) {
 
 std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
                                                                   const std::vector<uint64_t>& reduction_axes,
-                                                                  bool keepdim) {
+                                                                  const std::vector<uint64_t>& squeeze_axes) {
     std::vector<uint64_t> output_dims = input_dims;
 
     for (uint64_t axis : reduction_axes) {
@@ -109,21 +107,54 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
         output_dims[axis] = 1;
     }
 
-    if (keepdim)
+    if (squeeze_axes.empty()) {
+        // Do not squeeze
         return output_dims;
+    }
 
     std::vector<uint64_t> squeezed;
     squeezed.reserve(output_dims.size());
-    for (uint64_t d : output_dims) {
-        if (d != 1)
-            squeezed.push_back(d);
+    if (squeeze_axes.size() == 1 && squeeze_axes[0] == UINT64_MAX) {
+        // Squeeze all singletons
+        for (uint64_t d : output_dims) {
+            if (d != 1)
+                squeezed.push_back(d);
+        }
+    } else {
+        // Eliminate the specified dimensions, error if any specified dimension is not a singleton.
+        // Precondition: squeeze_dimensions are sorted ascending and uniquified.
+        uint64_t nextDimToSqueeze = squeeze_axes[0];
+        uint64_t nextIndexInSqueezedDims = 1;
+        for (uint64_t i = 0; i < output_dims.size(); ++i) {
+            if (i == nextDimToSqueeze) {
+                if (output_dims[i] != 1) {
+                    throw runtime_error("Trying to squeeze axis " + to_string(nextDimToSqueeze) + "but it has size " +
+                                        to_string(output_dims[i]) + ", can only squeeze dimensions of size 1.");
+                }
+                if (nextIndexInSqueezedDims < squeeze_axes.size()) {
+                    nextDimToSqueeze = squeeze_axes[nextIndexInSqueezedDims];
+                    nextIndexInSqueezedDims += 1;
+                } else {
+                    nextDimToSqueeze = UINT64_MAX;
+                }
+            } else {
+                squeezed.push_back(output_dims[i]);
+            }
+        }
+        if (nextIndexInSqueezedDims != squeeze_axes.size()) {
+            throw runtime_error("Axis " + to_string(nextDimToSqueeze) + " was passed as a dimension to squeeze, but it has only " +
+                                to_string(output_dims.size()) + " dimensions.");
+        }
     }
+
     if (squeezed.empty())
         squeezed.push_back(1);
     return squeezed;
 }
 
-static cudnnTensorDescriptor_t createCudnnTensorDescriptor(const std::vector<uint64_t>& dims, TensorDescriptor::DataType dtype) {
+static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t> dims, TensorDescriptor::DataType dtype) {
+    while (dims.size() < 4)
+        dims.push_back(1);
     if (dims.empty())
         throw std::runtime_error("cuDNN reduction does not support empty-rank tensor descriptor here.");
     if (dims.size() > 8)
@@ -172,7 +203,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
     ReductionCacheKey key(compiled_reduction->op,
                           input_dims,
                           compiled_reduction->reduction_axes,
-                          compiled_reduction->keepdim,
+                          compiled_reduction->squeeze_axes,
                           compiled_reduction->inout_dtype,
                           compiled_reduction->compute_dtype,
                           device_num);
@@ -185,8 +216,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
 
     const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
                                                                          compiled_reduction->reduction_axes,
-                                                                         /*internal_keepdim=*/true);
-
+                                                                         /*squeeze_axes=*/{});
     built->a_desc = createCudnnTensorDescriptor(input_dims, compiled_reduction->inout_dtype);
     built->c_desc = createCudnnTensorDescriptor(output_dims, compiled_reduction->inout_dtype);
     built->reduce_desc = createCudnnReduceDescriptor(compiled_reduction->op, compiled_reduction->compute_dtype);

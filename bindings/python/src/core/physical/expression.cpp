@@ -1,4 +1,5 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unordered_map.h>
@@ -87,6 +88,205 @@ Return the elementwise natural logarithm of the input expression x
         "x"_a,
         R"nbdoc(
 Return the elementwise square root of the input expression x
+)nbdoc");
+
+    // Reductions
+    auto parse_axes = [](nb::object axis) -> std::vector<uint64_t> {
+        if (axis.is_none()) {
+            return {};
+        }
+        if (nb::isinstance<nb::int_>(axis)) {
+            return {nb::cast<uint64_t>(axis)};
+        }
+        return nb::cast<std::vector<uint64_t>>(axis);
+    };
+
+    auto parse_squeeze_axes = [](nb::object squeeze) -> std::vector<uint64_t> {
+        if (squeeze.is_none()) {
+            return {};
+        }
+
+        if (nb::isinstance<nb::bool_>(squeeze)) {
+            bool b = nb::cast<bool>(squeeze);
+            if (!b) {
+                return {};
+            }
+            return {UINT64_MAX};  // sentinel meaning "squeeze all singleton dims"
+        }
+
+        if (nb::isinstance<nb::int_>(squeeze)) {
+            return {nb::cast<uint64_t>(squeeze)};
+        }
+
+        return nb::cast<std::vector<uint64_t>>(squeeze);
+    };
+
+    expr.def(
+        "reduce_sum",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_sum(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by summation across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+)nbdoc");
+
+    expr.def(
+        "reduce_prod",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_prod(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by product across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+)nbdoc");
+
+    expr.def(
+        "reduce_min",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_min(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by minimum across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+)nbdoc");
+
+    expr.def(
+        "reduce_max",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_max(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by maximum across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+)nbdoc");
+
+    expr.def(
+        "reduce_mean",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_mean(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by arithmetic mean across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+)nbdoc");
+
+    expr.def(
+        "reduce_norm1",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_norm1(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by L1 norm across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+)nbdoc");
+
+    expr.def(
+        "reduce_norm2",
+        [parse_axes, parse_squeeze_axes](
+            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
+            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
+            if (compute_dtype.has_value())
+                maybe_compute_dtype = compute_dtype.value();
+            return self.reduce_norm2(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        },
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Reduce by L2 norm across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
 )nbdoc");
 
     expr.def_static(

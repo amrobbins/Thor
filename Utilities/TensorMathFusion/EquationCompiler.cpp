@@ -153,68 +153,42 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
 }
 
 shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype) {
-    // Compile stage knows dtype, but is tensor shape agnostic
+    // Compile stage knows dtype, but is tensor shape agnostic.
+    // Reduction stage expression is expected to be:
+    //   node 0: INPUT
+    //   node 1: REDUCE_*
+    // with output_node == 1
 
-    assert(expr.nodes.size() == 1);
-    const ExprNode node = expr.nodes[0];
-    assert(isCudnnReduceOp(node.op));
-    assert(expr.numInputs() == 1);
+    if (expr.numInputs() != 1) {
+        throw std::runtime_error("Reduction stage must have exactly one input.");
+    }
 
-    return make_shared<CompiledReduction>(node.op, node.reduction_axes, node.keepdim, inout_dtype, node.compute_dtype);
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Reduction stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isCudnnReduceOp(node.op)) {
+        throw std::runtime_error("Reduction stage output node is not a cuDNN reduction op.");
+    }
+
+    if (node.lhs == UINT32_MAX) {
+        throw std::runtime_error("Reduction node is missing its input.");
+    }
+
+    if (node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("Reduction node lhs is out of range.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    if (input_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("Reduction stage input must be a local INPUT node.");
+    }
+
+    return make_shared<CompiledReduction>(node.op, node.reduction_axes, node.squeeze_axes, inout_dtype, node.compute_dtype);
 }
 
 static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op); }
-
-static bool hasLhs(const ExprNode& node) {
-    switch (node.op) {
-        case ExprOp::INPUT:
-        case ExprOp::SCALAR_FP:
-            return false;
-
-        case ExprOp::NEG:
-        case ExprOp::EXP:
-        case ExprOp::EXP2:
-        case ExprOp::EXP10:
-        case ExprOp::LN:
-        case ExprOp::LOG2:
-        case ExprOp::LOG10:
-        case ExprOp::SQRT:
-        case ExprOp::REDUCE_SUM:
-        case ExprOp::REDUCE_PROD:
-        case ExprOp::REDUCE_MIN:
-        case ExprOp::REDUCE_MAX:
-        case ExprOp::REDUCE_AMAX:
-        case ExprOp::REDUCE_AVG:
-        case ExprOp::REDUCE_NORM1:
-        case ExprOp::REDUCE_NORM2:
-            return true;
-
-        case ExprOp::ADD:
-        case ExprOp::SUB:
-        case ExprOp::MUL:
-        case ExprOp::DIV:
-        case ExprOp::POW:
-        case ExprOp::MIN:
-        case ExprOp::MAX:
-            return true;
-    }
-    return false;
-}
-
-static bool hasRhs(const ExprNode& node) {
-    switch (node.op) {
-        case ExprOp::ADD:
-        case ExprOp::SUB:
-        case ExprOp::MUL:
-        case ExprOp::DIV:
-        case ExprOp::POW:
-        case ExprOp::MIN:
-        case ExprOp::MAX:
-            return true;
-        default:
-            return false;
-    }
-}
 
 static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
     std::vector<uint32_t> stack{root_idx};
@@ -231,23 +205,21 @@ static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_i
             throw std::runtime_error("collectFusableRegion called on reduction root.");
         }
 
-        if (node.op == ExprOp::INPUT || node.op == ExprOp::SCALAR_FP) {
+        if (Expression::isLeafOp(node.op)) {
             continue;
         }
 
-        if (hasLhs(node)) {
-            uint32_t parent_idx = node.lhs;
-            if (parent_idx >= expr.nodes.size()) {
-                throw std::runtime_error("Invalid lhs node index in expression.");
-            }
-
-            const ExprNode& parent = expr.nodes[parent_idx];
-            if (!isStageBoundaryOp(parent.op)) {
-                stack.push_back(parent_idx);
-            }
+        uint32_t parent_idx = node.lhs;
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Invalid lhs node index in expression.");
         }
 
-        if (hasRhs(node)) {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        if (!isStageBoundaryOp(parent.op)) {
+            stack.push_back(parent_idx);
+        }
+
+        if (Expression::isBinaryOp(node.op)) {
             uint32_t parent_idx = node.rhs;
             if (parent_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid rhs node index in expression.");
@@ -267,21 +239,19 @@ static void collectBoundaryDependencies(const PhysicalExpression& expr,
     for (uint32_t node_idx : region_nodes) {
         const ExprNode& node = expr.nodes[node_idx];
 
-        if (node.op == ExprOp::INPUT || node.op == ExprOp::SCALAR_FP) {
+        if (Expression::isLeafOp(node.op)) {
             continue;
         }
 
-        if (hasLhs(node)) {
-            uint32_t parent_idx = node.lhs;
-            if (parent_idx >= expr.nodes.size()) {
-                throw std::runtime_error("Invalid lhs node index in expression.");
-            }
-            if (!region_nodes.count(parent_idx) && isStageBoundaryOp(expr.nodes[parent_idx].op)) {
-                boundary_nodes.insert(parent_idx);
-            }
+        uint32_t parent_idx = node.lhs;
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Invalid lhs node index in expression.");
+        }
+        if (!region_nodes.count(parent_idx) && isStageBoundaryOp(expr.nodes[parent_idx].op)) {
+            boundary_nodes.insert(parent_idx);
         }
 
-        if (hasRhs(node)) {
+        if (Expression::isBinaryOp(node.op)) {
             uint32_t parent_idx = node.rhs;
             if (parent_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid rhs node index in expression.");
@@ -305,9 +275,6 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     stage_expr.nodes.reserve(sorted_nodes.size());
 
     std::unordered_map<uint32_t, uint32_t> old_to_new_node_idx;
-    for (uint32_t i = 0; i < sorted_nodes.size(); ++i) {
-        old_to_new_node_idx.emplace(sorted_nodes[i], i);
-    }
 
     std::vector<uint32_t> stage_input_value_ids;
     std::unordered_map<uint32_t, uint32_t> value_id_to_local_input_slot;
@@ -337,7 +304,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
             uint32_t value_id = new_node.input_slot;
             new_node.input_slot = getOrCreateLocalInputSlot(value_id);
         } else {
-            if (hasLhs(new_node)) {
+            if (!Expression::isLeafOp(new_node.op)) {
                 uint32_t old_parent = new_node.lhs;
                 auto it = old_to_new_node_idx.find(old_parent);
                 if (it != old_to_new_node_idx.end()) {
@@ -354,12 +321,12 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
                     uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
                     stage_expr.nodes.push_back(std::move(input_node));
-                    old_to_new_node_idx.emplace(old_parent, new_input_idx);
+                    old_to_new_node_idx[old_parent] = new_input_idx;
                     new_node.lhs = new_input_idx;
                 }
             }
 
-            if (hasRhs(new_node)) {
+            if (Expression::isBinaryOp(new_node.op)) {
                 uint32_t old_parent = new_node.rhs;
                 auto it = old_to_new_node_idx.find(old_parent);
                 if (it != old_to_new_node_idx.end()) {
@@ -376,7 +343,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
                     uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
                     stage_expr.nodes.push_back(std::move(input_node));
-                    old_to_new_node_idx.emplace(old_parent, new_input_idx);
+                    old_to_new_node_idx[old_parent] = new_input_idx;
                     new_node.rhs = new_input_idx;
                 }
             }
@@ -384,19 +351,15 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
         uint32_t new_idx = static_cast<uint32_t>(stage_expr.nodes.size());
         stage_expr.nodes.push_back(std::move(new_node));
+        old_to_new_node_idx[old_idx] = new_idx;
 
-        auto root_it = old_to_new_node_idx.find(root_idx);
         if (old_idx == root_idx) {
             stage_expr.output_node = new_idx;
         }
     }
 
     if (stage_expr.output_node == UINT32_MAX) {
-        auto it = old_to_new_node_idx.find(root_idx);
-        if (it == old_to_new_node_idx.end()) {
-            throw std::runtime_error("Failed to determine fused stage output node.");
-        }
-        stage_expr.output_node = it->second;
+        throw std::runtime_error("Failed to determine fused stage output node.");
     }
 
     return PhysicalExecutionStage{
