@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iostream>
+
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 
@@ -59,7 +61,7 @@ struct CompiledEquation {
 struct CompiledReduction {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;
-    const bool keepdim;
+    std::vector<uint64_t> squeeze_axes;
     const TensorDescriptor::DataType inout_dtype;
     const TensorDescriptor::DataType compute_dtype;
 
@@ -67,14 +69,21 @@ struct CompiledReduction {
 
     CompiledReduction(ExprOp op,
                       std::vector<uint64_t> reduction_axes,
-                      bool keepdim,
+                      std::vector<uint64_t> squeeze_axes,
                       TensorDescriptor::DataType input_dtype,
-                      TensorDescriptor::DataType compute_dtype)
-        : op(op), keepdim(keepdim), inout_dtype(input_dtype), compute_dtype(compute_dtype) {
+                      Optional<TensorDescriptor::DataType> compute_dtype)
+        : op(op),
+          reduction_axes(std::move(reduction_axes)),
+          squeeze_axes(std::move(squeeze_axes)),
+          inout_dtype(input_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : inout_dtype) {
         // Canonical representation: sorted and uniquified
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         // Remove adjacent duplicates:
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
+
+        std::sort(this->squeeze_axes.begin(), this->squeeze_axes.end());
+        this->squeeze_axes.erase(std::unique(this->squeeze_axes.begin(), this->squeeze_axes.end()), this->squeeze_axes.end());
     }
 };
 

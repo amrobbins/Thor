@@ -207,6 +207,8 @@ int
     physical_tensor.def("get_placement", &PhysicalTensor::getPlacement);
     physical_tensor.def("get_size_in_bytes", &PhysicalTensor::getArraySizeInBytes);
 
+    physical_tensor.def_prop_ro("dimensions", [](const PhysicalTensor &self) { return self.getDescriptor().getDimensions(); });
+
     physical_tensor.def("numpy", [](PhysicalTensor &self) -> nb::object {
         if (self.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU)
             throw nb::value_error("PhysicalTensor.numpy() requires CPU placement");

@@ -1,5 +1,7 @@
 #include "Utilities/TensorMathFusion/Expression.h"
 
+using DataType = ThorImplementation::TensorDescriptor::DataType;
+
 namespace ThorImplementation {
 
 std::string formatFloatCanonical(double x) {
@@ -110,19 +112,55 @@ std::string canonicalize(const PhysicalExpression& expr) {
     return canonicalizeNode(expr, expr.output_node, memo);
 }
 
+bool Expression::isLeafOp(const ExprOp op) {
+    switch (op) {
+        case ExprOp::INPUT:
+        case ExprOp::SCALAR_FP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Expression::isUnaryOp(const ExprOp op) {
+    switch (op) {
+        case ExprOp::NEG:
+        case ExprOp::EXP:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_AVG:
+        case ExprOp::REDUCE_NORM1:
+        case ExprOp::REDUCE_NORM2:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool Expression::isBinaryOp(const ExprOp op) {
+    switch (op) {
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::POW:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+            return true;
+        default:
+            return false;
+    }
+}
+
 namespace {
-
-bool isLeafOp(ExprOp op) { return op == ExprOp::INPUT || op == ExprOp::SCALAR_FP; }
-
-bool isUnaryOp(ExprOp op) {
-    return op == ExprOp::NEG || op == ExprOp::EXP || op == ExprOp::EXP2 || op == ExprOp::EXP10 || op == ExprOp::LN || op == ExprOp::LOG2 ||
-           op == ExprOp::LOG10 || op == ExprOp::SQRT;
-}
-
-bool isBinaryOp(ExprOp op) {
-    return op == ExprOp::ADD || op == ExprOp::SUB || op == ExprOp::MUL || op == ExprOp::DIV || op == ExprOp::POW || op == ExprOp::MIN ||
-           op == ExprOp::MAX;
-}
 
 uint32_t cloneSubtree(const PhysicalExpression& src,
                       uint32_t srcNodeIndex,
@@ -135,19 +173,19 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     const ExprNode& srcNode = src.nodes[srcNodeIndex];
     ExprNode newNode = srcNode;
 
-    if (isUnaryOp(srcNode.op)) {
+    if (Expression::isUnaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing lhs for unary op");
         newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
         newNode.rhs = UINT32_MAX;
-    } else if (isBinaryOp(srcNode.op)) {
+    } else if (Expression::isBinaryOp(srcNode.op)) {
         if (srcNode.lhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing lhs for binary op");
         if (srcNode.rhs == UINT32_MAX)
             throw std::runtime_error("Malformed expression: missing rhs for binary op");
         newNode.lhs = cloneSubtree(src, srcNode.lhs, dst, oldToNew);
         newNode.rhs = cloneSubtree(src, srcNode.rhs, dst, oldToNew);
-    } else if (isLeafOp(srcNode.op)) {
+    } else if (Expression::isLeafOp(srcNode.op)) {
         // nothing to recurse into
     } else {
         std::string error_message = "Malformed expression: unsupported op in cloneSubtree: " + std::to_string((int)srcNode.op);
@@ -311,6 +349,77 @@ Expression Expression::operator/(const Expression& other) const { return binaryO
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
+
+// Reductions
+Expression Expression::reduce_sum(const std::vector<uint64_t>& axes,
+                                  const std::vector<uint64_t>& squeeze_axes,
+                                  Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_SUM);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
+
+Expression Expression::reduce_prod(const std::vector<uint64_t>& axes,
+                                   const std::vector<uint64_t>& squeeze_axes,
+                                   Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_PROD);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
+
+Expression Expression::reduce_min(const std::vector<uint64_t>& axes,
+                                  const std::vector<uint64_t>& squeeze_axes,
+                                  Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_MIN);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
+
+Expression Expression::reduce_max(const std::vector<uint64_t>& axes,
+                                  const std::vector<uint64_t>& squeeze_axes,
+                                  Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_MAX);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
+
+Expression Expression::reduce_mean(const std::vector<uint64_t>& axes,
+                                   const std::vector<uint64_t>& squeeze_axes,
+                                   Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_AVG);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
+
+Expression Expression::reduce_norm1(const std::vector<uint64_t>& axes,
+                                    const std::vector<uint64_t>& squeeze_axes,
+                                    Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_NORM1);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
+
+Expression Expression::reduce_norm2(const std::vector<uint64_t>& axes,
+                                    const std::vector<uint64_t>& squeeze_axes,
+                                    Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, ExprOp::REDUCE_NORM2);
+    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
+    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    return out;
+}
 
 Expression Expression::ln() const { return unaryOp(*this, ExprOp::LN); }
 Expression Expression::log2() const { return unaryOp(*this, ExprOp::LOG2); }

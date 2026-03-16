@@ -415,7 +415,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     }
 
     vector<uint64_t> outputDimensions =
-        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.keepdim);
+        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
     TensorDescriptor outputDescriptor(input.getDataType(), outputDimensions);
     Tensor output = Tensor(input.getPlacement(), outputDescriptor);
 

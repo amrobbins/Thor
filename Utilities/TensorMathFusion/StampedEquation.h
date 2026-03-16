@@ -13,7 +13,7 @@ struct ReductionCacheKey {
     const ExprOp op;
     const std::vector<uint64_t> input_dims;
     std::vector<uint64_t> reduction_axes;
-    const bool keepdim;
+    std::vector<uint64_t> squeeze_axes;
     const TensorDescriptor::DataType inout_dtype;
     const TensorDescriptor::DataType compute_dtype;
     const int device_num;
@@ -23,19 +23,26 @@ struct ReductionCacheKey {
     ReductionCacheKey(ExprOp op,
                       std::vector<uint64_t> input_dims,
                       std::vector<uint64_t> reduction_axes,
-                      bool keepdim,
+                      std::vector<uint64_t> squeeze_axes,
                       TensorDescriptor::DataType inout_dtype,
                       TensorDescriptor::DataType compute_dtype,
                       int device_num)
         : op(op),
           input_dims(std::move(input_dims)),
           reduction_axes(std::move(reduction_axes)),
-          keepdim(keepdim),
+          squeeze_axes(std::move(squeeze_axes)),
           inout_dtype(inout_dtype),
           compute_dtype(compute_dtype),
           device_num(device_num) {
-        std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
-        this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
+        if (this->reduction_axes.empty()) {
+            this->reduction_axes.resize(input_dims.size());
+            std::iota(this->reduction_axes.begin(), this->reduction_axes.end(), 0);
+        } else {
+            std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
+            this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
+        }
+        std::sort(this->squeeze_axes.begin(), this->squeeze_axes.end());
+        this->squeeze_axes.erase(std::unique(this->squeeze_axes.begin(), this->squeeze_axes.end()), this->squeeze_axes.end());
     }
 };
 
@@ -81,7 +88,7 @@ class StampedEquation {
 
     static std::vector<uint64_t> computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
                                                             const std::vector<uint64_t>& reduction_axes,
-                                                            bool keepdim);
+                                                            const std::vector<uint64_t>& squeeze_axes);
 
     static std::shared_ptr<BuiltReduction> buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,
                                                           const Tensor& input,
@@ -111,9 +118,9 @@ class StampedReduction {
     Stream stream;
 
     const float alpha_1 = 1.0f;
-    const float beta_1 = 0.0f;
+    const float beta_0 = 0.0f;
     const void* alpha = &alpha_1;
-    const void* beta = &beta_1;
+    const void* beta = &beta_0;
 };
 
 struct StampedExecutionStage {
@@ -189,12 +196,12 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<size_t>{}(k.input_dims.size()));
         for (uint64_t d : k.input_dims)
             hashCombine(h, hash<uint64_t>{}(d));
-
         hashCombine(h, hash<size_t>{}(k.reduction_axes.size()));
         for (uint64_t axis : k.reduction_axes)
             hashCombine(h, hash<uint64_t>{}(axis));
-
-        hashCombine(h, hash<bool>{}(k.keepdim));
+        hashCombine(h, hash<size_t>{}(k.squeeze_axes.size()));
+        for (uint64_t axis : k.squeeze_axes)
+            hashCombine(h, hash<uint64_t>{}(axis));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.inout_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<int>{}(k.device_num));
