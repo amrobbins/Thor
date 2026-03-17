@@ -27,7 +27,7 @@ void bind_physical_expression(nb::module_& physical) {
 
     expr.def_static("input",
                     &Expression::input,
-                    "input_index"_a,
+                    "input_name"_a,
                     R"nbdoc(
             Create an expression input node.
 
@@ -121,8 +121,6 @@ Return the elementwise square root of the input expression x
         return nb::cast<std::vector<uint64_t>>(squeeze);
     };
 
-    // FIXME: Create string reduce_args_doc so can change just one place
-
     auto parse_reduction_compute_dtype = [](const std::string_view& op_name,
                                             const std::optional<DataType>& compute_dtype) -> Optional<DataType> {
         if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
@@ -155,18 +153,19 @@ Args:
 )doc";
 
     std::string reduce_sum_doc = std::format(kReductionDocTemplate, "summation");
-    expr.def(
+    expr.def_static(
         "reduce_sum",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_sum", output_dtype);
-            return self.reduce_sum(
+            return expr.reduce_sum(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_sum", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
@@ -174,18 +173,19 @@ Args:
         reduce_sum_doc.c_str());
 
     std::string reduce_prod_doc = std::format(kReductionDocTemplate, "product");
-    expr.def(
+    expr.def_static(
         "reduce_prod",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_prod", output_dtype);
-            return self.reduce_prod(
+            return expr.reduce_prod(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_prod", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
@@ -193,18 +193,19 @@ Args:
         reduce_prod_doc.c_str());
 
     std::string reduce_min_doc = std::format(kReductionDocTemplate, "minimum");
-    expr.def(
+    expr.def_static(
         "reduce_min",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_min", output_dtype);
-            return self.reduce_min(
+            return expr.reduce_min(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_min", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
@@ -212,18 +213,19 @@ Args:
         reduce_min_doc.c_str());
 
     std::string reduce_max_doc = std::format(kReductionDocTemplate, "maximum");
-    expr.def(
+    expr.def_static(
         "reduce_max",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_max", output_dtype);
-            return self.reduce_max(
+            return expr.reduce_max(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_max", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
@@ -231,18 +233,19 @@ Args:
         reduce_max_doc.c_str());
 
     std::string reduce_mean_doc = std::format(kReductionDocTemplate, "arithmetic mean");
-    expr.def(
+    expr.def_static(
         "reduce_mean",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_mean", output_dtype);
-            return self.reduce_mean(
+            return expr.reduce_mean(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_mean", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
@@ -250,18 +253,19 @@ Args:
         reduce_mean_doc.c_str());
 
     std::string reduce_norm1_doc = std::format(kReductionDocTemplate, "L1 norm");
-    expr.def(
+    expr.def_static(
         "reduce_norm1",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_norm1", output_dtype);
-            return self.reduce_norm1(
+            return expr.reduce_norm1(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm1", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
@@ -269,18 +273,19 @@ Args:
         reduce_norm1_doc.c_str());
 
     std::string reduce_norm2_doc = std::format(kReductionDocTemplate, "L2 norm");
-    expr.def(
+    expr.def_static(
         "reduce_norm2",
         [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
-            const Expression& self,
+            const Expression& expr,
             nb::object axis,
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
             parse_reduction_output_dtype("reduce_norm2", output_dtype);
-            return self.reduce_norm2(
+            return expr.reduce_norm2(
                 parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm", compute_dtype));
         },
+        "expr"_a,
         "axis"_a = nb::none(),
         "squeeze"_a = false,
         "compute_dtype"_a.none() = DataType::FP32,
