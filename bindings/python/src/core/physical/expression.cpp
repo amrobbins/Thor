@@ -91,7 +91,7 @@ Return the elementwise square root of the input expression x
 )nbdoc");
 
     // Reductions
-    auto parse_axes = [](nb::object axis) -> std::vector<uint64_t> {
+    auto parse_axes = [](const nb::object& axis) -> std::vector<uint64_t> {
         if (axis.is_none()) {
             return {};
         }
@@ -101,7 +101,7 @@ Return the elementwise square root of the input expression x
         return nb::cast<std::vector<uint64_t>>(axis);
     };
 
-    auto parse_squeeze_axes = [](nb::object squeeze) -> std::vector<uint64_t> {
+    auto parse_squeeze_axes = [](const nb::object& squeeze) -> std::vector<uint64_t> {
         if (squeeze.is_none()) {
             return {};
         }
@@ -121,173 +121,171 @@ Return the elementwise square root of the input expression x
         return nb::cast<std::vector<uint64_t>>(squeeze);
     };
 
+    // FIXME: Create string reduce_args_doc so can change just one place
+
+    auto parse_reduction_compute_dtype = [](const std::string_view& op_name,
+                                            const std::optional<DataType>& compute_dtype) -> Optional<DataType> {
+        if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
+            throw std::runtime_error(std::string(op_name) + ": currently only supports compute_dtype=thor.DataType.fp32");
+        }
+        return DataType::FP32;
+    };
+
+    auto parse_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> compute_dtype) -> Optional<DataType> {
+        if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
+            throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.fp32");
+        }
+        return DataType::FP32;
+    };
+
+    static constexpr std::string_view kReductionDocTemplate = R"doc(
+Reduce by {} across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+    compute_dtype: thor.DataType: default thor.DataType.fp32
+        The data type used during compute. Currently only fp32 is supported for this operation.
+    output_dtype: thor.DataType: default thor.DataType.fp32
+        The data type that is written back to memory. Currently only fp32 is supported for this operation.
+)doc";
+
+    std::string reduce_sum_doc = std::format(kReductionDocTemplate, "summation");
     expr.def(
         "reduce_sum",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_sum(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_sum", output_dtype);
+            return self.reduce_sum(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_sum", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by summation across the specified axes.
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_sum_doc.c_str());
 
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
-
+    std::string reduce_prod_doc = std::format(kReductionDocTemplate, "product");
     expr.def(
         "reduce_prod",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_prod(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_prod", output_dtype);
+            return self.reduce_prod(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_prod", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by product across the specified axes.
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_prod_doc.c_str());
 
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
-
+    std::string reduce_min_doc = std::format(kReductionDocTemplate, "minimum");
     expr.def(
         "reduce_min",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_min(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_min", output_dtype);
+            return self.reduce_min(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_min", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by minimum across the specified axes.
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_min_doc.c_str());
 
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
-
+    std::string reduce_max_doc = std::format(kReductionDocTemplate, "maximum");
     expr.def(
         "reduce_max",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_max(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_max", output_dtype);
+            return self.reduce_max(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_max", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by maximum across the specified axes.
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_max_doc.c_str());
 
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
-
+    std::string reduce_mean_doc = std::format(kReductionDocTemplate, "arithmetic mean");
     expr.def(
         "reduce_mean",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_mean(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_mean", output_dtype);
+            return self.reduce_mean(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_mean", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by arithmetic mean across the specified axes.
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_mean_doc.c_str());
 
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
-
+    std::string reduce_norm1_doc = std::format(kReductionDocTemplate, "L1 norm");
     expr.def(
         "reduce_norm1",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_norm1(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_norm1", output_dtype);
+            return self.reduce_norm1(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm1", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by L1 norm across the specified axes.
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_norm1_doc.c_str());
 
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
-
+    std::string reduce_norm2_doc = std::format(kReductionDocTemplate, "L2 norm");
     expr.def(
         "reduce_norm2",
-        [parse_axes, parse_squeeze_axes](
-            const Expression& self, nb::object axis, nb::object squeeze, std::optional<DataType> compute_dtype) {
-            Optional<DataType> maybe_compute_dtype = Optional<DataType>::empty();
-            if (compute_dtype.has_value())
-                maybe_compute_dtype = compute_dtype.value();
-            return self.reduce_norm2(parse_axes(axis), parse_squeeze_axes(squeeze), maybe_compute_dtype);
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_reduction_output_dtype](
+            const Expression& self,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_reduction_output_dtype("reduce_norm2", output_dtype);
+            return self.reduce_norm2(
+                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm", compute_dtype));
         },
         "axis"_a = nb::none(),
         "squeeze"_a = false,
-        "compute_dtype"_a.none() = nb::none(),
-        R"nbdoc(
-Reduce by L2 norm across the specified axes.
-
-Args:
-    axis: int | list[int] | None
-        Single axis or sequence of axes to reduce. If None, reduce across all axes.
-    squeeze: bool | int | list[int]
-        If False, keep reduced axes as singleton dimensions.
-        If True, remove all singleton dimensions after reduction.
-        If an int or sequence of ints, remove those specific singleton axes after reduction.
-)nbdoc");
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::FP32,
+        reduce_norm2_doc.c_str());
 
     expr.def_static(
         "compile",
