@@ -155,8 +155,6 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
 static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t> dims, TensorDescriptor::DataType dtype) {
     while (dims.size() < 4)
         dims.push_back(1);
-    if (dims.empty())
-        throw std::runtime_error("cuDNN reduction does not support empty-rank tensor descriptor here.");
     if (dims.size() > 8)
         throw std::runtime_error("cuDNN reduction only supports rank <= 8.");
 
@@ -215,11 +213,11 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
     auto built = std::make_shared<BuiltReduction>(key);
 
     const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
-                                                                         compiled_reduction->reduction_axes,
+                                                                         built->key.reduction_axes,
                                                                          /*squeeze_axes=*/{});
-    built->a_desc = createCudnnTensorDescriptor(input_dims, compiled_reduction->inout_dtype);
-    built->c_desc = createCudnnTensorDescriptor(output_dims, compiled_reduction->inout_dtype);
-    built->reduce_desc = createCudnnReduceDescriptor(compiled_reduction->op, compiled_reduction->compute_dtype);
+    built->a_desc = createCudnnTensorDescriptor(input_dims, built->key.inout_dtype);
+    built->c_desc = createCudnnTensorDescriptor(output_dims, built->key.inout_dtype);
+    built->reduce_desc = createCudnnReduceDescriptor(built->key.op, built->key.compute_dtype);
 
     built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
 

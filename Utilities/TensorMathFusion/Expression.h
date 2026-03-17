@@ -122,32 +122,36 @@ class Expression {
     [[nodiscard]] Expression sqrt() const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
+    [[nodiscard]] Expression reduction(ExprOp op,
+                                       const std::vector<uint64_t>& reduction_axes,
+                                       const std::vector<uint64_t>& squeeze_axes,
+                                       Optional<TensorDescriptor::DataType> compute_dtype) const;
     [[nodiscard]] Expression reduce_sum(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_prod(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_min(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_max(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_mean(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_norm1(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_norm2(
-        const std::vector<uint64_t>& axes = {},
+        const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
 

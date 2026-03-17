@@ -35,7 +35,7 @@ struct ReductionCacheKey {
           compute_dtype(compute_dtype),
           device_num(device_num) {
         if (this->reduction_axes.empty()) {
-            this->reduction_axes.resize(input_dims.size());
+            this->reduction_axes.resize(this->input_dims.size());
             std::iota(this->reduction_axes.begin(), this->reduction_axes.end(), 0);
         } else {
             std::sort(this->reduction_axes.begin(), this->reduction_axes.end());

@@ -413,6 +413,9 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
 
     reduction.lhs = 0;
     reduction.rhs = UINT32_MAX;
+    reduction.reduction_axes = node.reduction_axes;
+    reduction.squeeze_axes = node.squeeze_axes;
+    reduction.compute_dtype = node.compute_dtype;
 
     stage_expr.nodes.push_back(std::move(reduction));
     stage_expr.output_node = 1;

@@ -351,74 +351,66 @@ Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
 
 // Reductions
-Expression Expression::reduce_sum(const std::vector<uint64_t>& axes,
-                                  const std::vector<uint64_t>& squeeze_axes,
-                                  Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_SUM);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
+DataType validate_reduction_compute_type(Optional<DataType> compute_dtype) {
+    if (compute_dtype.isPresent() && compute_dtype.get() != DataType::FP32) {
+        throw std::runtime_error("Reductions currently only support compute_dtype = FP32. Received: " +
+                                 TensorDescriptor::getElementTypeName(compute_dtype.get()));
+    }
+    return DataType::FP32;
+}
+
+Expression Expression::reduction(ExprOp op,
+                                 const std::vector<uint64_t>& reduction_axes,
+                                 const std::vector<uint64_t>& squeeze_axes,
+                                 Optional<DataType> compute_dtype) const {
+    Expression out = unaryOp(*this, op);
+
+    out.expr->nodes[out.nodeIndex].reduction_axes = reduction_axes;
     out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
+    out.expr->nodes[out.nodeIndex].compute_dtype = validate_reduction_compute_type(compute_dtype);
     return out;
 }
 
-Expression Expression::reduce_prod(const std::vector<uint64_t>& axes,
+Expression Expression::reduce_sum(const std::vector<uint64_t>& reduction_axes,
+                                  const std::vector<uint64_t>& squeeze_axes,
+                                  Optional<DataType> compute_dtype) const {
+    return reduction(ExprOp::REDUCE_SUM, reduction_axes, squeeze_axes, compute_dtype);
+}
+
+Expression Expression::reduce_prod(const std::vector<uint64_t>& reduction_axes,
                                    const std::vector<uint64_t>& squeeze_axes,
                                    Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_PROD);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
-    return out;
+    return reduction(ExprOp::REDUCE_PROD, reduction_axes, squeeze_axes, compute_dtype);
 }
 
-Expression Expression::reduce_min(const std::vector<uint64_t>& axes,
+Expression Expression::reduce_min(const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
                                   Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_MIN);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
-    return out;
+    return reduction(ExprOp::REDUCE_MIN, reduction_axes, squeeze_axes, compute_dtype);
 }
 
-Expression Expression::reduce_max(const std::vector<uint64_t>& axes,
+Expression Expression::reduce_max(const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
                                   Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_MAX);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
-    return out;
+    return reduction(ExprOp::REDUCE_MAX, reduction_axes, squeeze_axes, compute_dtype);
 }
 
-Expression Expression::reduce_mean(const std::vector<uint64_t>& axes,
+Expression Expression::reduce_mean(const std::vector<uint64_t>& reduction_axes,
                                    const std::vector<uint64_t>& squeeze_axes,
                                    Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_AVG);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
-    return out;
+    return reduction(ExprOp::REDUCE_AVG, reduction_axes, squeeze_axes, compute_dtype);
 }
 
-Expression Expression::reduce_norm1(const std::vector<uint64_t>& axes,
+Expression Expression::reduce_norm1(const std::vector<uint64_t>& reduction_axes,
                                     const std::vector<uint64_t>& squeeze_axes,
                                     Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_NORM1);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
-    return out;
+    return reduction(ExprOp::REDUCE_NORM1, reduction_axes, squeeze_axes, compute_dtype);
 }
 
-Expression Expression::reduce_norm2(const std::vector<uint64_t>& axes,
+Expression Expression::reduce_norm2(const std::vector<uint64_t>& reduction_axes,
                                     const std::vector<uint64_t>& squeeze_axes,
                                     Optional<DataType> compute_dtype) const {
-    Expression out = unaryOp(*this, ExprOp::REDUCE_NORM2);
-    out.expr->nodes[out.nodeIndex].reduction_axes = axes;
-    out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
-    out.expr->nodes[out.nodeIndex].compute_dtype = compute_dtype;
-    return out;
+    return reduction(ExprOp::REDUCE_NORM2, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::ln() const { return unaryOp(*this, ExprOp::LN); }
