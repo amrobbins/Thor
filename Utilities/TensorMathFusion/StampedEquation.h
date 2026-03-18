@@ -150,7 +150,8 @@ struct StampedExecutionStage {
 
 class StampedExecutionPlan {
    public:
-    StampedExecutionPlan(std::vector<StampedExecutionStage> steps) : steps(std::move(steps)) {}
+    StampedExecutionPlan(std::vector<StampedExecutionStage> steps, std::unordered_map<std::string, Tensor> final_outputs)
+        : steps(std::move(steps)), final_outputs(std::move(final_outputs)) {}
 
     void run() {
         for (const StampedExecutionStage& step : steps) {
@@ -166,29 +167,34 @@ class StampedExecutionPlan {
         }
     }
 
-    Tensor getOutputTensor() const {
-        if (steps.empty()) {
-            throw std::runtime_error("StampedExecutionPlan has no execution stages.");
+    Tensor output(const std::string& name) const {
+        auto it = final_outputs.find(name);
+        if (it == final_outputs.end()) {
+            throw std::runtime_error("No such output in stamped execution plan: " + name);
         }
+        return it->second;
+    }
 
-        const StampedExecutionStage& last = steps.back();
-        if (last.kind == StampedExecutionStage::Kind::FusedKernel) {
-            if (!last.kernel) {
-                throw std::runtime_error("Final fused stage is null.");
-            }
-            return last.kernel->getOutputTensor();
-        } else if (last.kind == StampedExecutionStage::Kind::Reduction) {
-            if (!last.reduction) {
-                throw std::runtime_error("Final reduction stage is null.");
-            }
-            return last.reduction->getOutputTensor();
+    Tensor output() const {
+        if (final_outputs.size() != 1)
+            throw std::runtime_error("StampedEquation.output() called to return the single output tensor, but there are " +
+                                     std::to_string(final_outputs.size()) + "output tensors.");
+        return final_outputs.begin()->second;
+    }
+
+    std::vector<std::string> outputNames() const {
+        std::vector<std::string> output_names;
+        output_names.reserve(final_outputs.size());
+
+        for (const auto& [key, value] : final_outputs) {
+            output_names.push_back(key);
         }
-
-        throw std::runtime_error("Unknown final execution stage kind.");
+        return output_names;
     }
 
    private:
     const std::vector<StampedExecutionStage> steps;
+    std::unordered_map<std::string, Tensor> final_outputs;
 };
 }  // namespace ThorImplementation
 

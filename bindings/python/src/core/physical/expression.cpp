@@ -330,6 +330,7 @@ Args:
 
                 std::string name = nb::cast<std::string>(key);
                 Expression out_expr = nb::cast<Expression>(value);
+
                 named_exprs.emplace_back(std::move(name), std::move(out_expr));
             }
 
@@ -440,9 +441,20 @@ void bind_stamped_equation(nb::module_& physical) {
 Execute the stamped fused equation on the bound tensors.
         )nbdoc");
 
-    stamped_equation.def_prop_ro("output_tensor",
-                                 &StampedExecutionPlan::getOutputTensor,
-                                 R"nbdoc(
-Return the output tensor owned by this equation instance.
-        )nbdoc");
+    stamped_equation.def_prop_ro(
+        "output_tensor",
+        [](const StampedExecutionPlan& self) { return self.output(); },
+        R"nbdoc(
+Return the output tensor owned by this equation instance. Valid when the equation has a single output tensor.
+)nbdoc");
+
+    stamped_equation.def(
+        "output",
+        [](const StampedExecutionPlan& self, const std::string& name) { return self.output(name); },
+        "name"_a,
+        R"nbdoc(
+Return a named output tensor from a stamped multi-output execution plan.
+)nbdoc");
+
+    stamped_equation.def("output_names", [](const StampedExecutionPlan& self) { return self.outputNames(); });
 }

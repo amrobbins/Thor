@@ -237,6 +237,60 @@ uint32_t cloneSubtree(const PhysicalExpression& src,
     return newIndex;
 }
 
+uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
+                                      uint32_t srcNodeIndex,
+                                      PhysicalExpression& dst,
+                                      std::unordered_map<uint32_t, uint32_t>& oldToNew,
+                                      std::unordered_map<std::string, uint32_t>& dstInputSlotsByName) {
+    auto it = oldToNew.find(srcNodeIndex);
+    if (it != oldToNew.end())
+        return it->second;
+
+    const ExprNode& srcNode = src.nodes.at(srcNodeIndex);
+    ExprNode newNode = srcNode;
+
+    if (srcNode.op == ExprOp::INPUT) {
+        if (srcNode.input_slot >= src.inputs.size()) {
+            throw std::runtime_error("Input slot out of range while merging expression outputs.");
+        }
+
+        const std::string& inputName = src.inputs[srcNode.input_slot].name;
+        auto slotIt = dstInputSlotsByName.find(inputName);
+        uint32_t mergedSlot;
+
+        if (slotIt != dstInputSlotsByName.end()) {
+            mergedSlot = slotIt->second;
+        } else {
+            mergedSlot = static_cast<uint32_t>(dst.inputs.size());
+            dst.inputs.push_back(NamedInput{inputName, mergedSlot});
+            dstInputSlotsByName.emplace(inputName, mergedSlot);
+        }
+
+        newNode.input_slot = mergedSlot;
+        newNode.lhs = UINT32_MAX;
+        newNode.rhs = UINT32_MAX;
+    } else if (Expression::isUnaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX)
+            throw std::runtime_error("Malformed expression: missing lhs for unary op while merging outputs.");
+        newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
+        newNode.rhs = UINT32_MAX;
+    } else if (Expression::isBinaryOp(srcNode.op)) {
+        if (srcNode.lhs == UINT32_MAX || srcNode.rhs == UINT32_MAX)
+            throw std::runtime_error("Malformed expression: missing child for binary op while merging outputs.");
+        newNode.lhs = cloneSubtreeWithMergedInputs(src, srcNode.lhs, dst, oldToNew, dstInputSlotsByName);
+        newNode.rhs = cloneSubtreeWithMergedInputs(src, srcNode.rhs, dst, oldToNew, dstInputSlotsByName);
+    } else if (srcNode.op == ExprOp::SCALAR_FP) {
+        // nothing to recurse into
+    } else {
+        throw std::runtime_error("Unsupported op while merging expression outputs: " + std::to_string((int)srcNode.op));
+    }
+
+    uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
+    dst.nodes.push_back(std::move(newNode));
+    oldToNew[srcNodeIndex] = newIndex;
+    return newIndex;
+}
+
 }  // namespace
 
 Expression Expression::input(const std::string& name) {
@@ -488,11 +542,12 @@ Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>
         throw std::runtime_error("Expression::outputs requires at least one named output.");
     }
 
-    std::shared_ptr<PhysicalExpression> shared_expr;
+    auto merged = std::make_shared<PhysicalExpression>();
     std::vector<NamedOutput> outputs;
     outputs.reserve(named_exprs.size());
 
     std::unordered_set<std::string> seen_names;
+    std::unordered_map<std::string, uint32_t> mergedInputSlotsByName;
 
     for (const auto& [name, expr] : named_exprs) {
         if (name.empty()) {
@@ -515,19 +570,16 @@ Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>
             throw std::runtime_error("Output expression node index is out of range.");
         }
 
-        if (!shared_expr) {
-            shared_expr = expr.expr;
-        } else if (shared_expr != expr.expr) {
-            throw std::runtime_error("All outputs must belong to the same expression graph.");
-        }
+        std::unordered_map<uint32_t, uint32_t> oldToNew;
+        uint32_t mergedRoot = cloneSubtreeWithMergedInputs(*expr.expr, expr.nodeIndex, *merged, oldToNew, mergedInputSlotsByName);
 
         outputs.push_back(NamedOutput{
             .name = name,
-            .node_idx = expr.nodeIndex,
+            .node_idx = mergedRoot,
         });
     }
 
-    return Outputs(std::move(shared_expr), std::move(outputs));
+    return Outputs(std::move(merged), std::move(outputs));
 }
 
 Outputs Expression::outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs) {

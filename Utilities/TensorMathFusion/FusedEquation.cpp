@@ -468,7 +468,17 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
     }
 
-    return StampedExecutionPlan(std::move(stampedStages));
+    std::unordered_map<std::string, Tensor> finalOutputsByName;
+    finalOutputsByName.reserve(compiled_outputs->final_outputs.size());
+    for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
+        auto it = values.find(final_output.value_id);
+        if (it == values.end()) {
+            throw std::runtime_error("Missing final output tensor for output: " + final_output.name);
+        }
+        finalOutputsByName.emplace(final_output.name, it->second);
+    }
+
+    return StampedExecutionPlan(std::move(stampedStages), std::move(finalOutputsByName));
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
