@@ -1,4 +1,5 @@
 #include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/EquationCompiler.h"
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
@@ -110,6 +111,44 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
 std::string canonicalize(const PhysicalExpression& expr) {
     std::unordered_map<uint32_t, std::string> memo;
     return canonicalizeNode(expr, expr.output_node, memo);
+}
+
+std::string canonicalize(const PhysicalExecutionStage& stage) {
+    std::ostringstream ss;
+
+    ss << "kind=";
+    switch (stage.kind) {
+        case PhysicalExecutionStage::Kind::FusedKernel:
+            ss << "fused";
+            break;
+        case PhysicalExecutionStage::Kind::Reduction:
+            ss << "reduction";
+            break;
+        default:
+            throw std::runtime_error("canonicalize(PhysicalExecutionStage): unknown stage kind.");
+    }
+
+    ss << ";expr={" << canonicalize(stage.expr) << "}";
+
+    ss << ";inputs=[";
+    for (size_t i = 0; i < stage.input_value_ids.size(); ++i) {
+        if (i > 0)
+            ss << ",";
+        ss << stage.input_value_ids[i];
+    }
+    ss << "]";
+
+    ss << ";outputs=[";
+    for (size_t i = 0; i < stage.outputs.size(); ++i) {
+        if (i > 0)
+            ss << ",";
+
+        const CompiledStageOutput& out = stage.outputs[i];
+        ss << "{name=" << out.name << ";local_node_idx=" << out.local_node_idx << "}";
+    }
+    ss << "]";
+
+    return ss.str();
 }
 
 bool Expression::isLeafOp(const ExprOp op) {
@@ -442,6 +481,57 @@ uint32_t PhysicalExpression::getOrCreateInputSlot(const std::string& name) {
     const uint32_t slot = static_cast<uint32_t>(inputs.size());
     inputs.push_back(NamedInput{name, slot});
     return slot;
+}
+
+Outputs Expression::outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs) {
+    if (named_exprs.empty()) {
+        throw std::runtime_error("Expression::outputs requires at least one named output.");
+    }
+
+    std::shared_ptr<PhysicalExpression> shared_expr;
+    std::vector<NamedOutput> outputs;
+    outputs.reserve(named_exprs.size());
+
+    std::unordered_set<std::string> seen_names;
+
+    for (const auto& [name, expr] : named_exprs) {
+        if (name.empty()) {
+            throw std::runtime_error("Output name cannot be empty.");
+        }
+
+        if (!seen_names.insert(name).second) {
+            throw std::runtime_error("Duplicate output name: " + name);
+        }
+
+        if (!expr.expr) {
+            throw std::runtime_error("Output expression has no backing PhysicalExpression.");
+        }
+
+        if (expr.nodeIndex == UINT32_MAX) {
+            throw std::runtime_error("Output expression has invalid node index.");
+        }
+
+        if (expr.nodeIndex >= expr.expr->nodes.size()) {
+            throw std::runtime_error("Output expression node index is out of range.");
+        }
+
+        if (!shared_expr) {
+            shared_expr = expr.expr;
+        } else if (shared_expr != expr.expr) {
+            throw std::runtime_error("All outputs must belong to the same expression graph.");
+        }
+
+        outputs.push_back(NamedOutput{
+            .name = name,
+            .node_idx = expr.nodeIndex,
+        });
+    }
+
+    return Outputs(std::move(shared_expr), std::move(outputs));
+}
+
+Outputs Expression::outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs) {
+    return outputs(std::vector<std::pair<std::string, Expression>>(named_exprs));
 }
 
 }  // namespace ThorImplementation

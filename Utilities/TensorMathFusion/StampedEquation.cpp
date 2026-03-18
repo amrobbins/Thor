@@ -11,10 +11,19 @@ using namespace std;
 namespace ThorImplementation {
 
 void StampedEquation::run() {
-    if (deviceBroadcastInfo.isPresent())
-        EquationRunner::run(compiledEquation, inputs, output, stream, deviceBroadcastInfo);
-    else
-        EquationRunner::run(compiledEquation, inputs, output, stream);
+    if (!compiledEquation) {
+        throw std::runtime_error("StampedEquation::run called with null compiled equation.");
+    }
+
+    if (outputs.empty()) {
+        throw std::runtime_error("StampedEquation::run called with no output tensors.");
+    }
+
+    if (deviceBroadcastInfo.isPresent()) {
+        EquationRunner::run(compiledEquation, inputs, outputs, stream, deviceBroadcastInfo.get());
+    } else {
+        EquationRunner::run(compiledEquation, inputs, outputs, stream);
+    }
 }
 
 StampedReduction::StampedReduction(
@@ -44,6 +53,7 @@ void StampedReduction::run() {
 }
 
 static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
+
 static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
     auto it = builtReductionCache.find(key);
     if (it == builtReductionCache.end()) {
@@ -114,6 +124,7 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
 
     std::vector<uint64_t> squeezed;
     squeezed.reserve(output_dims.size());
+
     if (squeeze_axes.size() == 1 && squeeze_axes[0] == UINT64_MAX) {
         // Squeeze all singletons
         for (uint64_t d : output_dims) {
@@ -125,12 +136,14 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
         // Precondition: squeeze_dimensions are sorted ascending and uniquified.
         uint64_t nextDimToSqueeze = squeeze_axes[0];
         uint64_t nextIndexInSqueezedDims = 1;
+
         for (uint64_t i = 0; i < output_dims.size(); ++i) {
             if (i == nextDimToSqueeze) {
                 if (output_dims[i] != 1) {
-                    throw runtime_error("Trying to squeeze axis " + to_string(nextDimToSqueeze) + "but it has size " +
+                    throw runtime_error("Trying to squeeze axis " + to_string(nextDimToSqueeze) + " but it has size " +
                                         to_string(output_dims[i]) + ", can only squeeze dimensions of size 1.");
                 }
+
                 if (nextIndexInSqueezedDims < squeeze_axes.size()) {
                     nextDimToSqueeze = squeeze_axes[nextIndexInSqueezedDims];
                     nextIndexInSqueezedDims += 1;
@@ -141,14 +154,16 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
                 squeezed.push_back(output_dims[i]);
             }
         }
+
         if (nextIndexInSqueezedDims != squeeze_axes.size()) {
-            throw runtime_error("Axis " + to_string(nextDimToSqueeze) + " was passed as a dimension to squeeze, but it has only " +
+            throw runtime_error("Axis " + to_string(nextDimToSqueeze) + " was passed as a dimension to squeeze, but tensor has only " +
                                 to_string(output_dims.size()) + " dimensions.");
         }
     }
 
     if (squeezed.empty())
         squeezed.push_back(1);
+
     return squeezed;
 }
 

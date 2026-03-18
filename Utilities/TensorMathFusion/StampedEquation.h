@@ -74,17 +74,22 @@ class StampedEquation {
    public:
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
                     const std::vector<Tensor>& inputs,
-                    const Tensor& output,
+                    const std::vector<Tensor>& outputs,
                     const Stream& stream,
                     Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty())
         : compiledEquation(std::move(compiledEquation)),
           inputs(inputs),
-          output(output),
+          outputs(outputs),
           stream(stream),
           deviceBroadcastInfo(deviceBroadcastInfo) {}
 
     void run();
-    Tensor getOutputTensor() const { return output; }
+    Tensor getOutputTensor() const {
+        if (outputs.size() != 1)
+            throw std::runtime_error("getOutputTensor called but there are " + std::to_string(outputs.size()) +
+                                     "outputs. This function is only valid for single output  equations.");
+        return outputs[0];
+    }
 
     static std::vector<uint64_t> computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
                                                             const std::vector<uint64_t>& reduction_axes,
@@ -97,7 +102,7 @@ class StampedEquation {
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
     std::vector<Tensor> inputs;
-    Tensor output;
+    std::vector<Tensor> outputs;
     Stream stream;
     Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty();
 };

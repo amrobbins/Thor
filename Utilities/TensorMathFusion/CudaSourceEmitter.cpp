@@ -1,10 +1,13 @@
 #include "Utilities/TensorMathFusion/CudaSourceEmitter.h"
+#include "Utilities/TensorMathFusion/EquationCompiler.h"
 
 using namespace std;
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
+
+bool PRINT_KERNELS = true;
 
 static std::string emitScalarFpLiteral(double x, DataType dtype) {
     auto formatFloating = [](double v, int precision) -> std::string {
@@ -23,6 +26,82 @@ static std::string emitScalarFpLiteral(double x, DataType dtype) {
     if (dtype == DataType::FP64)
         return formatFloating(x, 17);
     return formatFloating(x, 9) + "f";
+}
+
+void CudaSourceEmitter::emitScalarNode(std::ostringstream& ss,
+                                       const PhysicalExpression& expr,
+                                       uint32_t node_idx,
+                                       DataType dtype,
+                                       const std::string& compute_type,
+                                       bool broadcast_support) {
+    const auto& n = expr.nodes[node_idx];
+
+    switch (n.op) {
+        case ExprOp::INPUT:
+            if (broadcast_support) {
+                ss << "    " << compute_type << " t" << node_idx << "(in" << n.input_slot << "[in" << n.input_slot << "_offset]);\n";
+            } else {
+                ss << "    " << compute_type << " t" << node_idx << "(in" << n.input_slot << "[idx]);\n";
+            }
+            break;
+        case ExprOp::SCALAR_FP:
+            ss << "    " << compute_type << " t" << node_idx << "(" << emitScalarFpLiteral(n.scalar_fp, dtype) << ");\n";
+            break;
+        case ExprOp::ADD:
+            ss << "    " << compute_type << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << " + "
+               << CudaSourceEmitter::ref(n.rhs) << ";\n";
+            break;
+        case ExprOp::SUB:
+            ss << "    " << compute_type << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << " - "
+               << CudaSourceEmitter::ref(n.rhs) << ";\n";
+            break;
+        case ExprOp::MUL:
+            ss << "    " << compute_type << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << " * "
+               << CudaSourceEmitter::ref(n.rhs) << ";\n";
+            break;
+        case ExprOp::DIV:
+            ss << "    " << compute_type << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << " / "
+               << CudaSourceEmitter::ref(n.rhs) << ";\n";
+            break;
+        case ExprOp::NEG:
+            ss << "    " << compute_type << " t" << node_idx << " = -" << CudaSourceEmitter::ref(n.lhs) << ";\n";
+            break;
+        case ExprOp::EXP:
+            ss << "    " << compute_type << " t" << node_idx << " = expf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::EXP2:
+            ss << "    " << compute_type << " t" << node_idx << " = exp2f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::EXP10:
+            ss << "    " << compute_type << " t" << node_idx << " = exp10f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::LN:
+            ss << "    " << compute_type << " t" << node_idx << " = logf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::LOG2:
+            ss << "    " << compute_type << " t" << node_idx << " = log2f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::LOG10:
+            ss << "    " << compute_type << " t" << node_idx << " = log10f(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::SQRT:
+            ss << "    " << compute_type << " t" << node_idx << " = sqrtf(" << CudaSourceEmitter::ref(n.lhs) << ");\n";
+            break;
+        case ExprOp::POW:
+            ss << "    " << compute_type << " t" << node_idx << " = powf(" << CudaSourceEmitter::ref(n.lhs) << ", "
+               << CudaSourceEmitter::ref(n.rhs) << ");\n";
+            break;
+        case ExprOp::MIN:
+            ss << "    " << compute_type << " t" << node_idx << " = fminf(" << CudaSourceEmitter::ref(n.lhs) << ", "
+               << CudaSourceEmitter::ref(n.rhs) << ");\n";
+            break;
+        case ExprOp::MAX:
+            ss << "    " << compute_type << " t" << node_idx << " = fmaxf(" << CudaSourceEmitter::ref(n.lhs) << ", "
+               << CudaSourceEmitter::ref(n.rhs) << ");\n";
+            break;
+        default:
+            throw runtime_error("Unsupported op in fused stage emitter: " + to_string((int32_t)n.op));
+    }
 }
 
 string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, const string& kernel_name, const bool broadcast_support) {
@@ -207,7 +286,10 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
         ss << "\n  out[idx] = " << inout_dtype << "(" << ref(expr.output_node) << ");\n";
     ss << "}\n";
 
-    // printf("%s\n", ss.str().c_str());
+    if (PRINT_KERNELS) {
+        printf("%s\n", ss.str().c_str());
+    }
+
     return ss.str();
 }
 
@@ -381,7 +463,10 @@ string CudaSourceEmitter::emitVector2Flat(const PhysicalExpression& expr, DataTy
         ss << "\n  out[idx] = " << vector_storage_conversion(storage_dtype_vector, ref(expr.output_node)) << ";\n";
     ss << "}\n";
 
-    // printf("%s\n", ss.str().c_str());
+    if (PRINT_KERNELS) {
+        printf("%s\n", ss.str().c_str());
+    }
+
     return ss.str();
 }
 
@@ -595,7 +680,183 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
 
     ss << "}\n";
 
-    // printf("%s\n", ss.str().c_str());
+    if (PRINT_KERNELS) {
+        printf("%s\n", ss.str().c_str());
+    }
+
+    return ss.str();
+}
+
+static bool stageUsesBroadcast(const PhysicalExecutionStage& stage) {
+    for (const CompiledStageOutput& output : stage.outputs) {
+        uint32_t node_idx = output.local_node_idx;
+        if (node_idx >= stage.expr.nodes.size()) {
+            throw runtime_error("Stage output local_node_idx out of range.");
+        }
+
+        // For now, use the conservative rule:
+        // if any INPUT exists, we still let launch/runtime decide metadata.
+        // This helper is just a placeholder if you later want per-stage specialization.
+    }
+
+    return false;
+}
+
+static string scalarComputeType(DataType dtype, std::ostringstream& ss) {
+    if (dtype == DataType::FP32) {
+        return "float";
+    }
+    if (dtype == DataType::FP16) {
+        ss << "#include <cuda_fp16.h>\n";
+        return "half";
+    }
+    if (dtype == DataType::BF16) {
+        ss << "#include <cuda_bf16.h>\n";
+        return "__nv_bfloat16";
+    }
+
+    throw runtime_error("Unsupported scalar compute dtype in fused stage emitter: " + TensorDescriptor::getElementTypeName(dtype));
+}
+
+static string scalarStorageType(DataType dtype, std::ostringstream& ss) {
+    if (dtype == DataType::FP32) {
+        return "float";
+    }
+    if (dtype == DataType::FP16) {
+        ss << "#include <cuda_fp16.h>\n";
+        return "half";
+    }
+    if (dtype == DataType::BF16) {
+        ss << "#include <cuda_bf16.h>\n";
+        return "__nv_bfloat16";
+    }
+    if (dtype == DataType::FP8_E4M3) {
+        ss << "#include <cuda_fp16.h>\n";
+        ss << "#include <cuda_fp8.h>\n";
+        return "__nv_fp8_e4m3";
+    }
+    if (dtype == DataType::FP8_E5M2) {
+        ss << "#include <cuda_fp16.h>\n";
+        ss << "#include <cuda_fp8.h>\n";
+        return "__nv_fp8_e5m2";
+    }
+
+    throw runtime_error("Unsupported scalar storage dtype in fused stage emitter: " + TensorDescriptor::getElementTypeName(dtype));
+}
+
+static string storeScalarExpr(const string& storage_type, const string& compute_type, const string& value_expr) {
+    if (storage_type == compute_type) {
+        return value_expr;
+    }
+    return storage_type + "(" + value_expr + ")";
+}
+
+static vector<vector<const CompiledStageOutput*>> groupOutputsByNumelDescending(const PhysicalExecutionStage& stage) {
+    // For 1.0, we assume runtime/planner has already arranged that outputs in a fused stage
+    // are legal to execute in one kernel, and that emitter/runtime can determine numel per output.
+    //
+    // Here we use a temporary grouping rule:
+    // each output is its own group in declared order.
+    //
+    // Replace this later once stage/output metadata includes per-output numel.
+    vector<vector<const CompiledStageOutput*>> groups;
+    groups.reserve(stage.outputs.size());
+    for (const CompiledStageOutput& output : stage.outputs) {
+        groups.push_back({&output});
+    }
+    return groups;
+}
+
+string CudaSourceEmitter::emit(const PhysicalExecutionStage& stage,
+                               DataType dtype,
+                               const string& kernel_name,
+                               const bool broadcast_support) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw runtime_error("CudaSourceEmitter::emit(stage, ...) called on non-fused stage.");
+    }
+
+    if (stage.outputs.empty()) {
+        throw runtime_error("Fused stage has no outputs.");
+    }
+
+    // For 1.0, keep this new path scalar-only.
+    if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+        throw runtime_error("Multi-output fused stage emitter is currently implemented only for scalar path.");
+    }
+
+    ostringstream ss;
+
+    const string compute_type = scalarComputeType(dtype, ss);
+    const string storage_type = scalarStorageType(dtype, ss);
+
+    if (broadcast_support) {
+        ss << R"DEVICE(
+struct BroadcastInfoHeader {
+  unsigned int rank;
+  unsigned int num_inputs;
+  unsigned long long numel;
+};
+
+__device__ __forceinline__
+const unsigned long long* broadcast_output_strides(const BroadcastInfoHeader* broadcast) {
+  return reinterpret_cast<const unsigned long long*>(
+      reinterpret_cast<const char*>(broadcast) + sizeof(BroadcastInfoHeader));
+}
+
+__device__ __forceinline__
+const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* broadcast) {
+  return broadcast_output_strides(broadcast) + broadcast->rank;
+}
+)DEVICE";
+    }
+
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+
+    for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+        ss << "const " << storage_type << "* in" << i << ", ";
+    }
+
+    for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
+        ss << storage_type << "* out" << i << ", ";
+    }
+
+    // For 1.0 use one max_numel argument. Per-output numel/planner metadata can come later.
+    ss << "unsigned long long max_numel) {\n";
+
+    ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
+    ss << "  if (idx >= max_numel) return;\n\n";
+
+    // 1.0 conservative implementation:
+    // emit each output in its own masked block.
+    //
+    // For now, use max_numel for every output block. The runtime/planner must only place outputs
+    // together in a stage when this is valid, or you must later add per-output numel args.
+    //
+    // The next refinement is to pass per-output numel and group equal-sized outputs.
+
+    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+        const CompiledStageOutput& output = stage.outputs[out_idx];
+
+        if (output.local_node_idx >= stage.expr.nodes.size()) {
+            throw runtime_error("Stage output local_node_idx out of range.");
+        }
+
+        ss << "  {\n";
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            emitScalarNode(ss, stage.expr, node_idx, dtype, compute_type, broadcast_support);
+        }
+
+        ss << "    out" << out_idx << "[idx] = " << storeScalarExpr(storage_type, compute_type, ref(output.local_node_idx)) << ";\n";
+        ss << "  }\n\n";
+    }
+
+    ss << "}\n";
+
+    if (PRINT_KERNELS) {
+        printf("%s\n", ss.str().c_str());
+    }
+
     return ss.str();
 }
 

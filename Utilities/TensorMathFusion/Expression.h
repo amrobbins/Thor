@@ -9,11 +9,14 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace ThorImplementation {
+struct PhysicalExecutionStage;
+
 enum class ExprOp : uint16_t {
     INPUT = 3,
     SCALAR_FP,
@@ -86,6 +89,11 @@ struct NamedInput {
     uint32_t slot;
 };
 
+struct NamedOutput {
+    std::string name;
+    uint32_t node_idx;
+};
+
 struct PhysicalExpression {
     std::vector<ExprNode> nodes;
     std::vector<NamedInput> inputs;
@@ -96,9 +104,42 @@ struct PhysicalExpression {
     uint32_t getOrCreateInputSlot(const std::string& name);
 };
 
+struct PhysicalOutputs {
+    std::shared_ptr<PhysicalExpression> expr;
+    std::vector<NamedOutput> outputs;
+};
+
+class Outputs {
+   public:
+    [[nodiscard]] const std::shared_ptr<PhysicalExpression>& expression() const { return expr; }
+    [[nodiscard]] const std::vector<NamedOutput>& namedOutputs() const { return outputs; }
+
+    [[nodiscard]] PhysicalOutputs physicalOutputs() const {
+        if (!expr) {
+            throw std::runtime_error("Outputs has no backing expression graph.");
+        }
+        return PhysicalOutputs{
+            .expr = expr,
+            .outputs = outputs,
+        };
+    }
+
+   private:
+    std::shared_ptr<PhysicalExpression> expr;
+    std::vector<NamedOutput> outputs;
+
+    Outputs(std::shared_ptr<PhysicalExpression> expr, std::vector<NamedOutput> outputs)
+        : expr(std::move(expr)), outputs(std::move(outputs)) {}
+
+    friend class Expression;
+};
+
 class Expression {
    public:
     Expression(double value);
+
+    static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
+    static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);
 
     static Expression input(const std::string& name);
     static Expression scalar(double value);
@@ -159,9 +200,7 @@ class Expression {
     [[nodiscard]] Expression max(const Expression& other) const;
 
     static bool isLeafOp(ExprOp op);
-
     static bool isUnaryOp(ExprOp op);
-
     static bool isBinaryOp(ExprOp op);
 
    private:
@@ -179,5 +218,6 @@ bool isCommutative(ExprOp op);
 std::string opName(ExprOp op);
 std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex, std::unordered_map<uint32_t, std::string>& memo);
 std::string canonicalize(const PhysicalExpression& expr);
+std::string canonicalize(const PhysicalExecutionStage& stage);
 
 }  // namespace ThorImplementation
