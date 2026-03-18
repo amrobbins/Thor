@@ -363,4 +363,54 @@ Parameters
 new_dimensions : list[int]
     New tensor dimensions.
 )nbdoc");
+
+    physical_tensor.def(
+        "clone_copy_async",
+        [](const PhysicalTensor &self, TensorPlacement new_placement, const Stream &stream) {
+            PhysicalTensor cloned = self.clone(new_placement);
+            cloned.copyFromAsync(self, stream);
+            return cloned;
+        },
+        "new_placement"_a,
+        "stream"_a,
+        R"nbdoc(
+Create a clone of this tensor with a new placement, then copy this tensor into it asynchronously on the given stream.
+
+Parameters
+----------
+new_placement : thor.physical.Placement
+    Destination placement for the cloned tensor.
+stream : thor.physical.Stream
+    Stream used for the asynchronous copy.
+
+Returns
+-------
+thor.physical.PhysicalTensor
+    The cloned tensor. The copy operation has been scheduled on the stream.
+)nbdoc");
+
+    physical_tensor.def(
+        "clone_copy_async",
+        [](const PhysicalTensor &self, TensorDescriptor::DataType new_data_type, const Stream &stream) {
+            PhysicalTensor cloned = self.clone(new_data_type);
+            cloned.copyFromAsync(self, stream);
+            return cloned;
+        },
+        "new_data_type"_a,
+        "stream"_a,
+        R"nbdoc(
+Create a clone of this tensor with a new data type, then copy this tensor into it asynchronously on the given stream.
+
+Parameters
+----------
+new_data_type : thor.DataType
+    Destination data type for the cloned tensor.
+stream : thor.physical.Stream
+    Stream used for the asynchronous copy.
+
+Returns
+-------
+thor.physical.PhysicalTensor
+    The cloned tensor. The copy operation has been scheduled on the stream.
+)nbdoc");
 }
