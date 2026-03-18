@@ -17,6 +17,8 @@ using StampedEquation = ThorImplementation::StampedEquation;
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 using Tensor = ThorImplementation::Tensor;
 using StampedExecutionPlan = ThorImplementation::StampedExecutionPlan;
+using Outputs = ThorImplementation::Outputs;
+using NamedOutput = ThorImplementation::NamedOutput;
 
 void bind_physical_expression(nb::module_& physical) {
     auto expr = nb::class_<Expression>(physical, "Expression");
@@ -291,6 +293,60 @@ Args:
         "compute_dtype"_a.none() = DataType::FP32,
         "output_dtype"_a.none() = DataType::FP32,
         reduce_norm2_doc.c_str());
+
+    nb::class_<Outputs>(expr, "Outputs")
+        .def(
+            "compile",  // FIXME: Should compile be here
+            [](const Outputs& self, DataType dtype, int device_num, bool use_fast_math) {
+                return FusedEquation::compile(self.physicalOutputs(), dtype, device_num, use_fast_math);
+            },
+            "dtype"_a,
+            "device_num"_a,
+            "use_fast_math"_a = false)
+        .def("output_names", [](const Outputs& self) {
+            std::vector<std::string> names;
+            for (const NamedOutput& output : self.namedOutputs()) {
+                names.push_back(output.name);
+            }
+            return names;
+        });
+
+    expr.def_static(
+        "outputs",
+        [](nb::dict mapping) {
+            std::vector<std::pair<std::string, Expression>> named_exprs;
+            named_exprs.reserve(mapping.size());
+
+            for (auto item : mapping) {
+                nb::handle key = item.first;
+                nb::handle value = item.second;
+
+                if (!nb::isinstance<nb::str>(key)) {
+                    throw std::runtime_error("Expression.outputs keys must be strings.");
+                }
+                if (!nb::isinstance<Expression>(value)) {
+                    throw std::runtime_error("Expression.outputs values must be Expression objects.");
+                }
+
+                std::string name = nb::cast<std::string>(key);
+                Expression out_expr = nb::cast<Expression>(value);
+                named_exprs.emplace_back(std::move(name), std::move(out_expr));
+            }
+
+            return Expression::outputs(named_exprs);
+        },
+        "outputs"_a,
+        R"nbdoc(
+Create a terminal multi-output graph from a mapping of output names to expressions.
+
+Args:
+    outputs: dict[str, Expression]
+        Mapping from output names to expressions. All expressions must belong to the same graph.
+
+Returns:
+    Outputs
+        A terminal multi-output graph object that can be compiled together.
+)nbdoc");
 
     expr.def_static(
         "compile",

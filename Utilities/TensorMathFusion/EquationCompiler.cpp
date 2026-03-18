@@ -1,10 +1,12 @@
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
+#include "Utilities/TensorMathFusion/FusedEquation.h"
 
 #include "CudaSourceEmitter.h"
 
 using namespace std;
 
 namespace ThorImplementation {
+
 static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
 
 static shared_ptr<CompiledEquation> cacheLookup(const EquationCacheKey& key) {
@@ -102,7 +104,6 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
     nvrtcResult res = nvrtcCompileProgram(prog, (int)opts.size(), opts.data());
 
-    // collect log either way
     size_t log_size = 0;
     NVRTC_CHECK(nvrtcGetProgramLogSize(prog, &log_size));
     string log(log_size, '\0');
@@ -136,29 +137,121 @@ shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression&
 
     vector<string> input_names;
     input_names.reserve(expr.inputs.size());
-    for (uint32_t i = 0; i < expr.inputs.size(); ++i)
-        input_names.push_back(expr.inputs[i].name);
+    for (const NamedInput& input : expr.inputs) {
+        input_names.push_back(input.name);
+    }
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, sig.dtype, sig.device_num);
-    compiled->input_names.clear();
-    compiled->input_names.reserve(expr.inputs.size());
-    for (const NamedInput& input : expr.inputs) {
-        compiled->input_names.push_back(input.name);
-    }
 
     cacheInsert(key, compiled);
     return compiled;
 }
 
-shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype) {
-    // Compile stage knows dtype, but is tensor shape agnostic.
-    // Reduction stage expression is expected to be:
-    //   node 0: INPUT
-    //   node 1: REDUCE_*
-    // with output_node == 1
+shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage,
+                                                                 const EquationSignature& sig,
+                                                                 const bool broadcast_support) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw runtime_error("compileFusedStage called on non-fused stage.");
+    }
 
+    ensureCudaContextCurrent(sig.device_num);
+
+    EquationCacheKey key(canonicalize(stage), sig, broadcast_support);
+    shared_ptr<CompiledEquation> hit = cacheLookup(key);
+    if (hit)
+        return hit;
+
+    string kernel_name = "fused_kernel";
+    // string cuda_src = CudaSourceEmitter::emit(stage, sig.dtype, kernel_name, broadcast_support);
+    std::string cuda_src;
+    if (stage.outputs.size() == 1) {
+        // FIXME: broadcast support is not there yet for multi-output
+        cuda_src = CudaSourceEmitter::emit(stage.expr, sig.dtype, kernel_name, broadcast_support);
+    } else {
+        cuda_src = CudaSourceEmitter::emit(stage, sig.dtype, kernel_name, broadcast_support);
+    }
+
+    vector<string> input_names;
+    input_names.reserve(stage.expr.inputs.size());
+    for (const NamedInput& input : stage.expr.inputs) {
+        input_names.push_back(input.name);
+    }
+
+    vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
+    vector<char> cubin = linkToCubin(ltoir, sig);
+    auto compiled = loadCubin(key, cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+
+    cacheInsert(key, compiled);
+    return compiled;
+}
+
+std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs& outputs,
+                                                           const EquationSignature& sig,
+                                                           bool broadcast_support) {
+    if (!outputs.expr) {
+        throw std::runtime_error("Cannot compile Outputs with null expression graph.");
+    }
+
+    if (outputs.outputs.empty()) {
+        throw std::runtime_error("Cannot compile Outputs with no requested outputs.");
+    }
+
+    ensureCudaContextCurrent(sig.device_num);
+
+    auto compiled = std::make_shared<CompiledOutputs>();
+    compiled->signature = sig;
+    compiled->broadcast_support = broadcast_support;
+
+    std::vector<PhysicalExecutionStage> planned_stages = splitAtReductionBoundaries(outputs);
+    compiled->stages.reserve(planned_stages.size());
+
+    for (const PhysicalExecutionStage& stage : planned_stages) {
+        std::shared_ptr<CompiledEquation> flat;
+        std::shared_ptr<CompiledEquation> broadcast;
+        std::shared_ptr<CompiledReduction> reduction;
+        switch (stage.kind) {
+            case PhysicalExecutionStage::Kind::FusedKernel:
+                flat = compileFusedStage(stage, sig, false);
+                broadcast = compileFusedStage(stage, sig, true);
+                compiled->stages.emplace_back(flat, broadcast, stage.input_value_ids, stage.outputs);
+                break;
+            case PhysicalExecutionStage::Kind::Reduction:
+                reduction = compileReduction(stage.expr, sig.dtype);
+                compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
+                break;
+            default:
+                throw std::runtime_error("Unknown stage kind in EquationCompiler::compile(PhysicalOutputs).");
+        }
+    }
+
+    compiled->final_outputs.reserve(outputs.outputs.size());
+    for (const NamedOutput& requested : outputs.outputs) {
+        bool found = false;
+
+        for (const CompiledExecutionStage& stage : compiled->stages) {
+            for (const CompiledStageOutput& produced : stage.outputs) {
+                if (produced.name == requested.name) {
+                    compiled->final_outputs.push_back(produced);
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                break;
+            }
+        }
+
+        if (!found) {
+            throw std::runtime_error("Failed to resolve final output value id for output: " + requested.name);
+        }
+    }
+
+    return compiled;
+}
+
+shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype) {
     if (expr.numInputs() != 1) {
         throw std::runtime_error("Reduction stage must have exactly one input.");
     }
@@ -197,8 +290,9 @@ static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_i
         uint32_t node_idx = stack.back();
         stack.pop_back();
 
-        if (!region_nodes.insert(node_idx).second)
+        if (!region_nodes.insert(node_idx).second) {
             continue;
+        }
 
         const ExprNode& node = expr.nodes[node_idx];
         if (isStageBoundaryOp(node.op)) {
@@ -209,25 +303,25 @@ static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_i
             continue;
         }
 
-        uint32_t parent_idx = node.lhs;
-        if (parent_idx >= expr.nodes.size()) {
+        uint32_t lhs_idx = node.lhs;
+        if (lhs_idx >= expr.nodes.size()) {
             throw std::runtime_error("Invalid lhs node index in expression.");
         }
 
-        const ExprNode& parent = expr.nodes[parent_idx];
-        if (!isStageBoundaryOp(parent.op)) {
-            stack.push_back(parent_idx);
+        const ExprNode& lhs = expr.nodes[lhs_idx];
+        if (!isStageBoundaryOp(lhs.op)) {
+            stack.push_back(lhs_idx);
         }
 
         if (Expression::isBinaryOp(node.op)) {
-            uint32_t parent_idx = node.rhs;
-            if (parent_idx >= expr.nodes.size()) {
+            uint32_t rhs_idx = node.rhs;
+            if (rhs_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid rhs node index in expression.");
             }
 
-            const ExprNode& parent = expr.nodes[parent_idx];
-            if (!isStageBoundaryOp(parent.op)) {
-                stack.push_back(parent_idx);
+            const ExprNode& rhs = expr.nodes[rhs_idx];
+            if (!isStageBoundaryOp(rhs.op)) {
+                stack.push_back(rhs_idx);
             }
         }
     }
@@ -243,31 +337,40 @@ static void collectBoundaryDependencies(const PhysicalExpression& expr,
             continue;
         }
 
-        uint32_t parent_idx = node.lhs;
-        if (parent_idx >= expr.nodes.size()) {
+        uint32_t lhs_idx = node.lhs;
+        if (lhs_idx >= expr.nodes.size()) {
             throw std::runtime_error("Invalid lhs node index in expression.");
         }
-        if (!region_nodes.count(parent_idx) && isStageBoundaryOp(expr.nodes[parent_idx].op)) {
-            boundary_nodes.insert(parent_idx);
+        if (!region_nodes.count(lhs_idx) && isStageBoundaryOp(expr.nodes[lhs_idx].op)) {
+            boundary_nodes.insert(lhs_idx);
         }
 
         if (Expression::isBinaryOp(node.op)) {
-            uint32_t parent_idx = node.rhs;
-            if (parent_idx >= expr.nodes.size()) {
+            uint32_t rhs_idx = node.rhs;
+            if (rhs_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid rhs node index in expression.");
             }
-            if (!region_nodes.count(parent_idx) && isStageBoundaryOp(expr.nodes[parent_idx].op)) {
-                boundary_nodes.insert(parent_idx);
+            if (!region_nodes.count(rhs_idx) && isStageBoundaryOp(expr.nodes[rhs_idx].op)) {
+                boundary_nodes.insert(rhs_idx);
             }
         }
     }
 }
 
+struct RequestedStageOutput {
+    std::string name;
+    uint32_t old_root_idx;
+    uint32_t value_id;
+};
+
 static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
                                               const std::unordered_set<uint32_t>& region_nodes,
-                                              uint32_t root_idx,
-                                              uint32_t output_value_id,
+                                              const std::vector<RequestedStageOutput>& requested_outputs,
                                               const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    if (requested_outputs.empty()) {
+        throw std::runtime_error("buildFusedStage requires at least one requested output.");
+    }
+
     std::vector<uint32_t> sorted_nodes(region_nodes.begin(), region_nodes.end());
     std::sort(sorted_nodes.begin(), sorted_nodes.end());
 
@@ -352,27 +455,40 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
         uint32_t new_idx = static_cast<uint32_t>(stage_expr.nodes.size());
         stage_expr.nodes.push_back(std::move(new_node));
         old_to_new_node_idx[old_idx] = new_idx;
-
-        if (old_idx == root_idx) {
-            stage_expr.output_node = new_idx;
-        }
     }
 
-    if (stage_expr.output_node == UINT32_MAX) {
-        throw std::runtime_error("Failed to determine fused stage output node.");
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.reserve(requested_outputs.size());
+
+    for (const RequestedStageOutput& requested : requested_outputs) {
+        auto it = old_to_new_node_idx.find(requested.old_root_idx);
+        if (it == old_to_new_node_idx.end()) {
+            throw std::runtime_error("Failed to remap fused stage output node.");
+        }
+
+        stage_outputs.push_back(CompiledStageOutput{
+            .name = requested.name,
+            .local_node_idx = it->second,
+            .value_id = requested.value_id,
+        });
+    }
+
+    if (!stage_outputs.empty()) {
+        stage_expr.output_node = stage_outputs.front().local_node_idx;
     }
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::FusedKernel,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(stage_input_value_ids),
-        .output_value_id = output_value_id,
+        .outputs = std::move(stage_outputs),
     };
 }
 
 static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr,
                                                   uint32_t node_idx,
                                                   uint32_t output_value_id,
+                                                  const std::string& output_name,
                                                   const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
     const ExprNode& node = expr.nodes[node_idx];
     if (!isStageBoundaryOp(node.op)) {
@@ -420,33 +536,119 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     stage_expr.nodes.push_back(std::move(reduction));
     stage_expr.output_node = 1;
 
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 1,
+        .value_id = output_value_id,
+    });
+
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::Reduction,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
-        .output_value_id = output_value_id,
+        .outputs = std::move(stage_outputs),
     };
 }
 
-std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries(const PhysicalExpression& expr) {
+std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries(const PhysicalOutputs& outputs) {
+    if (!outputs.expr) {
+        throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
+    }
+    if (outputs.outputs.empty()) {
+        throw std::runtime_error("Cannot split empty PhysicalOutputs.");
+    }
+
+    const PhysicalExpression& expr = *outputs.expr;
     if (expr.nodes.empty()) {
         throw std::runtime_error("Cannot split empty PhysicalExpression.");
     }
-    if (expr.output_node >= expr.nodes.size()) {
-        throw std::runtime_error("PhysicalExpression output_node is out of range.");
+
+    for (const NamedOutput& output : outputs.outputs) {
+        if (output.node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("PhysicalOutputs contains output node_idx out of range.");
+        }
     }
 
     std::unordered_map<uint32_t, uint32_t> node_output_value_id;
+    std::vector<PhysicalExecutionStage> stages;
     uint32_t next_value_id = expr.numInputs();
 
-    std::vector<PhysicalExecutionStage> stages;
-
-    std::function<void(uint32_t)> emitForRoot = [&](uint32_t root_idx) {
+    std::function<void(uint32_t)> emitForDependency = [&](uint32_t root_idx) {
         if (node_output_value_id.find(root_idx) != node_output_value_id.end()) {
             return;
         }
 
         const ExprNode& root = expr.nodes[root_idx];
+        if (isStageBoundaryOp(root.op)) {
+            uint32_t parent_idx = root.lhs;
+            if (parent_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Reduction lhs out of range.");
+            }
+
+            const ExprNode& parent = expr.nodes[parent_idx];
+            if (parent.op != ExprOp::INPUT) {
+                if (isStageBoundaryOp(parent.op)) {
+                    emitForDependency(parent_idx);
+                } else {
+                    std::unordered_set<uint32_t> region;
+                    collectFusableRegion(expr, parent_idx, region);
+
+                    std::unordered_set<uint32_t> boundary_nodes;
+                    collectBoundaryDependencies(expr, region, boundary_nodes);
+                    for (uint32_t boundary_root : boundary_nodes) {
+                        emitForDependency(boundary_root);
+                    }
+
+                    uint32_t fused_out_id = next_value_id++;
+                    node_output_value_id[parent_idx] = fused_out_id;
+
+                    std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
+                        .name = "",
+                        .old_root_idx = parent_idx,
+                        .value_id = fused_out_id,
+                    }};
+
+                    stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
+                }
+            }
+
+            uint32_t reduce_out_id = next_value_id++;
+            node_output_value_id[root_idx] = reduce_out_id;
+            stages.push_back(buildReductionStage(expr, root_idx, reduce_out_id, "", node_output_value_id));
+            return;
+        }
+
+        std::unordered_set<uint32_t> region;
+        collectFusableRegion(expr, root_idx, region);
+
+        std::unordered_set<uint32_t> boundary_nodes;
+        collectBoundaryDependencies(expr, region, boundary_nodes);
+        for (uint32_t boundary_root : boundary_nodes) {
+            emitForDependency(boundary_root);
+        }
+
+        uint32_t out_id = next_value_id++;
+        node_output_value_id[root_idx] = out_id;
+
+        std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
+            .name = "",
+            .old_root_idx = root_idx,
+            .value_id = out_id,
+        }};
+
+        stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
+    };
+
+    struct OutputRegionGroup {
+        std::vector<uint32_t> region_nodes_sorted;
+        std::vector<RequestedStageOutput> outputs;
+    };
+
+    std::map<std::vector<uint32_t>, OutputRegionGroup> fused_terminal_groups;
+
+    for (const NamedOutput& named_output : outputs.outputs) {
+        const ExprNode& root = expr.nodes[named_output.node_idx];
 
         if (isStageBoundaryOp(root.op)) {
             uint32_t parent_idx = root.lhs;
@@ -457,7 +659,7 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
             const ExprNode& parent = expr.nodes[parent_idx];
             if (parent.op != ExprOp::INPUT) {
                 if (isStageBoundaryOp(parent.op)) {
-                    emitForRoot(parent_idx);
+                    emitForDependency(parent_idx);
                 } else {
                     std::unordered_set<uint32_t> region;
                     collectFusableRegion(expr, parent_idx, region);
@@ -465,36 +667,58 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
                     std::unordered_set<uint32_t> boundary_nodes;
                     collectBoundaryDependencies(expr, region, boundary_nodes);
                     for (uint32_t boundary_root : boundary_nodes) {
-                        emitForRoot(boundary_root);
+                        emitForDependency(boundary_root);
                     }
 
-                    uint32_t fused_out_id = next_value_id++;
-                    node_output_value_id[parent_idx] = fused_out_id;
-                    stages.push_back(buildFusedStage(expr, region, parent_idx, fused_out_id, node_output_value_id));
+                    if (node_output_value_id.find(parent_idx) == node_output_value_id.end()) {
+                        uint32_t fused_out_id = next_value_id++;
+                        node_output_value_id[parent_idx] = fused_out_id;
+
+                        std::vector<RequestedStageOutput> dependency_outputs{RequestedStageOutput{
+                            .name = "",
+                            .old_root_idx = parent_idx,
+                            .value_id = fused_out_id,
+                        }};
+                        stages.push_back(buildFusedStage(expr, region, dependency_outputs, node_output_value_id));
+                    }
                 }
             }
 
             uint32_t reduce_out_id = next_value_id++;
-            node_output_value_id[root_idx] = reduce_out_id;
-            stages.push_back(buildReductionStage(expr, root_idx, reduce_out_id, node_output_value_id));
-            return;
+            node_output_value_id[named_output.node_idx] = reduce_out_id;
+            stages.push_back(buildReductionStage(expr, named_output.node_idx, reduce_out_id, named_output.name, node_output_value_id));
+            continue;
         }
 
         std::unordered_set<uint32_t> region;
-        collectFusableRegion(expr, root_idx, region);
+        collectFusableRegion(expr, named_output.node_idx, region);
 
         std::unordered_set<uint32_t> boundary_nodes;
         collectBoundaryDependencies(expr, region, boundary_nodes);
         for (uint32_t boundary_root : boundary_nodes) {
-            emitForRoot(boundary_root);
+            emitForDependency(boundary_root);
         }
 
         uint32_t out_id = next_value_id++;
-        node_output_value_id[root_idx] = out_id;
-        stages.push_back(buildFusedStage(expr, region, root_idx, out_id, node_output_value_id));
-    };
+        node_output_value_id[named_output.node_idx] = out_id;
 
-    emitForRoot(expr.output_node);
+        std::vector<uint32_t> region_key(region.begin(), region.end());
+        std::sort(region_key.begin(), region_key.end());
+
+        auto& group = fused_terminal_groups[region_key];
+        group.region_nodes_sorted = region_key;
+        group.outputs.push_back(RequestedStageOutput{
+            .name = named_output.name,
+            .old_root_idx = named_output.node_idx,
+            .value_id = out_id,
+        });
+    }
+
+    for (const auto& [region_key, group] : fused_terminal_groups) {
+        std::unordered_set<uint32_t> region_nodes(group.region_nodes_sorted.begin(), group.region_nodes_sorted.end());
+        stages.push_back(buildFusedStage(expr, region_nodes, group.outputs, node_output_value_id));
+    }
+
     return stages;
 }
 
