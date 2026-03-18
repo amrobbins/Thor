@@ -284,11 +284,9 @@ def test_outputs_shared_trunk_numerical(dtype: thor.DataType):
     stamped.run()
 
     cpu_placement = Placement(DeviceType.cpu, 0)
-    plus_one_cpu = stamped.output("plus_one").clone(cpu_placement)
-    minus_three_cpu = stamped.output("minus_three").clone(cpu_placement)
 
-    plus_one_cpu.copy_from_async(stamped.output("plus_one"), stream)
-    minus_three_cpu.copy_from_async(stamped.output("minus_three"), stream)
+    plus_one_cpu = stamped.output("plus_one").clone_copy_async(cpu_placement, stream)
+    minus_three_cpu = stamped.output("minus_three").clone_copy_async(cpu_placement, stream)
     stream.synchronize()
 
     got_plus_one = plus_one_cpu.numpy()
