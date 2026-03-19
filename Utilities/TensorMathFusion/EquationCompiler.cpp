@@ -46,6 +46,121 @@ static void ensureCudaContextCurrent(int device_num) {
     }
 }
 
+struct StageNodeKey {
+    ExprOp op = ExprOp::INPUT;
+    uint32_t lhs = UINT32_MAX;
+    uint32_t rhs = UINT32_MAX;
+    uint32_t input_slot = UINT32_MAX;
+    uint64_t scalar_bits = 0;
+
+    bool operator==(const StageNodeKey& other) const = default;
+};
+
+struct StageNodeKeyHash {
+    size_t operator()(const StageNodeKey& k) const noexcept {
+        size_t h = std::hash<int>{}(static_cast<int>(k.op));
+        hashCombine(h, std::hash<uint32_t>{}(k.lhs));
+        hashCombine(h, std::hash<uint32_t>{}(k.rhs));
+        hashCombine(h, std::hash<uint32_t>{}(k.input_slot));
+        hashCombine(h, std::hash<uint64_t>{}(k.scalar_bits));
+        return h;
+    }
+};
+
+static bool isCommutativeStageOp(ExprOp op) { return op == ExprOp::ADD || op == ExprOp::MUL || op == ExprOp::MIN || op == ExprOp::MAX; }
+
+static uint64_t scalarBits(double x) {
+    uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(x));
+    std::memcpy(&bits, &x, sizeof(bits));
+    return bits;
+}
+
+static StageNodeKey makeStageNodeKey(const ExprNode& n) {
+    StageNodeKey key;
+    key.op = n.op;
+
+    switch (n.op) {
+        case ExprOp::INPUT:
+            key.input_slot = n.input_slot;
+            break;
+
+        case ExprOp::SCALAR_FP:
+            key.scalar_bits = scalarBits(n.scalar_fp);
+            break;
+
+        default:
+            if (!Expression::isLeafOp(n.op)) {
+                key.lhs = n.lhs;
+            }
+            if (Expression::isBinaryOp(n.op)) {
+                key.rhs = n.rhs;
+                if (isCommutativeStageOp(n.op) && key.lhs > key.rhs) {
+                    std::swap(key.lhs, key.rhs);
+                }
+            }
+            break;
+    }
+
+    return key;
+}
+
+static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vector<CompiledStageOutput>& stage_outputs) {
+    if (stage_outputs.empty()) {
+        throw std::runtime_error("deduplicateFusedStageExpr requires at least one stage output.");
+    }
+
+    std::vector<ExprNode> dedup_nodes;
+    dedup_nodes.reserve(stage_expr.nodes.size());
+
+    std::unordered_map<StageNodeKey, uint32_t, StageNodeKeyHash> key_to_new_idx;
+    std::vector<uint32_t> old_to_new(stage_expr.nodes.size(), UINT32_MAX);
+
+    std::function<uint32_t(uint32_t)> remapNode = [&](uint32_t old_idx) -> uint32_t {
+        if (old_idx >= stage_expr.nodes.size()) {
+            throw std::runtime_error("deduplicateFusedStageExpr saw node index out of range.");
+        }
+
+        if (old_to_new[old_idx] != UINT32_MAX) {
+            return old_to_new[old_idx];
+        }
+
+        ExprNode n = stage_expr.nodes[old_idx];
+
+        if (!Expression::isLeafOp(n.op)) {
+            n.lhs = remapNode(n.lhs);
+        }
+
+        if (Expression::isBinaryOp(n.op)) {
+            n.rhs = remapNode(n.rhs);
+        }
+
+        if (isCommutativeStageOp(n.op) && Expression::isBinaryOp(n.op) && n.lhs > n.rhs) {
+            std::swap(n.lhs, n.rhs);
+        }
+
+        StageNodeKey key = makeStageNodeKey(n);
+        auto it = key_to_new_idx.find(key);
+        if (it != key_to_new_idx.end()) {
+            old_to_new[old_idx] = it->second;
+            return it->second;
+        }
+
+        uint32_t new_idx = static_cast<uint32_t>(dedup_nodes.size());
+        dedup_nodes.push_back(std::move(n));
+        key_to_new_idx.emplace(key, new_idx);
+        old_to_new[old_idx] = new_idx;
+        return new_idx;
+    };
+
+    for (CompiledStageOutput& output : stage_outputs) {
+        output.local_node_idx = remapNode(output.local_node_idx);
+    }
+
+    stage_expr.nodes = std::move(dedup_nodes);
+    stage_expr.output_node = stage_outputs.front().local_node_idx;
+}
+
 static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op); }
 
 static void collectExternalValueIds(const PhysicalExpression& expr,
@@ -541,6 +656,8 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     if (!stage_outputs.empty()) {
         stage_expr.output_node = stage_outputs.front().local_node_idx;
     }
+
+    deduplicateFusedStageExpr(stage_expr, stage_outputs);
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::FusedKernel,
