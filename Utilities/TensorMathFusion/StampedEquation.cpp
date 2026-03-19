@@ -38,11 +38,17 @@ StampedReduction::StampedReduction(
 }
 
 void StampedReduction::run() {
+    void* workspace_ptr = nullptr;
+    if (built_reduction->workspace_bytes > 0) {
+        assert(workspace.isPresent());
+        workspace_ptr = workspace.get().getMemPtr();
+    }
+
     CUDNN_CHECK(cudnnReduceTensor(stream.getCudnnHandle(),
                                   built_reduction->reduce_desc,
                                   nullptr,
                                   0,
-                                  workspace.get().getMemPtr(),
+                                  workspace_ptr,
                                   built_reduction->workspace_bytes,
                                   alpha,
                                   built_reduction->a_desc,

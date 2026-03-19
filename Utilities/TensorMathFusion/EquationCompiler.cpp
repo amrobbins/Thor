@@ -46,6 +46,75 @@ static void ensureCudaContextCurrent(int device_num) {
     }
 }
 
+static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op); }
+
+static void collectExternalValueIds(const PhysicalExpression& expr,
+                                    const std::unordered_set<uint32_t>& region_nodes,
+                                    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id,
+                                    std::unordered_set<uint32_t>& external_value_ids) {
+    auto addExternalValue = [&](uint32_t parent_idx) {
+        if (parent_idx == UINT32_MAX)
+            return;
+
+        if (region_nodes.contains(parent_idx))
+            return;
+
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("External dependency node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        if (parent.op == ExprOp::INPUT) {
+            external_value_ids.insert(parent.input_slot);
+            return;
+        }
+
+        if (isStageBoundaryOp(parent.op)) {
+            auto it = node_output_value_id.find(parent_idx);
+            if (it == node_output_value_id.end()) {
+                throw std::runtime_error("Missing value id for boundary dependency.");
+            }
+            external_value_ids.insert(it->second);
+            return;
+        }
+
+        throw std::runtime_error("Found non-boundary dependency outside fusable region.");
+    };
+
+    for (uint32_t node_idx : region_nodes) {
+        const ExprNode& node = expr.nodes[node_idx];
+
+        if (node.op == ExprOp::INPUT) {
+            external_value_ids.insert(node.input_slot);
+            continue;
+        }
+
+        if (Expression::isLeafOp(node.op)) {
+            continue;
+        }
+
+        addExternalValue(node.lhs);
+
+        if (Expression::isBinaryOp(node.op)) {
+            addExternalValue(node.rhs);
+        }
+    }
+}
+
+static bool setsOverlap(const std::unordered_set<uint32_t>& a, const std::unordered_set<uint32_t>& b) {
+    if (a.size() > b.size()) {
+        return setsOverlap(b, a);
+    }
+
+    for (uint32_t v : a) {
+        if (b.contains(v)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
@@ -164,10 +233,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         return hit;
 
     string kernel_name = "fused_kernel";
-    // string cuda_src = CudaSourceEmitter::emit(stage, sig.dtype, kernel_name, broadcast_support);
     std::string cuda_src;
     if (stage.outputs.size() == 1) {
-        // FIXME: broadcast support is not there yet for multi-output
         cuda_src = CudaSourceEmitter::emit(stage.expr, sig.dtype, kernel_name, broadcast_support);
     } else {
         cuda_src = CudaSourceEmitter::emit(stage, sig.dtype, kernel_name, broadcast_support);
@@ -280,8 +347,6 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
 
     return make_shared<CompiledReduction>(node.op, node.reduction_axes, node.squeeze_axes, inout_dtype, node.compute_dtype);
 }
-
-static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op); }
 
 static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
     std::vector<uint32_t> stack{root_idx};
@@ -640,12 +705,12 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
         stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
     };
 
-    struct OutputRegionGroup {
-        std::vector<uint32_t> region_nodes_sorted;
+    struct TerminalFusedGroup {
+        std::unordered_set<uint32_t> region_nodes;
+        std::unordered_set<uint32_t> dependency_value_ids;
         std::vector<RequestedStageOutput> outputs;
     };
-
-    std::map<std::vector<uint32_t>, OutputRegionGroup> fused_terminal_groups;
+    std::vector<TerminalFusedGroup> fused_terminal_groups;
 
     for (const NamedOutput& named_output : outputs.outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
@@ -702,21 +767,55 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
         uint32_t out_id = next_value_id++;
         node_output_value_id[named_output.node_idx] = out_id;
 
-        std::vector<uint32_t> region_key(region.begin(), region.end());
-        std::sort(region_key.begin(), region_key.end());
+        std::unordered_set<uint32_t> dependency_value_ids;
+        collectExternalValueIds(expr, region, node_output_value_id, dependency_value_ids);
 
-        auto& group = fused_terminal_groups[region_key];
-        group.region_nodes_sorted = region_key;
-        group.outputs.push_back(RequestedStageOutput{
+        RequestedStageOutput requested_output{
             .name = named_output.name,
             .old_root_idx = named_output.node_idx,
             .value_id = out_id,
-        });
+        };
+
+        std::vector<size_t> overlapping_groups;
+        for (size_t i = 0; i < fused_terminal_groups.size(); ++i) {
+            if (setsOverlap(fused_terminal_groups[i].dependency_value_ids, dependency_value_ids)) {
+                overlapping_groups.push_back(i);
+            }
+        }
+
+        if (overlapping_groups.empty()) {
+            TerminalFusedGroup new_group;
+            new_group.region_nodes = std::move(region);
+            new_group.dependency_value_ids = std::move(dependency_value_ids);
+            new_group.outputs.push_back(std::move(requested_output));
+            fused_terminal_groups.push_back(std::move(new_group));
+        } else {
+            const size_t target = overlapping_groups.front();
+
+            fused_terminal_groups[target].region_nodes.insert(region.begin(), region.end());
+            fused_terminal_groups[target].dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
+            fused_terminal_groups[target].outputs.push_back(std::move(requested_output));
+
+            for (size_t k = overlapping_groups.size(); k-- > 1;) {
+                const size_t src_idx = overlapping_groups[k];
+
+                fused_terminal_groups[target].region_nodes.insert(fused_terminal_groups[src_idx].region_nodes.begin(),
+                                                                  fused_terminal_groups[src_idx].region_nodes.end());
+
+                fused_terminal_groups[target].dependency_value_ids.insert(fused_terminal_groups[src_idx].dependency_value_ids.begin(),
+                                                                          fused_terminal_groups[src_idx].dependency_value_ids.end());
+
+                fused_terminal_groups[target].outputs.insert(fused_terminal_groups[target].outputs.end(),
+                                                             fused_terminal_groups[src_idx].outputs.begin(),
+                                                             fused_terminal_groups[src_idx].outputs.end());
+
+                fused_terminal_groups.erase(fused_terminal_groups.begin() + static_cast<std::ptrdiff_t>(src_idx));
+            }
+        }
     }
 
-    for (const auto& [region_key, group] : fused_terminal_groups) {
-        std::unordered_set<uint32_t> region_nodes(group.region_nodes_sorted.begin(), group.region_nodes_sorted.end());
-        stages.push_back(buildFusedStage(expr, region_nodes, group.outputs, node_output_value_id));
+    for (const TerminalFusedGroup& group : fused_terminal_groups) {
+        stages.push_back(buildFusedStage(expr, group.region_nodes, group.outputs, node_output_value_id));
     }
 
     return stages;

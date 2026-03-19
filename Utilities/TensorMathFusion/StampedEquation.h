@@ -84,12 +84,15 @@ class StampedEquation {
           deviceBroadcastInfo(deviceBroadcastInfo) {}
 
     void run();
+
     Tensor getOutputTensor() const {
         if (outputs.size() != 1)
             throw std::runtime_error("getOutputTensor called but there are " + std::to_string(outputs.size()) +
                                      "outputs. This function is only valid for single output  equations.");
         return outputs[0];
     }
+
+    const std::vector<Tensor>& getOutputTensors() const { return outputs; }
 
     static std::vector<uint64_t> computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
                                                             const std::vector<uint64_t>& reduction_axes,
@@ -135,17 +138,9 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused) : kind(Kind::FusedKernel), kernel(fused) {
-        outputTensor = fused->getOutputTensor();
-    }
-    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction) : kind(Kind::Reduction), reduction(reduction) {
-        outputTensor = reduction->getOutputTensor();
-    }
+    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused) : kind(Kind::FusedKernel), kernel(fused) {}
 
-    Tensor getOutputTensor() { return outputTensor; }
-
-   private:
-    Tensor outputTensor;
+    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction) : kind(Kind::Reduction), reduction(reduction) {}
 };
 
 class StampedExecutionPlan {
