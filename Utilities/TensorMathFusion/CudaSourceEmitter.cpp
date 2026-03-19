@@ -680,9 +680,9 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
 
     ss << "}\n";
 
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
+    // if (PRINT_KERNELS) {
+    //     printf("%s\n", ss.str().c_str());
+    // }
 
     return ss.str();
 }
@@ -779,15 +779,150 @@ string CudaSourceEmitter::emit(const PhysicalExecutionStage& stage,
         throw runtime_error("Fused stage has no outputs.");
     }
 
-    // For 1.0, keep this new path scalar-only.
-    if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
-        throw runtime_error("Multi-output fused stage emitter is currently implemented only for scalar path.");
-    }
+    const bool vector2_path =
+        dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2;
 
     ostringstream ss;
 
-    const string compute_type = scalarComputeType(dtype, ss);
-    const string storage_type = scalarStorageType(dtype, ss);
+    if (!vector2_path) {
+        const string compute_type = scalarComputeType(dtype, ss);
+        const string storage_type = scalarStorageType(dtype, ss);
+
+        if (broadcast_support) {
+            ss << R"DEVICE(
+struct BroadcastInfoHeader {
+  unsigned int rank;
+  unsigned int num_inputs;
+  unsigned long long numel;
+};
+
+__device__ __forceinline__
+const unsigned long long* broadcast_output_strides(const BroadcastInfoHeader* broadcast) {
+  return reinterpret_cast<const unsigned long long*>(
+      reinterpret_cast<const char*>(broadcast) + sizeof(BroadcastInfoHeader));
+}
+
+__device__ __forceinline__
+const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* broadcast) {
+  return broadcast_output_strides(broadcast) + broadcast->rank;
+}
+)DEVICE";
+        }
+
+        ss << "extern \"C\" __global__\n";
+        ss << "void " << kernel_name << "(";
+
+        for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+            ss << "const " << storage_type << "* in" << i << ", ";
+        }
+
+        for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
+            ss << storage_type << "* out" << i << ", ";
+        }
+
+        if (broadcast_support) {
+            ss << "const BroadcastInfoHeader* broadcast) {\n";
+        } else {
+            ss << "unsigned long long numel) {\n";
+        }
+
+        ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
+
+        if (broadcast_support) {
+            ss << R"DEVICE(
+  if (idx >= broadcast->numel) return;
+
+  const unsigned int rank = broadcast->rank;
+  const unsigned long long* output_strides = broadcast_output_strides(broadcast);
+  const unsigned long long* input_strides = broadcast_input_strides(broadcast);
+
+)DEVICE";
+
+            for (uint32_t inputIdx = 0; inputIdx < stage.expr.numInputs(); ++inputIdx) {
+                ss << "  unsigned long long in" << inputIdx << "_offset = 0ULL;\n";
+            }
+
+            ss << R"DEVICE(
+  unsigned long long remaining = idx;
+  for (unsigned int axis = 0; axis < rank; ++axis) {
+    const unsigned long long stride = output_strides[axis];
+    const unsigned long long c = remaining / stride;
+    remaining %= stride;
+)DEVICE";
+
+            for (uint32_t inputIdx = 0; inputIdx < stage.expr.numInputs(); ++inputIdx) {
+                if (inputIdx == 0)
+                    ss << "    in" << inputIdx << "_offset += c * input_strides[axis];\n";
+                else if (inputIdx == 1)
+                    ss << "    in" << inputIdx << "_offset += c * input_strides[rank + axis];\n";
+                else
+                    ss << "    in" << inputIdx << "_offset += c * input_strides[" << inputIdx << " * rank + axis];\n";
+            }
+
+            ss << R"DEVICE(
+  }
+
+)DEVICE";
+        } else {
+            ss << "  if (idx >= numel) return;\n\n";
+        }
+
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            emitScalarNode(ss, stage.expr, node_idx, dtype, compute_type, broadcast_support);
+        }
+
+        ss << "\n";
+        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+            const CompiledStageOutput& output = stage.outputs[out_idx];
+
+            if (output.local_node_idx >= stage.expr.nodes.size()) {
+                throw runtime_error("Stage output local_node_idx out of range.");
+            }
+
+            ss << "  out" << out_idx << "[idx] = " << storeScalarExpr(storage_type, compute_type, ref(output.local_node_idx)) << ";\n";
+        }
+
+        ss << "}\n";
+
+        if (PRINT_KERNELS) {
+            printf("%s\n", ss.str().c_str());
+        }
+
+        return ss.str();
+    }
+
+    string compute_dtype;
+    string compute_dtype_vector;
+    string storage_dtype;
+    string storage_dtype_vector;
+
+    if (dtype == DataType::BF16) {
+        compute_dtype = "__nv_bfloat16";
+        compute_dtype_vector = "__nv_bfloat162";
+        storage_dtype = "__nv_bfloat16";
+        storage_dtype_vector = "__nv_bfloat162";
+        ss << "#include <cuda_bf16.h>\n";
+    } else if (dtype == DataType::FP16) {
+        compute_dtype = "half";
+        compute_dtype_vector = "half2";
+        storage_dtype = "half";
+        storage_dtype_vector = "half2";
+        ss << "#include <cuda_fp16.h>\n";
+    } else if (dtype == DataType::FP8_E4M3) {
+        compute_dtype = "half";
+        compute_dtype_vector = "half2";
+        storage_dtype = "__nv_fp8_e4m3";
+        storage_dtype_vector = "__nv_fp8x2_e4m3";
+        ss << "#include <cuda_fp16.h>\n";
+        ss << "#include <cuda_fp8.h>\n";
+    } else {
+        compute_dtype = "half";
+        compute_dtype_vector = "half2";
+        storage_dtype = "__nv_fp8_e5m2";
+        storage_dtype_vector = "__nv_fp8x2_e5m2";
+        ss << "#include <cuda_fp16.h>\n";
+        ss << "#include <cuda_fp8.h>\n";
+    }
 
     if (broadcast_support) {
         ss << R"DEVICE(
@@ -813,28 +948,155 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
-    for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
-        ss << "const " << storage_type << "* in" << i << ", ";
+    if (broadcast_support) {
+        for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+            ss << "const " << storage_dtype << "* in" << i << ", ";
+        }
+    } else {
+        for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+            ss << "const " << storage_dtype_vector << "* in" << i << ", ";
+        }
     }
 
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-        ss << storage_type << "* out" << i << ", ";
+        ss << storage_dtype_vector << "* out" << i << ", ";
     }
 
-    // For 1.0 use one max_numel argument. Per-output numel/planner metadata can come later.
-    ss << "unsigned long long max_numel) {\n";
+    if (broadcast_support) {
+        ss << "const BroadcastInfoHeader* broadcast) {\n";
+    } else {
+        ss << "unsigned long long numel) {\n";
+    }
 
     ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
-    ss << "  if (idx >= max_numel) return;\n\n";
 
-    // 1.0 conservative implementation:
-    // emit each output in its own masked block.
-    //
-    // For now, use max_numel for every output block. The runtime/planner must only place outputs
-    // together in a stage when this is valid, or you must later add per-output numel args.
-    //
-    // The next refinement is to pass per-output numel and group equal-sized outputs.
+    if (!broadcast_support) {
+        ss << "  if (idx >= (numel >> 1)) return;\n\n";
+    } else {
+        ss << "  unsigned long long idx0 = idx << 1;\n";
+        ss << "  if (idx0 >= broadcast->numel) return;\n";
+        ss << "  unsigned long long idx1 = idx0 + 1;\n\n";
 
+        ss << "  const unsigned int rank = broadcast->rank;\n";
+        ss << "  const unsigned long long* output_strides = broadcast_output_strides(broadcast);\n";
+        ss << "  const unsigned long long* input_strides = broadcast_input_strides(broadcast);\n\n";
+
+        for (uint32_t inputIdx = 0; inputIdx < stage.expr.numInputs(); ++inputIdx) {
+            ss << "  unsigned long long in" << inputIdx << "_offset0 = 0ULL;\n";
+            ss << "  unsigned long long in" << inputIdx << "_offset1 = 0ULL;\n";
+        }
+        ss << "\n";
+
+        ss << "  {\n";
+        ss << "    unsigned long long remaining = idx0;\n";
+        ss << "    for (unsigned int axis = 0; axis < rank; ++axis) {\n";
+        ss << "      const unsigned long long stride = output_strides[axis];\n";
+        ss << "      const unsigned long long c = remaining / stride;\n";
+        ss << "      remaining %= stride;\n";
+        for (uint32_t inputIdx = 0; inputIdx < stage.expr.numInputs(); ++inputIdx) {
+            if (inputIdx == 0)
+                ss << "      in" << inputIdx << "_offset0 += c * input_strides[axis];\n";
+            else if (inputIdx == 1)
+                ss << "      in" << inputIdx << "_offset0 += c * input_strides[rank + axis];\n";
+            else
+                ss << "      in" << inputIdx << "_offset0 += c * input_strides[" << inputIdx << " * rank + axis];\n";
+        }
+        ss << "    }\n";
+        ss << "  }\n\n";
+
+        ss << "  const bool have_second_lane = (idx1 < broadcast->numel);\n";
+        ss << "  if (have_second_lane) {\n";
+        ss << "    unsigned long long remaining = idx1;\n";
+        ss << "    for (unsigned int axis = 0; axis < rank; ++axis) {\n";
+        ss << "      const unsigned long long stride = output_strides[axis];\n";
+        ss << "      const unsigned long long c = remaining / stride;\n";
+        ss << "      remaining %= stride;\n";
+        for (uint32_t inputIdx = 0; inputIdx < stage.expr.numInputs(); ++inputIdx) {
+            if (inputIdx == 0)
+                ss << "      in" << inputIdx << "_offset1 += c * input_strides[axis];\n";
+            else if (inputIdx == 1)
+                ss << "      in" << inputIdx << "_offset1 += c * input_strides[rank + axis];\n";
+            else
+                ss << "      in" << inputIdx << "_offset1 += c * input_strides[" << inputIdx << " * rank + axis];\n";
+        }
+        ss << "    }\n";
+        ss << "  } else {\n";
+        for (uint32_t inputIdx = 0; inputIdx < stage.expr.numInputs(); ++inputIdx) {
+            ss << "    in" << inputIdx << "_offset1 = in" << inputIdx << "_offset0;\n";
+        }
+        ss << "  }\n\n";
+    }
+
+    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+        const auto& n = stage.expr.nodes[node_idx];
+        switch (n.op) {
+            case ExprOp::INPUT: {
+                if (broadcast_support) {
+                    const string var0 = "in" + to_string(n.input_slot) + "[in" + to_string(n.input_slot) + "_offset0]";
+                    const string var1 = "in" + to_string(n.input_slot) + "[in" + to_string(n.input_slot) + "_offset1]";
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2BroadcastPackLoad(storage_dtype, var0, var1) << ";\n";
+                } else {
+                    const string variable = "in" + to_string(n.input_slot) + "[idx]";
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                       << vector_compute_conversion(storage_dtype_vector, variable) << ";\n";
+                }
+                break;
+            }
+            case ExprOp::SCALAR_FP:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                break;
+            case ExprOp::ADD:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Add(ref(n.lhs), ref(n.rhs)) << ";\n";
+                break;
+            case ExprOp::SUB:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sub(ref(n.lhs), ref(n.rhs)) << ";\n";
+                break;
+            case ExprOp::MUL:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Mul(ref(n.lhs), ref(n.rhs)) << ";\n";
+                break;
+            case ExprOp::DIV:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Div(ref(n.lhs), ref(n.rhs)) << ";\n";
+                break;
+            case ExprOp::NEG:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Neg(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::EXP:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::EXP2:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp2(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::EXP10:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp10(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::LN:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Ln(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::LOG2:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log2(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::LOG10:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log10(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::SQRT:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sqrt(ref(n.lhs), dtype) << ";\n";
+                break;
+            case ExprOp::POW:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Pow(ref(n.lhs), ref(n.rhs), dtype) << ";\n";
+                break;
+            case ExprOp::MIN:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Min(ref(n.lhs), ref(n.rhs)) << ";\n";
+                break;
+            case ExprOp::MAX:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Max(ref(n.lhs), ref(n.rhs)) << ";\n";
+                break;
+            default:
+                throw runtime_error("Unsupported op in multi-output vector emitter: " + to_string((int32_t)n.op));
+        }
+    }
+
+    ss << "\n";
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
         const CompiledStageOutput& output = stage.outputs[out_idx];
 
@@ -842,13 +1104,7 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
             throw runtime_error("Stage output local_node_idx out of range.");
         }
 
-        ss << "  {\n";
-        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-            emitScalarNode(ss, stage.expr, node_idx, dtype, compute_type, broadcast_support);
-        }
-
-        ss << "    out" << out_idx << "[idx] = " << storeScalarExpr(storage_type, compute_type, ref(output.local_node_idx)) << ";\n";
-        ss << "  }\n\n";
+        ss << "  out" << out_idx << "[idx] = " << vector_storage_conversion(storage_dtype_vector, ref(output.local_node_idx)) << ";\n";
     }
 
     ss << "}\n";
