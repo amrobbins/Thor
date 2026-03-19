@@ -2,34 +2,24 @@ import numpy as np
 import pytest
 import thor
 from thor.physical import Expression as ex
-from thor.physical import PhysicalTensor, Stream, Placement, DeviceType
+from thor.physical import PhysicalTensor, Stream, Placement, DeviceType, numpy_dtypes
 
 FLOAT_DTYPES = [
     thor.DataType.fp32,
-    # enable later once multi-output path supports them end-to-end
-    # thor.DataType.fp16,
-    # thor.DataType.bf16,
-    # thor.DataType.fp8_e4m3,
-    # thor.DataType.fp8_e5m2,
+    thor.DataType.fp16,
+    thor.DataType.bf16,
+    thor.DataType.fp8_e4m3,
+    thor.DataType.fp8_e5m2,
 ]
 
 
-def _numpy_storage_dtype(dtype: thor.DataType) -> np.dtype:
-    return thor.physical.numpy_dtypes.from_thor(dtype)
-
-
-def _numpy_compute_dtype(dtype: thor.DataType) -> np.dtype:
+def _numpy_compute_dtype(dtype: thor.DataType) -> numpy_dtypes.dtype:
     if dtype == thor.DataType.fp32:
-        return thor.physical.numpy_dtypes.fp32
-    if dtype == thor.DataType.fp16:
-        return thor.physical.numpy_dtypes.fp32
+        return numpy_dtypes.fp32
     if dtype == thor.DataType.bf16:
-        return thor.physical.numpy_dtypes.fp32
-    if dtype == thor.DataType.fp8_e4m3:
-        return thor.physical.numpy_dtypes.fp32
-    if dtype == thor.DataType.fp8_e5m2:
-        return thor.physical.numpy_dtypes.fp32
-    raise ValueError(f"Unsupported dtype: {dtype}")
+        return numpy_dtypes.bf16
+    else:
+        return numpy_dtypes.fp16
 
 
 def _gpu_tensor(shape: list[int], dtype: thor.DataType, gpu_num: int = 0) -> PhysicalTensor:
@@ -69,6 +59,13 @@ def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
         np.testing.assert_allclose(got, expected, rtol=5e-2, atol=5e-2)
 
 
+def rtol_atol(dtype: thor.DataType) -> tuple[float, float]:
+    if dtype == thor.DataType.fp32:
+        return 1e-6, 1e-6
+    else:
+        return 5e-2, 5e-2
+
+
 @pytest.mark.cuda
 def test_outputs_compile_smoke():
     x = ex.input("x")
@@ -99,7 +96,7 @@ def test_outputs_two_pointwise_results_numerical(dtype: thor.DataType):
         "prod": x * y,
     })
 
-    storage_dtype = _numpy_storage_dtype(dtype)
+    storage_dtype = thor.physical.numpy_dtypes.from_thor(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
 
     x_np = np.array([1, 2, 3, 4], dtype=np.float32).astype(storage_dtype)
@@ -148,7 +145,7 @@ def test_output_stamp_missing_input_raises(dtype: thor.DataType):
         "prod": x * y,
     })
 
-    storage_dtype = _numpy_storage_dtype(dtype)
+    storage_dtype = thor.physical.numpy_dtypes.from_thor(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
 
     x_np = np.array([1, 2, 3, 4], dtype=np.float32).astype(storage_dtype)
@@ -183,7 +180,7 @@ def test_output_stamp_unexpected_input_raises(dtype: thor.DataType):
         "prod": x * y,
     })
 
-    storage_dtype = _numpy_storage_dtype(dtype)
+    storage_dtype = thor.physical.numpy_dtypes.from_thor(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
 
     x_np = np.array([1, 2, 3, 4], dtype=np.float32).astype(storage_dtype)
@@ -221,23 +218,24 @@ def test_outputs_stamp_wrong_input_name_raises(dtype: thor.DataType):
         "prod": x * y,
     })
 
-    storage_dtype = _numpy_storage_dtype(dtype)
+    cpu_placement = Placement(DeviceType.cpu, 0)
+    gpu_placement = Placement(DeviceType.gpu, 0)
+    stream = Stream(gpu_num=0)
+    storage_dtype = thor.physical.numpy_dtypes.from_thor(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
 
-    x_np = np.array([1, 2, 3, 4], dtype=np.float32).astype(storage_dtype)
-    y_np = np.array([5, 6, 7, 8], dtype=np.float32).astype(storage_dtype)
+    x_cpu = PhysicalTensor(cpu_placement, PhysicalTensor.Descriptor(dtype, [4]))
+    y_cpu = PhysicalTensor(cpu_placement, PhysicalTensor.Descriptor(dtype, [4]))
+    x_np = x_cpu.numpy()
+    y_np = y_cpu.numpy()
 
-    x_ref = x_np.astype(compute_dtype)
-    y_ref = y_np.astype(compute_dtype)
-
-    expected_sum = x_ref + y_ref
-    expected_prod = x_ref * y_ref
-
-    x_gpu = _copy_numpy_to_gpu(x_np, dtype)
-    y_gpu = _copy_numpy_to_gpu(y_np, dtype)
+    x_np[:] = np.array([1, 2, 3, 4], dtype=storage_dtype).astype(compute_dtype)
+    y_np[:] = np.array([5, 6, 7, 8], dtype=storage_dtype).astype(compute_dtype)
 
     eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
-    stream = Stream(gpu_num=0)
+
+    x_gpu = x_cpu.clone_copy_async(gpu_placement, stream)
+    y_gpu = y_cpu.clone_copy_async(gpu_placement, stream)
 
     with pytest.raises(RuntimeError):
         stamped = eq.stamp({
@@ -259,31 +257,33 @@ def test_outputs_shared_trunk_numerical(dtype: thor.DataType):
         "minus_three": trunk - 3.0,
     })
 
-    storage_dtype = _numpy_storage_dtype(dtype)
+    cpu_placement = Placement(DeviceType.cpu, 0)
+    gpu_placement = Placement(DeviceType.gpu, 0)
+    stream = Stream(gpu_num=0)
+    storage_dtype = thor.physical.numpy_dtypes.from_thor(dtype)
     compute_dtype = _numpy_compute_dtype(dtype)
 
-    x_np = np.array([1, 2, 3, 4], dtype=np.float32).astype(storage_dtype)
-    y_np = np.array([2, 3, 4, 5], dtype=np.float32).astype(storage_dtype)
+    x_cpu = PhysicalTensor(cpu_placement, PhysicalTensor.Descriptor(dtype, [4]))
+    y_cpu = PhysicalTensor(cpu_placement, PhysicalTensor.Descriptor(dtype, [4]))
+    x_np = x_cpu.numpy()
+    y_np = y_cpu.numpy()
 
-    x_ref = x_np.astype(compute_dtype)
-    y_ref = y_np.astype(compute_dtype)
-    trunk_ref = (x_ref + y_ref) * 2.0
+    x_np[:] = np.array([1.25, 1.50, 1.75, 0.75], dtype=storage_dtype).astype(compute_dtype)
+    y_np[:] = np.array([0.75, 1.00, 1.25, 1.75], dtype=storage_dtype).astype(compute_dtype)
 
+    trunk_ref = (x_np + y_np) * 2.0
     expected_plus_one = trunk_ref + 1.0
     expected_minus_three = trunk_ref - 3.0
 
-    x_gpu = _copy_numpy_to_gpu(x_np, dtype)
-    y_gpu = _copy_numpy_to_gpu(y_np, dtype)
+    x_gpu = x_cpu.clone_copy_async(gpu_placement, stream)
+    y_gpu = y_cpu.clone_copy_async(gpu_placement, stream)
 
     eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
-    stream = Stream(gpu_num=0)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
     }, stream)
     stamped.run()
-
-    cpu_placement = Placement(DeviceType.cpu, 0)
 
     plus_one_cpu = stamped.output("plus_one").clone_copy_async(cpu_placement, stream)
     minus_three_cpu = stamped.output("minus_three").clone_copy_async(cpu_placement, stream)
@@ -292,10 +292,11 @@ def test_outputs_shared_trunk_numerical(dtype: thor.DataType):
     got_plus_one = plus_one_cpu.numpy()
     got_minus_three = minus_three_cpu.numpy()
 
-    _assert_close(got_plus_one, expected_plus_one, dtype)
-    _assert_close(got_minus_three, expected_minus_three, dtype)
+    rtol, atol = rtol_atol(storage_dtype)
+    np.testing.assert_allclose(got_plus_one, expected_plus_one, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(got_minus_three, expected_minus_three, rtol=rtol, atol=atol)
 
-    # Since multiple outputs, it is not valid to call .output_tensor
+    # Since multiple outputs, it is not valid to call stamped.output_tensor
     with pytest.raises(RuntimeError):
         stamped.output_tensor
 
