@@ -571,3 +571,73 @@ def test_outputs_grouped_broadcast_two_reductions_from_broadcasted_trunk(dtype: 
 
     assert list(sum_axis1_cpu.numpy().shape) == [2, 1, 4]
     assert list(max_axis2_cpu.numpy().shape) == [2, 3, 1]
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", REDUCTION_DTYPES)
+def test_outputs_grouped_broadcast_different_input_shapes(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
+
+    outs = ex.outputs(
+        {
+            "broadcast1": x * z,  # [1,3] * [3, 3] = [3, 3]
+            "broadcast2": y * z,  # [3,1] * [3, 3] = [3, 3]
+        })
+
+    stream = thor.physical.Stream(gpu_num=0)
+
+    x_cpu = _cpu_tensor([1, 3], dtype)
+    y_cpu = _cpu_tensor([3, 1], dtype)
+    z_cpu = _cpu_tensor([3, 3], dtype)
+
+    x_np = _fill_cpu_tensor(
+        x_cpu,
+        [
+            [1.0, 1.25, 1.75],
+        ],
+        dtype,
+    )
+    y_np = _fill_cpu_tensor(
+        y_cpu,
+        [
+            [2.0],
+            [2.4],
+            [3.1],
+        ],
+        dtype,
+    )
+    z_np = _fill_cpu_tensor(
+        z_cpu,
+        [
+            [0.25, 1.6, 0.77],
+            [0.82, 0.1, 2.4],
+            [1.3, 2.1, 0.45],
+        ],
+        dtype,
+    )
+
+    expected_broadcast1 = x_np * z_np
+    expected_broadcast2 = y_np * z_np
+
+    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    stamped = eq.stamp(
+        {
+            "x": _clone_to_gpu(x_cpu, stream),
+            "y": _clone_to_gpu(y_cpu, stream),
+            "z": _clone_to_gpu(z_cpu, stream),
+        },
+        stream,
+    )
+    stamped.run()
+
+    broadcast1_cpu = _clone_to_cpu(stamped.output("broadcast1"), stream)
+    broadcast2_cpu = _clone_to_cpu(stamped.output("broadcast2"), stream)
+    stream.synchronize()
+
+    _assert_close(broadcast1_cpu.numpy(), expected_broadcast1, dtype)
+    _assert_close(broadcast2_cpu.numpy(), expected_broadcast2, dtype)
+
+    assert list(broadcast1_cpu.numpy().shape) == [3, 3]
+    assert list(broadcast2_cpu.numpy().shape) == [3, 3]

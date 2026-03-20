@@ -1,5 +1,6 @@
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 
+#include "Utilities/TensorMathFusion/CudaSourceEmitter.h"
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
@@ -243,12 +244,105 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
 }
 
 struct ResolvedBroadcastGroup {
-    std::vector<uint64_t> output_dims;
-    std::vector<uint32_t> output_indices;
+    SpecializedBroadcastGroup specialized;
     Tensor device_broadcast_info;
-
-    explicit ResolvedBroadcastGroup(std::vector<uint64_t> output_dims) : output_dims(std::move(output_dims)) {}
 };
+
+static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& inputDims,
+                                                                   const std::vector<uint64_t>& outputDimensions) {
+    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
+    if (inputDims.size() > outputDimensions.size()) {
+        throw std::runtime_error("Input rank exceeds output rank in computeInputPackedStridesForBroadcast.");
+    }
+
+    const uint32_t rankDiff = rank - static_cast<uint32_t>(inputDims.size());
+
+    uint64_t runningStride = 1;
+    std::vector<uint64_t> inputPackedStrides(rank, 0);
+
+    for (int64_t axis = static_cast<int64_t>(rank) - 1; axis >= 0; --axis) {
+        if (static_cast<uint32_t>(axis) < rankDiff) {
+            inputPackedStrides[static_cast<size_t>(axis)] = 0;
+            continue;
+        }
+
+        const uint32_t inputAxis = static_cast<uint32_t>(axis) - rankDiff;
+        const uint64_t inputDim = inputDims[inputAxis];
+        const uint64_t outputDim = outputDimensions[static_cast<size_t>(axis)];
+
+        if (inputDim == outputDim) {
+            inputPackedStrides[static_cast<size_t>(axis)] = runningStride;
+            runningStride *= inputDim;
+        } else if (inputDim == 1) {
+            inputPackedStrides[static_cast<size_t>(axis)] = 0;
+        } else {
+            throw std::runtime_error("Input shape is not broadcast-compatible with output shape.");
+        }
+    }
+
+    return inputPackedStrides;
+}
+
+static SpecializedBroadcastGroup buildSpecializedBroadcastGroup(const CompiledExecutionStage& stage,
+                                                                const std::vector<Tensor>& stage_inputs,
+                                                                const std::vector<uint64_t>& output_dims,
+                                                                const std::vector<uint32_t>& output_indices) {
+    SpecializedBroadcastGroup group;
+    group.output_dims = output_dims;
+    group.output_indices = output_indices;
+    group.numel = product(output_dims);
+
+    std::unordered_set<uint32_t> used_input_slots_set;
+    for (uint32_t out_idx : output_indices) {
+        if (out_idx >= stage.outputs.size()) {
+            throw std::runtime_error("buildSpecializedBroadcastGroup output index out of range.");
+        }
+        collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, used_input_slots_set);
+    }
+
+    group.used_input_slots.assign(used_input_slots_set.begin(), used_input_slots_set.end());
+    std::sort(group.used_input_slots.begin(), group.used_input_slots.end());
+
+    const uint32_t rank = static_cast<uint32_t>(output_dims.size());
+    const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
+
+    std::vector<std::vector<uint64_t>> per_input_strides;
+    per_input_strides.reserve(group.used_input_slots.size());
+    for (uint32_t local_slot : group.used_input_slots) {
+        if (local_slot >= stage_inputs.size()) {
+            throw std::runtime_error("buildSpecializedBroadcastGroup local input slot out of range.");
+        }
+        per_input_strides.push_back(computeInputPackedStridesForBroadcast(stage_inputs[local_slot].getDimensions(), output_dims));
+    }
+
+    for (uint32_t axis = 0; axis < rank; ++axis) {
+        if (output_dims[axis] == 1) {
+            continue;
+        }
+
+        SpecializedBroadcastAxis axis_desc;
+        axis_desc.dim = output_dims[axis];
+        axis_desc.output_stride = output_strides[axis];
+        axis_desc.input_strides.reserve(group.used_input_slots.size());
+
+        bool contributes_to_any_input = false;
+        for (const std::vector<uint64_t>& input_strides : per_input_strides) {
+            const uint64_t s = input_strides[axis];
+            axis_desc.input_strides.push_back(s);
+            if (s != 0) {
+                contributes_to_any_input = true;
+            }
+        }
+
+        if (!contributes_to_any_input) {
+            continue;
+        }
+
+        group.active_axes.push_back(std::move(axis_desc));
+    }
+
+    return group;
+}
 
 struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
     Tensor hostBroadcastInfo;
@@ -297,32 +391,28 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
     groups.reserve(grouped_output_indices.size());
 
     for (auto& [dims, output_indices] : grouped_output_indices) {
-        ResolvedBroadcastGroup group(dims);
-        group.output_indices = std::move(output_indices);
+        ResolvedBroadcastGroup resolved;
+        resolved.specialized = buildSpecializedBroadcastGroup(stage, stage_inputs, dims, output_indices);
 
-        std::unordered_set<uint32_t> used_input_slots;
-        for (uint32_t out_idx : group.output_indices) {
-            collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, used_input_slots);
-        }
+        std::unordered_set<uint32_t> used_input_slots(resolved.specialized.used_input_slots.begin(),
+                                                      resolved.specialized.used_input_slots.end());
 
-        group.device_broadcast_info = createDeviceBroadcastInfoForUsedInputs(stage_inputs, group.output_dims, used_input_slots, stream);
+        resolved.device_broadcast_info =
+            createDeviceBroadcastInfoForUsedInputs(stage_inputs, resolved.specialized.output_dims, used_input_slots, stream);
 
-        groups.push_back(std::move(group));
+        groups.push_back(std::move(resolved));
     }
 
     std::sort(groups.begin(), groups.end(), [](const ResolvedBroadcastGroup& a, const ResolvedBroadcastGroup& b) {
-        const uint64_t a_numel = product(a.output_dims);
-        const uint64_t b_numel = product(b.output_dims);
-
-        if (a_numel != b_numel) {
-            return a_numel > b_numel;  // largest first
+        if (a.specialized.numel != b.specialized.numel) {
+            return a.specialized.numel > b.specialized.numel;
         }
 
-        if (a.output_dims.size() != b.output_dims.size()) {
-            return a.output_dims.size() > b.output_dims.size();
+        if (a.specialized.output_dims.size() != b.specialized.output_dims.size()) {
+            return a.specialized.output_dims.size() > b.specialized.output_dims.size();
         }
 
-        return a.output_dims < b.output_dims;
+        return a.specialized.output_dims < b.specialized.output_dims;
     });
 
     return groups;
@@ -677,30 +767,26 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
             std::shared_ptr<StampedEquation> stamped;
             if (requiresBroadcast) {
-                if (stage.outputs.size() == 1) {
-                    Tensor broadcastInfo = createDeviceBroadcastInfo(layoutInputs, stageOutputs[0].getDimensions(), stream);
-                    stamped = stampEquation(stage.broadcast, layoutInputs, stageOutputs, stream, broadcastInfo);
+                std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs, stream);
+
+                std::vector<SpecializedBroadcastGroup> specialized_groups;
+                specialized_groups.reserve(groups.size());
+                for (const ResolvedBroadcastGroup& group : groups) {
+                    specialized_groups.push_back(group.specialized);
+                }
+
+                std::shared_ptr<CompiledEquation> specialized_broadcast =
+                    EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
+
+                if (groups.size() == 1) {
+                    stamped = stampEquation(specialized_broadcast, layoutInputs, stageOutputs, stream, groups[0].device_broadcast_info);
                 } else {
-                    std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs, stream);
-
-                    if (groups.size() == 1) {
-                        stamped = stampEquation(stage.broadcast, layoutInputs, stageOutputs, stream, groups[0].device_broadcast_info);
-                    } else {
-                        std::vector<std::vector<uint32_t>> output_groups;
-                        output_groups.reserve(groups.size());
-                        std::vector<Tensor> broadcast_infos;
-                        broadcast_infos.reserve(groups.size());
-
-                        for (const ResolvedBroadcastGroup& group : groups) {
-                            output_groups.push_back(group.output_indices);
-                            broadcast_infos.push_back(group.device_broadcast_info);
-                        }
-
-                        std::shared_ptr<CompiledEquation> grouped_broadcast =
-                            EquationCompiler::compileGroupedBroadcastStage(stage, compiled_outputs->signature, output_groups);
-
-                        stamped = stampEquation(grouped_broadcast, layoutInputs, stageOutputs, stream, broadcast_infos);
+                    std::vector<Tensor> broadcast_infos;
+                    broadcast_infos.reserve(groups.size());
+                    for (const ResolvedBroadcastGroup& group : groups) {
+                        broadcast_infos.push_back(group.device_broadcast_info);
                     }
+                    stamped = stampEquation(specialized_broadcast, layoutInputs, stageOutputs, stream, broadcast_infos);
                 }
             } else {
                 stamped = stampEquation(stage.flat, layoutInputs, stageOutputs, stream);
@@ -822,8 +908,17 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, T
     std::vector<Tensor> outputsVec{output};
 
     if (requiresBroadcast) {
-        Tensor broadcastInfo = createDeviceBroadcastInfo(layoutInputs, resolvedOutputDims, stream);
-        EquationRunner::run(stage.broadcast, layoutInputs, outputsVec, stream, broadcastInfo);
+        std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs, stream);
+        if (groups.size() != 1) {
+            throw std::runtime_error("FusedEquation::run expected exactly one broadcast group for single-output run().");
+        }
+
+        std::vector<SpecializedBroadcastGroup> specialized_groups{groups[0].specialized};
+
+        std::shared_ptr<CompiledEquation> specialized_broadcast =
+            EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
+
+        EquationRunner::run(specialized_broadcast, layoutInputs, outputsVec, stream, groups[0].device_broadcast_info);
     } else {
         EquationRunner::run(stage.flat, layoutInputs, outputsVec, stream);
     }
