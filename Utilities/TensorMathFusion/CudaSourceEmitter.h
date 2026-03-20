@@ -35,6 +35,11 @@ class CudaSourceEmitter {
                                             TensorDescriptor::DataType dtype,
                                             const std::string& kernel_name);
 
+    static std::string emitSpecializedBroadcast(const CompiledExecutionStage& stage,
+                                                const std::vector<SpecializedBroadcastGroup>& groups,
+                                                TensorDescriptor::DataType dtype,
+                                                const std::string& kernel_name);
+
    private:
     static std::string ref(uint32_t idx);
 

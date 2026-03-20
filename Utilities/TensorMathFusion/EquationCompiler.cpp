@@ -30,6 +30,20 @@ static void cacheInsert(const EquationCacheKey& key, shared_ptr<CompiledEquation
     compiledEquationCache[key] = compiledEquation;
 }
 
+static unordered_map<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache;
+
+static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src, const EquationSignature& sig) {
+    std::string key;
+    key.reserve(cuda_src.size() + 128);
+    key += "dtype=" + std::to_string(static_cast<int>(sig.dtype));
+    key += "|sm=" + std::to_string(sig.sm_major) + std::to_string(sig.sm_minor);
+    key += "|dev=" + std::to_string(sig.device_num);
+    key += "|fast=" + std::to_string(sig.use_fast_math ? 1 : 0);
+    key += "|src=";
+    key += cuda_src;
+    return key;
+}
+
 static void ensureCudaContextCurrent(int device_num) {
     CU_CHECK(cuInit(0));
 
@@ -1160,6 +1174,48 @@ std::shared_ptr<CompiledEquation> EquationCompiler::compileGroupedBroadcastStage
 
     compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
     compiled->num_broadcast_groups = static_cast<uint32_t>(output_groups.size());
+    return compiled;
+}
+
+shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(const CompiledExecutionStage& stage,
+                                                                                const EquationSignature& sig,
+                                                                                const std::vector<SpecializedBroadcastGroup>& groups) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("compileSpecializedBroadcastStage called on non-fused stage.");
+    }
+    if (groups.empty()) {
+        throw std::runtime_error("compileSpecializedBroadcastStage requires at least one broadcast group.");
+    }
+
+    ensureCudaContextCurrent(sig.device_num);
+
+    const std::string kernel_name = "fused_kernel";
+    const std::string cuda_src = CudaSourceEmitter::emitSpecializedBroadcast(stage, groups, sig.dtype, kernel_name);
+
+    const std::string cache_key = makeSpecializedBroadcastCacheKey(cuda_src, sig);
+    auto hit = specializedBroadcastCache.find(cache_key);
+    if (hit != specializedBroadcastCache.end()) {
+        return hit->second;
+    }
+
+    std::vector<std::string> input_names;
+    input_names.reserve(stage.expr.inputs.size());
+    for (const NamedInput& input : stage.expr.inputs) {
+        input_names.push_back(input.name);
+    }
+
+    std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
+    std::vector<char> cubin = linkToCubin(ltoir, sig);
+
+    auto compiled =
+        loadCubin(EquationCacheKey(canonicalize(stage.expr), sig, true), cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+
+    if (groups.size() > 1) {
+        compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
+        compiled->num_broadcast_groups = static_cast<uint32_t>(groups.size());
+    }
+
+    specializedBroadcastCache.emplace(cache_key, compiled);
     return compiled;
 }
 
