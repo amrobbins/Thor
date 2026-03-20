@@ -49,15 +49,48 @@ std::string opName(ExprOp op) {
             return "MIN";
         case ExprOp::MAX:
             return "MAX";
+        case ExprOp::REDUCE_SUM:
+            return "RSUM";
+        case ExprOp::REDUCE_PROD:
+            return "RPROD";
+        case ExprOp::REDUCE_MIN:
+            return "RMIN";
+        case ExprOp::REDUCE_MAX:
+            return "RMAX";
+        case ExprOp::REDUCE_AVG:
+            return "RAVG";
+        case ExprOp::REDUCE_NORM1:
+            return "RNORM1";
+        case ExprOp::REDUCE_NORM2:
+            return "RNORM2";
         default:
             throw std::runtime_error("Unknown ExprOp");
     }
 }
 
-std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex, std::unordered_map<uint32_t, std::string>& memo) {
-    auto it = memo.find(nodeIndex);
-    if (it != memo.end())
-        return it->second;
+static std::string formatUIntVectorCanonical(const std::vector<uint64_t>& values) {
+    std::ostringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0)
+            ss << ",";
+        ss << values[i];
+    }
+    ss << "]";
+    return ss.str();
+}
+
+static std::string canonicalizeNode(const PhysicalExpression& expr,
+                                    uint32_t nodeIndex,
+                                    std::vector<std::string>& memo,
+                                    std::vector<uint8_t>& memoReady) {
+    if (nodeIndex >= expr.nodes.size()) {
+        throw std::runtime_error("canonicalizeNode nodeIndex out of range.");
+    }
+
+    if (memoReady[nodeIndex]) {
+        return memo[nodeIndex];
+    }
 
     const ExprNode& n = expr.nodes[nodeIndex];
     std::string out;
@@ -79,8 +112,22 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
-            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo) + ")";
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
             break;
+
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_AVG:
+        case ExprOp::REDUCE_NORM1:
+        case ExprOp::REDUCE_NORM2: {
+            const DataType compute_dtype = n.compute_dtype.isPresent() ? n.compute_dtype.get() : DataType::FP32;
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";axes=" + formatUIntVectorCanonical(n.reduction_axes) + ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) +
+                  ";compute=" + TensorDescriptor::getElementTypeName(compute_dtype) + ")";
+            break;
+        }
 
         case ExprOp::ADD:
         case ExprOp::SUB:
@@ -89,8 +136,8 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
         case ExprOp::POW:
         case ExprOp::MIN:
         case ExprOp::MAX: {
-            std::string a = canonicalizeNode(expr, n.lhs, memo);
-            std::string b = canonicalizeNode(expr, n.rhs, memo);
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
 
             if (isCommutative(n.op) && a > b)
                 std::swap(a, b);
@@ -100,17 +147,22 @@ std::string canonicalizeNode(const PhysicalExpression& expr, uint32_t nodeIndex,
         }
 
         default:
-            std::string error_message = "Unsupported ExprOp in canonicalizeNode: " + std::to_string((int)n.op);
-            throw std::runtime_error(error_message.c_str());
+            throw std::runtime_error("Unsupported ExprOp in canonicalizeNode: " + std::to_string((int)n.op));
     }
 
     memo[nodeIndex] = out;
-    return out;
+    memoReady[nodeIndex] = 1;
+    return memo[nodeIndex];
 }
 
 std::string canonicalize(const PhysicalExpression& expr) {
-    std::unordered_map<uint32_t, std::string> memo;
-    return canonicalizeNode(expr, expr.output_node, memo);
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("canonicalize(PhysicalExpression): output_node out of range.");
+    }
+
+    std::vector<std::string> memo(expr.nodes.size());
+    std::vector<uint8_t> memoReady(expr.nodes.size(), 0);
+    return canonicalizeNode(expr, expr.output_node, memo, memoReady);
 }
 
 std::string canonicalize(const PhysicalExecutionStage& stage) {
@@ -128,8 +180,6 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             throw std::runtime_error("canonicalize(PhysicalExecutionStage): unknown stage kind.");
     }
 
-    ss << ";expr={" << canonicalize(stage.expr) << "}";
-
     ss << ";inputs=[";
     for (size_t i = 0; i < stage.input_value_ids.size(); ++i) {
         if (i > 0)
@@ -138,13 +188,24 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
     }
     ss << "]";
 
+    std::vector<std::string> memo(stage.expr.nodes.size());
+    std::vector<uint8_t> memoReady(stage.expr.nodes.size(), 0);
+
     ss << ";outputs=[";
     for (size_t i = 0; i < stage.outputs.size(); ++i) {
         if (i > 0)
             ss << ",";
 
         const CompiledStageOutput& out = stage.outputs[i];
-        ss << "{name=" << out.name << ";local_node_idx=" << out.local_node_idx << "}";
+        ss << "{local_node_idx=" << out.local_node_idx << ";expr=";
+
+        if (out.local_node_idx == UINT32_MAX) {
+            ss << "NONE";
+        } else {
+            ss << canonicalizeNode(stage.expr, out.local_node_idx, memo, memoReady);
+        }
+
+        ss << "}";
     }
     ss << "]";
 

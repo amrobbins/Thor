@@ -58,14 +58,14 @@ void StampedReduction::run() {
                                   output.getMemPtr()));
 }
 
-static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
+// static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
+static ThreadSafeLruCache<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache(100'000);
 
 static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
-    auto it = builtReductionCache.find(key);
-    if (it == builtReductionCache.end()) {
-        return nullptr;
-    }
-    return it->second;
+    optional<shared_ptr<BuiltReduction>> hit = builtReductionCache.get(key);
+    if (hit.has_value())
+        return hit.value();
+    return nullptr;
 }
 
 static cudnnDataType_t toCudnnDataType(TensorDescriptor::DataType dtype) {
@@ -242,7 +242,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
 
     built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
 
-    builtReductionCache.emplace(key, built);
+    builtReductionCache.put(key, built);
     return built;
 }
 

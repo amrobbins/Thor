@@ -245,7 +245,6 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
 
 struct ResolvedBroadcastGroup {
     SpecializedBroadcastGroup specialized;
-    Tensor device_broadcast_info;
 };
 
 static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& inputDims,
@@ -378,8 +377,7 @@ static Tensor createDeviceBroadcastInfoForUsedInputs(const std::vector<Tensor>& 
 }
 
 static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
-                                                                        const std::vector<Tensor>& stage_inputs,
-                                                                        Stream stream) {
+                                                                        const std::vector<Tensor>& stage_inputs) {
     std::map<std::vector<uint64_t>, std::vector<uint32_t>> grouped_output_indices;
 
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
@@ -393,13 +391,6 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
     for (auto& [dims, output_indices] : grouped_output_indices) {
         ResolvedBroadcastGroup resolved;
         resolved.specialized = buildSpecializedBroadcastGroup(stage, stage_inputs, dims, output_indices);
-
-        std::unordered_set<uint32_t> used_input_slots(resolved.specialized.used_input_slots.begin(),
-                                                      resolved.specialized.used_input_slots.end());
-
-        resolved.device_broadcast_info =
-            createDeviceBroadcastInfoForUsedInputs(stage_inputs, resolved.specialized.output_dims, used_input_slots, stream);
-
         groups.push_back(std::move(resolved));
     }
 
@@ -767,7 +758,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
             std::shared_ptr<StampedEquation> stamped;
             if (requiresBroadcast) {
-                std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs, stream);
+                std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs);
 
                 std::vector<SpecializedBroadcastGroup> specialized_groups;
                 specialized_groups.reserve(groups.size());
@@ -778,16 +769,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::shared_ptr<CompiledEquation> specialized_broadcast =
                     EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
-                if (groups.size() == 1) {
-                    stamped = stampEquation(specialized_broadcast, layoutInputs, stageOutputs, stream, groups[0].device_broadcast_info);
-                } else {
-                    std::vector<Tensor> broadcast_infos;
-                    broadcast_infos.reserve(groups.size());
-                    for (const ResolvedBroadcastGroup& group : groups) {
-                        broadcast_infos.push_back(group.device_broadcast_info);
-                    }
-                    stamped = stampEquation(specialized_broadcast, layoutInputs, stageOutputs, stream, broadcast_infos);
-                }
+                stamped = stampEquation(specialized_broadcast, layoutInputs, stageOutputs, stream);
             } else {
                 stamped = stampEquation(stage.flat, layoutInputs, stageOutputs, stream);
             }
@@ -908,7 +890,7 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, T
     std::vector<Tensor> outputsVec{output};
 
     if (requiresBroadcast) {
-        std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs, stream);
+        std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs);
         if (groups.size() != 1) {
             throw std::runtime_error("FusedEquation::run expected exactly one broadcast group for single-output run().");
         }
@@ -918,7 +900,7 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, T
         std::shared_ptr<CompiledEquation> specialized_broadcast =
             EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
-        EquationRunner::run(specialized_broadcast, layoutInputs, outputsVec, stream, groups[0].device_broadcast_info);
+        EquationRunner::run(specialized_broadcast, layoutInputs, outputsVec, stream);
     } else {
         EquationRunner::run(stage.flat, layoutInputs, outputsVec, stream);
     }

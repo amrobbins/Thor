@@ -6,6 +6,7 @@
 #include "Utilities/Common/Stream.h"
 
 #include "Utilities/TensorMathFusion/CompiledEquation.h"
+#include "Utilities/TensorMathFusion/LruCache.h"
 
 namespace ThorImplementation {
 

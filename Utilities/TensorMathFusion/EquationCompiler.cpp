@@ -16,21 +16,22 @@ using namespace std;
 
 namespace ThorImplementation {
 
-static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
+// static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
+static ThreadSafeLruCache<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(100'000);
 
 static shared_ptr<CompiledEquation> cacheLookup(const EquationCacheKey& key) {
-    auto it = compiledEquationCache.find(key);
-    if (it == compiledEquationCache.end()) {
-        return nullptr;
-    }
-    return it->second;
+    optional<shared_ptr<CompiledEquation>> hit = compiledEquationCache.get(key);
+    if (hit.has_value())
+        return hit.value();
+    return nullptr;
 }
 
 static void cacheInsert(const EquationCacheKey& key, shared_ptr<CompiledEquation>& compiledEquation) {
-    compiledEquationCache[key] = compiledEquation;
+    compiledEquationCache.put(key, compiledEquation);
 }
 
-static unordered_map<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache;
+// static unordered_map<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache;
+static ThreadSafeLruCache<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache(100'000);
 
 static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src, const EquationSignature& sig) {
     std::string key;
@@ -1128,13 +1129,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
 
     for (const PhysicalExecutionStage& stage : planned.stages) {
         std::shared_ptr<CompiledEquation> flat;
-        std::shared_ptr<CompiledEquation> broadcast;
         std::shared_ptr<CompiledReduction> reduction;
         switch (stage.kind) {
             case PhysicalExecutionStage::Kind::FusedKernel:
                 flat = compileFusedStage(stage, sig, false);
-                broadcast = compileFusedStage(stage, sig, true);
-                compiled->stages.emplace_back(stage.expr, flat, broadcast, stage.input_value_ids, stage.outputs);
+                compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs);
                 break;
             case PhysicalExecutionStage::Kind::Reduction:
                 reduction = compileReduction(stage.expr, sig.dtype);
@@ -1146,34 +1145,6 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
     }
 
     compiled->final_outputs = std::move(planned.final_outputs);
-    return compiled;
-}
-
-std::shared_ptr<CompiledEquation> EquationCompiler::compileGroupedBroadcastStage(const CompiledExecutionStage& stage,
-                                                                                 const EquationSignature& sig,
-                                                                                 const std::vector<std::vector<uint32_t>>& output_groups) {
-    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
-        throw std::runtime_error("compileGroupedBroadcastStage called on non-fused stage.");
-    }
-
-    ensureCudaContextCurrent(sig.device_num);
-
-    const std::string kernel_name = "fused_kernel";
-    const std::string cuda_src = CudaSourceEmitter::emitGroupedBroadcast(stage, output_groups, sig.dtype, kernel_name);
-
-    std::vector<std::string> input_names;
-    input_names.reserve(stage.expr.inputs.size());
-    for (const NamedInput& input : stage.expr.inputs) {
-        input_names.push_back(input.name);
-    }
-
-    std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
-    std::vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled =
-        loadCubin(EquationCacheKey(canonicalize(stage.expr), sig, true), cubin, kernel_name, input_names, sig.dtype, sig.device_num);
-
-    compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
-    compiled->num_broadcast_groups = static_cast<uint32_t>(output_groups.size());
     return compiled;
 }
 
@@ -1193,9 +1164,9 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     const std::string cuda_src = CudaSourceEmitter::emitSpecializedBroadcast(stage, groups, sig.dtype, kernel_name);
 
     const std::string cache_key = makeSpecializedBroadcastCacheKey(cuda_src, sig);
-    auto hit = specializedBroadcastCache.find(cache_key);
-    if (hit != specializedBroadcastCache.end()) {
-        return hit->second;
+    optional<shared_ptr<CompiledEquation>> hit = specializedBroadcastCache.get(cache_key);
+    if (hit.has_value()) {
+        return hit.value();
     }
 
     std::vector<std::string> input_names;
@@ -1215,7 +1186,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         compiled->num_broadcast_groups = static_cast<uint32_t>(groups.size());
     }
 
-    specializedBroadcastCache.emplace(cache_key, compiled);
+    specializedBroadcastCache.put(cache_key, compiled);
     return compiled;
 }
 

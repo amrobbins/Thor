@@ -25,7 +25,6 @@ struct CompiledExecutionStage {
     PhysicalExpression expr;
 
     const std::shared_ptr<CompiledEquation> flat = nullptr;
-    const std::shared_ptr<CompiledEquation> broadcast = nullptr;
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
@@ -33,15 +32,9 @@ struct CompiledExecutionStage {
 
     CompiledExecutionStage(const PhysicalExpression& expr,
                            const std::shared_ptr<CompiledEquation>& flat,
-                           const std::shared_ptr<CompiledEquation>& broadcast,
                            std::vector<uint32_t> input_value_ids,
                            std::vector<CompiledStageOutput> outputs)
-        : kind(Kind::FusedKernel),
-          expr(expr),
-          flat(flat),
-          broadcast(broadcast),
-          input_value_ids(std::move(input_value_ids)),
-          outputs(std::move(outputs)) {}
+        : kind(Kind::FusedKernel), expr(expr), flat(flat), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
 
     CompiledExecutionStage(const std::shared_ptr<CompiledReduction>& reduction,
                            std::vector<uint32_t> input_value_ids,
