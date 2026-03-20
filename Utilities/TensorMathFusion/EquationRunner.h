@@ -32,6 +32,12 @@ class EquationRunner {
                     const std::vector<Tensor>& outputs,
                     Stream& stream,
                     Tensor& deviceBroadcastInfo);
+
+    static void run(const std::shared_ptr<CompiledEquation>& compiledEquation,
+                    const std::vector<Tensor>& inputs,
+                    const std::vector<Tensor>& outputs,
+                    Stream& stream,
+                    std::vector<Tensor>& broadcastInfos);
 };
 
 }  // namespace ThorImplementation

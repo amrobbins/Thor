@@ -52,6 +52,10 @@ class EquationCompiler {
     static std::vector<PhysicalExecutionStage> splitAtReductionBoundaries(const PhysicalOutputs& outputs);
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype);
+
+    static std::shared_ptr<CompiledEquation> compileGroupedBroadcastStage(const CompiledExecutionStage& stage,
+                                                                          const EquationSignature& sig,
+                                                                          const std::vector<std::vector<uint32_t>>& output_groups);
 };
 
 }  // namespace ThorImplementation

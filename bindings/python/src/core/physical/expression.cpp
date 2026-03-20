@@ -418,6 +418,20 @@ inputs: dict[str, PhysicalTensor]
     A dict mapping input names to tensors
 )nbdoc");
 
+    fused_equation.def("stamp",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const Stream&,
+                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
+                       "inputs"_a,
+                       "stream"_a,
+                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+                       R"nbdoc(
+Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
+
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+)nbdoc");
+
     fused_equation.def("run",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
                        "inputs"_a,

@@ -19,10 +19,10 @@ void StampedEquation::run() {
         throw std::runtime_error("StampedEquation::run called with no output tensors.");
     }
 
-    if (deviceBroadcastInfo.isPresent()) {
-        EquationRunner::run(compiledEquation, inputs, outputs, stream, deviceBroadcastInfo.get());
-    } else {
+    if (deviceBroadcastInfos.empty()) {
         EquationRunner::run(compiledEquation, inputs, outputs, stream);
+    } else {
+        EquationRunner::run(compiledEquation, inputs, outputs, stream, deviceBroadcastInfos);
     }
 }
 

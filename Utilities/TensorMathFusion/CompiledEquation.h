@@ -34,10 +34,19 @@ struct EquationCacheKey {
 };
 
 struct CompiledEquation {
+    enum class LaunchKind {
+        Flat,
+        BroadcastSingle,
+        BroadcastGrouped,
+    };
+
     EquationCacheKey key;
     CUmodule module = nullptr;
     CUfunction kernel = nullptr;
     std::string kernel_name;
+
+    LaunchKind launch_kind = LaunchKind::Flat;
+    uint32_t num_broadcast_groups = 0;
 
     TensorDescriptor::DataType dtype;
     int deviceNum = 0;
