@@ -3,6 +3,15 @@
 
 #include "CudaSourceEmitter.h"
 
+#include <algorithm>
+#include <cstring>
+#include <functional>
+#include <map>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
 using namespace std;
 
 namespace ThorImplementation {
@@ -230,6 +239,128 @@ static bool setsOverlap(const std::unordered_set<uint32_t>& a, const std::unorde
     return false;
 }
 
+static std::vector<uint32_t> makeRegionKey(const std::unordered_set<uint32_t>& region) {
+    std::vector<uint32_t> region_key(region.begin(), region.end());
+    std::sort(region_key.begin(), region_key.end());
+    return region_key;
+}
+
+static const char* fusedOpTag(ExprOp op) {
+    switch (op) {
+        case ExprOp::INPUT:
+            return "IN";
+        case ExprOp::SCALAR_FP:
+            return "F";
+        case ExprOp::ADD:
+            return "ADD";
+        case ExprOp::SUB:
+            return "SUB";
+        case ExprOp::MUL:
+            return "MUL";
+        case ExprOp::DIV:
+            return "DIV";
+        case ExprOp::NEG:
+            return "NEG";
+        case ExprOp::EXP:
+            return "EXP";
+        case ExprOp::EXP2:
+            return "EXP2";
+        case ExprOp::EXP10:
+            return "EXP10";
+        case ExprOp::LN:
+            return "LOG";
+        case ExprOp::LOG2:
+            return "LOG2";
+        case ExprOp::LOG10:
+            return "LOG10";
+        case ExprOp::SQRT:
+            return "SQRT";
+        case ExprOp::POW:
+            return "POW";
+        case ExprOp::MIN:
+            return "MIN";
+        case ExprOp::MAX:
+            return "MAX";
+        case ExprOp::REDUCE_SUM:
+            return "RSUM";
+        case ExprOp::REDUCE_PROD:
+            return "RPROD";
+        case ExprOp::REDUCE_MIN:
+            return "RMIN";
+        case ExprOp::REDUCE_MAX:
+            return "RMAX";
+        case ExprOp::REDUCE_AVG:
+            return "RAVG";
+        case ExprOp::REDUCE_NORM1:
+            return "RNORM1";
+        case ExprOp::REDUCE_NORM2:
+            return "RNORM2";
+        default:
+            throw std::runtime_error("Unsupported op in fusedRegionSignature.");
+    }
+}
+
+static std::string uintVecSignature(const std::vector<uint64_t>& v) {
+    std::string s = "[";
+    for (size_t i = 0; i < v.size(); ++i) {
+        s += std::to_string(v[i]);
+        if (i + 1 < v.size()) {
+            s += ",";
+        }
+    }
+    s += "]";
+    return s;
+}
+
+static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx >= expr.nodes.size()) {
+        throw std::runtime_error("fusedRegionSignatureRec node_idx out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+
+    switch (node.op) {
+        case ExprOp::INPUT:
+            return std::string("IN(") + std::to_string(node.input_slot) + ")";
+
+        case ExprOp::SCALAR_FP:
+            return std::string("F(") + std::to_string(scalarBits(node.scalar_fp)) + ")";
+
+        default:
+            break;
+    }
+
+    if (Expression::isLeafOp(node.op)) {
+        return std::string(fusedOpTag(node.op));
+    }
+
+    const std::string lhs = fusedRegionSignatureRec(expr, node.lhs);
+
+    if (isStageBoundaryOp(node.op)) {
+        TensorDescriptor::DataType compute_dtype =
+            node.compute_dtype.isPresent() ? node.compute_dtype.get() : TensorDescriptor::DataType::FP32;
+
+        return std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
+               ",squeeze=" + uintVecSignature(node.squeeze_axes) + ",compute=" + std::to_string(static_cast<int>(compute_dtype)) + ")";
+    }
+
+    if (!Expression::isBinaryOp(node.op)) {
+        return std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
+    }
+
+    std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+
+    if (isCommutativeStageOp(node.op) && rhs < lhs) {
+        return std::string(fusedOpTag(node.op)) + "(" + rhs + "," + lhs + ")";
+    }
+
+    return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ")";
+}
+
+static std::string fusedRegionSignature(const PhysicalExpression& expr, uint32_t root_idx) {
+    return fusedRegionSignatureRec(expr, root_idx);
+}
+
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
@@ -366,70 +497,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, sig.dtype, sig.device_num);
 
     cacheInsert(key, compiled);
-    return compiled;
-}
-
-std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs& outputs,
-                                                           const EquationSignature& sig,
-                                                           bool broadcast_support) {
-    if (!outputs.expr) {
-        throw std::runtime_error("Cannot compile Outputs with null expression graph.");
-    }
-
-    if (outputs.outputs.empty()) {
-        throw std::runtime_error("Cannot compile Outputs with no requested outputs.");
-    }
-
-    ensureCudaContextCurrent(sig.device_num);
-
-    auto compiled = std::make_shared<CompiledOutputs>();
-    compiled->signature = sig;
-    compiled->broadcast_support = broadcast_support;
-
-    std::vector<PhysicalExecutionStage> planned_stages = splitAtReductionBoundaries(outputs);
-    compiled->stages.reserve(planned_stages.size());
-
-    for (const PhysicalExecutionStage& stage : planned_stages) {
-        std::shared_ptr<CompiledEquation> flat;
-        std::shared_ptr<CompiledEquation> broadcast;
-        std::shared_ptr<CompiledReduction> reduction;
-        switch (stage.kind) {
-            case PhysicalExecutionStage::Kind::FusedKernel:
-                flat = compileFusedStage(stage, sig, false);
-                broadcast = compileFusedStage(stage, sig, true);
-                compiled->stages.emplace_back(flat, broadcast, stage.input_value_ids, stage.outputs);
-                break;
-            case PhysicalExecutionStage::Kind::Reduction:
-                reduction = compileReduction(stage.expr, sig.dtype);
-                compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
-                break;
-            default:
-                throw std::runtime_error("Unknown stage kind in EquationCompiler::compile(PhysicalOutputs).");
-        }
-    }
-
-    compiled->final_outputs.reserve(outputs.outputs.size());
-    for (const NamedOutput& requested : outputs.outputs) {
-        bool found = false;
-
-        for (const CompiledExecutionStage& stage : compiled->stages) {
-            for (const CompiledStageOutput& produced : stage.outputs) {
-                if (produced.name == requested.name) {
-                    compiled->final_outputs.push_back(produced);
-                    found = true;
-                    break;
-                }
-            }
-            if (found) {
-                break;
-            }
-        }
-
-        if (!found) {
-            throw std::runtime_error("Failed to resolve final output value id for output: " + requested.name);
-        }
-    }
-
     return compiled;
 }
 
@@ -733,7 +800,12 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     };
 }
 
-std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries(const PhysicalOutputs& outputs) {
+struct PlannedExecution {
+    std::vector<PhysicalExecutionStage> stages;
+    std::vector<CompiledStageOutput> final_outputs;
+};
+
+static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     if (!outputs.expr) {
         throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
     }
@@ -753,10 +825,49 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
     }
 
     std::unordered_map<uint32_t, uint32_t> node_output_value_id;
-    std::vector<PhysicalExecutionStage> stages;
+    std::map<std::string, uint32_t> fused_region_value_id;
+
+    struct TerminalFusedGroup {
+        std::unordered_set<uint32_t> region_nodes;
+        std::unordered_set<uint32_t> dependency_value_ids;
+        std::vector<RequestedStageOutput> outputs;
+        std::map<std::string, uint32_t> exact_region_value_id;
+        bool emitted = false;
+    };
+
+    std::vector<std::optional<TerminalFusedGroup>> terminal_groups;
+    std::map<std::string, size_t> pending_terminal_region_to_group;
+
+    PlannedExecution planned;
     uint32_t next_value_id = expr.numInputs();
 
-    std::function<void(uint32_t)> emitForDependency = [&](uint32_t root_idx) {
+    std::function<void(size_t)> materializeTerminalGroup;
+    std::function<void(uint32_t)> emitForDependency;
+
+    materializeTerminalGroup = [&](size_t group_idx) {
+        if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
+            throw std::runtime_error("materializeTerminalGroup group_idx out of range or inactive.");
+        }
+
+        TerminalFusedGroup& group = *terminal_groups[group_idx];
+        if (group.emitted) {
+            return;
+        }
+
+        if (group.outputs.empty()) {
+            throw std::runtime_error("materializeTerminalGroup found empty terminal group.");
+        }
+
+        planned.stages.push_back(buildFusedStage(expr, group.region_nodes, group.outputs, node_output_value_id));
+
+        for (const auto& [region_key, value_id] : group.exact_region_value_id) {
+            fused_region_value_id[region_key] = value_id;
+        }
+
+        group.emitted = true;
+    };
+
+    emitForDependency = [&](uint32_t root_idx) {
         if (node_output_value_id.find(root_idx) != node_output_value_id.end()) {
             return;
         }
@@ -770,34 +881,12 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
 
             const ExprNode& parent = expr.nodes[parent_idx];
             if (parent.op != ExprOp::INPUT) {
-                if (isStageBoundaryOp(parent.op)) {
-                    emitForDependency(parent_idx);
-                } else {
-                    std::unordered_set<uint32_t> region;
-                    collectFusableRegion(expr, parent_idx, region);
-
-                    std::unordered_set<uint32_t> boundary_nodes;
-                    collectBoundaryDependencies(expr, region, boundary_nodes);
-                    for (uint32_t boundary_root : boundary_nodes) {
-                        emitForDependency(boundary_root);
-                    }
-
-                    uint32_t fused_out_id = next_value_id++;
-                    node_output_value_id[parent_idx] = fused_out_id;
-
-                    std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
-                        .name = "",
-                        .old_root_idx = parent_idx,
-                        .value_id = fused_out_id,
-                    }};
-
-                    stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
-                }
+                emitForDependency(parent_idx);
             }
 
             uint32_t reduce_out_id = next_value_id++;
             node_output_value_id[root_idx] = reduce_out_id;
-            stages.push_back(buildReductionStage(expr, root_idx, reduce_out_id, "", node_output_value_id));
+            planned.stages.push_back(buildReductionStage(expr, root_idx, reduce_out_id, "", node_output_value_id));
             return;
         }
 
@@ -810,8 +899,30 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
             emitForDependency(boundary_root);
         }
 
+        std::string region_sig = fusedRegionSignature(expr, root_idx);
+
+        auto emitted_it = fused_region_value_id.find(region_sig);
+        if (emitted_it != fused_region_value_id.end()) {
+            node_output_value_id[root_idx] = emitted_it->second;
+            return;
+        }
+
+        auto pending_it = pending_terminal_region_to_group.find(region_sig);
+        if (pending_it != pending_terminal_region_to_group.end()) {
+            materializeTerminalGroup(pending_it->second);
+
+            auto fused_it = fused_region_value_id.find(region_sig);
+            if (fused_it == fused_region_value_id.end()) {
+                throw std::runtime_error("Pending terminal region was materialized but no fused region value id was recorded.");
+            }
+
+            node_output_value_id[root_idx] = fused_it->second;
+            return;
+        }
+
         uint32_t out_id = next_value_id++;
         node_output_value_id[root_idx] = out_id;
+        fused_region_value_id.emplace(region_sig, out_id);
 
         std::vector<RequestedStageOutput> requested_outputs{RequestedStageOutput{
             .name = "",
@@ -819,15 +930,65 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
             .value_id = out_id,
         }};
 
-        stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
+        planned.stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));
     };
 
-    struct TerminalFusedGroup {
-        std::unordered_set<uint32_t> region_nodes;
-        std::unordered_set<uint32_t> dependency_value_ids;
-        std::vector<RequestedStageOutput> outputs;
+    auto addOrMergeTerminalGroup = [&](std::unordered_set<uint32_t> region,
+                                       std::unordered_set<uint32_t> dependency_value_ids,
+                                       RequestedStageOutput requested_output,
+                                       const std::string& region_sig) {
+        std::vector<size_t> overlapping_groups;
+        for (size_t i = 0; i < terminal_groups.size(); ++i) {
+            if (!terminal_groups[i].has_value() || terminal_groups[i]->emitted) {
+                continue;
+            }
+            if (setsOverlap(terminal_groups[i]->dependency_value_ids, dependency_value_ids)) {
+                overlapping_groups.push_back(i);
+            }
+        }
+
+        if (overlapping_groups.empty()) {
+            TerminalFusedGroup new_group;
+            new_group.region_nodes = std::move(region);
+            new_group.dependency_value_ids = std::move(dependency_value_ids);
+            new_group.outputs.push_back(requested_output);
+            new_group.exact_region_value_id.emplace(region_sig, requested_output.value_id);
+
+            size_t new_idx = terminal_groups.size();
+            terminal_groups.push_back(std::move(new_group));
+            pending_terminal_region_to_group[region_sig] = new_idx;
+            return;
+        }
+
+        size_t target = overlapping_groups.front();
+        TerminalFusedGroup& target_group = *terminal_groups[target];
+
+        target_group.region_nodes.insert(region.begin(), region.end());
+        target_group.dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
+        target_group.outputs.push_back(requested_output);
+        target_group.exact_region_value_id[region_sig] = requested_output.value_id;
+        pending_terminal_region_to_group[region_sig] = target;
+
+        for (size_t k = 1; k < overlapping_groups.size(); ++k) {
+            size_t src_idx = overlapping_groups[k];
+            if (!terminal_groups[src_idx].has_value()) {
+                continue;
+            }
+
+            TerminalFusedGroup& src_group = *terminal_groups[src_idx];
+
+            target_group.region_nodes.insert(src_group.region_nodes.begin(), src_group.region_nodes.end());
+            target_group.dependency_value_ids.insert(src_group.dependency_value_ids.begin(), src_group.dependency_value_ids.end());
+            target_group.outputs.insert(target_group.outputs.end(), src_group.outputs.begin(), src_group.outputs.end());
+
+            for (const auto& [key, value_id] : src_group.exact_region_value_id) {
+                target_group.exact_region_value_id[key] = value_id;
+                pending_terminal_region_to_group[key] = target;
+            }
+
+            terminal_groups[src_idx].reset();
+        }
     };
-    std::vector<TerminalFusedGroup> fused_terminal_groups;
 
     for (const NamedOutput& named_output : outputs.outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
@@ -840,35 +1001,19 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
 
             const ExprNode& parent = expr.nodes[parent_idx];
             if (parent.op != ExprOp::INPUT) {
-                if (isStageBoundaryOp(parent.op)) {
-                    emitForDependency(parent_idx);
-                } else {
-                    std::unordered_set<uint32_t> region;
-                    collectFusableRegion(expr, parent_idx, region);
-
-                    std::unordered_set<uint32_t> boundary_nodes;
-                    collectBoundaryDependencies(expr, region, boundary_nodes);
-                    for (uint32_t boundary_root : boundary_nodes) {
-                        emitForDependency(boundary_root);
-                    }
-
-                    if (node_output_value_id.find(parent_idx) == node_output_value_id.end()) {
-                        uint32_t fused_out_id = next_value_id++;
-                        node_output_value_id[parent_idx] = fused_out_id;
-
-                        std::vector<RequestedStageOutput> dependency_outputs{RequestedStageOutput{
-                            .name = "",
-                            .old_root_idx = parent_idx,
-                            .value_id = fused_out_id,
-                        }};
-                        stages.push_back(buildFusedStage(expr, region, dependency_outputs, node_output_value_id));
-                    }
-                }
+                emitForDependency(parent_idx);
             }
 
             uint32_t reduce_out_id = next_value_id++;
             node_output_value_id[named_output.node_idx] = reduce_out_id;
-            stages.push_back(buildReductionStage(expr, named_output.node_idx, reduce_out_id, named_output.name, node_output_value_id));
+            planned.stages.push_back(
+                buildReductionStage(expr, named_output.node_idx, reduce_out_id, named_output.name, node_output_value_id));
+
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = reduce_out_id,
+            });
             continue;
         }
 
@@ -879,6 +1024,37 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
         collectBoundaryDependencies(expr, region, boundary_nodes);
         for (uint32_t boundary_root : boundary_nodes) {
             emitForDependency(boundary_root);
+        }
+
+        std::string region_sig = fusedRegionSignature(expr, named_output.node_idx);
+
+        auto emitted_it = fused_region_value_id.find(region_sig);
+        if (emitted_it != fused_region_value_id.end()) {
+            node_output_value_id[named_output.node_idx] = emitted_it->second;
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = emitted_it->second,
+            });
+            continue;
+        }
+
+        auto pending_it = pending_terminal_region_to_group.find(region_sig);
+        if (pending_it != pending_terminal_region_to_group.end()) {
+            size_t group_idx = pending_it->second;
+            if (group_idx >= terminal_groups.size() || !terminal_groups[group_idx].has_value()) {
+                throw std::runtime_error("Pending terminal region points to invalid group.");
+            }
+
+            uint32_t existing_value_id = terminal_groups[group_idx]->exact_region_value_id.at(region_sig);
+            node_output_value_id[named_output.node_idx] = existing_value_id;
+
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = existing_value_id,
+            });
+            continue;
         }
 
         uint32_t out_id = next_value_id++;
@@ -893,49 +1069,98 @@ std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries
             .value_id = out_id,
         };
 
-        std::vector<size_t> overlapping_groups;
-        for (size_t i = 0; i < fused_terminal_groups.size(); ++i) {
-            if (setsOverlap(fused_terminal_groups[i].dependency_value_ids, dependency_value_ids)) {
-                overlapping_groups.push_back(i);
-            }
+        addOrMergeTerminalGroup(std::move(region), std::move(dependency_value_ids), requested_output, region_sig);
+
+        planned.final_outputs.push_back(CompiledStageOutput{
+            .name = named_output.name,
+            .local_node_idx = UINT32_MAX,
+            .value_id = out_id,
+        });
+    }
+
+    for (size_t i = 0; i < terminal_groups.size(); ++i) {
+        if (!terminal_groups[i].has_value()) {
+            continue;
         }
+        materializeTerminalGroup(i);
+    }
 
-        if (overlapping_groups.empty()) {
-            TerminalFusedGroup new_group;
-            new_group.region_nodes = std::move(region);
-            new_group.dependency_value_ids = std::move(dependency_value_ids);
-            new_group.outputs.push_back(std::move(requested_output));
-            fused_terminal_groups.push_back(std::move(new_group));
-        } else {
-            const size_t target = overlapping_groups.front();
+    return planned;
+}
 
-            fused_terminal_groups[target].region_nodes.insert(region.begin(), region.end());
-            fused_terminal_groups[target].dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
-            fused_terminal_groups[target].outputs.push_back(std::move(requested_output));
+std::vector<PhysicalExecutionStage> EquationCompiler::splitAtReductionBoundaries(const PhysicalOutputs& outputs) {
+    return planExecution(outputs).stages;
+}
 
-            for (size_t k = overlapping_groups.size(); k-- > 1;) {
-                const size_t src_idx = overlapping_groups[k];
+std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs& outputs,
+                                                           const EquationSignature& sig,
+                                                           bool broadcast_support) {
+    if (!outputs.expr) {
+        throw std::runtime_error("Cannot compile Outputs with null expression graph.");
+    }
 
-                fused_terminal_groups[target].region_nodes.insert(fused_terminal_groups[src_idx].region_nodes.begin(),
-                                                                  fused_terminal_groups[src_idx].region_nodes.end());
+    if (outputs.outputs.empty()) {
+        throw std::runtime_error("Cannot compile Outputs with no requested outputs.");
+    }
 
-                fused_terminal_groups[target].dependency_value_ids.insert(fused_terminal_groups[src_idx].dependency_value_ids.begin(),
-                                                                          fused_terminal_groups[src_idx].dependency_value_ids.end());
+    ensureCudaContextCurrent(sig.device_num);
 
-                fused_terminal_groups[target].outputs.insert(fused_terminal_groups[target].outputs.end(),
-                                                             fused_terminal_groups[src_idx].outputs.begin(),
-                                                             fused_terminal_groups[src_idx].outputs.end());
+    auto compiled = std::make_shared<CompiledOutputs>();
+    compiled->signature = sig;
+    compiled->broadcast_support = broadcast_support;
 
-                fused_terminal_groups.erase(fused_terminal_groups.begin() + static_cast<std::ptrdiff_t>(src_idx));
-            }
+    PlannedExecution planned = planExecution(outputs);
+    compiled->stages.reserve(planned.stages.size());
+
+    for (const PhysicalExecutionStage& stage : planned.stages) {
+        std::shared_ptr<CompiledEquation> flat;
+        std::shared_ptr<CompiledEquation> broadcast;
+        std::shared_ptr<CompiledReduction> reduction;
+        switch (stage.kind) {
+            case PhysicalExecutionStage::Kind::FusedKernel:
+                flat = compileFusedStage(stage, sig, false);
+                broadcast = compileFusedStage(stage, sig, true);
+                compiled->stages.emplace_back(stage.expr, flat, broadcast, stage.input_value_ids, stage.outputs);
+                break;
+            case PhysicalExecutionStage::Kind::Reduction:
+                reduction = compileReduction(stage.expr, sig.dtype);
+                compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
+                break;
+            default:
+                throw std::runtime_error("Unknown stage kind in EquationCompiler::compile(PhysicalOutputs).");
         }
     }
 
-    for (const TerminalFusedGroup& group : fused_terminal_groups) {
-        stages.push_back(buildFusedStage(expr, group.region_nodes, group.outputs, node_output_value_id));
+    compiled->final_outputs = std::move(planned.final_outputs);
+    return compiled;
+}
+
+std::shared_ptr<CompiledEquation> EquationCompiler::compileGroupedBroadcastStage(const CompiledExecutionStage& stage,
+                                                                                 const EquationSignature& sig,
+                                                                                 const std::vector<std::vector<uint32_t>>& output_groups) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("compileGroupedBroadcastStage called on non-fused stage.");
     }
 
-    return stages;
+    ensureCudaContextCurrent(sig.device_num);
+
+    const std::string kernel_name = "fused_kernel";
+    const std::string cuda_src = CudaSourceEmitter::emitGroupedBroadcast(stage, output_groups, sig.dtype, kernel_name);
+
+    std::vector<std::string> input_names;
+    input_names.reserve(stage.expr.inputs.size());
+    for (const NamedInput& input : stage.expr.inputs) {
+        input_names.push_back(input.name);
+    }
+
+    std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
+    std::vector<char> cubin = linkToCubin(ltoir, sig);
+    auto compiled =
+        loadCubin(EquationCacheKey(canonicalize(stage.expr), sig, true), cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+
+    compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
+    compiled->num_broadcast_groups = static_cast<uint32_t>(output_groups.size());
+    return compiled;
 }
 
 }  // namespace ThorImplementation

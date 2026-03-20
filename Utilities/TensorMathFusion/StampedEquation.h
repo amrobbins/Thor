@@ -76,12 +76,12 @@ class StampedEquation {
                     const std::vector<Tensor>& inputs,
                     const std::vector<Tensor>& outputs,
                     const Stream& stream,
-                    Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty())
+                    std::vector<Tensor> deviceBroadcastInfos = {})
         : compiledEquation(std::move(compiledEquation)),
           inputs(inputs),
           outputs(outputs),
           stream(stream),
-          deviceBroadcastInfo(deviceBroadcastInfo) {}
+          deviceBroadcastInfos(std::move(deviceBroadcastInfos)) {}
 
     void run();
 
@@ -107,7 +107,7 @@ class StampedEquation {
     std::vector<Tensor> inputs;
     std::vector<Tensor> outputs;
     Stream stream;
-    Optional<Tensor> deviceBroadcastInfo = Optional<Tensor>::empty();
+    std::vector<Tensor> deviceBroadcastInfos = {};
 };
 
 class StampedReduction {

@@ -28,6 +28,56 @@ static std::string emitScalarFpLiteral(double x, DataType dtype) {
     return formatFloating(x, 9) + "f";
 }
 
+static void collectRequiredNodes(const PhysicalExpression& expr, uint32_t node_idx, std::unordered_set<uint32_t>& required) {
+    if (!required.insert(node_idx).second) {
+        return;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (Expression::isLeafOp(node.op)) {
+        return;
+    }
+
+    collectRequiredNodes(expr, node.lhs, required);
+    if (Expression::isBinaryOp(node.op)) {
+        collectRequiredNodes(expr, node.rhs, required);
+    }
+}
+
+static std::vector<uint32_t> orderedRequiredNodesForGroup(const CompiledExecutionStage& stage,
+                                                          const std::vector<uint32_t>& output_indices) {
+    std::unordered_set<uint32_t> required;
+    for (uint32_t out_idx : output_indices) {
+        if (out_idx >= stage.outputs.size()) {
+            throw std::runtime_error("orderedRequiredNodesForGroup output index out of range.");
+        }
+        collectRequiredNodes(stage.expr, stage.outputs[out_idx].local_node_idx, required);
+    }
+
+    std::vector<uint32_t> ordered;
+    ordered.reserve(required.size());
+    for (uint32_t i = 0; i < stage.expr.nodes.size(); ++i) {
+        if (required.contains(i)) {
+            ordered.push_back(i);
+        }
+    }
+    return ordered;
+}
+
+static std::vector<uint32_t> usedInputSlotsForNodes(const PhysicalExpression& expr, const std::vector<uint32_t>& node_indices) {
+    std::unordered_set<uint32_t> slots;
+    for (uint32_t node_idx : node_indices) {
+        const ExprNode& node = expr.nodes[node_idx];
+        if (node.op == ExprOp::INPUT) {
+            slots.insert(node.input_slot);
+        }
+    }
+
+    std::vector<uint32_t> ordered(slots.begin(), slots.end());
+    std::sort(ordered.begin(), ordered.end());
+    return ordered;
+}
+
 void CudaSourceEmitter::emitScalarNode(std::ostringstream& ss,
                                        const PhysicalExpression& expr,
                                        uint32_t node_idx,
@@ -1105,6 +1155,120 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
         }
 
         ss << "  out" << out_idx << "[idx] = " << vector_storage_conversion(storage_dtype_vector, ref(output.local_node_idx)) << ";\n";
+    }
+
+    ss << "}\n";
+
+    if (PRINT_KERNELS) {
+        printf("%s\n", ss.str().c_str());
+    }
+
+    return ss.str();
+}
+
+std::string CudaSourceEmitter::emitGroupedBroadcast(const CompiledExecutionStage& stage,
+                                                    const std::vector<std::vector<uint32_t>>& output_groups,
+                                                    DataType dtype,
+                                                    const std::string& kernel_name) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("emitGroupedBroadcast called on non-fused stage.");
+    }
+
+    if (output_groups.empty()) {
+        throw std::runtime_error("emitGroupedBroadcast requires at least one output group.");
+    }
+
+    if (dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+        throw std::runtime_error("First cut: emitGroupedBroadcast is scalar-path only. Mirror the same structure into vector2 next.");
+    }
+
+    std::ostringstream ss;
+
+    const std::string compute_type = scalarComputeType(dtype, ss);
+    const std::string storage_type = scalarStorageType(dtype, ss);
+
+    ss << R"DEVICE(
+struct BroadcastInfoHeader {
+  unsigned int rank;
+  unsigned int num_inputs;
+  unsigned long long numel;
+};
+
+__device__ __forceinline__
+const unsigned long long* broadcast_output_strides(const BroadcastInfoHeader* broadcast) {
+  return reinterpret_cast<const unsigned long long*>(
+      reinterpret_cast<const char*>(broadcast) + sizeof(BroadcastInfoHeader));
+}
+
+__device__ __forceinline__
+const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* broadcast) {
+  return broadcast_output_strides(broadcast) + broadcast->rank;
+}
+)DEVICE";
+
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+
+    for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
+        ss << "const " << storage_type << "* in" << i << ", ";
+    }
+    for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
+        ss << storage_type << "* out" << i << ", ";
+    }
+    for (uint32_t g = 0; g < output_groups.size(); ++g) {
+        ss << "const BroadcastInfoHeader* broadcast" << g;
+        if (g + 1 < output_groups.size()) {
+            ss << ", ";
+        }
+    }
+    ss << ") {\n";
+
+    ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n\n";
+
+    for (uint32_t g = 0; g < output_groups.size(); ++g) {
+        const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, output_groups[g]);
+        const std::vector<uint32_t> used_inputs = usedInputSlotsForNodes(stage.expr, required_nodes);
+
+        ss << "  if (idx < broadcast" << g << "->numel) {\n";
+        ss << "    const unsigned int rank = broadcast" << g << "->rank;\n";
+        ss << "    const unsigned long long* output_strides = broadcast_output_strides(broadcast" << g << ");\n";
+        ss << "    const unsigned long long* input_strides = broadcast_input_strides(broadcast" << g << ");\n";
+
+        for (uint32_t input_slot : used_inputs) {
+            ss << "    unsigned long long in" << input_slot << "_offset = 0ULL;\n";
+        }
+
+        ss << R"DEVICE(
+    unsigned long long remaining = idx;
+    for (unsigned int axis = 0; axis < rank; ++axis) {
+      const unsigned long long stride = output_strides[axis];
+      const unsigned long long c = remaining / stride;
+      remaining %= stride;
+)DEVICE";
+
+        for (uint32_t input_slot : used_inputs) {
+            if (input_slot == 0) {
+                ss << "      in" << input_slot << "_offset += c * input_strides[axis];\n";
+            } else if (input_slot == 1) {
+                ss << "      in" << input_slot << "_offset += c * input_strides[rank + axis];\n";
+            } else {
+                ss << "      in" << input_slot << "_offset += c * input_strides[" << input_slot << " * rank + axis];\n";
+            }
+        }
+
+        ss << "    }\n\n";
+
+        for (uint32_t node_idx : required_nodes) {
+            emitScalarNode(ss, stage.expr, node_idx, dtype, compute_type, /*broadcast_support=*/true);
+        }
+
+        ss << "\n";
+        for (uint32_t out_idx : output_groups[g]) {
+            const CompiledStageOutput& output = stage.outputs[out_idx];
+            ss << "    out" << out_idx << "[idx] = " << storeScalarExpr(storage_type, compute_type, ref(output.local_node_idx)) << ";\n";
+        }
+
+        ss << "  }\n\n";
     }
 
     ss << "}\n";
