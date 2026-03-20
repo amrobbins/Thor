@@ -53,10 +53,6 @@ class EquationCompiler {
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype);
 
-    static std::shared_ptr<CompiledEquation> compileGroupedBroadcastStage(const CompiledExecutionStage& stage,
-                                                                          const EquationSignature& sig,
-                                                                          const std::vector<std::vector<uint32_t>>& output_groups);
-
     static std::shared_ptr<CompiledEquation> compileSpecializedBroadcastStage(const CompiledExecutionStage& stage,
                                                                               const EquationSignature& sig,
                                                                               const std::vector<SpecializedBroadcastGroup>& groups);

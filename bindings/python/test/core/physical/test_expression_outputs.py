@@ -6,10 +6,10 @@ from thor.physical import PhysicalTensor, Stream, Placement, DeviceType, numpy_d
 
 FLOAT_DTYPES = [
     thor.DataType.fp32,
-    # thor.DataType.fp16,
-    # thor.DataType.bf16,
-    # thor.DataType.fp8_e4m3,
-    # thor.DataType.fp8_e5m2,
+    thor.DataType.fp16,
+    thor.DataType.bf16,
+    thor.DataType.fp8_e4m3,
+    thor.DataType.fp8_e5m2,
 ]
 
 REDUCTION_DTYPES = [

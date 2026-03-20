@@ -28,6 +28,17 @@ static std::string emitScalarFpLiteral(double x, DataType dtype) {
     return formatFloating(x, 9) + "f";
 }
 
+static bool isPowerOfTwo(uint64_t x) { return x != 0 && (x & (x - 1)) == 0; }
+
+static uint32_t log2Exact(uint64_t x) {
+    uint32_t s = 0;
+    while (x > 1) {
+        x >>= 1;
+        ++s;
+    }
+    return s;
+}
+
 static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
                                                const SpecializedBroadcastGroup& group,
                                                const std::string& idx_expr,
@@ -38,8 +49,25 @@ static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
 
         const std::string coord = "c" + (offset_suffix.empty() ? std::string() : offset_suffix) + "_" + std::to_string(axis_i);
 
-        ss << indent << "const unsigned long long " << coord << " = (" << idx_expr << " / " << axis.output_stride << "ULL) % " << axis.dim
-           << "ULL;\n";
+        std::string base_expr;
+        if (axis.output_stride == 1) {
+            base_expr = idx_expr;
+        } else if (isPowerOfTwo(axis.output_stride)) {
+            base_expr = "(" + idx_expr + " >> " + std::to_string(log2Exact(axis.output_stride)) + ")";
+        } else {
+            base_expr = "(" + idx_expr + " / " + std::to_string(axis.output_stride) + "ULL)";
+        }
+
+        std::string coord_expr;
+        if (axis.dim == 1) {
+            coord_expr = "0ULL";
+        } else if (isPowerOfTwo(axis.dim)) {
+            coord_expr = "(" + base_expr + " & " + std::to_string(axis.dim - 1) + "ULL)";
+        } else {
+            coord_expr = "(" + base_expr + " % " + std::to_string(axis.dim) + "ULL)";
+        }
+
+        ss << indent << "const unsigned long long " << coord << " = " << coord_expr << ";\n";
 
         for (size_t j = 0; j < group.used_input_slots.size(); ++j) {
             const uint64_t stride = axis.input_strides[j];
@@ -47,8 +75,15 @@ static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
                 continue;
             }
 
-            ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += " << coord << " * " << stride
-               << "ULL;\n";
+            if (stride == 1) {
+                ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += " << coord << ";\n";
+            } else if (isPowerOfTwo(stride)) {
+                ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += (" << coord << " << "
+                   << std::to_string(log2Exact(stride)) << ");\n";
+            } else {
+                ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += " << coord << " * " << stride
+                   << "ULL;\n";
+            }
         }
     }
 }
@@ -1321,14 +1356,6 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
 
     std::ostringstream ss;
 
-    ss << R"DEVICE(
-struct BroadcastInfoHeader {
-  unsigned int rank;
-  unsigned int num_inputs;
-  unsigned long long numel;
-};
-)DEVICE";
-
     if (!vector2_path) {
         const std::string compute_type = scalarComputeType(dtype, ss);
         const std::string storage_type = scalarStorageType(dtype, ss);
@@ -1340,20 +1367,12 @@ struct BroadcastInfoHeader {
             ss << "const " << storage_type << "* in" << i << ", ";
         }
         for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-            ss << storage_type << "* out" << i << ", ";
+            ss << storage_type << "* out" << i;
+            if (i < stage.outputs.size() - 1)
+                ss << ", ";
         }
 
-        if (groups.size() == 1) {
-            ss << "const BroadcastInfoHeader* broadcast) {\n";
-        } else {
-            for (uint32_t g = 0; g < groups.size(); ++g) {
-                ss << "const BroadcastInfoHeader* broadcast" << g;
-                if (g + 1 < groups.size()) {
-                    ss << ", ";
-                }
-            }
-            ss << ") {\n";
-        }
+        ss << ") {\n";
 
         ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n\n";
 
@@ -1436,31 +1455,23 @@ struct BroadcastInfoHeader {
         ss << "const " << storage_dtype << "* in" << i << ", ";
     }
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-        ss << storage_dtype_vector << "* out" << i << ", ";
+        ss << storage_dtype_vector << "* out" << i;
+        if (i < stage.outputs.size() - 1)
+            ss << ", ";
     }
 
-    if (groups.size() == 1) {
-        ss << "const BroadcastInfoHeader* broadcast) {\n";
-    } else {
-        for (uint32_t g = 0; g < groups.size(); ++g) {
-            ss << "const BroadcastInfoHeader* broadcast" << g;
-            if (g + 1 < groups.size()) {
-                ss << ", ";
-            }
-        }
-        ss << ") {\n";
-    }
+    ss << ") {\n";
 
-    ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
-    ss << "  unsigned long long idx0 = idx << 1;\n\n";
+    ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n\n";
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
         const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
+        const uint64_t packed_numel = (group.numel + 1ULL) >> 1;
 
-        ss << "  if (idx0 < " << group.numel << "ULL) {\n";
+        ss << "  if (idx < " << packed_numel << "ULL) {\n";
+        ss << "    const unsigned long long idx0 = idx << 1;\n";
         ss << "    const unsigned long long idx1 = idx0 + 1ULL;\n";
-        ss << "    const bool have_second_lane = (idx1 < " << group.numel << "ULL);\n";
 
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "    unsigned long long in" << input_slot << "_offset0 = 0ULL;\n";
@@ -1471,17 +1482,9 @@ struct BroadcastInfoHeader {
         if (!group.active_axes.empty()) {
             emitSpecializedBroadcastOffsetMath(ss, group, "idx0", "0", "    ");
             ss << "\n";
+            emitSpecializedBroadcastOffsetMath(ss, group, "idx1", "1", "    ");
+            ss << "\n";
         }
-
-        ss << "    if (have_second_lane) {\n";
-        if (!group.active_axes.empty()) {
-            emitSpecializedBroadcastOffsetMath(ss, group, "idx1", "1", "      ");
-        }
-        ss << "    } else {\n";
-        for (uint32_t input_slot : group.used_input_slots) {
-            ss << "      in" << input_slot << "_offset1 = in" << input_slot << "_offset0;\n";
-        }
-        ss << "    }\n\n";
 
         for (uint32_t node_idx : required_nodes) {
             const auto& n = stage.expr.nodes[node_idx];
@@ -1489,59 +1492,59 @@ struct BroadcastInfoHeader {
                 case ExprOp::INPUT: {
                     const std::string var0 = "in" + std::to_string(n.input_slot) + "[in" + std::to_string(n.input_slot) + "_offset0]";
                     const std::string var1 = "in" + std::to_string(n.input_slot) + "[in" + std::to_string(n.input_slot) + "_offset1]";
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2BroadcastPackLoad(storage_dtype, var0, var1) << ";\n";
                     break;
                 }
                 case ExprOp::SCALAR_FP:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
                        << ";\n";
                     break;
                 case ExprOp::ADD:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Add(ref(n.lhs), ref(n.rhs)) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Add(ref(n.lhs), ref(n.rhs)) << ";\n";
                     break;
                 case ExprOp::SUB:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sub(ref(n.lhs), ref(n.rhs)) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sub(ref(n.lhs), ref(n.rhs)) << ";\n";
                     break;
                 case ExprOp::MUL:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Mul(ref(n.lhs), ref(n.rhs)) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Mul(ref(n.lhs), ref(n.rhs)) << ";\n";
                     break;
                 case ExprOp::DIV:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Div(ref(n.lhs), ref(n.rhs)) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Div(ref(n.lhs), ref(n.rhs)) << ";\n";
                     break;
                 case ExprOp::NEG:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Neg(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Neg(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::EXP:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::EXP2:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp2(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp2(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::EXP10:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp10(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp10(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::LN:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Ln(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Ln(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::LOG2:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log2(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log2(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::LOG10:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log10(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log10(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::SQRT:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sqrt(ref(n.lhs), dtype) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sqrt(ref(n.lhs), dtype) << ";\n";
                     break;
                 case ExprOp::POW:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Pow(ref(n.lhs), ref(n.rhs), dtype)
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Pow(ref(n.lhs), ref(n.rhs), dtype)
                        << ";\n";
                     break;
                 case ExprOp::MIN:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Min(ref(n.lhs), ref(n.rhs)) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Min(ref(n.lhs), ref(n.rhs)) << ";\n";
                     break;
                 case ExprOp::MAX:
-                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Max(ref(n.lhs), ref(n.rhs)) << ";\n";
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Max(ref(n.lhs), ref(n.rhs)) << ";\n";
                     break;
                 default:
                     throw std::runtime_error("Unsupported op in specialized vector broadcast emitter.");
