@@ -7,8 +7,6 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
 
-constexpr bool PRINT_KERNELS = false;
-
 static std::string emitScalarFpLiteral(double x, DataType dtype) {
     auto formatFloating = [](double v, int precision) -> std::string {
         std::ostringstream oss;
@@ -444,10 +442,6 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
         ss << "\n  out[idx] = " << inout_dtype << "(" << ref(expr.output_node) << ");\n";
     ss << "}\n";
 
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
-
     return ss.str();
 }
 
@@ -516,7 +510,7 @@ string CudaSourceEmitter::emitVector2Flat(const PhysicalExpression& expr, DataTy
     ss << storage_dtype_vector << "* out, unsigned long long numel) {\n";
 
     ss << "  unsigned long long idx = blockIdx.x * blockDim.x + threadIdx.x;\n";
-    ss << "  if (idx >= (numel >> 1)) return;\n\n";
+    ss << "  if (idx > (numel >> 1)) return;\n\n";
 
     for (uint32_t i = 0; i < expr.nodes.size(); ++i) {
         const auto& n = expr.nodes[i];
@@ -585,10 +579,6 @@ string CudaSourceEmitter::emitVector2Flat(const PhysicalExpression& expr, DataTy
     else
         ss << "\n  out[idx] = " << vector_storage_conversion(storage_dtype_vector, ref(expr.output_node)) << ";\n";
     ss << "}\n";
-
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
 
     return ss.str();
 }
@@ -803,10 +793,6 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
 
     ss << "}\n";
 
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
-
     return ss.str();
 }
 
@@ -1006,10 +992,6 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
         }
 
         ss << "}\n";
-
-        if (PRINT_KERNELS) {
-            printf("%s\n", ss.str().c_str());
-        }
 
         return ss.str();
     }
@@ -1232,10 +1214,6 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
 
     ss << "}\n";
 
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
-
     return ss.str();
 }
 
@@ -1346,10 +1324,6 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
 
     ss << "}\n";
 
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
-
     return ss.str();
 }
 
@@ -1423,10 +1397,6 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         }
 
         ss << "}\n";
-
-        if (PRINT_KERNELS) {
-            printf("%s\n", ss.str().c_str());
-        }
 
         return ss.str();
     }
@@ -1619,10 +1589,6 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     }
 
     ss << "}\n";
-
-    if (PRINT_KERNELS) {
-        printf("%s\n", ss.str().c_str());
-    }
 
     return ss.str();
 }

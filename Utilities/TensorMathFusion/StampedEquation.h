@@ -188,6 +188,8 @@ class StampedExecutionPlan {
         return output_names;
     }
 
+    std::unordered_map<std::string, Tensor> getFinalOutputs() const { return final_outputs; }
+
    private:
     const std::vector<StampedExecutionStage> steps;
     std::unordered_map<std::string, Tensor> final_outputs;

@@ -576,7 +576,7 @@ def test_outputs_grouped_broadcast_two_reductions_from_broadcasted_trunk(dtype: 
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("dtype", REDUCTION_DTYPES)
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_outputs_grouped_broadcast_different_input_shapes(dtype: thor.DataType):
     x = ex.input("x")
     y = ex.input("y")
