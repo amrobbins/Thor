@@ -1,6 +1,14 @@
 #pragma once
 
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
+#include <numeric>
+#include <optional>
+#include <stdexcept>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
@@ -76,15 +84,21 @@ class StampedEquation {
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
                     const std::vector<Tensor>& inputs,
                     const std::vector<Tensor>& outputs,
-                    const Stream& stream,
-                    std::vector<Tensor> deviceBroadcastInfos = {})
-        : compiledEquation(std::move(compiledEquation)),
-          inputs(inputs),
-          outputs(outputs),
-          stream(stream),
-          deviceBroadcastInfos(std::move(deviceBroadcastInfos)) {}
+                    const Stream& stream)
+        : compiledEquation(std::move(compiledEquation)), inputs(inputs), outputs(outputs), stream(stream) {}
 
     void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const {
+        if (!outputs.empty()) {
+            return outputs[0].getPlacement().getDeviceNum();
+        }
+        if (!inputs.empty()) {
+            return inputs[0].getPlacement().getDeviceNum();
+        }
+        throw std::runtime_error("StampedEquation::gpuNum() requires at least one input or output tensor.");
+    }
 
     Tensor getOutputTensor() const {
         if (outputs.size() != 1)
@@ -108,12 +122,15 @@ class StampedEquation {
     std::vector<Tensor> inputs;
     std::vector<Tensor> outputs;
     Stream stream;
-    std::vector<Tensor> deviceBroadcastInfos = {};
 };
 
 class StampedReduction {
    public:
     void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
     Tensor getOutputTensor() const { return output; }
 
     StampedReduction(
@@ -136,32 +153,42 @@ struct StampedExecutionStage {
     enum class Kind { FusedKernel, Reduction };
     const Kind kind;
 
+    const std::vector<uint32_t> dependency_stage_indices;
+    const uint32_t gpu_num;
+
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused) : kind(Kind::FusedKernel), kernel(fused) {}
+    explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::FusedKernel), dependency_stage_indices(std::move(dependency_stage_indices)), gpu_num(fused->gpuNum()), kernel(fused) {}
 
-    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction) : kind(Kind::Reduction), reduction(reduction) {}
+    explicit StampedExecutionStage(const std::shared_ptr<StampedReduction>& reduction, std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::Reduction),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(reduction->gpuNum()),
+          reduction(reduction) {}
+
+    void runOn(Stream& run_stream) const {
+        if (kind == Kind::FusedKernel) {
+            assert(kernel != nullptr);
+            kernel->runOn(run_stream);
+        } else if (kind == Kind::Reduction) {
+            assert(reduction != nullptr);
+            reduction->runOn(run_stream);
+        } else {
+            throw std::runtime_error("Unknown StampedExecutionStage kind: " + std::to_string((int)kind));
+        }
+    }
 };
 
 class StampedExecutionPlan {
    public:
-    StampedExecutionPlan(std::vector<StampedExecutionStage> steps, std::unordered_map<std::string, Tensor> final_outputs)
-        : steps(std::move(steps)), final_outputs(std::move(final_outputs)) {}
+    StampedExecutionPlan(std::vector<StampedExecutionStage> steps,
+                         std::unordered_map<std::string, Tensor> final_outputs,
+                         const Stream& stream)
+        : steps(std::move(steps)), final_outputs(std::move(final_outputs)), stream(stream) {}
 
-    void run() {
-        for (const StampedExecutionStage& step : steps) {
-            if (step.kind == StampedExecutionStage::Kind::FusedKernel) {
-                assert(step.kernel != nullptr);
-                step.kernel->run();
-            } else if (step.kind == StampedExecutionStage::Kind::Reduction) {
-                assert(step.reduction != nullptr);
-                step.reduction->run();
-            } else {
-                throw std::runtime_error("Unknown StampedExecutionStep kind: " + std::to_string((int)step.kind));
-            }
-        }
-    }
+    void run();
 
     Tensor output(const std::string& name) const {
         auto it = final_outputs.find(name);
@@ -193,7 +220,9 @@ class StampedExecutionPlan {
    private:
     const std::vector<StampedExecutionStage> steps;
     std::unordered_map<std::string, Tensor> final_outputs;
+    Stream stream;
 };
+
 }  // namespace ThorImplementation
 
 namespace std {

@@ -16,24 +16,10 @@ namespace ThorImplementation {
 
 class CudaSourceEmitter {
    public:
-    static std::string emit(const PhysicalExpression& expr,
-                            TensorDescriptor::DataType dtype,
-                            const std::string& kernel_name,
-                            const bool broadcast_support);
-    static std::string emit(const PhysicalExecutionStage& stage,
-                            TensorDescriptor::DataType dtype,
-                            const std::string& kernel_name,
-                            bool broadcast_support);
+    static std::string emitFlat(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, const std::string& kernel_name);
+    static std::string emitFlat(const PhysicalExecutionStage& stage, TensorDescriptor::DataType dtype, const std::string& kernel_name);
 
     static std::string emitVector2Flat(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, const std::string& kernel_name);
-    static std::string emitVector2Broadcast(const PhysicalExpression& expr,
-                                            TensorDescriptor::DataType dtype,
-                                            const std::string& kernel_name);
-
-    static std::string emitGroupedBroadcast(const CompiledExecutionStage& stage,
-                                            const std::vector<std::vector<uint32_t>>& output_groups,
-                                            TensorDescriptor::DataType dtype,
-                                            const std::string& kernel_name);
 
     static std::string emitSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                 const std::vector<SpecializedBroadcastGroup>& groups,

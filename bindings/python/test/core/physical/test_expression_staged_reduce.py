@@ -657,3 +657,146 @@ def test_reduce_sum_squeeze_matrix(
     assert got.shape == expected_shape
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_parallel_fanout_reductions_join_before_final_epilogue(dtype: thor.DataType):
+    """
+    Exercises:
+
+      shared fused trunk
+            |
+        +---+---+
+        |       |
+      reduce   reduce
+        |       |
+        +---+---+
+            |
+      final broadcast epilogue
+
+    If dependency waits are missing, the final epilogue can read unfinished
+    reduction outputs. If the final helper-stream join back to the caller stream
+    is missing, the host copy in _run_staged_expr can race the GPU work.
+    """
+    x = ex.input("x")
+
+    trunk = ex.exp(x * 0.03125 + 1.0)
+    left = ex.reduce_sum(trunk, axis=2, squeeze=False)  # [B, M, 1]
+    right = ex.reduce_mean(trunk, axis=1, squeeze=False)  # [B, 1, N]
+    expr = ex.sqrt(left + right + 1.0)  # [B, M, N]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    shape = (4, 48, 64)
+    x_np = np.linspace(0.1, 3.0, num=int(np.prod(shape)), dtype=np.float32).reshape(shape).astype(storage_dtype)
+
+    x_ref = x_np.astype(compute_dtype)
+    trunk_ref = np.exp(x_ref * 0.03125 + 1.0)
+    expected = np.sqrt(np.sum(trunk_ref, axis=2, keepdims=True) + np.mean(trunk_ref, axis=1, keepdims=True) +
+                       1.0).astype(storage_dtype)
+
+    # Run multiple times to better exercise helper-stream ordering.
+    for _ in range(4):
+        got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+        assert got.shape == expected.shape
+        _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_parallel_branch_and_chain_dependencies_join_correctly(dtype: thor.DataType):
+    """
+    Exercises:
+
+      left prologue -> left reduction -> left epilogue --+
+                                                        +-> final join epilogue
+                      right prologue -> right reduction -+
+
+    This checks that a stage depending on a dependent chain and an independent
+    branch waits on both producer paths correctly.
+    """
+    x = ex.input("x")
+    y = ex.input("y")
+    z = ex.input("z")
+
+    left = ex.reduce_sum((x + 1.0) * (y + 0.5), axis=2, squeeze=False)  # [B, M, 1]
+    left = ex.sqrt(left + 2.0)  # [B, M, 1]
+
+    right = ex.reduce_max(z * 0.25 + 3.0, axis=1, squeeze=False)  # [B, 1, N]
+
+    expr = ex.ln(left + right + 1.0)  # [B, M, N]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    shape = (5, 32, 40)
+
+    x_np = np.linspace(0.25, 2.25, num=int(np.prod(shape)), dtype=np.float32).reshape(shape).astype(storage_dtype)
+    y_np = np.linspace(0.5, 1.5, num=int(np.prod(shape)), dtype=np.float32).reshape(shape).astype(storage_dtype)
+    z_np = np.linspace(1.0, 5.0, num=int(np.prod(shape)), dtype=np.float32).reshape(shape).astype(storage_dtype)
+
+    x_ref = x_np.astype(compute_dtype)
+    y_ref = y_np.astype(compute_dtype)
+    z_ref = z_np.astype(compute_dtype)
+
+    left_ref = np.sum((x_ref + 1.0) * (y_ref + 0.5), axis=2, keepdims=True)
+    left_ref = np.sqrt(left_ref + 2.0)
+
+    right_ref = np.max(z_ref * 0.25 + 3.0, axis=1, keepdims=True)
+
+    expected = np.log(left_ref + right_ref + 1.0).astype(storage_dtype)
+
+    for _ in range(4):
+        got = _run_staged_expr(expr, ["x", "y", "z"], x_np, y_np, z_np, dtype=dtype)
+        assert got.shape == expected.shape
+        _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_multi_level_diamond_then_downstream_reduction_synchronizes(dtype: thor.DataType):
+    """
+    Exercises a deeper DAG:
+
+          shared trunk
+           /      \
+       reduce    reduce
+           \      /
+            join fuse
+                |
+            downstream reduction
+                |
+            final epilogue
+
+    This verifies that event waits are correct not only for the immediate join,
+    but also for later stages that depend on that joined result.
+    """
+    x = ex.input("x")
+
+    trunk = (x + 1.0) * 0.5
+    left = ex.reduce_sum(trunk, axis=2, squeeze=False)  # [B, M, 1]
+    right = ex.reduce_max(trunk, axis=1, squeeze=False)  # [B, 1, N]
+    joined = left + right + 2.0  # [B, M, N]
+    reduced = ex.reduce_mean(joined, axis=0, squeeze=False)  # [1, M, N]
+    expr = ex.sqrt(reduced + 1.0)  # [1, M, N]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    shape = (4, 24, 32)
+    x_np = np.linspace(1.0, 7.0, num=int(np.prod(shape)), dtype=np.float32).reshape(shape).astype(storage_dtype)
+
+    x_ref = x_np.astype(compute_dtype)
+    trunk_ref = (x_ref + 1.0) * 0.5
+    left_ref = np.sum(trunk_ref, axis=2, keepdims=True)
+    right_ref = np.max(trunk_ref, axis=1, keepdims=True)
+    joined_ref = left_ref + right_ref + 2.0
+    reduced_ref = np.mean(joined_ref, axis=0, keepdims=True)
+    expected = np.sqrt(reduced_ref + 1.0).astype(storage_dtype)
+
+    for _ in range(4):
+        got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+        assert got.shape == expected.shape
+        _assert_close(got, expected, dtype)
