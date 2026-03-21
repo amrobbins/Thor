@@ -282,6 +282,39 @@ static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::ve
     return inputPackedStrides;
 }
 
+static bool canUseNativeVectorLoadForUsedInput(const SpecializedBroadcastGroup& group, size_t used_input_idx) {
+    uint64_t contiguous_slice_size = 1;
+    uint64_t expected_stride = 1;
+    bool found_contiguous_suffix = false;
+
+    for (int64_t axis_i = static_cast<int64_t>(group.active_axes.size()) - 1; axis_i >= 0; --axis_i) {
+        const SpecializedBroadcastAxis& axis = group.active_axes[static_cast<size_t>(axis_i)];
+        const uint64_t input_stride = axis.input_strides[used_input_idx];
+
+        if (input_stride == 0) {
+            break;
+        }
+
+        if (input_stride != expected_stride) {
+            break;
+        }
+
+        found_contiguous_suffix = true;
+        contiguous_slice_size *= axis.dim;
+        expected_stride *= axis.dim;
+    }
+
+    if (!found_contiguous_suffix) {
+        return false;
+    }
+
+    // Safe when pair boundaries cannot cross an internal odd-sized reset.
+    // If the contiguous slice is even, every packed pair start stays aligned.
+    // If the contiguous slice is the full group, only the final tail can straddle,
+    // and tensor padding makes that safe.
+    return (contiguous_slice_size % 2ULL == 0ULL) || (contiguous_slice_size == group.numel);
+}
+
 static SpecializedBroadcastGroup buildSpecializedBroadcastGroup(const CompiledExecutionStage& stage,
                                                                 const std::vector<Tensor>& stage_inputs,
                                                                 const std::vector<uint64_t>& output_dims,
@@ -338,6 +371,15 @@ static SpecializedBroadcastGroup buildSpecializedBroadcastGroup(const CompiledEx
         }
 
         group.active_axes.push_back(std::move(axis_desc));
+    }
+
+    group.used_input_load_kinds.reserve(group.used_input_slots.size());
+    for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+        if (canUseNativeVectorLoadForUsedInput(group, used_i)) {
+            group.used_input_load_kinds.push_back(SpecializedInputLoadKind::NativeVector);
+        } else {
+            group.used_input_load_kinds.push_back(SpecializedInputLoadKind::ScalarPack);
+        }
     }
 
     return group;
