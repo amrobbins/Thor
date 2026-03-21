@@ -17,12 +17,13 @@ using namespace std;
 namespace ThorImplementation {
 
 // static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
-static ThreadSafeLruCache<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
+static LruCacheThreadSafe<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
 
 static shared_ptr<CompiledEquation> cacheLookup(const EquationCacheKey& key) {
     optional<shared_ptr<CompiledEquation>> hit = compiledEquationCache.get(key);
-    if (hit.has_value())
+    if (hit.has_value()) {
         return hit.value();
+    }
     return nullptr;
 }
 
@@ -31,7 +32,7 @@ static void cacheInsert(const EquationCacheKey& key, shared_ptr<CompiledEquation
 }
 
 // static unordered_map<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache;
-static ThreadSafeLruCache<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache(10'000);
+static LruCacheThreadSafe<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache(10'000);
 
 static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src, const EquationSignature& sig) {
     std::string key;
@@ -421,7 +422,14 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
+constexpr bool PRINT_KERNELS = false;
+
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
+    if (PRINT_KERNELS) {
+        printf("%s\n", src.c_str());
+        fflush(stdout);
+    }
+
     nvrtcProgram prog;
     NVRTC_CHECK(nvrtcCreateProgram(&prog, src.c_str(), "fused.cu", 0, nullptr, nullptr));
 

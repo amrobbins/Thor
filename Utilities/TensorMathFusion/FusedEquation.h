@@ -20,6 +20,16 @@ struct CompiledStageOutput {
 
 struct CompiledExecutionStage {
     enum class Kind { FusedKernel, Reduction };
+    static std::string kindToString(const Kind kind) {
+        switch (kind) {
+            case Kind::FusedKernel:
+                return "FusedKernel";
+            case Kind::Reduction:
+                return "Reduction";
+        }
+        return "<unknown>";
+    }
+
     const Kind kind;
 
     PhysicalExpression expr;
@@ -70,7 +80,10 @@ class FusedEquation {
                                              const Stream& stream,
                                              const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
 
+    void run(const Tensor& input, Tensor& output, Stream& stream) const;
     void run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const;
+    void run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const;
+    void run(const std::unordered_map<std::string, Tensor>& inputs, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const;
 
     static Tensor createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
                                             const std::vector<uint64_t>& outputDimensions,
@@ -104,7 +117,6 @@ class FusedEquation {
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
 
     [[nodiscard]] std::unordered_map<uint32_t, Tensor> bindRootInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
-
     const std::shared_ptr<CompiledOutputs> compiled_outputs;
     const std::vector<NamedInput> root_inputs;
 };

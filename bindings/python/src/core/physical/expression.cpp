@@ -296,12 +296,12 @@ Args:
 
     nb::class_<Outputs>(expr, "Outputs")
         .def(
-            "compile",  // FIXME: Should compile be here
+            "compile",
             [](const Outputs& self, DataType dtype, int device_num, bool use_fast_math) {
                 return FusedEquation::compile(self.physicalOutputs(), dtype, device_num, use_fast_math);
             },
             "dtype"_a,
-            "device_num"_a,
+            "device_num"_a = 0,
             "use_fast_math"_a = false)
         .def("output_names", [](const Outputs& self) {
             std::vector<std::string> names;
@@ -433,16 +433,57 @@ inputs: dict[str, PhysicalTensor]
 )nbdoc");
 
     fused_equation.def("run",
+                       nb::overload_cast<const Tensor&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
+                       "input"_a,
+                       "output"_a,
+                       "stream"_a,
+                       R"nbdoc(
+Run a fused equation with the thor.physical.PhysicalTensor's provided.
+
+input: PhysicalTensor
+output: PhysicalTensor
+)nbdoc");
+
+    fused_equation.def("run",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
                        "inputs"_a,
                        "output"_a,
                        "stream"_a,
                        R"nbdoc(
-    Run a fused equation with the thor.physical.PhysicalTensor's provided.
+Run a fused equation with the thor.physical.PhysicalTensor's provided.
 
-    inputs: dict[str, PhysicalTensor]
-        A dict mapping input names to tensors
-    )nbdoc");
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+output: PhysicalTensor
+)nbdoc");
+
+    fused_equation.def("run",
+                       nb::overload_cast<const Tensor&, std::unordered_map<std::string, Tensor>&, Stream&>(&FusedEquation::run, nb::const_),
+                       "input"_a,
+                       "outputs"_a,
+                       "stream"_a,
+                       R"nbdoc(
+Run a fused equation with the thor.physical.PhysicalTensor's provided.
+
+input: PhysicalTensor
+outputs: dict[str, PhysicalTensor]
+    A dict mapping output names to tensors
+)nbdoc");
+
+    fused_equation.def("run",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&, std::unordered_map<std::string, Tensor>&, Stream&>(
+                           &FusedEquation::run, nb::const_),
+                       "inputs"_a,
+                       "outputs"_a,
+                       "stream"_a,
+                       R"nbdoc(
+Run a fused equation with the thor.physical.PhysicalTensor's provided.
+
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+outputs: dict[str, PhysicalTensor]
+    A dict mapping output names to tensors
+)nbdoc");
 }
 
 void bind_stamped_equation(nb::module_& physical) {
@@ -468,6 +509,13 @@ Return the output tensor owned by this equation instance. Valid when the equatio
         "name"_a,
         R"nbdoc(
 Return a named output tensor from a stamped multi-output execution plan.
+)nbdoc");
+
+    stamped_equation.def(
+        "outputs",
+        [](const StampedExecutionPlan& self) { return self.getFinalOutputs(); },
+        R"nbdoc(
+Return a dict of named output tensor from a stamped multi-output execution plan.
 )nbdoc");
 
     stamped_equation.def("output_names", [](const StampedExecutionPlan& self) { return self.outputNames(); });

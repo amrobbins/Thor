@@ -9,20 +9,20 @@
 #include <utility>
 
 template <class Key, class Value, class Hash = std::hash<Key>, class KeyEqual = std::equal_to<Key>>
-class ThreadSafeLruCache {
+class LruCacheThreadSafe {
    public:
-    explicit ThreadSafeLruCache(std::size_t capacity) : capacity_(capacity) {
+    explicit LruCacheThreadSafe(std::size_t capacity) : capacity_(capacity) {
         if (capacity_ == 0) {
             throw std::invalid_argument("ThreadSafeLruCache capacity must be > 0.");
         }
         map_.reserve(capacity_);
     }
 
-    ThreadSafeLruCache(const ThreadSafeLruCache&) = delete;
-    ThreadSafeLruCache& operator=(const ThreadSafeLruCache&) = delete;
+    LruCacheThreadSafe(const LruCacheThreadSafe&) = delete;
+    LruCacheThreadSafe& operator=(const LruCacheThreadSafe&) = delete;
 
-    ThreadSafeLruCache(ThreadSafeLruCache&&) = delete;
-    ThreadSafeLruCache& operator=(ThreadSafeLruCache&&) = delete;
+    LruCacheThreadSafe(LruCacheThreadSafe&&) = delete;
+    LruCacheThreadSafe& operator=(LruCacheThreadSafe&&) = delete;
 
     [[nodiscard]] std::size_t capacity() const {
         std::lock_guard<std::mutex> lock(mutex_);

@@ -59,12 +59,13 @@ void StampedReduction::run() {
 }
 
 // static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
-static ThreadSafeLruCache<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache(10'000);
+static LruCacheThreadSafe<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache(10'000);
 
 static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
     optional<shared_ptr<BuiltReduction>> hit = builtReductionCache.get(key);
-    if (hit.has_value())
+    if (hit.has_value()) {
         return hit.value();
+    }
     return nullptr;
 }
 

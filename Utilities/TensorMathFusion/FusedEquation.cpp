@@ -561,7 +561,6 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
 
     outputDimensions.clear();
     outputDimensions.assign(maxRank, 1);
-    bool requiresBroadcast = false;
 
     for (uint64_t axis = 0; axis < maxRank; ++axis) {
         uint64_t resolvedDim = 1;
@@ -571,14 +570,11 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
             uint64_t dim = dims[axis];
 
             if (dim == 1) {
-                if (resolvedDim != 1)
-                    requiresBroadcast = true;
                 continue;
             }
 
             if (resolvedDim == 1) {
                 resolvedDim = dim;
-                requiresBroadcast = true;
             } else if (resolvedDim != dim) {
                 std::ostringstream err;
                 err << "Input tensors are not broadcast-compatible at axis " << axis << ". "
@@ -601,6 +597,14 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
         }
 
         outputDimensions[axis] = resolvedDim;
+    }
+
+    bool requiresBroadcast = false;
+    for (const Tensor& input : inputs) {
+        if (input.getDimensions() != outputDimensions) {
+            requiresBroadcast = true;
+            break;
+        }
     }
 
     return requiresBroadcast;
@@ -808,6 +812,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     specialized_groups.push_back(group.specialized);
                 }
 
+                printf("PATH 1\n");
                 std::shared_ptr<CompiledEquation> specialized_broadcast =
                     EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
@@ -880,71 +885,253 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
     return std::make_shared<StampedEquation>(compiledEquation, inputs, outputs, stream, deviceBroadcastInfos);
 }
 
-void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
-    // FIXME: Run should support multi-output, it does not yet.
-
+void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {
     if (!compiled_outputs) {
         throw std::runtime_error("FusedEquation::run requires compiled outputs.");
     }
 
-    if (compiled_outputs->stages.size() != 1) {
-        throw std::runtime_error(
-            "FusedEquation::run only supports single-stage fused equations. "
-            "Use stamp(...).run() for staged expressions.");
+    for (CompiledExecutionStage& stage : compiled_outputs->stages) {
+        if (stage.kind != stage.Kind::FusedKernel) {
+            throw std::runtime_error("FusedEquation::run only supports fused equations stages, but a stage has type: " +
+                                     stage.kindToString(stage.kind) + ". Use stamp(...).run() for staged expressions.");
+        }
+    }
+
+    if (compiled_outputs->stages.empty()) {
+        throw std::runtime_error("Expression has no execution stages");
     }
 
     const CompiledExecutionStage& stage = compiled_outputs->stages[0];
 
-    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+    if (stage.outputs.size() != 1) {
         throw std::runtime_error(
-            "FusedEquation::run only supports a single fused-kernel stage, not reductions. "
-            "Use stamp(...).run() for staged expressions.");
+            "FusedEquation::run was only passed a single output, but there are multiple stages"
+            "Pass a dict of name -> PhysicalTensor of outputs to run it.");
     }
 
-    if (!stage.flat) {
-        throw std::runtime_error("FusedEquation::run found a fused stage with no compiled kernel.");
+    if (root_inputs.size() != 1) {
+        throw std::runtime_error("FusedEquation::run was only passed a single input, but this equation requires " +
+                                 std::to_string(root_inputs.size()) +
+                                 " inputs. "
+                                 "Pass a dict of name -> PhysicalTensor of inputs to run it.");
     }
+
+    const std::string& input_name = root_inputs[0].name;
+    const std::string& output_name = stage.outputs[0].name;
+    std::unordered_map<std::string, Tensor> input_map = {{input_name, input}};
+    std::unordered_map<std::string, Tensor> output_map = {{output_name, output}};
+
+    run(input_map, output_map, stream);
+}
+
+void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
+    }
+
+    for (CompiledExecutionStage& stage : compiled_outputs->stages) {
+        if (stage.kind != stage.Kind::FusedKernel) {
+            throw std::runtime_error("FusedEquation::run only supports fused equations stages, but a stage has type: " +
+                                     stage.kindToString(stage.kind) + ". Use stamp(...).run() for staged expressions.");
+        }
+    }
+
+    if (compiled_outputs->stages.empty()) {
+        throw std::runtime_error("Expression has no execution stages");
+    }
+
+    const CompiledExecutionStage& stage = compiled_outputs->stages[0];
 
     if (stage.outputs.size() != 1) {
         throw std::runtime_error(
-            "FusedEquation::run only supports single-output fused equations. "
-            "Use stamp(...).run() for multi-output expressions.");
+            "FusedEquation::run was only passed a single output, but there are multiple stages."
+            "Pass a dict of name -> PhysicalTensor of outputs to run it.");
     }
 
-    std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
+    const std::string& output_name = stage.outputs[0].name;
+    std::unordered_map<std::string, Tensor> output_map = {{output_name, output}};
+    run(inputs, output_map, stream);
+}
 
-    std::vector<Tensor> orderedInputs;
-    orderedInputs.reserve(stage.input_value_ids.size());
-    for (uint32_t value_id : stage.input_value_ids) {
-        auto it = values.find(value_id);
-        if (it == values.end()) {
-            throw std::runtime_error("Missing input value for fused equation run.");
-        }
-        orderedInputs.push_back(it->second);
+void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
     }
 
-    std::vector<Tensor> layoutInputs = orderedInputs;
-    std::vector<uint64_t> resolvedOutputDims;
-    bool requiresBroadcast = resolveLayout(layoutInputs, resolvedOutputDims);
+    for (CompiledExecutionStage& stage : compiled_outputs->stages) {
+        if (stage.kind != stage.Kind::FusedKernel) {
+            throw std::runtime_error("FusedEquation::run only supports fused equations stages, but a stage has type: " +
+                                     stage.kindToString(stage.kind) + ". Use stamp(...).run() for staged expressions.");
+        }
+    }
 
-    verifyRequestedOutputLayout(output.getDimensions(), resolvedOutputDims);
+    if (root_inputs.size() != 1) {
+        throw std::runtime_error("FusedEquation::run was only passed a single input, but this equation requires " +
+                                 std::to_string(root_inputs.size()) +
+                                 " inputs. "
+                                 "Pass a dict of name -> PhysicalTensor of inputs to run it.");
+    }
 
-    std::vector<Tensor> outputsVec{output};
+    const std::string& input_name = root_inputs[0].name;
+    std::unordered_map<std::string, Tensor> input_map = {{input_name, input}};
 
-    if (requiresBroadcast) {
-        std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs);
-        if (groups.size() != 1) {
-            throw std::runtime_error("FusedEquation::run expected exactly one broadcast group for single-output run().");
+    run(input_map, outputs, stream);
+}
+
+void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
+                        std::unordered_map<std::string, Tensor>& outputs,
+                        Stream& stream) const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
+    }
+
+    if (compiled_outputs->stages.empty()) {
+        throw std::runtime_error("Expression has no execution stages.");
+    }
+
+    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+            throw std::runtime_error("FusedEquation::run only supports fused-kernel stages, but found stage kind: " +
+                                     stage.kindToString(stage.kind) + ". Use stamp(...).run() for staged expressions.");
+        }
+    }
+
+    // Root inputs only. If any later stage depends on a non-root value, this run()
+    // overload must reject it and require stamp(...).run().
+    const std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs);
+
+    if (root_values.empty()) {
+        throw std::runtime_error("FusedEquation::run requires at least one bound root input.");
+    }
+
+    std::unordered_set<uint32_t> root_value_ids;
+    root_value_ids.reserve(root_values.size());
+    for (const auto& [value_id, tensor] : root_values) {
+        (void)tensor;
+        root_value_ids.insert(value_id);
+    }
+
+    // Collect all expected final output names across all fused stages.
+    std::unordered_set<std::string> expected_output_names;
+    std::vector<std::string> expected_output_names_in_order;
+
+    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        for (const auto& stage_output : stage.outputs) {
+            if (expected_output_names.insert(stage_output.name).second) {
+                expected_output_names_in_order.push_back(stage_output.name);
+            }
+        }
+    }
+
+    // Verify caller provided every expected final output.
+    for (const std::string& name : expected_output_names_in_order) {
+        auto it = outputs.find(name);
+        if (it == outputs.end()) {
+            throw std::runtime_error("Missing output tensor '" + name + "' for fused equation run.");
+        }
+    }
+
+    // Verify caller did not provide unexpected outputs.
+    for (const auto& [name, tensor] : outputs) {
+        (void)tensor;
+        if (!expected_output_names.contains(name)) {
+            std::string expected_names_str;
+            for (size_t i = 0; i < expected_output_names_in_order.size(); ++i) {
+                if (i > 0) {
+                    expected_names_str += ", ";
+                }
+                expected_names_str += "'" + expected_output_names_in_order[i] + "'";
+            }
+            throw std::runtime_error("Unexpected output tensor '" + name +
+                                     "' passed to fused equation run. "
+                                     "Expected output names: [" +
+                                     expected_names_str + "].");
+        }
+    }
+
+    // Execute each fused stage in order, but only if it depends solely on root inputs.
+    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        std::vector<Tensor> orderedInputs;
+        orderedInputs.reserve(stage.input_value_ids.size());
+
+        for (uint32_t value_id : stage.input_value_ids) {
+            if (!root_value_ids.contains(value_id)) {
+                throw std::runtime_error(
+                    "FusedEquation::run encountered a stage that depends on a non-root intermediate tensor. "
+                    "Use stamp(...).run() for expressions requiring staged intermediates.");
+            }
+
+            auto it = root_values.find(value_id);
+            if (it == root_values.end()) {
+                throw std::runtime_error("Missing input value for fused equation run.");
+            }
+
+            orderedInputs.push_back(it->second);
         }
 
-        std::vector<SpecializedBroadcastGroup> specialized_groups{groups[0].specialized};
+        std::vector<Tensor> orderedOutputs;
+        orderedOutputs.reserve(stage.outputs.size());
+
+        for (const auto& stage_output : stage.outputs) {
+            auto it = outputs.find(stage_output.name);
+            if (it == outputs.end()) {
+                throw std::runtime_error("Missing output tensor '" + stage_output.name + "' for fused equation run.");
+            }
+            orderedOutputs.push_back(it->second);
+        }
+
+        std::vector<Tensor> layoutInputs = orderedInputs;
+        std::vector<uint64_t> resolvedOutputDims;
+        bool requiresBroadcast = false;
+
+        requiresBroadcast = resolveLayout(layoutInputs, resolvedOutputDims);
+
+        if (!requiresBroadcast) {
+            if (!stage.flat) {
+                throw std::runtime_error("FusedEquation::run found a flat fused stage with no compiled kernel.");
+            }
+
+            for (const Tensor& out : orderedOutputs) {
+                verifyRequestedOutputLayout(out.getDimensions(), resolvedOutputDims);
+            }
+
+            EquationRunner::run(stage.flat, layoutInputs, orderedOutputs, stream);
+            continue;
+        }
+
+        std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, orderedInputs);
+        if (groups.empty()) {
+            throw std::runtime_error("FusedEquation::run expected at least one broadcast group.");
+        }
+
+        std::vector<SpecializedBroadcastGroup> specialized_groups;
+        specialized_groups.reserve(groups.size());
+
+        std::vector<const std::vector<uint64_t>*> expected_output_dims(stage.outputs.size(), nullptr);
+
+        for (const auto& group : groups) {
+            specialized_groups.push_back(group.specialized);
+
+            for (uint32_t output_idx : group.specialized.output_indices) {
+                if (output_idx >= expected_output_dims.size()) {
+                    throw std::runtime_error("Broadcast group output index out of range.");
+                }
+                expected_output_dims[output_idx] = &group.specialized.output_dims;
+            }
+        }
+
+        for (size_t i = 0; i < orderedOutputs.size(); ++i) {
+            if (!expected_output_dims[i]) {
+                throw std::runtime_error("Missing resolved output dims for output '" + stage.outputs[i].name + "'.");
+            }
+
+            verifyRequestedOutputLayout(orderedOutputs[i].getDimensions(), *expected_output_dims[i]);
+        }
 
         std::shared_ptr<CompiledEquation> specialized_broadcast =
             EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
-        EquationRunner::run(specialized_broadcast, layoutInputs, outputsVec, stream);
-    } else {
-        EquationRunner::run(stage.flat, layoutInputs, outputsVec, stream);
+        EquationRunner::run(specialized_broadcast, orderedInputs, orderedOutputs, stream);
     }
 }
 
