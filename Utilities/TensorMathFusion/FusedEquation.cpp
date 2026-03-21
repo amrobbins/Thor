@@ -1049,42 +1049,29 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     }
 
-    // Execute each fused stage in order, but only if it depends solely on root inputs.
-    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
-        std::vector<Tensor> orderedInputs;
-        orderedInputs.reserve(stage.input_value_ids.size());
+    // Infer GPU number for helper-stream selection.
+    const int32_t gpu_num = root_values.begin()->second.getPlacement().getDeviceNum();
 
-        for (uint32_t value_id : stage.input_value_ids) {
-            if (!root_value_ids.contains(value_id)) {
-                throw std::runtime_error(
-                    "FusedEquation::run encountered a stage that depends on a non-root intermediate tensor. "
-                    "Use stamp(...).run() for expressions requiring staged intermediates.");
-            }
-
-            auto it = root_values.find(value_id);
-            if (it == root_values.end()) {
-                throw std::runtime_error("Missing input value for fused equation run.");
-            }
-
-            orderedInputs.push_back(it->second);
+    for (const auto& [value_id, tensor] : root_values) {
+        (void)value_id;
+        if (tensor.getPlacement().getDeviceNum() != gpu_num) {
+            throw std::runtime_error("FusedEquation::run requires all root inputs to be on the same GPU.");
         }
-
-        std::vector<Tensor> orderedOutputs;
-        orderedOutputs.reserve(stage.outputs.size());
-
-        for (const auto& stage_output : stage.outputs) {
-            auto it = outputs.find(stage_output.name);
-            if (it == outputs.end()) {
-                throw std::runtime_error("Missing output tensor '" + stage_output.name + "' for fused equation run.");
-            }
-            orderedOutputs.push_back(it->second);
+    }
+    for (const auto& [name, tensor] : outputs) {
+        (void)name;
+        if (tensor.getPlacement().getDeviceNum() != gpu_num) {
+            throw std::runtime_error("FusedEquation::run requires all outputs to be on the same GPU.");
         }
+    }
 
+    auto runStageOnStream = [&](const CompiledExecutionStage& stage,
+                                const std::vector<Tensor>& orderedInputs,
+                                const std::vector<Tensor>& orderedOutputs,
+                                Stream& launch_stream) {
         std::vector<Tensor> layoutInputs = orderedInputs;
         std::vector<uint64_t> resolvedOutputDims;
-        bool requiresBroadcast = false;
-
-        requiresBroadcast = resolveLayout(layoutInputs, resolvedOutputDims);
+        const bool requiresBroadcast = resolveLayout(layoutInputs, resolvedOutputDims);
 
         if (!requiresBroadcast) {
             if (!stage.flat) {
@@ -1095,8 +1082,8 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
                 verifyRequestedOutputLayout(out.getDimensions(), resolvedOutputDims);
             }
 
-            EquationRunner::run(stage.flat, layoutInputs, orderedOutputs, stream);
-            continue;
+            EquationRunner::run(stage.flat, layoutInputs, orderedOutputs, launch_stream);
+            return;
         }
 
         std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, orderedInputs);
@@ -1131,8 +1118,68 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         std::shared_ptr<CompiledEquation> specialized_broadcast =
             EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
-        EquationRunner::run(specialized_broadcast, orderedInputs, orderedOutputs, stream);
+        EquationRunner::run(specialized_broadcast, orderedInputs, orderedOutputs, launch_stream);
+    };
+
+    // Track helper streams actually used so the caller's stream can join them at the end.
+    std::vector<Stream> helper_streams_used;
+    helper_streams_used.reserve(compiled_outputs->stages.size());
+
+    auto rememberHelperStream = [&](Stream& helper_stream) {
+        if (std::find(helper_streams_used.begin(), helper_streams_used.end(), helper_stream) == helper_streams_used.end()) {
+            helper_streams_used.push_back(helper_stream);
+        }
+    };
+
+    // Execute each fused stage. This overload still only permits stages whose inputs
+    // are all root inputs, so legal stages are independent and can be launched on
+    // helper streams without extra inter-stage waits.
+
+    for (uint32_t stage_num = 0; stage_num < compiled_outputs->stages.size(); ++stage_num) {
+        bool use_helper_streams = (stage_num != 0);
+        const CompiledExecutionStage& stage = compiled_outputs->stages[stage_num];
+
+        std::vector<Tensor> orderedInputs;
+        orderedInputs.reserve(stage.input_value_ids.size());
+
+        for (uint32_t value_id : stage.input_value_ids) {
+            if (!root_value_ids.contains(value_id)) {
+                throw std::runtime_error(
+                    "FusedEquation::run encountered a stage that depends on a non-root intermediate tensor. "
+                    "Use stamp(...).run() for expressions requiring staged intermediates.");
+            }
+
+            auto it = root_values.find(value_id);
+            if (it == root_values.end()) {
+                throw std::runtime_error("Missing input value for fused equation run.");
+            }
+
+            orderedInputs.push_back(it->second);
+        }
+
+        std::vector<Tensor> orderedOutputs;
+        orderedOutputs.reserve(stage.outputs.size());
+
+        for (const auto& stage_output : stage.outputs) {
+            auto it = outputs.find(stage_output.name);
+            if (it == outputs.end()) {
+                throw std::runtime_error("Missing output tensor '" + stage_output.name + "' for fused equation run.");
+            }
+            orderedOutputs.push_back(it->second);
+        }
+
+        if (use_helper_streams) {
+            Stream& helper_stream = Expression::getNextHelperStream(gpu_num);
+            runStageOnStream(stage, orderedInputs, orderedOutputs, helper_stream);
+            rememberHelperStream(helper_stream);
+        } else {
+            runStageOnStream(stage, orderedInputs, orderedOutputs, stream);
+        }
+    }
+
+    // Join all helper streams back into the user-provided stream.
+    for (Stream& helper_stream : helper_streams_used) {
+        stream.waitEvent(helper_stream.putEvent());
     }
 }
-
 }  // namespace ThorImplementation

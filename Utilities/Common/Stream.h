@@ -168,6 +168,8 @@ class Stream : private ReferenceCounted {
         return *cublasHandle;
     }
 
+    bool operator==(const Stream &other) const { return cudaStream == other.cudaStream && cudaStream != nullptr; }
+
     int getGpuNum() const {
         assert(!uninitialized());
         return gpuNum;

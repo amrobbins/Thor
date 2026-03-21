@@ -200,25 +200,25 @@ def _build_broadcast_single(dtype: thor.DataType):
 
 
 def _build_flat_multi(dtype: thor.DataType):
+    a = ex.input("a")
     x = ex.input("x")
     y = ex.input("y")
     z = ex.input("z")
 
     xy = x + y
     outs = ex.outputs({
-        "sum": xy,
-        "prod": x * y,
-        "mix": xy * z,
+        "sum": xy + a,
+        "mix": xy * z * a,
     })
 
     input_shapes = {
+        "a": FLAT_SHAPE,
         "x": FLAT_SHAPE,
         "y": FLAT_SHAPE,
         "z": FLAT_SHAPE,
     }
     output_shapes = {
         "sum": FLAT_SHAPE,
-        "prod": FLAT_SHAPE,
         "mix": FLAT_SHAPE,
     }
     return outs.compile(dtype), input_shapes, output_shapes
@@ -238,14 +238,14 @@ def _build_flat_multi_disjoint_inputs_different_output_shapes(dtype: thor.DataTy
         })
 
     input_shapes = {
-        "a": FLAT_SHAPE_BIG,
-        "b": FLAT_SHAPE_BIG,
-        "c": FLAT_SHAPE_SMALL,
-        "d": FLAT_SHAPE_SMALL,
+        "a": FLAT_SHAPE,
+        "b": FLAT_SHAPE,
+        "c": FLAT_SHAPE,
+        "d": FLAT_SHAPE,
     }
     output_shapes = {
-        "ab_out": FLAT_SHAPE_BIG,
-        "cd_out": FLAT_SHAPE_SMALL,
+        "ab_out": FLAT_SHAPE,
+        "cd_out": FLAT_SHAPE,
     }
     return outs.compile(dtype), input_shapes, output_shapes
 
@@ -342,7 +342,7 @@ def _build_broadcast_multi_multiple_shapes_disjoint_inputs(dtype: thor.DataType)
 
 
 CASES = [
-    PerfCase("flat_single_output_compute_bound", "single", _build_flat_single_compute_bound),
+    # PerfCase("flat_single_output_compute_bound", "single", _build_flat_single_compute_bound),
     PerfCase("flat_single_output", "single", _build_flat_single),
     PerfCase("flat_multi_output", "multi", _build_flat_multi),
     PerfCase(

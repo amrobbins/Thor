@@ -136,6 +136,8 @@ class Outputs {
 
 class Expression {
    public:
+    static Stream& getNextHelperStream(uint32_t gpu_num);
+
     Expression(double value);
 
     static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
