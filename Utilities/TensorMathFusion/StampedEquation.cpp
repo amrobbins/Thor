@@ -3,27 +3,28 @@
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 
+#include <optional>
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace std;
 
 namespace ThorImplementation {
 
-void StampedEquation::run() {
+void StampedEquation::run() { runOn(stream); }
+
+void StampedEquation::runOn(Stream& run_stream) const {
     if (!compiledEquation) {
-        throw std::runtime_error("StampedEquation::run called with null compiled equation.");
+        throw std::runtime_error("StampedEquation::runOn called with null compiled equation.");
     }
 
     if (outputs.empty()) {
-        throw std::runtime_error("StampedEquation::run called with no output tensors.");
+        throw std::runtime_error("StampedEquation::runOn called with no output tensors.");
     }
 
-    if (deviceBroadcastInfos.empty()) {
-        EquationRunner::run(compiledEquation, inputs, outputs, stream);
-    } else {
-        EquationRunner::run(compiledEquation, inputs, outputs, stream, deviceBroadcastInfos);
-    }
+    EquationRunner::run(compiledEquation, inputs, outputs, run_stream);
 }
 
 StampedReduction::StampedReduction(
@@ -37,14 +38,16 @@ StampedReduction::StampedReduction(
     assert(output.getDataType() == built_reduction->key.inout_dtype);
 }
 
-void StampedReduction::run() {
+void StampedReduction::run() { runOn(stream); }
+
+void StampedReduction::runOn(Stream& run_stream) const {
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         assert(workspace.isPresent());
         workspace_ptr = workspace.get().getMemPtr();
     }
 
-    CUDNN_CHECK(cudnnReduceTensor(stream.getCudnnHandle(),
+    CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
                                   built_reduction->reduce_desc,
                                   nullptr,
                                   0,
@@ -55,7 +58,71 @@ void StampedReduction::run() {
                                   input.getMemPtr(),
                                   beta,
                                   built_reduction->c_desc,
-                                  output.getMemPtr()));
+                                  (void*)output.getMemPtr()));
+}
+
+void StampedExecutionPlan::run() {
+    if (steps.empty()) {
+        return;
+    }
+
+    using StreamEvent = std::decay_t<decltype(std::declval<Stream&>().putEvent())>;
+
+    std::vector<std::optional<StreamEvent>> completion_events(steps.size());
+
+    std::vector<Stream> launch_streams;
+    launch_streams.reserve(steps.size());
+
+    std::vector<Stream> helper_streams_used;
+    helper_streams_used.reserve(steps.size());
+
+    auto rememberHelperStream = [&](Stream& helper_stream) {
+        if (std::find(helper_streams_used.begin(), helper_streams_used.end(), helper_stream) == helper_streams_used.end()) {
+            helper_streams_used.push_back(helper_stream);
+        }
+    };
+
+    // Barrier representing all prior work already queued on the user stream.
+    StreamEvent user_stream_ready;
+    if (steps.size() > 1)
+        user_stream_ready = stream.putEvent();
+
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        const bool use_helper_stream = (stage_idx != 0);
+        const StampedExecutionStage& stage = steps[stage_idx];
+
+        Stream& launch_stream_ref = use_helper_stream ? Expression::getNextHelperStream(stage.gpu_num) : stream;
+
+        if (use_helper_stream) {
+            rememberHelperStream(launch_stream_ref);
+            launch_stream_ref.waitEvent(user_stream_ready);
+        }
+
+        for (uint32_t dep_stage_idx : stage.dependency_stage_indices) {
+            if (dep_stage_idx >= stage_idx) {
+                throw std::runtime_error("StampedExecutionPlan::run requires dependency_stage_indices to be topologically ordered.");
+            }
+
+            if (!completion_events[dep_stage_idx].has_value()) {
+                throw std::runtime_error("StampedExecutionPlan::run missing completion event for dependency stage.");
+            }
+
+            if (!(launch_stream_ref == launch_streams[dep_stage_idx])) {
+                launch_stream_ref.waitEvent(completion_events[dep_stage_idx].value());
+            }
+        }
+
+        stage.runOn(launch_stream_ref);
+
+        completion_events[stage_idx] = launch_stream_ref.putEvent();
+        launch_streams.push_back(launch_stream_ref);
+    }
+
+    for (Stream& helper_stream : helper_streams_used) {
+        if (!(helper_stream == stream)) {
+            stream.waitEvent(helper_stream.putEvent());
+        }
+    }
 }
 
 // static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;
@@ -125,7 +192,6 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
     }
 
     if (squeeze_axes.empty()) {
-        // Do not squeeze
         return output_dims;
     }
 
@@ -133,14 +199,11 @@ std::vector<uint64_t> StampedEquation::computeReductionOutputDims(const std::vec
     squeezed.reserve(output_dims.size());
 
     if (squeeze_axes.size() == 1 && squeeze_axes[0] == UINT64_MAX) {
-        // Squeeze all singletons
         for (uint64_t d : output_dims) {
             if (d != 1)
                 squeezed.push_back(d);
         }
     } else {
-        // Eliminate the specified dimensions, error if any specified dimension is not a singleton.
-        // Precondition: squeeze_dimensions are sorted ascending and uniquified.
         uint64_t nextDimToSqueeze = squeeze_axes[0];
         uint64_t nextIndexInSqueezedDims = 1;
 

@@ -98,18 +98,6 @@ class FusedEquation {
                                                                  std::vector<Tensor>& outputs,
                                                                  const Stream& stream) const;
 
-    [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                                                                 std::vector<Tensor>& inputs,
-                                                                 std::vector<Tensor>& outputs,
-                                                                 const Stream& stream,
-                                                                 const Tensor& deviceBroadcastInfo) const;
-
-    [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                                                                 std::vector<Tensor>& inputs,
-                                                                 std::vector<Tensor>& outputs,
-                                                                 const Stream& stream,
-                                                                 const std::vector<Tensor>& deviceBroadcastInfos) const;
-
     [[nodiscard]] std::shared_ptr<StampedReduction> stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
                                                                    Tensor& input,
                                                                    const Stream& stream) const;

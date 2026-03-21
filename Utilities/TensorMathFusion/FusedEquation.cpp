@@ -57,72 +57,6 @@ static std::vector<uint64_t> computePackedOutputStrides(const std::vector<uint64
     return strides;
 }
 
-static void buildBroadcastInfo(BroadcastInfoBufferView& buffer,
-                               const std::vector<Tensor>& inputs,
-                               const std::vector<uint64_t>& outputDimensions,
-                               const std::unordered_set<uint32_t>* usedInputSlots) {
-    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
-    const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
-
-    buffer.header()->numel = product(outputDimensions);
-
-    const std::vector<uint64_t> outputStrides = computePackedOutputStrides(outputDimensions);
-    for (uint32_t axis = 0; axis < rank; ++axis) {
-        buffer.outputStrides()[axis] = outputStrides[axis];
-    }
-
-    for (uint32_t inputIdx = 0; inputIdx < numInputs; ++inputIdx) {
-        const bool used = (usedInputSlots == nullptr) || usedInputSlots->contains(inputIdx);
-
-        if (!used) {
-            for (uint32_t axis = 0; axis < rank; ++axis) {
-                buffer.inputStride(inputIdx, axis) = 0;
-            }
-            continue;
-        }
-
-        const std::vector<uint64_t>& inputDims = inputs[inputIdx].getDimensions();
-        if (inputDims.size() > outputDimensions.size()) {
-            throw std::runtime_error("Input rank exceeds output rank in buildBroadcastInfo.");
-        }
-
-        const uint32_t rankDiff = rank - static_cast<uint32_t>(inputDims.size());
-
-        uint64_t runningStride = 1;
-        std::vector<uint64_t> inputPackedStrides(rank, 0);
-
-        for (int64_t axis = static_cast<int64_t>(rank) - 1; axis >= 0; --axis) {
-            if (static_cast<uint32_t>(axis) < rankDiff) {
-                inputPackedStrides[static_cast<size_t>(axis)] = 0;
-                continue;
-            }
-
-            const uint32_t inputAxis = static_cast<uint32_t>(axis) - rankDiff;
-            const uint64_t inputDim = inputDims[inputAxis];
-            const uint64_t outputDim = outputDimensions[static_cast<size_t>(axis)];
-
-            if (inputDim == outputDim) {
-                inputPackedStrides[static_cast<size_t>(axis)] = runningStride;
-                runningStride *= inputDim;
-            } else if (inputDim == 1) {
-                inputPackedStrides[static_cast<size_t>(axis)] = 0;
-            } else {
-                throw std::runtime_error("Input shape is not broadcast-compatible with output shape.");
-            }
-        }
-
-        for (uint32_t axis = 0; axis < rank; ++axis) {
-            buffer.inputStride(inputIdx, axis) = inputPackedStrides[axis];
-        }
-    }
-}
-
-static void buildBroadcastInfo(BroadcastInfoBufferView& buffer,
-                               const std::vector<Tensor>& inputs,
-                               const std::vector<uint64_t>& outputDimensions) {
-    buildBroadcastInfo(buffer, inputs, outputDimensions, nullptr);
-}
-
 static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uint32_t node_idx, std::unordered_set<uint32_t>& slots) {
     if (node_idx >= expr.nodes.size()) {
         throw std::runtime_error("collectReferencedLocalInputSlots saw node index out of range.");
@@ -385,39 +319,6 @@ static SpecializedBroadcastGroup buildSpecializedBroadcastGroup(const CompiledEx
     return group;
 }
 
-struct BroadcastInfoHostFunctionArgs : HostFunctionArgsBase {
-    Tensor hostBroadcastInfo;
-    Tensor deviceBroadcastInfo;
-
-    explicit BroadcastInfoHostFunctionArgs(Tensor hostBroadcastInfo, Tensor deviceBroadcastInfo)
-        : hostBroadcastInfo(hostBroadcastInfo), deviceBroadcastInfo(deviceBroadcastInfo) {}
-};
-
-static Tensor createDeviceBroadcastInfoForUsedInputs(const std::vector<Tensor>& inputs,
-                                                     const std::vector<uint64_t>& outputDimensions,
-                                                     const std::unordered_set<uint32_t>& usedInputSlots,
-                                                     Stream stream) {
-    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
-    const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
-    const uint64_t numBytes = BroadcastInfoBufferView::bytesRequired(rank, numInputs);
-
-    TensorDescriptor broadcastInfoDescriptor(TensorDescriptor::DataType::UINT8, {numBytes});
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement devicePlacement = inputs[0].getPlacement();
-
-    Tensor hostBroadcastInfo(cpuPlacement, broadcastInfoDescriptor);
-    Tensor deviceBroadcastInfo(devicePlacement, broadcastInfoDescriptor);
-
-    BroadcastInfoBufferView buffer(hostBroadcastInfo.getMemPtr(), rank, numInputs);
-    buildBroadcastInfo(buffer, inputs, outputDimensions, &usedInputSlots);
-
-    deviceBroadcastInfo.copyFromAsync(hostBroadcastInfo, stream);
-    stream.launchCleanUpHostFunctionArgs(std::make_unique<BroadcastInfoHostFunctionArgs>(hostBroadcastInfo, deviceBroadcastInfo));
-
-    return deviceBroadcastInfo;
-}
-
 static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
                                                                         const std::vector<Tensor>& stage_inputs) {
     std::map<std::vector<uint64_t>, std::vector<uint32_t>> grouped_output_indices;
@@ -505,30 +406,6 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
     });
 
     return compile(outputs, dtype, device_num, use_fast_math);
-}
-
-Tensor FusedEquation::createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
-                                                const std::vector<uint64_t>& outputDimensions,
-                                                Stream stream) {
-    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
-    const uint32_t numInputs = static_cast<uint32_t>(inputs.size());
-    const uint64_t numBytes = BroadcastInfoBufferView::bytesRequired(rank, numInputs);
-
-    TensorDescriptor broadcastInfoDescriptor(TensorDescriptor::DataType::UINT8, {numBytes});
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement devicePlacement = inputs[0].getPlacement();
-
-    Tensor hostBroadcastInfo(cpuPlacement, broadcastInfoDescriptor);
-    Tensor deviceBroadcastInfo(devicePlacement, broadcastInfoDescriptor);
-
-    BroadcastInfoBufferView buffer(hostBroadcastInfo.getMemPtr(), rank, numInputs);
-    buildBroadcastInfo(buffer, inputs, outputDimensions);
-
-    deviceBroadcastInfo.copyFromAsync(hostBroadcastInfo, stream);
-    stream.launchCleanUpHostFunctionArgs(std::make_unique<BroadcastInfoHostFunctionArgs>(hostBroadcastInfo, deviceBroadcastInfo));
-
-    return deviceBroadcastInfo;
 }
 
 bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions) {
@@ -697,15 +574,6 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
     return make_shared<StampedEquation>(compiledEquation, inputs, outputs, stream);
 }
 
-std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                                                              std::vector<Tensor>& inputs,
-                                                              std::vector<Tensor>& outputs,
-                                                              const Stream& stream,
-                                                              const Tensor& deviceBroadcastInfo) const {
-    std::vector<Tensor> infos{deviceBroadcastInfo};
-    return stampEquation(compiledEquation, inputs, outputs, stream, infos);
-}
-
 std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
                                                                 Tensor& input,
                                                                 const Stream& stream) const {
@@ -740,19 +608,40 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     }
 
     std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
+
     std::vector<StampedExecutionStage> stampedStages;
     stampedStages.reserve(compiled_outputs->stages.size());
+
+    // Maps each produced value_id to the stamped stage index that materializes it.
+    std::unordered_map<uint32_t, uint32_t> producer_stage_by_value_id;
+    producer_stage_by_value_id.reserve(compiled_outputs->stages.size() * 2);
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
         std::vector<Tensor> stageInputs;
         stageInputs.reserve(stage.input_value_ids.size());
+
+        // Collect dependency stage indices from any inputs produced by prior stages.
+        std::vector<uint32_t> dependency_stage_indices;
+        dependency_stage_indices.reserve(stage.input_value_ids.size());
+
         for (uint32_t value_id : stage.input_value_ids) {
             auto it = values.find(value_id);
             if (it == values.end()) {
                 throw std::runtime_error("Missing input value for staged execution plan.");
             }
             stageInputs.push_back(it->second);
+
+            auto producer_it = producer_stage_by_value_id.find(value_id);
+            if (producer_it != producer_stage_by_value_id.end()) {
+                dependency_stage_indices.push_back(producer_it->second);
+            }
         }
+
+        std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
+        dependency_stage_indices.erase(std::unique(dependency_stage_indices.begin(), dependency_stage_indices.end()),
+                                       dependency_stage_indices.end());
+
+        const uint32_t this_stage_idx = static_cast<uint32_t>(stampedStages.size());
 
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
             if (!stage.flat) {
@@ -812,7 +701,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     specialized_groups.push_back(group.specialized);
                 }
 
-                printf("PATH 1\n");
                 std::shared_ptr<CompiledEquation> specialized_broadcast =
                     EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
@@ -822,10 +710,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
 
             for (size_t i = 0; i < stage.outputs.size(); ++i) {
-                values[stage.outputs[i].value_id] = stageOutputs[i];
+                const uint32_t produced_value_id = stage.outputs[i].value_id;
+                values[produced_value_id] = stageOutputs[i];
+                producer_stage_by_value_id[produced_value_id] = this_stage_idx;
             }
 
-            stampedStages.emplace_back(stamped);
+            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
         } else {
             if (!stage.reduction) {
                 throw std::runtime_error("Missing compiled reduction stage.");
@@ -837,8 +727,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
             Tensor& reductionInput = stageInputs[0];
             std::shared_ptr<StampedReduction> stamped = stampReduction(stage.reduction, reductionInput, stream);
-            values[stage.outputs[0].value_id] = stamped->getOutputTensor();
-            stampedStages.emplace_back(stamped);
+
+            const uint32_t produced_value_id = stage.outputs[0].value_id;
+            values[produced_value_id] = stamped->getOutputTensor();
+            producer_stage_by_value_id[produced_value_id] = this_stage_idx;
+
+            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
         }
     }
 
@@ -852,7 +746,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         finalOutputsByName.emplace(final_output.name, it->second);
     }
 
-    return StampedExecutionPlan(std::move(stampedStages), std::move(finalOutputsByName));
+    return StampedExecutionPlan(std::move(stampedStages), std::move(finalOutputsByName), stream);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
@@ -863,26 +757,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         requested["output"] = requestedOutputShape;
     }
     return stamp(inputs, stream, requested);
-}
-
-std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                                                              std::vector<Tensor>& inputs,
-                                                              std::vector<Tensor>& outputs,
-                                                              const Stream& stream,
-                                                              const std::vector<Tensor>& deviceBroadcastInfos) const {
-    if (!compiledEquation) {
-        throw std::runtime_error("Cannot stamp an empty compiled equation.");
-    }
-
-    if (inputs.empty()) {
-        throw std::runtime_error("FusedEquation::stampEquation requires at least one input tensor.");
-    }
-
-    if (outputs.empty()) {
-        throw std::runtime_error("FusedEquation::stampEquation requires at least one output tensor.");
-    }
-
-    return std::make_shared<StampedEquation>(compiledEquation, inputs, outputs, stream, deviceBroadcastInfos);
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {

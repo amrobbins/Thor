@@ -10,6 +10,8 @@ Stream& Expression::getNextHelperStream(uint32_t gpu_num) {
     static std::vector<uint32_t> nextHelperStreamIndex;
     constexpr uint32_t MAX_HELPER_STREAMS_PER_GPU = 7;
     if (runnerHelperStreams.empty()) {
+        runnerHelperStreams.reserve(MAX_HELPER_STREAMS_PER_GPU);
+        nextHelperStreamIndex.reserve(MAX_HELPER_STREAMS_PER_GPU);
         runnerHelperStreams = std::vector<std::vector<Stream>>(MachineEvaluator::instance().getNumGpus(), std::vector<Stream>());
         nextHelperStreamIndex = std::vector<uint32_t>(MachineEvaluator::instance().getNumGpus(), 0);
     }

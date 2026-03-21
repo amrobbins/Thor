@@ -460,43 +460,14 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     return ltoir;
 }
 
-shared_ptr<CompiledEquation> EquationCompiler::compile(const PhysicalExpression& expr,
-                                                       const EquationSignature& sig,
-                                                       const bool broadcast_support) {
-    ensureCudaContextCurrent(sig.device_num);
-
-    EquationCacheKey key(canonicalize(expr), sig, broadcast_support);
-    shared_ptr<CompiledEquation> hit = cacheLookup(key);
-    if (hit)
-        return hit;
-
-    string kernel_name = "fused_kernel";
-    string cuda_src = CudaSourceEmitter::emit(expr, sig.dtype, kernel_name, broadcast_support);
-
-    vector<string> input_names;
-    input_names.reserve(expr.inputs.size());
-    for (const NamedInput& input : expr.inputs) {
-        input_names.push_back(input.name);
-    }
-
-    vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
-    vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, input_names, sig.dtype, sig.device_num);
-
-    cacheInsert(key, compiled);
-    return compiled;
-}
-
-shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage,
-                                                                 const EquationSignature& sig,
-                                                                 const bool broadcast_support) {
+shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage, const EquationSignature& sig) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         throw runtime_error("compileFusedStage called on non-fused stage.");
     }
 
     ensureCudaContextCurrent(sig.device_num);
 
-    EquationCacheKey key(canonicalize(stage), sig, broadcast_support);
+    EquationCacheKey key(canonicalize(stage), sig);
     shared_ptr<CompiledEquation> hit = cacheLookup(key);
     if (hit)
         return hit;
@@ -504,9 +475,9 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     string kernel_name = "fused_kernel";
     std::string cuda_src;
     if (stage.outputs.size() == 1) {
-        cuda_src = CudaSourceEmitter::emit(stage.expr, sig.dtype, kernel_name, broadcast_support);
+        cuda_src = CudaSourceEmitter::emitFlat(stage.expr, sig.dtype, kernel_name);
     } else {
-        cuda_src = CudaSourceEmitter::emit(stage, sig.dtype, kernel_name, broadcast_support);
+        cuda_src = CudaSourceEmitter::emitFlat(stage, sig.dtype, kernel_name);
     }
 
     vector<string> input_names;
@@ -1140,7 +1111,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
         std::shared_ptr<CompiledReduction> reduction;
         switch (stage.kind) {
             case PhysicalExecutionStage::Kind::FusedKernel:
-                flat = compileFusedStage(stage, sig, false);
+                flat = compileFusedStage(stage, sig);
                 compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs);
                 break;
             case PhysicalExecutionStage::Kind::Reduction:
@@ -1186,8 +1157,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     std::vector<char> cubin = linkToCubin(ltoir, sig);
 
-    auto compiled =
-        loadCubin(EquationCacheKey(canonicalize(stage.expr), sig, true), cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+    shared_ptr<CompiledEquation> compiled =
+        loadCubin(EquationCacheKey(canonicalize(stage.expr), sig), cubin, kernel_name, input_names, sig.dtype, sig.device_num);
 
     if (groups.size() > 1) {
         compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
