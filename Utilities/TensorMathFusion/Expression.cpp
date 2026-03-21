@@ -5,6 +5,25 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
 
+Stream& Expression::getNextHelperStream(uint32_t gpu_num) {
+    static std::vector<std::vector<Stream>> runnerHelperStreams;
+    static std::vector<uint32_t> nextHelperStreamIndex;
+    constexpr uint32_t MAX_HELPER_STREAMS_PER_GPU = 7;
+    if (runnerHelperStreams.empty()) {
+        runnerHelperStreams = std::vector<std::vector<Stream>>(MachineEvaluator::instance().getNumGpus(), std::vector<Stream>());
+        nextHelperStreamIndex = std::vector<uint32_t>(MachineEvaluator::instance().getNumGpus(), 0);
+    }
+    uint32_t cur_index = nextHelperStreamIndex[gpu_num];
+    if (cur_index == MAX_HELPER_STREAMS_PER_GPU)
+        cur_index = 0;
+    nextHelperStreamIndex[gpu_num] = cur_index + 1;
+
+    if (cur_index >= runnerHelperStreams[gpu_num].size())
+        runnerHelperStreams[gpu_num].emplace_back(gpu_num);
+
+    return runnerHelperStreams[gpu_num][cur_index];
+}
+
 std::string formatFloatCanonical(double x) {
     std::ostringstream ss;
     ss << std::setprecision(9) << x;
