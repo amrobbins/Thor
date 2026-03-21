@@ -115,11 +115,14 @@ struct SpecializedBroadcastAxis {
     std::vector<uint64_t> input_strides;  // same order as used_input_slots
 };
 
+enum class SpecializedInputLoadKind { ScalarPack, NativeVector };
+
 struct SpecializedBroadcastGroup {
     uint64_t numel = 0;
     std::vector<uint64_t> output_dims;
     std::vector<uint32_t> output_indices;
     std::vector<uint32_t> used_input_slots;  // sorted, local stage input slots
+    std::vector<SpecializedInputLoadKind> used_input_load_kinds;
     std::vector<SpecializedBroadcastAxis> active_axes;
 };
 

@@ -17,7 +17,7 @@ using namespace std;
 namespace ThorImplementation {
 
 // static unordered_map<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache;
-static ThreadSafeLruCache<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(100'000);
+static ThreadSafeLruCache<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
 
 static shared_ptr<CompiledEquation> cacheLookup(const EquationCacheKey& key) {
     optional<shared_ptr<CompiledEquation>> hit = compiledEquationCache.get(key);
@@ -31,7 +31,7 @@ static void cacheInsert(const EquationCacheKey& key, shared_ptr<CompiledEquation
 }
 
 // static unordered_map<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache;
-static ThreadSafeLruCache<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache(100'000);
+static ThreadSafeLruCache<std::string, shared_ptr<CompiledEquation>> specializedBroadcastCache(10'000);
 
 static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src, const EquationSignature& sig) {
     std::string key;

@@ -5,11 +5,11 @@ from thor.physical import Expression as ex
 from thor.physical import PhysicalTensor, Stream, Placement, DeviceType, numpy_dtypes
 
 FLOAT_DTYPES = [
-    # thor.DataType.fp32,
-    # thor.DataType.fp16,
-    # thor.DataType.bf16,
+    thor.DataType.fp32,
+    thor.DataType.fp16,
+    thor.DataType.bf16,
     thor.DataType.fp8_e4m3,
-    # thor.DataType.fp8_e5m2,
+    thor.DataType.fp8_e5m2,
 ]
 
 REDUCTION_DTYPES = [
@@ -52,6 +52,8 @@ def _fill_cpu_tensor(t: PhysicalTensor, values, dtype: thor.DataType) -> np.ndar
 def rtol_atol(dtype: thor.DataType) -> tuple[float, float]:
     if dtype == thor.DataType.fp32:
         return 1e-6, 1e-6
+    elif dtype == thor.DataType.fp8_e4m3 or dtype == thor.DataType.fp8_e5m2:
+        return 0.25, 0.25
     return 5e-2, 5e-2
 
 
@@ -166,8 +168,8 @@ def test_outputs_mixed_broadcast_and_flat_domains_numerical(dtype: thor.DataType
     x_np = _fill_cpu_tensor(
         x_cpu,
         [
-            [[1.0, 2.0, 3.0, 4.0]],
-            [[5.0, 6.0, 7.0, 8.0]],
+            [[1.0, 2.0, 3.0, 2.25]],
+            [[1.8, -0.2, 1.5, 2.5]],
         ],
         dtype,
     )
@@ -175,16 +177,16 @@ def test_outputs_mixed_broadcast_and_flat_domains_numerical(dtype: thor.DataType
         y_cpu,
         [[
             [0.5, 1.0, 1.5, 2.0],
-            [2.5, 3.0, 3.5, 4.0],
-            [4.5, 5.0, 5.5, 6.0],
+            [2.5, 1.75, 1.25, 0.5],
+            [1.75, 2.25, 2.5, 1.8],
         ]],
         dtype,
     )
     z_np = _fill_cpu_tensor(
         z_cpu,
         [
-            [[2.0, 3.0, 4.0, 5.0]],
-            [[1.5, 2.5, 3.5, 4.5]],
+            [[2.0, -0.05, 0.5, 0.5]],
+            [[0.5, 0.5, 0.25, -0.25]],
         ],
         dtype,
     )
@@ -247,8 +249,8 @@ def test_outputs_grouped_broadcast_same_shape_group_and_smaller_group(dtype: tho
     x_np = _fill_cpu_tensor(
         x_cpu,
         [
-            [[1.0, 2.0, 1.5, 2.5]],
-            [[3.0, 4.0, 3.5, 4.5]],
+            [[1.0, 0.0, 1.5, 1.5]],
+            [[1.25, -0.5, 0.5, -0.75]],
         ],
         dtype,
     )
@@ -256,16 +258,16 @@ def test_outputs_grouped_broadcast_same_shape_group_and_smaller_group(dtype: tho
         y_cpu,
         [[
             [0.25, 0.50, 0.75, 1.00],
-            [1.25, 1.50, 1.75, 2.00],
-            [2.25, 2.50, 2.75, 3.00],
+            [1.25, 1.50, 1.75, -0.50],
+            [0.5, 1.25, 0.75, 1.00],
         ]],
         dtype,
     )
     z_np = _fill_cpu_tensor(
         z_cpu,
         [
-            [[2.0, 2.0, 2.0, 2.0]],
-            [[3.0, 3.0, 3.0, 3.0]],
+            [[0.5, 0.75, 0.0, 0.25]],
+            [[1.5, 1.25, 1.0, 0.75]],
         ],
         dtype,
     )

@@ -7,7 +7,7 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
 
-bool PRINT_KERNELS = true;
+constexpr bool PRINT_KERNELS = false;
 
 static std::string emitScalarFpLiteral(double x, DataType dtype) {
     auto formatFloating = [](double v, int precision) -> std::string {
@@ -28,6 +28,41 @@ static std::string emitScalarFpLiteral(double x, DataType dtype) {
     return formatFloating(x, 9) + "f";
 }
 
+static string vector_compute_conversion(string storage_dtype_vector, string variable) {
+    if (storage_dtype_vector == "half2")
+        return variable;
+    else if (storage_dtype_vector == "__nv_bfloat162")
+        return variable;
+    else if (storage_dtype_vector == "__nv_fp8x2_e4m3")
+        return "static_cast<__half2>(" + variable + ")";
+    else if (storage_dtype_vector == "__nv_fp8x2_e5m2")
+        return "static_cast<__half2>(" + variable + ")";
+    throw runtime_error("Unsupported vector storage dtype in vector_compute_conversion: " + storage_dtype_vector);
+}
+
+static string vector_storage_conversion(string storage_dtype_vector, string variable) {
+    if (storage_dtype_vector == "half2")
+        return variable;
+    else if (storage_dtype_vector == "__nv_bfloat162")
+        return variable;
+    else if (storage_dtype_vector == "__nv_fp8x2_e4m3")
+        return "__nv_fp8x2_e4m3(" + variable + ")";
+    else if (storage_dtype_vector == "__nv_fp8x2_e5m2")
+        return "__nv_fp8x2_e5m2(" + variable + ")";
+    throw runtime_error("Unsupported vector storage dtype in vector_compute_conversion: " + storage_dtype_vector);
+}
+
+static string emitVector2ScalarLiteral(double x, DataType dtype) {
+    const string lit = emitScalarFpLiteral(x, dtype);
+
+    if (dtype == DataType::FP16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
+        return "__halves2half2(__float2half_rn(" + lit + "), __float2half_rn(" + lit + "))";
+    } else if (dtype == DataType::BF16) {
+        return "__floats2bfloat162_rn(" + lit + ", " + lit + ")";
+    }
+    throw runtime_error("Unsupported dtype in emitVector2ScalarLiteral.");
+}
+
 static bool isPowerOfTwo(uint64_t x) { return x != 0 && (x & (x - 1)) == 0; }
 
 static uint32_t log2Exact(uint64_t x) {
@@ -39,11 +74,23 @@ static uint32_t log2Exact(uint64_t x) {
     return s;
 }
 
+static std::string emitVector2BroadcastNativeLoad(const std::string& storage_dtype_vector,
+                                                  const std::string& base_ptr,
+                                                  const std::string& scalar_offset0) {
+    const std::string vec_expr = "reinterpret_cast<const " + storage_dtype_vector + "*>(" + base_ptr + " + " + scalar_offset0 + ")[0]";
+    return vector_compute_conversion(storage_dtype_vector, vec_expr);
+}
+
 static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
                                                const SpecializedBroadcastGroup& group,
+                                               const std::vector<size_t>& used_input_indices,
                                                const std::string& idx_expr,
                                                const std::string& offset_suffix,
                                                const std::string& indent) {
+    if (used_input_indices.empty()) {
+        return;
+    }
+
     for (size_t axis_i = 0; axis_i < group.active_axes.size(); ++axis_i) {
         const SpecializedBroadcastAxis& axis = group.active_axes[axis_i];
 
@@ -69,20 +116,21 @@ static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
 
         ss << indent << "const unsigned long long " << coord << " = " << coord_expr << ";\n";
 
-        for (size_t j = 0; j < group.used_input_slots.size(); ++j) {
-            const uint64_t stride = axis.input_strides[j];
+        for (size_t used_i : used_input_indices) {
+            const uint64_t stride = axis.input_strides[used_i];
             if (stride == 0) {
                 continue;
             }
 
+            const uint32_t input_slot = group.used_input_slots[used_i];
+
             if (stride == 1) {
-                ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += " << coord << ";\n";
+                ss << indent << "in" << input_slot << "_offset" << offset_suffix << " += " << coord << ";\n";
             } else if (isPowerOfTwo(stride)) {
-                ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += (" << coord << " << "
+                ss << indent << "in" << input_slot << "_offset" << offset_suffix << " += (" << coord << " << "
                    << std::to_string(log2Exact(stride)) << ");\n";
             } else {
-                ss << indent << "in" << group.used_input_slots[j] << "_offset" << offset_suffix << " += " << coord << " * " << stride
-                   << "ULL;\n";
+                ss << indent << "in" << input_slot << "_offset" << offset_suffix << " += " << coord << " * " << stride << "ULL;\n";
             }
         }
     }
@@ -406,41 +454,6 @@ string CudaSourceEmitter::emit(const PhysicalExpression& expr, DataType dtype, c
 string CudaSourceEmitter::ref(uint32_t idx) {
     // temporaries are tN
     return "t" + to_string(idx);
-}
-
-static string vector_compute_conversion(string storage_dtype_vector, string variable) {
-    if (storage_dtype_vector == "half2")
-        return variable;
-    else if (storage_dtype_vector == "__nv_bfloat162")
-        return variable;
-    else if (storage_dtype_vector == "__nv_fp8x2_e4m3")
-        return "static_cast<__half2>(" + variable + ")";
-    else if (storage_dtype_vector == "__nv_fp8x2_e5m2")
-        return "static_cast<__half2>(" + variable + ")";
-    throw runtime_error("Unsupported vector storage dtype in vector_compute_conversion: " + storage_dtype_vector);
-}
-
-static string vector_storage_conversion(string storage_dtype_vector, string variable) {
-    if (storage_dtype_vector == "half2")
-        return variable;
-    else if (storage_dtype_vector == "__nv_bfloat162")
-        return variable;
-    else if (storage_dtype_vector == "__nv_fp8x2_e4m3")
-        return "__nv_fp8x2_e4m3(" + variable + ")";
-    else if (storage_dtype_vector == "__nv_fp8x2_e5m2")
-        return "__nv_fp8x2_e5m2(" + variable + ")";
-    throw runtime_error("Unsupported vector storage dtype in vector_compute_conversion: " + storage_dtype_vector);
-}
-
-static string emitVector2ScalarLiteral(double x, DataType dtype) {
-    const string lit = emitScalarFpLiteral(x, dtype);
-
-    if (dtype == DataType::FP16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
-        return "__halves2half2(__float2half_rn(" + lit + "), __float2half_rn(" + lit + "))";
-    } else if (dtype == DataType::BF16) {
-        return "__floats2bfloat162_rn(" + lit + ", " + lit + ")";
-    }
-    throw runtime_error("Unsupported dtype in emitVector2ScalarLiteral.");
 }
 
 static string emitVector2Add(const string& a, const string& b) { return "__hadd2(" + a + ", " + b + ")"; }
@@ -790,9 +803,9 @@ const unsigned long long* broadcast_input_strides(const BroadcastInfoHeader* bro
 
     ss << "}\n";
 
-    // if (PRINT_KERNELS) {
-    //     printf("%s\n", ss.str().c_str());
-    // }
+    if (PRINT_KERNELS) {
+        printf("%s\n", ss.str().c_str());
+    }
 
     return ss.str();
 }
@@ -1380,6 +1393,9 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
             const SpecializedBroadcastGroup& group = groups[g];
             const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
 
+            std::vector<size_t> all_used_indices(group.used_input_slots.size());
+            std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
+
             ss << "  if (idx < " << group.numel << "ULL) {\n";
 
             for (uint32_t input_slot : group.used_input_slots) {
@@ -1388,7 +1404,7 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
 
             if (!group.active_axes.empty()) {
                 ss << "\n";
-                emitSpecializedBroadcastOffsetMath(ss, group, "idx", "", "    ");
+                emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx", "", "    ");
                 ss << "\n";
             }
 
@@ -1469,33 +1485,74 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         const std::vector<uint32_t> required_nodes = orderedRequiredNodesForGroup(stage, group.output_indices);
         const uint64_t packed_numel = (group.numel + 1ULL) >> 1;
 
+        std::vector<size_t> all_used_indices;
+        std::vector<size_t> scalar_pack_indices;
+        std::unordered_map<uint32_t, SpecializedInputLoadKind> input_load_kind_by_slot;
+
+        all_used_indices.reserve(group.used_input_slots.size());
+        scalar_pack_indices.reserve(group.used_input_slots.size());
+
+        for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
+            all_used_indices.push_back(used_i);
+            input_load_kind_by_slot.emplace(group.used_input_slots[used_i], group.used_input_load_kinds[used_i]);
+
+            if (group.used_input_load_kinds[used_i] == SpecializedInputLoadKind::ScalarPack) {
+                scalar_pack_indices.push_back(used_i);
+            }
+        }
+
+        const bool any_scalar_pack = !scalar_pack_indices.empty();
+
         ss << "  if (idx < " << packed_numel << "ULL) {\n";
         ss << "    const unsigned long long idx0 = idx << 1;\n";
-        ss << "    const unsigned long long idx1 = idx0 + 1ULL;\n";
+
+        if (any_scalar_pack) {
+            ss << "    const unsigned long long idx1 = idx0 + 1ULL;\n";
+        }
 
         for (uint32_t input_slot : group.used_input_slots) {
             ss << "    unsigned long long in" << input_slot << "_offset0 = 0ULL;\n";
+        }
+        for (size_t used_i : scalar_pack_indices) {
+            const uint32_t input_slot = group.used_input_slots[used_i];
             ss << "    unsigned long long in" << input_slot << "_offset1 = 0ULL;\n";
         }
 
         ss << "\n";
         if (!group.active_axes.empty()) {
-            emitSpecializedBroadcastOffsetMath(ss, group, "idx0", "0", "    ");
+            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx0", "0", "    ");
             ss << "\n";
-            emitSpecializedBroadcastOffsetMath(ss, group, "idx1", "1", "    ");
-            ss << "\n";
+
+            if (any_scalar_pack) {
+                emitSpecializedBroadcastOffsetMath(ss, group, scalar_pack_indices, "idx1", "1", "    ");
+                ss << "\n";
+            }
         }
 
         for (uint32_t node_idx : required_nodes) {
             const auto& n = stage.expr.nodes[node_idx];
             switch (n.op) {
                 case ExprOp::INPUT: {
-                    const std::string var0 = "in" + std::to_string(n.input_slot) + "[in" + std::to_string(n.input_slot) + "_offset0]";
-                    const std::string var1 = "in" + std::to_string(n.input_slot) + "[in" + std::to_string(n.input_slot) + "_offset1]";
-                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
-                       << emitVector2BroadcastPackLoad(storage_dtype, var0, var1) << ";\n";
+                    const uint32_t slot = n.input_slot;
+                    const auto kind_it = input_load_kind_by_slot.find(slot);
+                    if (kind_it == input_load_kind_by_slot.end()) {
+                        throw std::runtime_error("Missing input load kind for specialized vector broadcast input.");
+                    }
+
+                    if (kind_it->second == SpecializedInputLoadKind::NativeVector) {
+                        const std::string base = "in" + std::to_string(slot);
+                        const std::string offset0 = "in" + std::to_string(slot) + "_offset0";
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                           << emitVector2BroadcastNativeLoad(storage_dtype_vector, base, offset0) << ";\n";
+                    } else {
+                        const std::string var0 = "in" + std::to_string(slot) + "[in" + std::to_string(slot) + "_offset0]";
+                        const std::string var1 = "in" + std::to_string(slot) + "[in" + std::to_string(slot) + "_offset1]";
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                           << emitVector2BroadcastPackLoad(storage_dtype, var0, var1) << ";\n";
+                    }
                     break;
                 }
+
                 case ExprOp::SCALAR_FP:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
                        << ";\n";
