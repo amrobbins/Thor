@@ -318,7 +318,7 @@ def test_broadcast_requested_output_shape_add_singletons(dtype: thor.DataType):
     }, stream, requestedOutputShape=[1, 1, 3])
     stamped_equation.run()
 
-    out_gpu = stamped_equation.output_tensor
+    out_gpu = stamped_equation.output()
     out_cpu = out_gpu.clone(Placement(DeviceType.cpu))
     out_cpu.copy_from_async(out_gpu, stream)
     stream.synchronize()
@@ -396,7 +396,7 @@ def test_broadcast_nested_expression_fp32_numerical_stamped():
     }, stream)
     stamped_equation.run()
 
-    out_gpu = stamped_equation.output_tensor
+    out_gpu = stamped_equation.output()
     out_cpu = out_gpu.clone(cpu_placement)
     out_cpu.copy_from_async(out_gpu, stream)
     stream.synchronize()
@@ -626,7 +626,7 @@ def test_broadcast_stamped_reused_twice(dtype: thor.DataType):
 
     stamped_equation.run()
 
-    out_gpu_1 = stamped_equation.output_tensor
+    out_gpu_1 = stamped_equation.output()
     out_cpu_1 = out_gpu_1.clone(cpu_placement)
     out_cpu_1.copy_from_async(out_gpu_1, stream)
     stream.synchronize()
@@ -653,7 +653,7 @@ def test_broadcast_stamped_reused_twice(dtype: thor.DataType):
 
     stamped_equation.run()
 
-    out_gpu_2 = stamped_equation.output_tensor
+    out_gpu_2 = stamped_equation.output()
     out_cpu_2 = out_gpu_2.clone(cpu_placement)
     out_cpu_2.copy_from_async(out_gpu_2, stream)
     stream.synchronize()

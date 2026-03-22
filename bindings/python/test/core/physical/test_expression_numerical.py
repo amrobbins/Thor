@@ -441,7 +441,7 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
     }, stream)
     stamped_equation.run()
 
-    out_gpu = stamped_equation.output_tensor
+    out_gpu = stamped_equation.output()
     out_cpu = out_gpu.clone(cpu_placement)
     out_cpu.copy_from_async(out_gpu, stream)
     stream.synchronize()

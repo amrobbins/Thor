@@ -111,7 +111,7 @@ def _run_staged_expr(
     stamped = eq.stamp(input_tensors_gpu, stream)
     stamped.run()
 
-    out_gpu = stamped.output_tensor
+    out_gpu = stamped.output()
     out_host = PhysicalTensor(cpu_placement, out_gpu.get_descriptor())
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
@@ -519,7 +519,7 @@ def test_stamp_output_tensor_matches_expected_shape_squeeze_false(dtype: thor.Da
         "x": x_gpu
     }, stream)
 
-    assert list(stamped.output_tensor.dimensions) == [2, 1]
+    assert list(stamped.output().dimensions) == [2, 1]
 
 
 @pytest.mark.cuda
@@ -550,7 +550,7 @@ def test_stamp_output_tensor_matches_expected_shape_squeeze_true(dtype: thor.Dat
         "x": x_gpu
     }, stream)
 
-    assert list(stamped.output_tensor.get_descriptor().get_dimensions()) == [2]
+    assert list(stamped.output().get_descriptor().get_dimensions()) == [2]
 
 
 @pytest.mark.cuda
@@ -584,7 +584,7 @@ def test_stamp_output_tensor_matches_expected_shape_squeeze_specific_axis(dtype:
         "x": x_gpu
     }, stream)
 
-    assert list(stamped.output_tensor.get_descriptor().get_dimensions()) == [2, 1]
+    assert list(stamped.output().get_descriptor().get_dimensions()) == [2, 1]
 
 
 @pytest.mark.cuda

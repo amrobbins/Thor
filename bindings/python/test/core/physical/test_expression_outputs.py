@@ -225,7 +225,7 @@ def test_outputs_shared_trunk_three_results_numerical(dtype: thor.DataType):
     np.testing.assert_allclose(square_cpu.numpy(), expected_square, rtol=rtol, atol=atol)
 
     with pytest.raises(RuntimeError):
-        stamped.output_tensor
+        stamped.output()
 
 
 @pytest.mark.cuda
@@ -305,11 +305,11 @@ def test_outputs_single_output_supports_output_tensor(dtype: thor.DataType):
     }, stream)
     stamped.run()
 
-    output_tensor_cpu = _clone_to_cpu(stamped.output_tensor, stream)
+    output_tensor_cpu = _clone_to_cpu(stamped.output(), stream)
     named_output_cpu = _clone_to_cpu(stamped.output("sum"), stream)
     stream.synchronize()
 
-    assert isinstance(stamped.output_tensor, PhysicalTensor)
+    assert isinstance(stamped.output(), PhysicalTensor)
     _assert_close(output_tensor_cpu.numpy(), expected, dtype)
     _assert_close(named_output_cpu.numpy(), expected, dtype)
 
@@ -480,7 +480,7 @@ def test_outputs_multiple_reductions_from_shared_trunk(dtype: thor.DataType):
     _assert_close(max1_cpu.numpy(), expected_max1, dtype)
 
     with pytest.raises(RuntimeError):
-        stamped.output_tensor
+        stamped.output()
 
 
 @pytest.mark.cuda
@@ -531,7 +531,7 @@ def test_outputs_pointwise_and_reductions_mixed_plan(dtype: thor.DataType):
     _assert_close(max1_cpu.numpy(), expected_max1, dtype)
 
     with pytest.raises(RuntimeError):
-        stamped.output_tensor
+        stamped.output()
 
 
 @pytest.mark.cuda
