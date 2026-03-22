@@ -101,6 +101,20 @@ static std::string formatUIntVectorCanonical(const std::vector<uint64_t>& values
     return ss.str();
 }
 
+static std::string formatOptionalDTypeCanonical(const Optional<DataType>& dtype) {
+    if (!dtype.isPresent()) {
+        return "none";
+    }
+    return TensorDescriptor::getElementTypeName(dtype.get());
+}
+
+static void appendNodeDTypeMetadata(std::string& out, const ExprNode& n) {
+    out += ";out=" + formatOptionalDTypeCanonical(n.output_dtype);
+    out += ";compute=" + formatOptionalDTypeCanonical(n.compute_dtype);
+    out += ";bwd_out=" + formatOptionalDTypeCanonical(n.backward_output_dtype);
+    out += ";bwd_compute=" + formatOptionalDTypeCanonical(n.backward_compute_dtype);
+}
+
 static std::string canonicalizeNode(const PhysicalExpression& expr,
                                     uint32_t nodeIndex,
                                     std::vector<std::string>& memo,
@@ -143,10 +157,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2: {
-            const DataType compute_dtype = n.compute_dtype.isPresent() ? n.compute_dtype.get() : DataType::FP32;
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
-                  ";axes=" + formatUIntVectorCanonical(n.reduction_axes) + ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) +
-                  ";compute=" + TensorDescriptor::getElementTypeName(compute_dtype) + ")";
+                  ";axes=" + formatUIntVectorCanonical(n.reduction_axes) + ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
             break;
         }
 
@@ -171,6 +183,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             throw std::runtime_error("Unsupported ExprOp in canonicalizeNode: " + std::to_string((int)n.op));
     }
 
+    appendNodeDTypeMetadata(out, n);
     memo[nodeIndex] = out;
     memoReady[nodeIndex] = 1;
     return memo[nodeIndex];

@@ -1,4 +1,5 @@
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
+#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 
 #include "CudaSourceEmitter.h"
@@ -37,7 +38,6 @@ static LruCacheThreadSafe<std::string, shared_ptr<CompiledEquation>> specialized
 static std::string makeSpecializedBroadcastCacheKey(const std::string& cuda_src, const EquationSignature& sig) {
     std::string key;
     key.reserve(cuda_src.size() + 128);
-    key += "dtype=" + std::to_string(static_cast<int>(sig.dtype));
     key += "|sm=" + std::to_string(sig.sm_major) + std::to_string(sig.sm_minor);
     key += "|dev=" + std::to_string(sig.device_num);
     key += "|fast=" + std::to_string(sig.use_fast_math ? 1 : 0);
@@ -77,6 +77,10 @@ struct StageNodeKey {
     uint32_t rhs = UINT32_MAX;
     uint32_t input_slot = UINT32_MAX;
     uint64_t scalar_bits = 0;
+    int32_t output_dtype = -1;
+    int32_t compute_dtype = -1;
+    int32_t backward_output_dtype = -1;
+    int32_t backward_compute_dtype = -1;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -88,6 +92,10 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<uint32_t>{}(k.rhs));
         hashCombine(h, std::hash<uint32_t>{}(k.input_slot));
         hashCombine(h, std::hash<uint64_t>{}(k.scalar_bits));
+        hashCombine(h, std::hash<int32_t>{}(k.output_dtype));
+        hashCombine(h, std::hash<int32_t>{}(k.compute_dtype));
+        hashCombine(h, std::hash<int32_t>{}(k.backward_output_dtype));
+        hashCombine(h, std::hash<int32_t>{}(k.backward_compute_dtype));
         return h;
     }
 };
@@ -101,9 +109,15 @@ static uint64_t scalarBits(double x) {
     return bits;
 }
 
+static int32_t optionalDTypeTag(const Optional<DataType>& dtype) { return dtype.isPresent() ? static_cast<int32_t>(dtype.get()) : -1; }
+
 static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     StageNodeKey key;
     key.op = n.op;
+    key.output_dtype = optionalDTypeTag(n.output_dtype);
+    key.compute_dtype = optionalDTypeTag(n.compute_dtype);
+    key.backward_output_dtype = optionalDTypeTag(n.backward_output_dtype);
+    key.backward_compute_dtype = optionalDTypeTag(n.backward_compute_dtype);
 
     switch (n.op) {
         case ExprOp::INPUT:
@@ -316,6 +330,20 @@ static const char* fusedOpTag(ExprOp op) {
     }
 }
 
+static std::string optionalDTypeSignature(const Optional<DataType>& dtype) {
+    if (!dtype.isPresent()) {
+        return "none";
+    }
+    return TensorDescriptor::getElementTypeName(dtype.get());
+}
+
+static void appendNodeDTypeSignature(std::string& s, const ExprNode& node) {
+    s += ";out=" + optionalDTypeSignature(node.output_dtype);
+    s += ";compute=" + optionalDTypeSignature(node.compute_dtype);
+    s += ";bwd_out=" + optionalDTypeSignature(node.backward_output_dtype);
+    s += ";bwd_compute=" + optionalDTypeSignature(node.backward_compute_dtype);
+}
+
 static std::string uintVecSignature(const std::vector<uint64_t>& v) {
     std::string s = "[";
     for (size_t i = 0; i < v.size(); ++i) {
@@ -336,41 +364,54 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     const ExprNode& node = expr.nodes[node_idx];
 
     switch (node.op) {
-        case ExprOp::INPUT:
-            return std::string("IN(") + std::to_string(node.input_slot) + ")";
+        case ExprOp::INPUT: {
+            std::string s = std::string("IN(") + std::to_string(node.input_slot) + ")";
+            appendNodeDTypeSignature(s, node);
+            return s;
+        }
 
-        case ExprOp::SCALAR_FP:
-            return std::string("F(") + std::to_string(scalarBits(node.scalar_fp)) + ")";
+        case ExprOp::SCALAR_FP: {
+            std::string s = std::string("F(") + std::to_string(scalarBits(node.scalar_fp)) + ")";
+            appendNodeDTypeSignature(s, node);
+            return s;
+        }
 
         default:
             break;
     }
 
     if (Expression::isLeafOp(node.op)) {
-        return std::string(fusedOpTag(node.op));
+        std::string s = std::string(fusedOpTag(node.op));
+        appendNodeDTypeSignature(s, node);
+        return s;
     }
 
     const std::string lhs = fusedRegionSignatureRec(expr, node.lhs);
 
     if (isStageBoundaryOp(node.op)) {
-        TensorDescriptor::DataType compute_dtype =
-            node.compute_dtype.isPresent() ? node.compute_dtype.get() : TensorDescriptor::DataType::FP32;
-
-        return std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
-               ",squeeze=" + uintVecSignature(node.squeeze_axes) + ",compute=" + std::to_string(static_cast<int>(compute_dtype)) + ")";
+        std::string s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
+                        ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        appendNodeDTypeSignature(s, node);
+        return s;
     }
 
     if (!Expression::isBinaryOp(node.op)) {
-        return std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
+        std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
+        appendNodeDTypeSignature(s, node);
+        return s;
     }
 
     std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
 
     if (isCommutativeStageOp(node.op) && rhs < lhs) {
-        return std::string(fusedOpTag(node.op)) + "(" + rhs + "," + lhs + ")";
+        std::string s = std::string(fusedOpTag(node.op)) + "(" + rhs + "," + lhs + ")";
+        appendNodeDTypeSignature(s, node);
+        return s;
     }
 
-    return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ")";
+    std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ")";
+    appendNodeDTypeSignature(s, node);
+    return s;
 }
 
 static std::string fusedRegionSignature(const PhysicalExpression& expr, uint32_t root_idx) {
@@ -381,7 +422,8 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
                                                          const vector<string>& input_names,
-                                                         TensorDescriptor::DataType dtype,
+                                                         const std::vector<TensorDescriptor::DataType>& input_dtypes,
+                                                         const std::vector<TensorDescriptor::DataType>& output_dtypes,
                                                          int device_num) {
     CUmodule module;
     CUfunction fn;
@@ -395,10 +437,101 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     out->kernel = fn;
     out->kernel_name = kernel_name;
     out->input_names = input_names;
-    out->dtype = dtype;
+    out->input_dtypes = input_dtypes;
+    out->output_dtypes = output_dtypes;
     out->deviceNum = device_num;
 
     return out;
+}
+
+static std::vector<DataType> collectCompiledInputDTypes(const PhysicalExpression& expr) {
+    std::vector<DataType> input_dtypes(expr.numInputs(), DataType::FP32);
+    std::vector<uint8_t> seen(expr.numInputs(), 0);
+
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::INPUT) {
+            continue;
+        }
+        if (!node.output_dtype.isPresent()) {
+            throw runtime_error("Fused stage input node is missing resolved output_dtype.");
+        }
+        if (node.input_slot >= input_dtypes.size()) {
+            throw runtime_error("Input slot out of range while collecting compiled input dtypes.");
+        }
+
+        const DataType dtype = node.output_dtype.get();
+        if (seen[node.input_slot]) {
+            if (input_dtypes[node.input_slot] != dtype) {
+                throw runtime_error("Inconsistent fused stage input dtype for local input slot.");
+            }
+        } else {
+            input_dtypes[node.input_slot] = dtype;
+            seen[node.input_slot] = 1;
+        }
+    }
+
+    for (uint32_t slot = 0; slot < input_dtypes.size(); ++slot) {
+        if (!seen[slot]) {
+            throw runtime_error("Unused or unresolved fused stage input slot.");
+        }
+    }
+
+    return input_dtypes;
+}
+
+static std::vector<DataType> collectCompiledOutputDTypes(const PhysicalExecutionStage& stage) {
+    std::vector<DataType> output_dtypes;
+    output_dtypes.reserve(stage.outputs.size());
+
+    for (const CompiledStageOutput& output : stage.outputs) {
+        if (output.local_node_idx >= stage.expr.nodes.size()) {
+            throw runtime_error("Stage output local_node_idx out of range while collecting output dtypes.");
+        }
+        const ExprNode& node = stage.expr.nodes[output.local_node_idx];
+        if (!node.output_dtype.isPresent()) {
+            throw runtime_error("Fused stage output node is missing resolved output_dtype.");
+        }
+        output_dtypes.push_back(node.output_dtype.get());
+    }
+
+    return output_dtypes;
+}
+
+static DataType resolveHomogeneousFusedStageDType(const PhysicalExpression& expr) {
+    Optional<DataType> stage_output_dtype = Optional<DataType>::empty();
+
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op == ExprOp::SCALAR_FP) {
+            continue;
+        }
+
+        if (!node.output_dtype.isPresent()) {
+            throw runtime_error("Fused stage node is missing resolved output_dtype.");
+        }
+        if (!node.compute_dtype.isPresent()) {
+            throw runtime_error("Fused stage node is missing resolved compute_dtype.");
+        }
+
+        const DataType node_output_dtype = node.output_dtype.get();
+        const DataType expected_compute_dtype = defaultComputeDType(node_output_dtype);
+
+        if (!stage_output_dtype.isPresent()) {
+            stage_output_dtype = node_output_dtype;
+        } else if (stage_output_dtype.get() != node_output_dtype) {
+            throw runtime_error("Current fused kernel codegen still requires a single resolved output_dtype per fused stage.");
+        }
+        if (node.compute_dtype.get() != expected_compute_dtype) {
+            throw runtime_error(
+                "Current fused kernel codegen still requires compute_dtype to follow the default policy for the "
+                "resolved stage dtype. Per-node compute dtypes are the next patch.");
+        }
+    }
+
+    if (!stage_output_dtype.isPresent()) {
+        return DataType::FP32;
+    }
+
+    return stage_output_dtype.get();
 }
 
 vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const EquationSignature& sig) {
@@ -473,28 +606,27 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         return hit;
 
     string kernel_name = "fused_kernel";
-    std::string cuda_src;
-    if (stage.outputs.size() == 1) {
-        cuda_src = CudaSourceEmitter::emitFlat(stage.expr, sig.dtype, kernel_name);
-    } else {
-        cuda_src = CudaSourceEmitter::emitFlat(stage, sig.dtype, kernel_name);
-    }
+    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name);
 
     vector<string> input_names;
     input_names.reserve(stage.expr.inputs.size());
     for (const NamedInput& input : stage.expr.inputs) {
         input_names.push_back(input.name);
     }
+    const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+    auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
+    const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
 
     cacheInsert(key, compiled);
     return compiled;
 }
 
-shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype) {
+shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr) {
     if (expr.numInputs() != 1) {
         throw std::runtime_error("Reduction stage must have exactly one input.");
     }
@@ -521,7 +653,15 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
         throw std::runtime_error("Reduction stage input must be a local INPUT node.");
     }
 
-    return make_shared<CompiledReduction>(node.op, node.reduction_axes, node.squeeze_axes, inout_dtype, node.compute_dtype);
+    if (!input_node.output_dtype.isPresent()) {
+        throw std::runtime_error("Reduction input node missing resolved output_dtype.");
+    }
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("Reduction node missing resolved output_dtype.");
+    }
+
+    return make_shared<CompiledReduction>(
+        node.op, node.reduction_axes, node.squeeze_axes, input_node.output_dtype.get(), node.output_dtype.get(), node.compute_dtype);
 }
 
 static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
@@ -663,6 +803,13 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
                     input_node.op = ExprOp::INPUT;
                     input_node.input_slot = getOrCreateLocalInputSlot(out_it->second);
 
+                    // This local INPUT stands in for the already-materialized parent value
+                    // crossing a stage boundary, so it should inherit that value's dtype semantics.
+                    input_node.output_dtype = expr.nodes[old_parent].output_dtype;
+                    input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
+                    input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
+                    input_node.backward_compute_dtype = expr.nodes[old_parent].backward_compute_dtype;
+
                     uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
                     stage_expr.nodes.push_back(std::move(input_node));
                     old_to_new_node_idx[old_parent] = new_input_idx;
@@ -684,6 +831,13 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
                     ExprNode input_node;
                     input_node.op = ExprOp::INPUT;
                     input_node.input_slot = getOrCreateLocalInputSlot(out_it->second);
+
+                    // This local INPUT stands in for the already-materialized parent value
+                    // crossing a stage boundary, so it should inherit that value's dtype semantics.
+                    input_node.output_dtype = expr.nodes[old_parent].output_dtype;
+                    input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
+                    input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
+                    input_node.backward_compute_dtype = expr.nodes[old_parent].backward_compute_dtype;
 
                     uint32_t new_input_idx = static_cast<uint32_t>(stage_expr.nodes.size());
                     stage_expr.nodes.push_back(std::move(input_node));
@@ -765,9 +919,22 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
         input_value_ids.push_back(out_it->second);
     }
 
+    if (!parent.output_dtype.isPresent()) {
+        throw std::runtime_error("Reduction parent node is missing resolved output_dtype.");
+    }
+
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
     input_node.input_slot = 0;
+
+    // This local INPUT node represents the already-materialized value produced by
+    // the parent expression feeding the reduction. It should inherit the parent's
+    // value dtype semantics.
+    input_node.output_dtype = parent.output_dtype;
+    input_node.compute_dtype = parent.compute_dtype;
+    input_node.backward_output_dtype = parent.backward_output_dtype;
+    input_node.backward_compute_dtype = parent.backward_compute_dtype;
+
     stage_expr.nodes.push_back(std::move(input_node));
 
     reduction.lhs = 0;
@@ -1115,7 +1282,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs);
                 break;
             case PhysicalExecutionStage::Kind::Reduction:
-                reduction = compileReduction(stage.expr, sig.dtype);
+                reduction = compileReduction(stage.expr);
                 compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
                 break;
             default:
@@ -1140,7 +1307,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     ensureCudaContextCurrent(sig.device_num);
 
     const std::string kernel_name = "fused_kernel";
-    const std::string cuda_src = CudaSourceEmitter::emitSpecializedBroadcast(stage, groups, sig.dtype, kernel_name);
+    const std::string cuda_src = CudaSourceEmitter::emitSpecializedBroadcast(stage, groups, kernel_name);
 
     const std::string cache_key = makeSpecializedBroadcastCacheKey(cuda_src, sig);
     optional<shared_ptr<CompiledEquation>> hit = specializedBroadcastCache.get(cache_key);
@@ -1153,12 +1320,27 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     for (const NamedInput& input : stage.expr.inputs) {
         input_names.push_back(input.name);
     }
+    const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
+    std::vector<DataType> output_dtypes;
+    output_dtypes.reserve(stage.outputs.size());
+    for (const CompiledStageOutput& output : stage.outputs) {
+        if (output.local_node_idx >= stage.expr.nodes.size()) {
+            throw std::runtime_error("Stage output local_node_idx out of range.");
+        }
+        const ExprNode& node = stage.expr.nodes[output.local_node_idx];
+        if (!node.output_dtype.isPresent()) {
+            throw std::runtime_error("Specialized broadcast output node missing resolved output_dtype.");
+        }
+        output_dtypes.push_back(node.output_dtype.get());
+    }
 
     std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     std::vector<char> cubin = linkToCubin(ltoir, sig);
 
-    shared_ptr<CompiledEquation> compiled =
-        loadCubin(EquationCacheKey(canonicalize(stage.expr), sig), cubin, kernel_name, input_names, sig.dtype, sig.device_num);
+    shared_ptr<CompiledEquation> compiled = loadCubin(
+        EquationCacheKey(canonicalize(stage.expr), sig), cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
+    const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
+    compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
 
     if (groups.size() > 1) {
         compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;

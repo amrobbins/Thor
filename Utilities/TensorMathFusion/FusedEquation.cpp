@@ -3,6 +3,7 @@
 #include "Utilities/TensorMathFusion/CudaSourceEmitter.h"
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
 #include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
 
 #include <cuda_runtime.h>
@@ -10,6 +11,7 @@
 #include <stdexcept>
 
 using namespace std;
+using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
 
@@ -466,26 +468,16 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
 }
 
 std::vector<std::string> FusedEquation::getOutputNames() const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::getOutputNames requires compiled outputs.");
-    }
-
     std::vector<std::string> output_names;
-    output_names.reserve(compiled_outputs->final_outputs.size());
-
-    for (const CompiledStageOutput& output : compiled_outputs->final_outputs) {
+    output_names.reserve(outputs_template.outputs.size());
+    for (const NamedOutput& output : outputs_template.outputs) {
         output_names.push_back(output.name);
     }
-
     return output_names;
 }
 
 std::vector<uint64_t> FusedEquation::getOutputShape(const Tensor& input) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::getOutputShape requires compiled outputs.");
-    }
-
-    if (compiled_outputs->final_outputs.size() != 1) {
+    if (outputs_template.outputs.size() != 1) {
         throw std::runtime_error(
             "FusedEquation::getOutputShape was called for an equation with multiple final outputs. "
             "Use getOutputShapes(...) instead.");
@@ -504,11 +496,7 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const Tensor& input) const {
 }
 
 std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std::string, Tensor>& inputs) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::getOutputShape requires compiled outputs.");
-    }
-
-    if (compiled_outputs->final_outputs.size() != 1) {
+    if (outputs_template.outputs.size() != 1) {
         throw std::runtime_error(
             "FusedEquation::getOutputShape was called for an equation with multiple final outputs. "
             "Use getOutputShapes(...) instead.");
@@ -535,9 +523,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
     const std::unordered_map<std::string, Tensor>& inputs) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::getOutputShapes requires compiled outputs.");
-    }
+    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
 
     std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs);
 
@@ -607,7 +593,46 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
     return final_output_shapes;
 }
 
-FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
+EquationSignature FusedEquation::buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math) {
+    cudaDeviceProp prop{};
+    cudaError_t cuda_status = cudaGetDeviceProperties(&prop, device_num);
+    if (cuda_status != cudaSuccess) {
+        throw std::runtime_error(std::string("cudaGetDeviceProperties failed: ") + cudaGetErrorString(cuda_status));
+    }
+
+    EquationSignature sig{};
+    sig.num_inputs = num_inputs;
+    sig.sm_major = prop.major;
+    sig.sm_minor = prop.minor;
+    sig.device_num = device_num;
+    sig.use_fast_math = use_fast_math;
+    return sig;
+}
+
+std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
+    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(namedInputs);
+
+    if (root_values.empty()) {
+        throw std::runtime_error("FusedEquation::compileForInputs requires at least one bound root input.");
+    }
+    std::vector<DataType> root_input_dtypes(root_inputs.size());
+    for (const NamedInput& input : root_inputs) {
+        auto it = root_values.find(input.slot);
+        if (it == root_values.end()) {
+            throw std::runtime_error("Missing bound tensor for root input slot " + std::to_string(input.slot) + ".");
+        }
+        root_input_dtypes[input.slot] = it->second.getDataType();
+    }
+
+    PhysicalOutputs resolved_outputs = outputs_template;
+    resolved_outputs.expr = std::make_shared<PhysicalExpression>(*outputs_template.expr);
+    resolveOutputsDTypesInPlace(resolved_outputs, root_input_dtypes);
+
+    const EquationSignature sig = buildSignature(resolved_outputs.expr->numInputs(), device_num, use_fast_math);
+    return EquationCompiler::compile(resolved_outputs, sig, true);
+}
+
+FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, int device_num, bool use_fast_math) {
     if (device_num < 0) {
         throw std::runtime_error("FusedEquation::compile requires device_num >= 0.");
     }
@@ -630,25 +655,10 @@ FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, TensorDescr
         throw std::runtime_error("FusedEquation::compile device_num is out of range.");
     }
 
-    cudaDeviceProp prop{};
-    cuda_status = cudaGetDeviceProperties(&prop, device_num);
-    if (cuda_status != cudaSuccess) {
-        throw std::runtime_error(std::string("cudaGetDeviceProperties failed: ") + cudaGetErrorString(cuda_status));
-    }
-
-    EquationSignature sig{};
-    sig.num_inputs = outputs.expr->numInputs();
-    sig.dtype = dtype;
-    sig.sm_major = prop.major;
-    sig.sm_minor = prop.minor;
-    sig.device_num = device_num;
-    sig.use_fast_math = use_fast_math;
-
-    std::shared_ptr<CompiledOutputs> compiled = EquationCompiler::compile(outputs, sig, true);
-    return FusedEquation(std::move(compiled), outputs.expr->inputs);
+    return FusedEquation(outputs, device_num, use_fast_math);
 }
 
-FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
+FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_num, bool use_fast_math) {
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("FusedEquation::compile PhysicalExpression output_node is out of range.");
     }
@@ -660,7 +670,7 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, TensorDescr
         .node_idx = expr.output_node,
     });
 
-    return compile(outputs, dtype, device_num, use_fast_math);
+    return compile(outputs, device_num, use_fast_math);
 }
 
 bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions) {
@@ -780,6 +790,9 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
     if (inputs.empty()) {
         throw std::runtime_error("FusedEquation::stampEquation requires at least one input tensor.");
     }
+    if (outputs.size() != compiledEquation->numOutputs()) {
+        throw std::runtime_error("Wrong number of outputs passed to FusedEquation::stampEquation.");
+    }
 
     if (inputs.size() != compiledEquation->numInputs()) {
         throw std::runtime_error("Wrong number of inputs passed to FusedEquation::stampEquation.");
@@ -794,7 +807,7 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
         throw std::runtime_error("First input tensor is not initialized.");
     }
 
-    if (firstInput.getDescriptor().getDataType() != compiledEquation->dtype) {
+    if (firstInput.getDescriptor().getDataType() != compiledEquation->input_dtypes[0]) {
         throw std::runtime_error("Input tensor data type does not match compiled equation data type.");
     }
 
@@ -806,7 +819,7 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
         if (!inputs[i].isInitialized()) {
             throw std::runtime_error("Input tensor is not initialized.");
         }
-        if (inputs[i].getDescriptor().getDataType() != compiledEquation->dtype) {
+        if (inputs[i].getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
             throw std::runtime_error("Input tensor data type mismatch.");
         }
         if (inputs[i].getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
@@ -814,11 +827,12 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
         }
     }
 
-    for (const Tensor& output : outputs) {
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const Tensor& output = outputs[i];
         if (!output.isInitialized()) {
             throw std::runtime_error("Output tensor is not initialized.");
         }
-        if (output.getDescriptor().getDataType() != compiledEquation->dtype) {
+        if (output.getDescriptor().getDataType() != compiledEquation->output_dtypes[i]) {
             throw std::runtime_error("Output tensor data type mismatch.");
         }
         if (output.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
@@ -835,8 +849,8 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     if (!compiledReduction)
         throw std::runtime_error("Tried to stamp reduction on a non-reduction FusedEquation.");
 
-    if (input.getDataType() != compiledReduction->inout_dtype) {
-        throw std::runtime_error("Input dtype does not match compiled reduction dtype.");
+    if (input.getDataType() != compiledReduction->input_dtype) {
+        throw std::runtime_error("Input dtype does not match compiled reduction input dtype.");
     }
 
     std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiledReduction, input, stream.getGpuNum());
@@ -849,7 +863,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
 
     vector<uint64_t> outputDimensions =
         StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
-    TensorDescriptor outputDescriptor(input.getDataType(), outputDimensions);
+    TensorDescriptor outputDescriptor(compiledReduction->output_dtype, outputDimensions);
     Tensor output = Tensor(input.getPlacement(), outputDescriptor);
 
     return make_shared<StampedReduction>(std::move(built), input, output, stream, workspace);
@@ -858,9 +872,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::stamp requires compiled outputs.");
-    }
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
 
     std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
 
@@ -913,7 +925,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             TensorPlacement outputPlacement = layoutInputs[0].getPlacement();
 
             if (!requiresBroadcast) {
-                for (const CompiledStageOutput& produced : stage.outputs) {
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    const CompiledStageOutput& produced = stage.outputs[output_idx];
+
                     auto requested_it = requestedOutputShapes.find(produced.name);
                     const std::vector<uint64_t>* requested_shape =
                         (requested_it != requestedOutputShapes.end()) ? &requested_it->second : nullptr;
@@ -923,7 +937,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
 
                     TensorDescriptor outputDescriptor(
-                        stage.flat->dtype, (requested_shape && !requested_shape->empty()) ? *requested_shape : resolvedOutputDims);
+                        stage.flat->output_dtypes[output_idx],
+                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolvedOutputDims);
                     stageOutputs.emplace_back(outputPlacement, outputDescriptor);
                 }
             } else {
@@ -941,7 +956,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
 
                     TensorDescriptor outputDescriptor(
-                        stage.flat->dtype, (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims);
+                        stage.flat->output_dtypes[output_idx],
+                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims);
                     stageOutputs.emplace_back(outputPlacement, outputDescriptor);
                 }
             }
@@ -1015,9 +1031,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
-    }
+    std::unordered_map<std::string, Tensor> input_map = {{root_inputs[0].name, input}};
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(input_map);
 
     for (CompiledExecutionStage& stage : compiled_outputs->stages) {
         if (stage.kind != stage.Kind::FusedKernel) {
@@ -1045,18 +1060,14 @@ void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) con
                                  "Pass a dict of name -> PhysicalTensor of inputs to run it.");
     }
 
-    const std::string& input_name = root_inputs[0].name;
-    const std::string& output_name = stage.outputs[0].name;
-    std::unordered_map<std::string, Tensor> input_map = {{input_name, input}};
+    const std::string& output_name = outputs_template.outputs[0].name;
     std::unordered_map<std::string, Tensor> output_map = {{output_name, output}};
 
     run(input_map, output_map, stream);
 }
 
 void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
-    }
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
 
     for (CompiledExecutionStage& stage : compiled_outputs->stages) {
         if (stage.kind != stage.Kind::FusedKernel) {
@@ -1083,9 +1094,7 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, T
 }
 
 void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
-    }
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs({{root_inputs[0].name, input}});
 
     for (CompiledExecutionStage& stage : compiled_outputs->stages) {
         if (stage.kind != stage.Kind::FusedKernel) {
@@ -1110,9 +1119,7 @@ void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Ten
 void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
                         std::unordered_map<std::string, Tensor>& outputs,
                         Stream& stream) const {
-    if (!compiled_outputs) {
-        throw std::runtime_error("FusedEquation::run requires compiled outputs.");
-    }
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
 
     if (compiled_outputs->stages.empty()) {
         throw std::runtime_error("Expression has no execution stages.");

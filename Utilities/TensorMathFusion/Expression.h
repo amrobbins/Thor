@@ -78,10 +78,15 @@ struct ExprNode {
     uint32_t input_slot = UINT32_MAX;
     double scalar_fp = 0.0;
 
+    // Value semantics for this node.
+    Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty();
+    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty();
+    Optional<TensorDescriptor::DataType> backward_output_dtype = Optional<TensorDescriptor::DataType>::empty();
+    Optional<TensorDescriptor::DataType> backward_compute_dtype = Optional<TensorDescriptor::DataType>::empty();
+
     // for reduction nodes only
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty();
 };
 
 struct NamedInput {

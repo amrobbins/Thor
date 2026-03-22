@@ -34,8 +34,8 @@ StampedReduction::StampedReduction(
         assert(workspace.isPresent());
         assert(workspace.get().getArraySizeInBytes() >= built_reduction->workspace_bytes);
     }
-    assert(input.getDataType() == built_reduction->key.inout_dtype);
-    assert(output.getDataType() == built_reduction->key.inout_dtype);
+    assert(input.getDataType() == built_reduction->key.input_dtype);
+    assert(output.getDataType() == built_reduction->key.output_dtype);
 }
 
 void StampedReduction::run() { runOn(stream); }
@@ -287,7 +287,8 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
                           input_dims,
                           compiled_reduction->reduction_axes,
                           compiled_reduction->squeeze_axes,
-                          compiled_reduction->inout_dtype,
+                          compiled_reduction->input_dtype,
+                          compiled_reduction->output_dtype,
                           compiled_reduction->compute_dtype,
                           device_num);
 
@@ -300,9 +301,9 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
     const std::vector<uint64_t> output_dims = computeReductionOutputDims(input_dims,
                                                                          built->key.reduction_axes,
                                                                          /*squeeze_axes=*/{});
-    built->a_desc = createCudnnTensorDescriptor(input_dims, built->key.inout_dtype);
-    built->c_desc = createCudnnTensorDescriptor(output_dims, built->key.inout_dtype);
+    built->a_desc = createCudnnTensorDescriptor(input_dims, built->key.input_dtype);
     built->reduce_desc = createCudnnReduceDescriptor(built->key.op, built->key.compute_dtype);
+    built->c_desc = createCudnnTensorDescriptor(output_dims, built->key.output_dtype);
 
     built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
 
