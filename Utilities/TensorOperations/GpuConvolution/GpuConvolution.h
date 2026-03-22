@@ -2,6 +2,7 @@
 
 #include "ConvolutionKernelRequirement.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Cache/LruCache.h"
 #include "Utilities/Common/Optional.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
@@ -87,20 +88,22 @@ class GpuConvolution {
     void printBackwardFilterKernelInfo(ConvolutionKernelRequirement convolutionKernelRequirement);
 
    private:
-    std::mutex forwardMutex;
-    std::mutex backwardDataMutex;
-    std::mutex backwardFilterMutex;
+    std::mutex measureMutex;  // FIXME: This could be per GPU
 
-    std::unordered_map<ConvolutionKernelRequirement, cudnnConvolutionFwdAlgoPerf_t> optimalForwardKernels;
-    std::unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdDataAlgoPerf_t> optimalBackwardDataKernels;
-    std::unordered_map<ConvolutionKernelRequirement, cudnnConvolutionBwdFilterAlgoPerf_t> optimalBackwardFilterKernels;
+    LruCacheThreadSafe<ConvolutionKernelRequirement, cudnnConvolutionFwdAlgoPerf_t> optimalForwardKernels;
+    LruCacheThreadSafe<ConvolutionKernelRequirement, cudnnConvolutionBwdDataAlgoPerf_t> optimalBackwardDataKernels;
+    LruCacheThreadSafe<ConvolutionKernelRequirement, cudnnConvolutionBwdFilterAlgoPerf_t> optimalBackwardFilterKernels;
 
     static constexpr int MAX_ALGOS = 5000;
 
     static constexpr bool useCudnnForwardBias = true;
     static constexpr bool useCudnnBackwardBias = true;
 
-    GpuConvolution();
+    static constexpr std::size_t MAX_CONV_KERNEL_CACHE_OCCUPANCY = 25000;
+    GpuConvolution()
+        : optimalForwardKernels(MAX_CONV_KERNEL_CACHE_OCCUPANCY),
+          optimalBackwardDataKernels(MAX_CONV_KERNEL_CACHE_OCCUPANCY),
+          optimalBackwardFilterKernels(MAX_CONV_KERNEL_CACHE_OCCUPANCY) {}
 
     void chooseOptimalKernelBackwardData(ConvolutionKernelRequirement convolutionKernelRequirement, Stream stream);
     void chooseOptimalKernelBackwardFilter(ConvolutionKernelRequirement convolutionKernelRequirement, Stream stream);
