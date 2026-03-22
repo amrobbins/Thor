@@ -298,6 +298,7 @@ Args:
         .def(
             "compile",
             [](const Outputs& self, DataType dtype, int device_num, bool use_fast_math) {
+                nb::gil_scoped_release release;
                 return FusedEquation::compile(self.physicalOutputs(), dtype, device_num, use_fast_math);
             },
             "dtype"_a,
@@ -377,27 +378,36 @@ Returns
 -------
 thor.physical.FusedEquation
     The compiled fused equation.
+)nbdoc");
 
-Example
+    expr.def_static(
+        "compile",
+        [](const Outputs& self, DataType dtype, int device_num, bool use_fast_math) {
+            nb::gil_scoped_release release;
+            return FusedEquation::compile(self.physicalOutputs(), dtype, device_num, use_fast_math);
+        },
+        "expr"_a,
+        "dtype"_a,
+        "device_num"_a = 0,
+        "use_fast_math"_a = false,
+        R"nbdoc(
+Compile an expression into a fused equation.
+
+Parameters
+----------
+expr : thor.physical.Expression
+    The expression to compile.
+dtype : thor.DataType
+    The tensor data type to target.
+device_num : int, default 0
+    The GPU device number.
+use_fast_math : bool, default False
+    Whether to enable fast-math optimizations during compilation.
+
+Returns
 -------
-x = thor.physical.Expression.input(0)
-y = thor.physical.Expression.input(1)
-z = thor.physical.Expression.input(2)
-
-expr = (x / y) * z + 1.5
-eq = thor.physical.Expression.compile(
-    expr,
-    dtype=thor.DataType.fp32,
-    device_num=0,
-)
-
-eq.run({'x': x_tensor, 'y': y_tensor, 'z': z_tensor}, out_tensor, stream)
-
-# or
-
-stamped = eq.stamp({'x': x_tensor, 'y': y_tensor, 'z': z_tensor}, stream)
-stamped.run()
-out = stamped.output_tensor
+thor.physical.FusedEquation
+    The compiled fused equation.
 )nbdoc");
 }
 
@@ -484,6 +494,81 @@ inputs: dict[str, PhysicalTensor]
 outputs: dict[str, PhysicalTensor]
     A dict mapping output names to tensors
 )nbdoc");
+
+    fused_equation.def("output_names",
+                       &FusedEquation::getOutputNames,
+                       R"nbdoc(
+Returns
+-------
+list[int]
+    A list of names of the outputs from this equation.
+)nbdoc");
+
+    fused_equation.def("output_shape",
+                       nb::overload_cast<const Tensor&>(&FusedEquation::getOutputShape, nb::const_),
+                       "input"_a,
+                       R"nbdoc(
+Get the shape of the output tensor for this equation, from the input tensors.
+
+Parameters
+----------
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+
+Returns
+-------
+list[int]
+    The output tensor dimensions.
+)nbdoc");
+    fused_equation.def("output_shape",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&>(&FusedEquation::getOutputShape, nb::const_),
+                       "inputs"_a,
+                       R"nbdoc(
+Get the shape of the output tensor for this equation, from the input tensors.
+
+Parameters
+----------
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+
+Returns
+-------
+list[int]
+    The output tensor dimensions.
+)nbdoc");
+
+    fused_equation.def("output_shapes",
+                       nb::overload_cast<const Tensor&>(&FusedEquation::getOutputShapes, nb::const_),
+                       "input"_a,
+                       R"nbdoc(
+Get the shape of the output tensor for this equation, from the input tensors.
+
+Parameters
+----------
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+
+Returns
+-------
+dict[str, list[int]]
+    output name -> tensor dimensions.
+)nbdoc");
+    fused_equation.def("output_shapes",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&>(&FusedEquation::getOutputShapes, nb::const_),
+                       "inputs"_a,
+                       R"nbdoc(
+Get the shape of the output tensor for this equation, from the input tensors.
+
+Parameters
+----------
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+
+Returns
+-------
+dict[str, list[int]]
+    output name -> tensor dimensions.
+)nbdoc");
 }
 
 void bind_stamped_equation(nb::module_& physical) {
@@ -496,8 +581,8 @@ void bind_stamped_equation(nb::module_& physical) {
 Execute the stamped fused equation on the bound tensors.
         )nbdoc");
 
-    stamped_equation.def_prop_ro(
-        "output_tensor",
+    stamped_equation.def(
+        "output",
         [](const StampedExecutionPlan& self) { return self.output(); },
         R"nbdoc(
 Return the output tensor owned by this equation instance. Valid when the equation has a single output tensor.

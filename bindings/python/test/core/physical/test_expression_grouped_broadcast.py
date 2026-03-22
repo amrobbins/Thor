@@ -140,7 +140,7 @@ def test_outputs_grouped_broadcast_mixed_domains_numerical(dtype: thor.DataType)
     assert list(y_shift_cpu.numpy().shape) == [1, 3, 4]
 
     with pytest.raises(RuntimeError):
-        stamped.output_tensor
+        stamped.output()
 
 
 @pytest.mark.cuda
@@ -221,7 +221,7 @@ def test_outputs_mixed_broadcast_and_flat_domains_numerical(dtype: thor.DataType
     assert list(flat_square_cpu.numpy().shape) == [2, 1, 4]
 
     with pytest.raises(RuntimeError):
-        stamped.output_tensor
+        stamped.output()
 
 
 @pytest.mark.cuda

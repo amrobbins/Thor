@@ -342,7 +342,7 @@ def _build_broadcast_multi_multiple_shapes_disjoint_inputs(dtype: thor.DataType)
 
 
 CASES = [
-    # PerfCase("flat_single_output_compute_bound", "single", _build_flat_single_compute_bound),
+    PerfCase("flat_single_output_compute_bound", "single", _build_flat_single_compute_bound),
     PerfCase("flat_single_output", "single", _build_flat_single),
     PerfCase("flat_multi_output", "multi", _build_flat_multi),
     PerfCase(

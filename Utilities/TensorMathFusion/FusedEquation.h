@@ -85,9 +85,12 @@ class FusedEquation {
     void run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const;
     void run(const std::unordered_map<std::string, Tensor>& inputs, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const;
 
-    static Tensor createDeviceBroadcastInfo(const std::vector<Tensor>& inputs,
-                                            const std::vector<uint64_t>& outputDimensions,
-                                            Stream stream);
+    std::vector<std::string> getOutputNames() const;
+
+    std::vector<uint64_t> getOutputShape(const Tensor& input) const;
+    std::vector<uint64_t> getOutputShape(const std::unordered_map<std::string, Tensor>& inputs) const;
+    std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const Tensor& input) const;
+    std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const std::unordered_map<std::string, Tensor>& inputs) const;
 
    private:
     explicit FusedEquation(std::shared_ptr<CompiledOutputs> compiled_outputs, std::vector<NamedInput> root_inputs)

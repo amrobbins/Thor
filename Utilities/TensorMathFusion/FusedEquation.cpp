@@ -352,6 +352,261 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
     return groups;
 }
 
+static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
+    if (inputs.empty()) {
+        throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
+    }
+
+    std::vector<std::vector<uint64_t>> originalInputDimensions = inputs;
+
+    uint64_t maxRank = 0;
+    for (const std::vector<uint64_t>& dims : inputs) {
+        if (dims.empty()) {
+            throw std::runtime_error("Input tensor has 0 dimensions, which is not supported.");
+        }
+        maxRank = std::max<uint64_t>(maxRank, dims.size());
+    }
+
+    std::vector<std::vector<uint64_t>> paddedInputs;
+    paddedInputs.reserve(inputs.size());
+
+    for (const std::vector<uint64_t>& oldDims : inputs) {
+        if (oldDims.size() == maxRank) {
+            paddedInputs.push_back(oldDims);
+            continue;
+        }
+
+        std::vector<uint64_t> paddedDims(maxRank - oldDims.size(), 1);
+        paddedDims.insert(paddedDims.end(), oldDims.begin(), oldDims.end());
+        paddedInputs.push_back(std::move(paddedDims));
+    }
+
+    outputDimensions.clear();
+    outputDimensions.assign(maxRank, 1);
+
+    for (uint64_t axis = 0; axis < maxRank; ++axis) {
+        uint64_t resolvedDim = 1;
+
+        for (const std::vector<uint64_t>& dims : paddedInputs) {
+            uint64_t dim = dims[axis];
+
+            if (dim == 1) {
+                continue;
+            }
+
+            if (resolvedDim == 1) {
+                resolvedDim = dim;
+            } else if (resolvedDim != dim) {
+                std::ostringstream err;
+                err << "Input tensors are not broadcast-compatible at axis " << axis << ". "
+                    << "Encountered dimension " << resolvedDim << " and dimension " << dim << ". "
+                    << "Input shapes: ";
+                for (size_t i = 0; i < originalInputDimensions.size(); ++i) {
+                    const std::vector<uint64_t>& inDims = originalInputDimensions[i];
+                    err << "[";
+                    for (size_t j = 0; j < inDims.size(); ++j) {
+                        err << inDims[j];
+                        if (j + 1 < inDims.size()) {
+                            err << ", ";
+                        }
+                    }
+                    err << "]";
+                    if (i + 1 < originalInputDimensions.size()) {
+                        err << ", ";
+                    }
+                }
+                throw std::runtime_error(err.str());
+            }
+        }
+
+        outputDimensions[axis] = resolvedDim;
+    }
+
+    bool requiresBroadcast = false;
+    for (const std::vector<uint64_t>& dims : paddedInputs) {
+        if (dims != outputDimensions) {
+            requiresBroadcast = true;
+            break;
+        }
+    }
+
+    return requiresBroadcast;
+}
+
+static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
+                                                             size_t output_idx,
+                                                             const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    if (output_idx >= stage.outputs.size()) {
+        throw std::runtime_error("resolveOutputDimsForStageOutput output_idx out of range.");
+    }
+
+    std::unordered_set<uint32_t> used_input_slots;
+    collectReferencedLocalInputSlots(stage.expr, stage.outputs[output_idx].local_node_idx, used_input_slots);
+
+    if (used_input_slots.empty()) {
+        throw std::runtime_error("Shape inference currently requires each output to depend on at least one tensor input.");
+    }
+
+    std::vector<std::vector<uint64_t>> subset_input_dims;
+    subset_input_dims.reserve(used_input_slots.size());
+
+    for (uint32_t local_slot = 0; local_slot < stage_input_dims.size(); ++local_slot) {
+        if (used_input_slots.contains(local_slot)) {
+            subset_input_dims.push_back(stage_input_dims[local_slot]);
+        }
+    }
+
+    if (subset_input_dims.empty()) {
+        throw std::runtime_error("Failed to collect subset input shapes for stage output.");
+    }
+
+    std::vector<uint64_t> output_dims;
+    resolveLayoutFromDims(subset_input_dims, output_dims);
+    return output_dims;
+}
+
+std::vector<std::string> FusedEquation::getOutputNames() const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::getOutputNames requires compiled outputs.");
+    }
+
+    std::vector<std::string> output_names;
+    output_names.reserve(compiled_outputs->final_outputs.size());
+
+    for (const CompiledStageOutput& output : compiled_outputs->final_outputs) {
+        output_names.push_back(output.name);
+    }
+
+    return output_names;
+}
+
+std::vector<uint64_t> FusedEquation::getOutputShape(const Tensor& input) const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::getOutputShape requires compiled outputs.");
+    }
+
+    if (compiled_outputs->final_outputs.size() != 1) {
+        throw std::runtime_error(
+            "FusedEquation::getOutputShape was called for an equation with multiple final outputs. "
+            "Use getOutputShapes(...) instead.");
+    }
+
+    if (root_inputs.size() != 1) {
+        throw std::runtime_error("FusedEquation::getOutputShape was passed a single input, but this equation requires " +
+                                 std::to_string(root_inputs.size()) + " inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
+    }
+
+    std::unordered_map<std::string, Tensor> input_map = {
+        {root_inputs[0].name, input},
+    };
+
+    return getOutputShape(input_map);
+}
+
+std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std::string, Tensor>& inputs) const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::getOutputShape requires compiled outputs.");
+    }
+
+    if (compiled_outputs->final_outputs.size() != 1) {
+        throw std::runtime_error(
+            "FusedEquation::getOutputShape was called for an equation with multiple final outputs. "
+            "Use getOutputShapes(...) instead.");
+    }
+
+    if (root_inputs.size() != inputs.size()) {
+        throw std::runtime_error("FusedEquation::getOutputShape was passed " + to_string(inputs.size()) +
+                                 " inputs, but this equation requires " + std::to_string(root_inputs.size()) +
+                                 " inputs. Pass a dict of name -> Tensor to getOutputShape(...).");
+    }
+
+    std::unordered_map<std::string, std::vector<uint64_t>> output_shapes = getOutputShapes(inputs);
+    assert(output_shapes.size() == 1);
+    return output_shapes.begin()->second;
+}
+
+std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(const Tensor& input) const {
+    std::unordered_map<std::string, Tensor> input_map = {
+        {root_inputs[0].name, input},
+    };
+
+    return getOutputShapes(input_map);
+}
+
+std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
+    const std::unordered_map<std::string, Tensor>& inputs) const {
+    if (!compiled_outputs) {
+        throw std::runtime_error("FusedEquation::getOutputShapes requires compiled outputs.");
+    }
+
+    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs);
+
+    if (root_values.empty()) {
+        throw std::runtime_error("FusedEquation::getOutputShapes requires at least one bound root input.");
+    }
+
+    std::unordered_map<uint32_t, std::vector<uint64_t>> value_dims;
+    value_dims.reserve(root_values.size() + compiled_outputs->stages.size());
+
+    for (const auto& [value_id, tensor] : root_values) {
+        value_dims.emplace(value_id, tensor.getDimensions());
+    }
+
+    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        std::vector<std::vector<uint64_t>> stage_input_dims;
+        stage_input_dims.reserve(stage.input_value_ids.size());
+
+        for (uint32_t value_id : stage.input_value_ids) {
+            auto it = value_dims.find(value_id);
+            if (it == value_dims.end()) {
+                throw std::runtime_error("Missing input shape for staged output-shape inference.");
+            }
+            stage_input_dims.push_back(it->second);
+        }
+
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            std::vector<uint64_t> resolved_output_dims;
+            bool requiresBroadcast = resolveLayoutFromDims(stage_input_dims, resolved_output_dims);
+
+            if (!requiresBroadcast) {
+                for (const CompiledStageOutput& produced : stage.outputs) {
+                    value_dims[produced.value_id] = resolved_output_dims;
+                }
+            } else {
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    value_dims[stage.outputs[output_idx].value_id] = resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+                }
+            }
+        } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
+            if (!stage.reduction) {
+                throw std::runtime_error("Missing compiled reduction stage.");
+            }
+
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduction stage expected exactly one input and one output.");
+            }
+
+            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
+                stage_input_dims[0], stage.reduction->reduction_axes, stage.reduction->squeeze_axes);
+        } else {
+            throw std::runtime_error("Unknown execution stage kind in getOutputShapes.");
+        }
+    }
+
+    std::unordered_map<std::string, std::vector<uint64_t>> final_output_shapes;
+    final_output_shapes.reserve(compiled_outputs->final_outputs.size());
+
+    for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
+        auto it = value_dims.find(final_output.value_id);
+        if (it == value_dims.end()) {
+            throw std::runtime_error("Missing final output shape for output: " + final_output.name);
+        }
+        final_output_shapes.emplace(final_output.name, it->second);
+    }
+
+    return final_output_shapes;
+}
+
 FusedEquation FusedEquation::compile(const PhysicalOutputs& outputs, TensorDescriptor::DataType dtype, int device_num, bool use_fast_math) {
     if (device_num < 0) {
         throw std::runtime_error("FusedEquation::compile requires device_num >= 0.");
