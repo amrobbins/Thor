@@ -5,7 +5,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "Utilities/TensorMathFusion/BroadcastStructs.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"

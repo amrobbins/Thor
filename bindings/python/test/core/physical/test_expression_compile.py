@@ -633,8 +633,9 @@ def test_fused_equation_output_shapes_rejects_unexpected_input_name():
     eq = ex.compile(expr, dtype=thor.DataType.fp32, device_num=0, use_fast_math=False)
     x_gpu = _gpu_tensor([2, 3], thor.DataType.fp32)
 
-    with pytest.raises(RuntimeError, match="Missing required"):
+    with pytest.raises(RuntimeError, match="Unexpected input"):
         eq.output_shapes({
+            "x": x_gpu,
             "wrong_name": x_gpu
         })
 

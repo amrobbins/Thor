@@ -3,6 +3,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
 
+#include "Utilities/Cache/LruCache.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -362,9 +363,8 @@ class CublasMatrixMultiply {
     static const float BETA_ACCUMULATE;
     static const float BETA_CLEAR;
 
-    std::unordered_map<CublasKernelRequirement, CublasKernel> optimalKernels;
-    std::unordered_map<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
-
+    LruCacheThreadSafe<CublasKernelRequirement, CublasKernel> optimalKernels;
+    LruCacheThreadSafe<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
     std::mutex mtx;
 
     class Youreusingitwrong : public std::exception {
@@ -377,7 +377,8 @@ class CublasMatrixMultiply {
         std::string message;
     };
 
-    CublasMatrixMultiply() {}
+    static constexpr std::size_t MAX_KERNEL_CACHE_OCCUPANCY = 25000;
+    CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
     cudaDataType_t mapToCublasDataType(TensorDescriptor::DataType dataType);
 

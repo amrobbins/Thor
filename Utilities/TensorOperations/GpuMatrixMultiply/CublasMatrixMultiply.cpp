@@ -162,11 +162,9 @@ void CublasMatrixMultiply::gemm(Tensor A,
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    CublasMatrixMultiply::instance().mtx.lock();
-    auto it = optimalKernels.find(cublasKernelRequirement);
-    assert(it != optimalKernels.end());
-    CublasKernel cublasKernel = it->second;
-    CublasMatrixMultiply::instance().mtx.unlock();
+    auto maybeCublasKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
+    assert(maybeCublasKernel.has_value());
+    CublasKernel cublasKernel = maybeCublasKernel.value();
 
     // Check byte size of workspace
     if (workspace.isPresent()) {
@@ -360,11 +358,9 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
     OperationType operationType(CUBLAS_COMPUTE_32F, CUDA_R_32F, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda, ABCDDataTypeCuda);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    // If there is already a known kernel, use it. Otherwise a heuristic search will be performed and the kernel remembered.
-    CublasMatrixMultiply::instance().mtx.lock();
-    if (optimalKernels.count(cublasKernelRequirement) == 1) {
-        cublasLtMatmulAlgo_t algorithm = optimalKernels[cublasKernelRequirement].getAlgorithm(stream.getGpuNum());
-        CublasMatrixMultiply::instance().mtx.unlock();
+    // If there is already a known kernel, use it. Otherwise, a heuristic search will be performed and the kernel remembered.
+    if (auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
+        cublasLtMatmulAlgo_t algorithm = optimalKernel->getAlgorithm(stream.getGpuNum());
 
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
@@ -383,10 +379,22 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                       0,
                                       stream);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+        cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
         return;
-    } else if (knownHeuristicAlgorithms.count(cublasKernelRequirement) == 1) {
-        cublasLtMatmulAlgo_t algorithm = knownHeuristicAlgorithms[cublasKernelRequirement];
-        CublasMatrixMultiply::instance().mtx.unlock();
+    } else if (auto heuristicAlgorithm = CublasMatrixMultiply::instance().knownHeuristicAlgorithms.get(cublasKernelRequirement);
+               heuristicAlgorithm.has_value()) {
+        cublasLtMatmulAlgo_t algorithm = *heuristicAlgorithm;
 
         cublasStatus = cublasLtMatmul(MachineEvaluator::instance().getCublasLtHandle(stream.getGpuNum()),
                                       operationDesc,
@@ -405,9 +413,20 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                       0,
                                       stream);
         assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+        cublasStatus = cublasLtMatrixLayoutDestroy(DDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatrixLayoutDestroy(CDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatrixLayoutDestroy(BDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatrixLayoutDestroy(ADesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        cublasStatus = cublasLtMatmulDescDestroy(operationDesc);
+        assert(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
         return;
     }
-    CublasMatrixMultiply::instance().mtx.unlock();
 
     cublasLtMatmulPreference_t searchPreferences;
     cublasStatus = cublasLtMatmulPreferenceCreate(&searchPreferences);
@@ -458,9 +477,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                       stream);
         if (cublasStatus == CUBLAS_STATUS_SUCCESS) {
             kernelLaunchedSuccessfully = true;
-            CublasMatrixMultiply::instance().mtx.lock();
-            knownHeuristicAlgorithms[cublasKernelRequirement] = results[i].algo;
-            CublasMatrixMultiply::instance().mtx.unlock();
+            CublasMatrixMultiply::instance().knownHeuristicAlgorithms.put(cublasKernelRequirement, results[i].algo);
         }
     }
 
@@ -501,9 +518,7 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                 // FIXME: may need an algo per gpu
                 // FIXME: add their top N heuristic kernels to the set of optimal candidates, will need to change CublasKernel to take
                 // algorithm in constructor
-                CublasMatrixMultiply::instance().mtx.lock();
-                knownHeuristicAlgorithms[cublasKernelRequirement] = results[i].algo;
-                CublasMatrixMultiply::instance().mtx.unlock();
+                CublasMatrixMultiply::instance().knownHeuristicAlgorithms.put(cublasKernelRequirement, results[i].algo);
             }
         }
     }
@@ -830,11 +845,14 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
                                                          ldD,
                                                          true);
         CublasKernelRequirement workspaceCublasKernelRequirement(kernelRequirementWithWorkspace, operationType);
-        CublasMatrixMultiply::instance().mtx.lock();
-        if (optimalKernels[noWorkspaceCublasKernelRequirement].getAverageRunTimeMilliseconds() <
-            optimalKernels[workspaceCublasKernelRequirement].getAverageRunTimeMilliseconds())
-            optimalKernels[workspaceCublasKernelRequirement] = optimalKernels[noWorkspaceCublasKernelRequirement];
-        CublasMatrixMultiply::instance().mtx.unlock();
+        std::lock_guard<std::mutex> lock(CublasMatrixMultiply::instance().mtx);
+        auto noWorkspaceKernel = CublasMatrixMultiply::instance().optimalKernels.get(noWorkspaceCublasKernelRequirement);
+        auto workspaceKernel = CublasMatrixMultiply::instance().optimalKernels.get(workspaceCublasKernelRequirement);
+        assert(noWorkspaceKernel.has_value());
+        assert(workspaceKernel.has_value());
+        if (noWorkspaceKernel->getAverageRunTimeMilliseconds() < workspaceKernel->getAverageRunTimeMilliseconds()) {
+            CublasMatrixMultiply::instance().optimalKernels.put(workspaceCublasKernelRequirement, *noWorkspaceKernel);
+        }
     }
 }
 
@@ -927,15 +945,11 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    // CublasMatrixMultiply::instance().mtx.lock();
-
     // Will only evaluate kernel once per gpu type
-    if (optimalKernels.count(cublasKernelRequirement) == 1) {
-        CublasKernel optimalKernel = optimalKernels[cublasKernelRequirement];
+    if (auto optimalKernel = optimalKernels.get(cublasKernelRequirement); optimalKernel.has_value()) {
         bool kernelWillRunOnGpu;
-        unsigned int workspaceSizeInBytes = optimalKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+        unsigned int workspaceSizeInBytes = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
         assert(kernelWillRunOnGpu);
-        // CublasMatrixMultiply::instance().mtx.unlock();
         return workspaceSizeInBytes > 0 ? true : false;
     }
 
@@ -1289,7 +1303,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     bool bestKernelHasWorkspace = bestKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu) > 0;
     assert(kernelWillRunOnGpu);
 
-    optimalKernels[cublasKernelRequirement] = bestKernel;
+    optimalKernels.put(cublasKernelRequirement, bestKernel);
 
     // If the best one that may have a workspace has no workspace, then this is also the best one that may not have a workspace.
     if (allowWorkspaces && !bestKernelHasWorkspace) {
@@ -1308,7 +1322,7 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                             false);
 
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirementWithoutWorkspace, operationType);
-        optimalKernels[noWorkspaceCublasKernelRequirement] = bestKernel;
+        optimalKernels.put(noWorkspaceCublasKernelRequirement, bestKernel);
     }
 
     // CublasMatrixMultiply::instance().mtx.unlock();
@@ -1464,10 +1478,9 @@ unsigned int CublasMatrixMultiply::getGemmWorkspaceSizeInBytes(int gpuNum,
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
-    CublasMatrixMultiply::instance().mtx.lock();
-    assert(optimalKernels.count(cublasKernelRequirement) == 1);
-    unsigned int workspaceSize = optimalKernels[cublasKernelRequirement].getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
-    CublasMatrixMultiply::instance().mtx.unlock();
+    auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
+    assert(optimalKernel.has_value());
+    unsigned int workspaceSize = optimalKernel->getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
 
     return workspaceSize;
 }
@@ -1495,19 +1508,16 @@ double CublasMatrixMultiply::getOptimalKernelTime(string gpuType,
 
     string ABCDataTypeString = ABCDataType == TensorDescriptor::DataType::FP32 ? "FP32" : "FP16";
 
-    CublasMatrixMultiply::instance().mtx.lock();
-    auto it = optimalKernels.find(cublasKernelRequirement);
-    if (it == optimalKernels.end()) {
+    auto optimalKernel = CublasMatrixMultiply::instance().optimalKernels.get(cublasKernelRequirement);
+    if (!optimalKernel.has_value()) {
         string message =
             "CublasMatrixMultiply::getOptimalKernelTime() : Kernel time is not known because kernel time has not been measured for "
             "gpuType " +
             gpuType + " rowsA " + std::to_string(rowsA) + " colsA " + std::to_string(colsA) + " colsB " + std::to_string(colsB) +
             "dataType " + ABCDataTypeString;
-        CublasMatrixMultiply::instance().mtx.unlock();
         throw(CublasMatrixMultiply::Youreusingitwrong(message));
     }
-    double averageRunTimeMilliseconds = it->second.getAverageRunTimeMilliseconds();
-    CublasMatrixMultiply::instance().mtx.unlock();
+    double averageRunTimeMilliseconds = optimalKernel->getAverageRunTimeMilliseconds();
 
     return averageRunTimeMilliseconds;
 }

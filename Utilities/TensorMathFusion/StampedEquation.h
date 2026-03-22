@@ -13,8 +13,8 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
+#include "../Cache/LruCache.h"
 #include "Utilities/TensorMathFusion/CompiledEquation.h"
-#include "Utilities/TensorMathFusion/LruCache.h"
 
 namespace ThorImplementation {
 
