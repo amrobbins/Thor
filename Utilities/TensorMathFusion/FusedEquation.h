@@ -61,15 +61,9 @@ struct CompiledOutputs {
 
 class FusedEquation {
    public:
-    static FusedEquation compile(const PhysicalExpression& expr,
-                                 TensorDescriptor::DataType dtype,
-                                 int device_num,
-                                 bool use_fast_math = false);
+    static FusedEquation compile(const PhysicalExpression& expr, int device_num, bool use_fast_math = false);
 
-    static FusedEquation compile(const PhysicalOutputs& outputs,
-                                 TensorDescriptor::DataType dtype,
-                                 int device_num,
-                                 bool use_fast_math = false);
+    static FusedEquation compile(const PhysicalOutputs& outputs, int device_num, bool use_fast_math = false);
 
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                              const Stream& stream,
@@ -92,8 +86,11 @@ class FusedEquation {
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const std::unordered_map<std::string, Tensor>& inputs) const;
 
    private:
-    explicit FusedEquation(std::shared_ptr<CompiledOutputs> compiled_outputs, std::vector<NamedInput> root_inputs)
-        : compiled_outputs(std::move(compiled_outputs)), root_inputs(std::move(root_inputs)) {}
+    explicit FusedEquation(PhysicalOutputs outputs_template, int device_num, bool use_fast_math)
+        : outputs_template(std::move(outputs_template)),
+          root_inputs(this->outputs_template.expr ? this->outputs_template.expr->inputs : std::vector<NamedInput>{}),
+          device_num(device_num),
+          use_fast_math(use_fast_math) {}
 
     [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
                                                                  std::vector<Tensor>& inputs,
@@ -106,9 +103,16 @@ class FusedEquation {
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
 
+    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
+
+    [[nodiscard]] static EquationSignature buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math);
+
     [[nodiscard]] std::unordered_map<uint32_t, Tensor> bindRootInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
-    const std::shared_ptr<CompiledOutputs> compiled_outputs;
+
+    const PhysicalOutputs outputs_template;
     const std::vector<NamedInput> root_inputs;
+    const int device_num;
+    const bool use_fast_math;
 };
 
 struct SpecializedBroadcastAxis {

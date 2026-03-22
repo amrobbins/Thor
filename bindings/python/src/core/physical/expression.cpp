@@ -297,11 +297,10 @@ Args:
     nb::class_<Outputs>(expr, "Outputs")
         .def(
             "compile",
-            [](const Outputs& self, DataType dtype, int device_num, bool use_fast_math) {
+            [](const Outputs& self, int device_num, bool use_fast_math) {
                 nb::gil_scoped_release release;
-                return FusedEquation::compile(self.physicalOutputs(), dtype, device_num, use_fast_math);
+                return FusedEquation::compile(self.physicalOutputs(), device_num, use_fast_math);
             },
-            "dtype"_a,
             "device_num"_a = 0,
             "use_fast_math"_a = false)
         .def("output_names", [](const Outputs& self) {
@@ -352,12 +351,11 @@ Returns:
 
     expr.def_static(
         "compile",
-        [](const Expression& expr, DataType dtype, int device_num, bool use_fast_math) {
+        [](const Expression& expr, int device_num, bool use_fast_math) {
             nb::gil_scoped_release release;
-            return FusedEquation::compile(expr.expression(), dtype, device_num, use_fast_math);
+            return FusedEquation::compile(expr.expression(), device_num, use_fast_math);
         },
         "expr"_a,
-        "dtype"_a,
         "device_num"_a = 0,
         "use_fast_math"_a = false,
         R"nbdoc(
@@ -382,12 +380,11 @@ thor.physical.FusedEquation
 
     expr.def_static(
         "compile",
-        [](const Outputs& self, DataType dtype, int device_num, bool use_fast_math) {
+        [](const Outputs& self, int device_num, bool use_fast_math) {
             nb::gil_scoped_release release;
-            return FusedEquation::compile(self.physicalOutputs(), dtype, device_num, use_fast_math);
+            return FusedEquation::compile(self.physicalOutputs(), device_num, use_fast_math);
         },
         "expr"_a,
-        "dtype"_a,
         "device_num"_a = 0,
         "use_fast_math"_a = false,
         R"nbdoc(
@@ -397,8 +394,6 @@ Parameters
 ----------
 expr : thor.physical.Expression
     The expression to compile.
-dtype : thor.DataType
-    The tensor data type to target.
 device_num : int, default 0
     The GPU device number.
 use_fast_math : bool, default False

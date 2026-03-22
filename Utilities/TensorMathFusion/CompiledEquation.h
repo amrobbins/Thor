@@ -8,7 +8,6 @@
 namespace ThorImplementation {
 struct EquationSignature {
     uint32_t num_inputs;
-    TensorDescriptor::DataType dtype;
     int sm_major;
     int sm_minor;
     int device_num;
@@ -45,12 +44,16 @@ struct CompiledEquation {
 
     LaunchKind launch_kind = LaunchKind::Flat;
     uint32_t num_broadcast_groups = 0;
+    uint32_t elements_per_thread = 1;
 
-    TensorDescriptor::DataType dtype;
     int deviceNum = 0;
     std::vector<std::string> input_names;
+    std::vector<TensorDescriptor::DataType> input_dtypes;
+    std::vector<TensorDescriptor::DataType> output_dtypes;
 
     uint64_t numInputs() { return input_names.size(); }
+    uint64_t numInputs() const { return input_names.size(); }
+    uint64_t numOutputs() const { return output_dtypes.size(); }
 
     CompiledEquation() = default;
     CompiledEquation(const CompiledEquation&) = delete;
@@ -69,8 +72,9 @@ struct CompiledReduction {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    const TensorDescriptor::DataType inout_dtype;
+    const TensorDescriptor::DataType input_dtype;
     const TensorDescriptor::DataType compute_dtype;
+    const TensorDescriptor::DataType output_dtype;
 
     bool operator==(const CompiledReduction& other) const = default;
 
@@ -78,12 +82,14 @@ struct CompiledReduction {
                       std::vector<uint64_t> reduction_axes,
                       std::vector<uint64_t> squeeze_axes,
                       TensorDescriptor::DataType input_dtype,
+                      TensorDescriptor::DataType output_dtype,
                       Optional<TensorDescriptor::DataType> compute_dtype)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
-          inout_dtype(input_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : inout_dtype) {
+          input_dtype(input_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : output_dtype),
+          output_dtype(output_dtype) {
         // Canonical representation: sorted and uniquified
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         // Remove adjacent duplicates:
@@ -104,7 +110,6 @@ struct hash<ThorImplementation::EquationSignature> {
     size_t operator()(const ThorImplementation::EquationSignature& s) const noexcept {
         size_t h = 0;
         hashCombine(h, std::hash<uint32_t>{}(s.num_inputs));
-        hashCombine(h, std::hash<int>{}(static_cast<int>(s.dtype)));
         hashCombine(h, std::hash<int>{}(s.sm_major));
         hashCombine(h, std::hash<int>{}(s.sm_minor));
         hashCombine(h, std::hash<int>{}(s.device_num));

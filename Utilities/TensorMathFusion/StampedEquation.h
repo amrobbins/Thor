@@ -13,7 +13,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
-#include "../Cache/LruCache.h"
+#include "Utilities/Cache/LruCache.h"
 #include "Utilities/TensorMathFusion/CompiledEquation.h"
 
 namespace ThorImplementation {
@@ -23,8 +23,9 @@ struct ReductionCacheKey {
     const std::vector<uint64_t> input_dims;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
-    const TensorDescriptor::DataType inout_dtype;
+    const TensorDescriptor::DataType input_dtype;
     const TensorDescriptor::DataType compute_dtype;
+    const TensorDescriptor::DataType output_dtype;
     const int device_num;
 
     bool operator==(const ReductionCacheKey& other) const = default;
@@ -33,15 +34,17 @@ struct ReductionCacheKey {
                       std::vector<uint64_t> input_dims,
                       std::vector<uint64_t> reduction_axes,
                       std::vector<uint64_t> squeeze_axes,
-                      TensorDescriptor::DataType inout_dtype,
+                      TensorDescriptor::DataType input_dtype,
+                      TensorDescriptor::DataType output_dtype,
                       TensorDescriptor::DataType compute_dtype,
                       int device_num)
         : op(op),
           input_dims(std::move(input_dims)),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
-          inout_dtype(inout_dtype),
+          input_dtype(input_dtype),
           compute_dtype(compute_dtype),
+          output_dtype(output_dtype),
           device_num(device_num) {
         if (this->reduction_axes.empty()) {
             this->reduction_axes.resize(this->input_dims.size());
@@ -240,8 +243,9 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<size_t>{}(k.squeeze_axes.size()));
         for (uint64_t axis : k.squeeze_axes)
             hashCombine(h, hash<uint64_t>{}(axis));
-        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.inout_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.input_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
+        hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

@@ -40,14 +40,14 @@ class EquationCompiler {
                                                        const std::vector<char>& cubin,
                                                        const std::string& kernel_name,
                                                        const std::vector<std::string>& input_names,
-                                                       TensorDescriptor::DataType dtype,
+                                                       const std::vector<TensorDescriptor::DataType>& input_dtypes,
+                                                       const std::vector<TensorDescriptor::DataType>& output_dtypes,
                                                        int device_num);
 
     static std::shared_ptr<CompiledEquation> compileFusedStage(const PhysicalExecutionStage& stage, const EquationSignature& sig);
     static std::vector<PhysicalExecutionStage> splitAtReductionBoundaries(const PhysicalOutputs& outputs);
 
-    static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr, TensorDescriptor::DataType inout_dtype);
-
+    static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledEquation> compileSpecializedBroadcastStage(const CompiledExecutionStage& stage,
                                                                               const EquationSignature& sig,
                                                                               const std::vector<SpecializedBroadcastGroup>& groups);

@@ -95,7 +95,6 @@ def _run_expr(
 
     eq = ex.compile(
         expr,
-        dtype=dtype,
         device_num=gpu_num,
         use_fast_math=use_fast_math,
     )
@@ -134,10 +133,17 @@ def test_add_sub_mul_div_numerical(dtype: thor.DataType):
     x_np = np.array([1, 2, 3, 4, 5, 6], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
     y_np = np.array([2, 3, 4, 5, 6, 7], dtype=thor.physical.numpy_dtypes.fp32).astype(storage_dtype)
 
-    x_ref = x_np.astype(compute_dtype)
-    y_ref = y_np.astype(compute_dtype)
+    def to_storage(arr: np.ndarray) -> np.ndarray:
+        return arr.astype(storage_dtype)
 
-    expected = ((x_ref + y_ref) - 2.0) * (x_ref / (y_ref + 1.0))
+    # Model Thor's semantics:
+    # each node computes in compute_dtype, then materializes to output_dtype (= storage dtype here).
+    sum_ref = to_storage(x_np.astype(compute_dtype) + y_np.astype(compute_dtype))
+    minus_ref = to_storage(sum_ref.astype(compute_dtype) - 2.0)
+    denom_ref = to_storage(y_np.astype(compute_dtype) + 1.0)
+    div_ref = to_storage(x_np.astype(compute_dtype) / denom_ref.astype(compute_dtype))
+    expected = to_storage(minus_ref.astype(compute_dtype) * div_ref.astype(compute_dtype))
+
     got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype)
 
     _assert_close(got, expected, dtype)
@@ -359,7 +365,7 @@ def test_fast_math_toggle_numerical(dtype: thor.DataType, use_fast_math: bool):
     x_ref = x_np.astype(compute_dtype)
     y_ref = y_np.astype(compute_dtype)
 
-    got = _run_expr(expr, ['x', 'y'], x_np, y_np, dtype=dtype, use_fast_math=use_fast_math)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, use_fast_math=use_fast_math)
     expected = np.exp(np.log2(x_ref + 8.0) + np.power(y_ref, 2.0) / 3.0)
 
     rtol, atol = _rtol_atol(dtype)
@@ -429,7 +435,6 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
 
     fused_equation = ex.compile(
         expr,
-        dtype=dtype,
         device_num=gpu_num,
         use_fast_math=False,
     )

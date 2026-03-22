@@ -15,9 +15,13 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
                                     std::to_string(compiledEquation->numInputs()) + "\n";
         throw std::runtime_error(error_message.c_str());
     }
+    if (outputs.size() != compiledEquation->numOutputs()) {
+        throw std::runtime_error("Wrong number of outputs passed to EquationRunner::run.");
+    }
 
     uint64_t max_numel = 0;
-    for (auto& output : outputs) {
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const Tensor& output = outputs[i];
         if (output.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
             throw std::runtime_error("Output tensor is not located on a GPU.");
         }
@@ -25,7 +29,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         if (numel > max_numel)
             max_numel = numel;
 
-        if (output.getDataType() != compiledEquation->dtype) {
+        if (output.getDataType() != compiledEquation->output_dtypes[i]) {
             throw std::runtime_error("Output type mismatch");
         }
         if (output.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
@@ -36,13 +40,14 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         }
     }
 
-    for (const auto& t : inputs) {
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        const Tensor& t = inputs[i];
         if (!t.isInitialized()) {
             throw std::runtime_error("All input tensors must be initialized.");
         }
 
-        if (t.getDescriptor().getDataType() != compiledEquation->dtype) {
-            throw std::runtime_error("V1 fused equations dtype mismatch");
+        if (t.getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
+            throw std::runtime_error("Fused equation input dtype mismatch");
         }
 
         if (t.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
@@ -68,7 +73,7 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     std::vector<void*> args;
-    args.reserve(inputs.size() + 2);
+    args.reserve(inputs.size() + outputs.size() + 1);
 
     for (size_t i = 0; i < input_ptrs.size(); ++i) {
         args.push_back((void*)&input_ptrs[i]);
@@ -78,8 +83,10 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
     args.push_back((void*)&max_numel);
 
-    uint32_t block = std::min(max_numel, 256UL);
-    uint32_t grid = static_cast<uint32_t>((max_numel + block - 1) / block);
+    const uint64_t launch_numel = (max_numel + static_cast<uint64_t>(compiledEquation->elements_per_thread) - 1ULL) /
+                                  static_cast<uint64_t>(compiledEquation->elements_per_thread);
+    uint32_t block = static_cast<uint32_t>(std::min<uint64_t>(launch_numel, 256ULL));
+    uint32_t grid = static_cast<uint32_t>((launch_numel + block - 1ULL) / block);
 
     CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid, 1, 1, block, 1, 1, 0, stream, args.data(), nullptr));
 }
