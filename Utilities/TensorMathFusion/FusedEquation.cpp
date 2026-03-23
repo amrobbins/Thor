@@ -1,5 +1,6 @@
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 
+#include "Utilities/TensorMathFusion/AutoDiff.h"
 #include "Utilities/TensorMathFusion/CudaSourceEmitter.h"
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
 #include "Utilities/TensorMathFusion/Expression.h"
@@ -642,6 +643,39 @@ EquationSignature FusedEquation::buildSignature(uint32_t num_inputs, int device_
     return sig;
 }
 
+PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, Tensor>& root_values) const {
+    if (!backward_config.has_value()) {
+        return outputs_template;
+    }
+
+    std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims;
+    forward_input_dims.reserve(
+        backward_config->forward_outputs_template.expr ? backward_config->forward_outputs_template.expr->inputs.size() : 0);
+
+    for (const NamedInput& forward_input : backward_config->forward_outputs_template.expr->inputs) {
+        bool found_name = false;
+        for (const NamedInput& root_input : root_inputs) {
+            if (root_input.name != forward_input.name) {
+                continue;
+            }
+            auto it = root_values.find(root_input.slot);
+            if (it == root_values.end()) {
+                throw std::runtime_error("Missing bound tensor for backward forward-input shape specialization input: " +
+                                         forward_input.name);
+            }
+            forward_input_dims.emplace(forward_input.name, it->second.getDimensions());
+            found_name = true;
+            break;
+        }
+        if (!found_name) {
+            throw std::runtime_error("Backward equation root inputs do not contain required forward input: " + forward_input.name);
+        }
+    }
+
+    return buildBackwardOutputs(
+        backward_config->forward_outputs_template, backward_config->wrt_names, backward_config->upstream_input_name, forward_input_dims);
+}
+
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
     std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(namedInputs);
 
@@ -657,19 +691,35 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(const std::
         throw std::runtime_error("FusedEquation::compileForRootValues requires at least one bound root input.");
     }
 
-    const RuntimeDTypeKey cache_key = makeRuntimeDTypeKey(root_inputs, root_values);
+    const RuntimeDTypeKey dtype_cache_key = makeRuntimeDTypeKey(root_inputs, root_values);
 
+    if (!backward_config.has_value()) {
+        std::shared_ptr<CompiledOutputs> cached_compiled_outputs;
+        if (compiled_outputs_runtime_cache->tryGet(dtype_cache_key, cached_compiled_outputs)) {
+            return cached_compiled_outputs;
+        }
+
+        PhysicalOutputs resolved_outputs = outputs_template;
+        resolved_outputs.expr = std::make_shared<PhysicalExpression>(*outputs_template.expr);
+        resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);
+
+        std::shared_ptr<CompiledOutputs> compiled_outputs = EquationCompiler::compile(resolved_outputs, base_signature, true);
+        compiled_outputs_runtime_cache->put(dtype_cache_key, compiled_outputs);
+        return compiled_outputs;
+    }
+
+    const RuntimeShapeKey shape_cache_key = makeRuntimeShapeKey(root_inputs, root_values);
     std::shared_ptr<CompiledOutputs> cached_compiled_outputs;
-    if (compiled_outputs_runtime_cache->tryGet(cache_key, cached_compiled_outputs)) {
+    if (compiled_outputs_shape_cache->tryGet(shape_cache_key, cached_compiled_outputs)) {
         return cached_compiled_outputs;
     }
 
-    PhysicalOutputs resolved_outputs = outputs_template;
-    resolved_outputs.expr = std::make_shared<PhysicalExpression>(*outputs_template.expr);
-    resolveOutputsDTypesInPlace(resolved_outputs, cache_key.root_input_dtypes);
+    PhysicalOutputs resolved_outputs = buildShapeSpecializedOutputs(root_values);
+    resolved_outputs.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
+    resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);
 
     std::shared_ptr<CompiledOutputs> compiled_outputs = EquationCompiler::compile(resolved_outputs, base_signature, true);
-    compiled_outputs_runtime_cache->put(cache_key, compiled_outputs);
+    compiled_outputs_shape_cache->put(shape_cache_key, compiled_outputs);
     return compiled_outputs;
 }
 
@@ -804,6 +854,21 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_
     });
 
     return compile(outputs, device_num, use_fast_math);
+}
+
+FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt_names,
+                                             const std::optional<std::string>& upstream_input_name) const {
+    PhysicalOutputs backward_outputs = buildBackwardOutputs(outputs_template, wrt_names, upstream_input_name);
+    const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
+    return FusedEquation(backward_outputs,
+                         device_num,
+                         use_fast_math,
+                         backward_signature,
+                         BackwardEquationConfig{
+                             .forward_outputs_template = outputs_template,
+                             .wrt_names = wrt_names,
+                             .upstream_input_name = upstream_input_name,
+                         });
 }
 
 bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions) {

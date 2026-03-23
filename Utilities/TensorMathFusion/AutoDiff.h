@@ -1,0 +1,20 @@
+#pragma once
+
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "Utilities/TensorMathFusion/Expression.h"
+
+namespace ThorImplementation {
+
+inline constexpr const char* DEFAULT_BACKWARD_UPSTREAM_INPUT_NAME = "__grad_output";
+
+PhysicalOutputs buildBackwardOutputs(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names = {},
+    const std::optional<std::string>& upstream_input_name = std::nullopt,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims = std::nullopt);
+
+}  // namespace ThorImplementation
