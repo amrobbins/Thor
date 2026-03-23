@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -117,11 +118,20 @@ struct PreparedConvenienceRunPlan {
     std::vector<std::string> expected_output_names_in_order;  // stable convenience-run validation order
 };
 
+struct BackwardEquationConfig {
+    PhysicalOutputs forward_outputs_template;
+    std::vector<std::string> wrt_names;
+    std::optional<std::string> upstream_input_name;
+};
+
 class FusedEquation {
    public:
     static FusedEquation compile(const PhysicalExpression& expr, int device_num, bool use_fast_math = false);
 
     static FusedEquation compile(const PhysicalOutputs& outputs, int device_num, bool use_fast_math = false);
+
+    [[nodiscard]] FusedEquation compileBackward(const std::vector<std::string>& wrt_names = {},
+                                                const std::optional<std::string>& upstream_input_name = std::nullopt) const;
 
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                              const Stream& stream,
@@ -144,14 +154,21 @@ class FusedEquation {
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const std::unordered_map<std::string, Tensor>& inputs) const;
 
    private:
-    explicit FusedEquation(PhysicalOutputs outputs_template, int device_num, bool use_fast_math, EquationSignature base_signature)
+    explicit FusedEquation(PhysicalOutputs outputs_template,
+                           int device_num,
+                           bool use_fast_math,
+                           EquationSignature base_signature,
+                           std::optional<BackwardEquationConfig> backward_config = std::nullopt)
         : outputs_template(std::move(outputs_template)),
           root_inputs(this->outputs_template.expr ? this->outputs_template.expr->inputs : std::vector<NamedInput>{}),
           device_num(device_num),
           use_fast_math(use_fast_math),
           base_signature(std::move(base_signature)),
+          backward_config(std::move(backward_config)),
           compiled_outputs_runtime_cache(
               std::make_shared<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>(64)),
+          compiled_outputs_shape_cache(
+              std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<CompiledOutputs>, RuntimeShapeKeyHash>>(64)),
           convenience_run_plan_cache(
               std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>(64)) {
     }
@@ -170,6 +187,7 @@ class FusedEquation {
 
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(const std::unordered_map<uint32_t, Tensor>& root_values) const;
+    [[nodiscard]] PhysicalOutputs buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, Tensor>& root_values) const;
     [[nodiscard]] std::shared_ptr<PreparedConvenienceRunPlan> prepareConvenienceRunPlan(
         const std::unordered_map<uint32_t, Tensor>& root_values) const;
 
@@ -182,11 +200,14 @@ class FusedEquation {
     const int device_num;
     const bool use_fast_math;
     const EquationSignature base_signature;
+    const std::optional<BackwardEquationConfig> backward_config;
 
-    // Hot-path cache for convenience run()/shape APIs. The compiled stage plan depends
-    // on root input dtypes, but not on input shapes.
+    // Forward equations compile per runtime dtype only. Shape-specialized backward equations
+    // compile against runtime shapes so they use a separate cache.
     std::shared_ptr<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>
         compiled_outputs_runtime_cache;
+    std::shared_ptr<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<CompiledOutputs>, RuntimeShapeKeyHash>>
+        compiled_outputs_shape_cache;
     std::shared_ptr<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>
         convenience_run_plan_cache;
 };

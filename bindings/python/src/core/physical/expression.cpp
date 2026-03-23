@@ -501,6 +501,35 @@ outputs: dict[str, PhysicalTensor]
     A dict mapping output names to tensors
 )nbdoc");
 
+    fused_equation.def(
+        "compile_backward",
+        [](const FusedEquation& self, const std::vector<std::string>& wrt_names, std::optional<std::string> upstream_input_name) {
+            nb::gil_scoped_release release;
+            return self.compileBackward(wrt_names, upstream_input_name);
+        },
+        "wrt_names"_a = std::vector<std::string>{},
+        "upstream_input_name"_a.none() = nb::none(),
+        R"nbdoc(
+Compile a backward equation.
+
+By default, phase 1 seeds the backward pass with an implicit upstream gradient
+of 1. For non-scalar outputs, that means the resulting gradients are with
+respect to the sum of the output tensor elements.
+
+Pass ``upstream_input_name`` to make the upstream gradient explicit instead.
+The compiled backward equation will then expect an additional input tensor with
+that name whose shape is compatible with the forward output. A common choice is
+``"__grad_output"``.
+
+Args:
+    wrt_names: list[str]
+        Input names to differentiate with respect to. If omitted, all forward
+        root inputs are differentiated.
+    upstream_input_name: str | None
+        Optional name for an explicit upstream-gradient input tensor. If None,
+        phase 1 uses the legacy implicit seed of 1.
+)nbdoc");
+
     fused_equation.def("output_names",
                        &FusedEquation::getOutputNames,
                        R"nbdoc(
