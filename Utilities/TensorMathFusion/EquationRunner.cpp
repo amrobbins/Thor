@@ -30,7 +30,8 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
             max_numel = numel;
 
         if (output.getDataType() != compiledEquation->output_dtypes[i]) {
-            throw std::runtime_error("Output type mismatch");
+            throw std::runtime_error("Output type mismatch. Got: " + TensorDescriptor::getElementTypeName(output.getDataType()) +
+                                     " Expected: " + TensorDescriptor::getElementTypeName(compiledEquation->output_dtypes[i]));
         }
         if (output.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
             throw std::runtime_error("Output tensor is not located on a GPU.");

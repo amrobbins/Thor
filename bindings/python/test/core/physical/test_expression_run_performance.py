@@ -117,7 +117,7 @@ class PerfCase:
     builder: callable
 
 
-def _build_flat_single(dtype: thor.DataType):
+def _build_flat_single():
     x = ex.input("x")
     y = ex.input("y")
     z = ex.input("z")
@@ -130,16 +130,16 @@ def _build_flat_single(dtype: thor.DataType):
         "z": FLAT_SHAPE,
     }
     output_shape = FLAT_SHAPE
-    return ex.compile(expr, dtype), input_shapes, output_shape
+    return ex.compile(expr), input_shapes, output_shape
 
 
-def _build_flat_single_compute_bound(dtype: thor.DataType):
+def _build_flat_single_compute_bound():
     x = ex.input("x")
     y = ex.input("y")
     z = ex.input("z")
 
-    num_accums = 24
-    dependency_chain_length = 8
+    num_accums = 16
+    dependency_chain_length = 4
 
     # Build 16 independent accumulators so the GPU has much more ILP than a
     # single long dependency chain. The final output folds them back together.
@@ -180,10 +180,10 @@ def _build_flat_single_compute_bound(dtype: thor.DataType):
         "z": FLAT_SHAPE,
     }
     output_shape = FLAT_SHAPE
-    return ex.compile(expr, dtype), input_shapes, output_shape
+    return ex.compile(expr), input_shapes, output_shape
 
 
-def _build_broadcast_single(dtype: thor.DataType):
+def _build_broadcast_single():
     x = ex.input("x")
     y = ex.input("y")
     z = ex.input("z")
@@ -196,10 +196,10 @@ def _build_broadcast_single(dtype: thor.DataType):
         "z": BCAST_Z_SHAPE,
     }
     output_shape = BCAST_OUT_SHAPE
-    return ex.compile(expr, dtype), input_shapes, output_shape
+    return ex.compile(expr), input_shapes, output_shape
 
 
-def _build_flat_multi(dtype: thor.DataType):
+def _build_flat_multi():
     a = ex.input("a")
     x = ex.input("x")
     y = ex.input("y")
@@ -221,10 +221,10 @@ def _build_flat_multi(dtype: thor.DataType):
         "sum": FLAT_SHAPE,
         "mix": FLAT_SHAPE,
     }
-    return outs.compile(dtype), input_shapes, output_shapes
+    return outs.compile(), input_shapes, output_shapes
 
 
-def _build_flat_multi_disjoint_inputs_different_output_shapes(dtype: thor.DataType):
+def _build_flat_multi_disjoint_inputs_different_output_shapes():
     a = ex.input("a")
     b = ex.input("b")
     c = ex.input("c")
@@ -247,10 +247,10 @@ def _build_flat_multi_disjoint_inputs_different_output_shapes(dtype: thor.DataTy
         "ab_out": FLAT_SHAPE,
         "cd_out": FLAT_SHAPE,
     }
-    return outs.compile(dtype), input_shapes, output_shapes
+    return outs.compile(), input_shapes, output_shapes
 
 
-def _build_broadcast_multi(dtype: thor.DataType):
+def _build_broadcast_multi():
     x = ex.input("x")
     y = ex.input("y")
     z = ex.input("z")
@@ -273,10 +273,10 @@ def _build_broadcast_multi(dtype: thor.DataType):
         "xz": BCAST_OUT_SHAPE,
         "mix": BCAST_OUT_SHAPE,
     }
-    return outs.compile(dtype), input_shapes, output_shapes
+    return outs.compile(), input_shapes, output_shapes
 
 
-def _build_broadcast_multi_multiple_shapes_shared_inputs(dtype: thor.DataType):
+def _build_broadcast_multi_multiple_shapes_shared_inputs():
     x = ex.input("x")
     y = ex.input("y")
     z = ex.input("z")
@@ -303,10 +303,10 @@ def _build_broadcast_multi_multiple_shapes_shared_inputs(dtype: thor.DataType):
         "wide_mix": BCAST_WIDE_SHAPE,  # [128, 256, 256]
         "narrow": BCAST_NARROW_SHAPE,  # [128, 1, 256]
     }
-    return outs.compile(dtype), input_shapes, output_shapes
+    return outs.compile(), input_shapes, output_shapes
 
 
-def _build_broadcast_multi_multiple_shapes_disjoint_inputs(dtype: thor.DataType):
+def _build_broadcast_multi_multiple_shapes_disjoint_inputs():
     a = ex.input("a")
     b = ex.input("b")
     c = ex.input("c")
@@ -338,7 +338,7 @@ def _build_broadcast_multi_multiple_shapes_disjoint_inputs(dtype: thor.DataType)
         "narrow_prod": BCAST_NARROW_SHAPE,  # [128, 1, 256]
         "narrow_sum": BCAST_NARROW_SHAPE,  # [128, 1, 256]
     }
-    return outs.compile(dtype), input_shapes, output_shapes
+    return outs.compile(), input_shapes, output_shapes
 
 
 CASES = [
@@ -386,7 +386,7 @@ def test_expression_kernel_throughput(case: PerfCase, dtype: thor.DataType, reco
     """
     stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
 
-    program, input_shapes, output_spec = case.builder(dtype)
+    program, input_shapes, output_spec = case.builder()
     inputs = {
         name: PhysicalTensor(Placement(DeviceType.gpu, GPU_NUM), PhysicalTensor.Descriptor(dtype, shape))
         for name, shape in input_shapes.items()

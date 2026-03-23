@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "Utilities/Cache/LruCache.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
@@ -59,6 +60,63 @@ struct CompiledOutputs {
     std::vector<CompiledStageOutput> final_outputs;
 };
 
+struct RuntimeDTypeKey {
+    std::vector<TensorDescriptor::DataType> root_input_dtypes;
+
+    bool operator==(const RuntimeDTypeKey& other) const = default;
+};
+
+struct RuntimeDTypeKeyHash {
+    size_t operator()(const RuntimeDTypeKey& k) const noexcept {
+        size_t h = 0;
+
+        auto combine = [&](size_t value) noexcept { h ^= value + 0x9e3779b9 + (h << 6) + (h >> 2); };
+
+        combine(std::hash<size_t>{}(k.root_input_dtypes.size()));
+        for (TensorDescriptor::DataType dtype : k.root_input_dtypes) {
+            combine(std::hash<int>{}(static_cast<int>(dtype)));
+        }
+
+        return h;
+    }
+};
+
+struct RuntimeShapeKey {
+    RuntimeDTypeKey dtype_key;
+    std::vector<std::vector<uint64_t>> root_input_dims;
+
+    bool operator==(const RuntimeShapeKey& other) const = default;
+};
+
+struct RuntimeShapeKeyHash {
+    size_t operator()(const RuntimeShapeKey& k) const noexcept {
+        size_t h = RuntimeDTypeKeyHash{}(k.dtype_key);
+
+        auto combine = [&](size_t value) noexcept { h ^= value + 0x9e3779b9 + (h << 6) + (h >> 2); };
+
+        combine(std::hash<size_t>{}(k.root_input_dims.size()));
+        for (const std::vector<uint64_t>& dims : k.root_input_dims) {
+            combine(std::hash<size_t>{}(dims.size()));
+            for (uint64_t d : dims) {
+                combine(std::hash<uint64_t>{}(d));
+            }
+        }
+
+        return h;
+    }
+};
+
+struct PreparedConvenienceRunStage {
+    std::shared_ptr<CompiledEquation> compiled_equation;
+    std::vector<std::vector<uint64_t>> expected_output_dims;  // aligned with stage.outputs
+};
+
+struct PreparedConvenienceRunPlan {
+    std::shared_ptr<CompiledOutputs> compiled_outputs;
+    std::vector<PreparedConvenienceRunStage> stages;          // aligned with compiled_outputs->stages
+    std::vector<std::string> expected_output_names_in_order;  // stable convenience-run validation order
+};
+
 class FusedEquation {
    public:
     static FusedEquation compile(const PhysicalExpression& expr, int device_num, bool use_fast_math = false);
@@ -86,11 +144,17 @@ class FusedEquation {
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const std::unordered_map<std::string, Tensor>& inputs) const;
 
    private:
-    explicit FusedEquation(PhysicalOutputs outputs_template, int device_num, bool use_fast_math)
+    explicit FusedEquation(PhysicalOutputs outputs_template, int device_num, bool use_fast_math, EquationSignature base_signature)
         : outputs_template(std::move(outputs_template)),
           root_inputs(this->outputs_template.expr ? this->outputs_template.expr->inputs : std::vector<NamedInput>{}),
           device_num(device_num),
-          use_fast_math(use_fast_math) {}
+          use_fast_math(use_fast_math),
+          base_signature(std::move(base_signature)),
+          compiled_outputs_runtime_cache(
+              std::make_shared<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>(64)),
+          convenience_run_plan_cache(
+              std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>(64)) {
+    }
 
     [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
                                                                  std::vector<Tensor>& inputs,
@@ -99,11 +163,15 @@ class FusedEquation {
 
     [[nodiscard]] std::shared_ptr<StampedReduction> stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
                                                                    Tensor& input,
-                                                                   const Stream& stream) const;
+                                                                   const Stream& stream,
+                                                                   const std::vector<uint64_t>& requested_output_shape) const;
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
 
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
+    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(const std::unordered_map<uint32_t, Tensor>& root_values) const;
+    [[nodiscard]] std::shared_ptr<PreparedConvenienceRunPlan> prepareConvenienceRunPlan(
+        const std::unordered_map<uint32_t, Tensor>& root_values) const;
 
     [[nodiscard]] static EquationSignature buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math);
 
@@ -113,6 +181,14 @@ class FusedEquation {
     const std::vector<NamedInput> root_inputs;
     const int device_num;
     const bool use_fast_math;
+    const EquationSignature base_signature;
+
+    // Hot-path cache for convenience run()/shape APIs. The compiled stage plan depends
+    // on root input dtypes, but not on input shapes.
+    std::shared_ptr<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>
+        compiled_outputs_runtime_cache;
+    std::shared_ptr<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>
+        convenience_run_plan_cache;
 };
 
 struct SpecializedBroadcastAxis {

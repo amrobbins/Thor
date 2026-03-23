@@ -305,14 +305,14 @@ def test_scalar_only_expression_numerical(dtype: thor.DataType):
     x = ex.input("x")
     lifted_expr = (x * 0.0) + expr
 
-    storage_dtype = _numpy_storage_dtype(dtype)
-    compute_dtype = _numpy_compute_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(thor.DataType.fp32)
 
-    x_np = np.zeros((6,), dtype=storage_dtype)
+    x_np = np.zeros((6,), dtype=compute_dtype)
     expected_value = np.exp(compute_dtype(2.0)) + np.log2(compute_dtype(8.0)) - np.sqrt(compute_dtype(9.0))
     expected = np.full(x_np.shape, expected_value, dtype=compute_dtype)
 
-    got = _run_expr(lifted_expr, ['x'], x_np, dtype=dtype)
+    # There are no input tensors, just scalars, so they default to fp32
+    got = _run_expr(lifted_expr, ['x'], x_np, dtype=thor.DataType.fp32)
     _assert_close(got, expected, dtype)
 
 
@@ -365,7 +365,7 @@ def test_fast_math_toggle_numerical(dtype: thor.DataType, use_fast_math: bool):
     x_ref = x_np.astype(compute_dtype)
     y_ref = y_np.astype(compute_dtype)
 
-    got = _run_expr(expr, ['x', 'y'], x_np, y_np, use_fast_math=use_fast_math)
+    got = _run_expr(expr, ['x', 'y'], x_np, y_np, use_fast_math=use_fast_math, dtype=dtype)
     expected = np.exp(np.log2(x_ref + 8.0) + np.power(y_ref, 2.0) / 3.0)
 
     rtol, atol = _rtol_atol(dtype)
@@ -453,3 +453,187 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
 
     rtol, atol = _rtol_atol(dtype)
     np.testing.assert_allclose(out_cpu.numpy(), expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.cuda
+def test_fused_equation_stamp_as_type_single_output_requested_shape_accepts_squeezed_layout():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    expr = ex.reduce_sum(x, axis=2, squeeze=False)  # actual logical output [2, 3, 1]
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    # Requested layout [2, 3] should be accepted because singleton dims are ignored.
+    stamped = eq.stamp(
+        {
+            "x": x_gpu,
+        },
+        stream,
+        [2, 3],
+    )
+
+    assert stamped is not None
+
+
+@pytest.mark.cuda
+def test_fused_equation_stamp_as_type_single_output_requested_shape_rejects_incompatible_layout():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    expr = ex.reduce_sum(x, axis=2, squeeze=False)  # actual logical output [2, 3, 1]
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    with pytest.raises(RuntimeError, match="Output tensor dimensions are incompatible"):
+        eq.stamp(
+            {
+                "x": x_gpu,
+            },
+            stream,
+            [2, 4],
+        )
+
+
+@pytest.mark.cuda
+def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadcast_accepts_compatible_layouts():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    xy = x + y
+    y_shift = y - 0.5
+
+    outs = ex.outputs(
+        {
+            "wide_sum": xy,  # [17, 3]
+            "wide_mix": xy * y_shift,  # [17, 3]
+            "narrow_shift": x + 1.0,  # [17, 1]
+        })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([17, 1], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([1, 3], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    stamped = eq.stamp(
+        {
+            "x": x_gpu,
+            "y": y_gpu,
+        },
+        stream,
+        {
+            "wide_sum": [17, 3],
+            "wide_mix": [17, 3],
+            "narrow_shift": [17],  # compatible with logical [17, 1]
+        },
+    )
+
+    assert stamped is not None
+
+
+@pytest.mark.cuda
+def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadcast_rejects_incompatible_layout():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    xy = x + y
+
+    outs = ex.outputs({
+        "wide_sum": xy,  # [17, 3]
+        "narrow_shift": x + 1.0,  # [17, 1]
+    })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([17, 1], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([1, 3], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    with pytest.raises(RuntimeError, match="Output tensor dimensions are incompatible"):
+        eq.stamp(
+            {
+                "x": x_gpu,
+                "y": y_gpu,
+            },
+            stream,
+            {
+                "wide_sum": [17, 4],  # incompatible
+                "narrow_shift": [17],
+            },
+        )
+
+
+@pytest.mark.cuda
+def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reduction_and_epilogue_accepts_compatible_layouts(
+):
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    trunk = (x + 1.0) * (y - 0.5)
+
+    outs = ex.outputs(
+        {
+            "reduced": ex.reduce_sum(trunk, axis=2, squeeze=False),  # [2, 3, 1]
+            "final": ex.sqrt(ex.reduce_sum(trunk, axis=2, squeeze=False) + 1.0),  # [2, 3, 1]
+            "pointwise": x + 2.0,  # [2, 3, 4]
+        })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    stamped = eq.stamp(
+        {
+            "x": x_gpu,
+            "y": y_gpu,
+        },
+        stream,
+        {
+            "reduced": [2, 3],
+            "final": [2, 3],
+            "pointwise": [2, 3, 4],
+        },
+    )
+
+    assert stamped is not None
+
+
+@pytest.mark.cuda
+def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reduction_and_epilogue_rejects_incompatible_layout(
+):
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    trunk = (x + 1.0) * (y - 0.5)
+
+    outs = ex.outputs(
+        {
+            "reduced": ex.reduce_sum(trunk, axis=2, squeeze=False),  # [2, 3, 1]
+            "final": ex.sqrt(ex.reduce_sum(trunk, axis=2, squeeze=False) + 1.0),  # [2, 3, 1]
+            "pointwise": x + 2.0,  # [2, 3, 4]
+        })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    with pytest.raises(RuntimeError, match="Output tensor dimensions are incompatible"):
+        eq.stamp(
+            {
+                "x": x_gpu,
+                "y": y_gpu,
+            },
+            stream,
+            {
+                "reduced": [2, 4],  # incompatible with logical [2, 3, 1]
+                "final": [2, 3],
+                "pointwise": [2, 3, 4],
+            },
+        )

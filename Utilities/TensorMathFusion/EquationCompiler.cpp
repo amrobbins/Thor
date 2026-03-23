@@ -77,6 +77,7 @@ struct StageNodeKey {
     uint32_t rhs = UINT32_MAX;
     uint32_t input_slot = UINT32_MAX;
     uint64_t scalar_bits = 0;
+    int32_t input_tensor_dtype = -1;
     int32_t output_dtype = -1;
     int32_t compute_dtype = -1;
     int32_t backward_output_dtype = -1;
@@ -92,6 +93,7 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<uint32_t>{}(k.rhs));
         hashCombine(h, std::hash<uint32_t>{}(k.input_slot));
         hashCombine(h, std::hash<uint64_t>{}(k.scalar_bits));
+        hashCombine(h, std::hash<int32_t>{}(k.input_tensor_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.output_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.compute_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.backward_output_dtype));
@@ -114,6 +116,7 @@ static int32_t optionalDTypeTag(const Optional<DataType>& dtype) { return dtype.
 static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     StageNodeKey key;
     key.op = n.op;
+    key.input_tensor_dtype = optionalDTypeTag(n.input_tensor_dtype);
     key.output_dtype = optionalDTypeTag(n.output_dtype);
     key.compute_dtype = optionalDTypeTag(n.compute_dtype);
     key.backward_output_dtype = optionalDTypeTag(n.backward_output_dtype);
@@ -338,6 +341,7 @@ static std::string optionalDTypeSignature(const Optional<DataType>& dtype) {
 }
 
 static void appendNodeDTypeSignature(std::string& s, const ExprNode& node) {
+    s += ";input=" + optionalDTypeSignature(node.input_tensor_dtype);
     s += ";out=" + optionalDTypeSignature(node.output_dtype);
     s += ";compute=" + optionalDTypeSignature(node.compute_dtype);
     s += ";bwd_out=" + optionalDTypeSignature(node.backward_output_dtype);
@@ -452,14 +456,14 @@ static std::vector<DataType> collectCompiledInputDTypes(const PhysicalExpression
         if (node.op != ExprOp::INPUT) {
             continue;
         }
-        if (!node.output_dtype.isPresent()) {
-            throw runtime_error("Fused stage input node is missing resolved output_dtype.");
+        if (!node.input_tensor_dtype.isPresent()) {
+            throw runtime_error("Fused stage input node is missing resolved input_tensor_dtype.");
         }
         if (node.input_slot >= input_dtypes.size()) {
             throw runtime_error("Input slot out of range while collecting compiled input dtypes.");
         }
 
-        const DataType dtype = node.output_dtype.get();
+        const DataType dtype = node.input_tensor_dtype.get();
         if (seen[node.input_slot]) {
             if (input_dtypes[node.input_slot] != dtype) {
                 throw runtime_error("Inconsistent fused stage input dtype for local input slot.");
@@ -653,15 +657,25 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
         throw std::runtime_error("Reduction stage input must be a local INPUT node.");
     }
 
-    if (!input_node.output_dtype.isPresent()) {
-        throw std::runtime_error("Reduction input node missing resolved output_dtype.");
+    if (!input_node.input_tensor_dtype.isPresent()) {
+        throw std::runtime_error("Reduction input node missing resolved input_tensor_dtype.");
     }
     if (!node.output_dtype.isPresent()) {
         throw std::runtime_error("Reduction node missing resolved output_dtype.");
     }
 
     return make_shared<CompiledReduction>(
-        node.op, node.reduction_axes, node.squeeze_axes, input_node.output_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+        node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+}
+
+static bool inputRequiresMaterialization(const ExprNode& node) {
+    if (node.op != ExprOp::INPUT) {
+        return false;
+    }
+    if (!node.input_tensor_dtype.isPresent() || !node.output_dtype.isPresent()) {
+        return false;
+    }
+    return node.input_tensor_dtype.get() != node.output_dtype.get();
 }
 
 static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_idx, std::unordered_set<uint32_t>& region_nodes) {
@@ -805,6 +819,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
                     // This local INPUT stands in for the already-materialized parent value
                     // crossing a stage boundary, so it should inherit that value's dtype semantics.
+                    input_node.input_tensor_dtype = expr.nodes[old_parent].output_dtype;
                     input_node.output_dtype = expr.nodes[old_parent].output_dtype;
                     input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
                     input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
@@ -834,6 +849,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
                     // This local INPUT stands in for the already-materialized parent value
                     // crossing a stage boundary, so it should inherit that value's dtype semantics.
+                    input_node.input_tensor_dtype = expr.nodes[old_parent].output_dtype;
                     input_node.output_dtype = expr.nodes[old_parent].output_dtype;
                     input_node.compute_dtype = expr.nodes[old_parent].compute_dtype;
                     input_node.backward_output_dtype = expr.nodes[old_parent].backward_output_dtype;
@@ -902,6 +918,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     ExprNode reduction = node;
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(1);
+    Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
 
     uint32_t parent_idx = reduction.lhs;
     if (parent_idx >= expr.nodes.size()) {
@@ -909,18 +926,22 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     }
 
     const ExprNode& parent = expr.nodes[parent_idx];
-    if (parent.op == ExprOp::INPUT) {
-        input_value_ids.push_back(parent.input_slot);
-    } else {
-        auto out_it = node_output_value_id.find(parent_idx);
-        if (out_it == node_output_value_id.end()) {
-            throw std::runtime_error("Missing value id for reduction input.");
-        }
+    auto out_it = node_output_value_id.find(parent_idx);
+    if (out_it != node_output_value_id.end()) {
         input_value_ids.push_back(out_it->second);
+        actual_input_dtype = parent.output_dtype;
+    } else if (parent.op == ExprOp::INPUT) {
+        input_value_ids.push_back(parent.input_slot);
+        actual_input_dtype = parent.input_tensor_dtype;
+    } else {
+        throw std::runtime_error("Missing value id for reduction input.");
     }
 
     if (!parent.output_dtype.isPresent()) {
         throw std::runtime_error("Reduction parent node is missing resolved output_dtype.");
+    }
+    if (!actual_input_dtype.isPresent()) {
+        throw std::runtime_error("Reduction parent node is missing resolved actual input dtype.");
     }
 
     ExprNode input_node;
@@ -930,6 +951,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     // This local INPUT node represents the already-materialized value produced by
     // the parent expression feeding the reduction. It should inherit the parent's
     // value dtype semantics.
+    input_node.input_tensor_dtype = actual_input_dtype.get();
     input_node.output_dtype = parent.output_dtype;
     input_node.compute_dtype = parent.compute_dtype;
     input_node.backward_output_dtype = parent.backward_output_dtype;
@@ -1041,7 +1063,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             const ExprNode& parent = expr.nodes[parent_idx];
-            if (parent.op != ExprOp::INPUT) {
+            if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
                 emitForDependency(parent_idx);
             }
 
@@ -1161,7 +1183,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             const ExprNode& parent = expr.nodes[parent_idx];
-            if (parent.op != ExprOp::INPUT) {
+            if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
                 emitForDependency(parent_idx);
             }
 

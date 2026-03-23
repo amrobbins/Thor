@@ -72,7 +72,6 @@ def test_outputs_compile_smoke(dtype: thor.DataType):
     })
 
     compiled = outs.compile(
-        dtype=dtype,
         device_num=0,
         use_fast_math=False,
     )
@@ -105,7 +104,7 @@ def test_outputs_two_pointwise_results_numerical(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -161,7 +160,7 @@ def test_outputs_two_pointwise_results_broadcast_numerical(dtype: thor.DataType)
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -207,7 +206,7 @@ def test_outputs_shared_trunk_three_results_numerical(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -256,7 +255,7 @@ def test_outputs_disjoint_input_groups_numerical(dtype: thor.DataType):
     expected_left = a_np + b_np
     expected_right = x_np * y_np
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "a": _clone_to_gpu(a_cpu, stream),
@@ -298,7 +297,7 @@ def test_outputs_single_output_supports_output_tensor(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -335,7 +334,7 @@ def test_outputs_unknown_name_rejected_after_run(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -364,7 +363,7 @@ def test_output_stamp_missing_input_raises(dtype: thor.DataType):
     _fill_cpu_tensor(x_cpu, [1, 2, 3, 4], dtype)
     x_gpu = _clone_to_gpu(x_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
 
     with pytest.raises(RuntimeError):
         eq.stamp({
@@ -393,7 +392,7 @@ def test_output_stamp_unexpected_input_raises(dtype: thor.DataType):
     _fill_cpu_tensor(y_cpu, [5, 6, 7, 8], dtype)
     _fill_cpu_tensor(z_cpu, [9, 10, 11, 12], dtype)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
 
     with pytest.raises(RuntimeError):
         eq.stamp(
@@ -424,7 +423,7 @@ def test_outputs_stamp_wrong_input_name_raises(dtype: thor.DataType):
     _fill_cpu_tensor(x_cpu, [1, 2, 3, 4], dtype)
     _fill_cpu_tensor(y_cpu, [5, 6, 7, 8], dtype)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
 
     with pytest.raises(RuntimeError):
         eq.stamp(
@@ -465,7 +464,7 @@ def test_outputs_multiple_reductions_from_shared_trunk(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -514,7 +513,7 @@ def test_outputs_pointwise_and_reductions_mixed_plan(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu
@@ -563,7 +562,7 @@ def test_outputs_reduction_squeeze_true_numerical(dtype: thor.DataType):
     x_gpu = _clone_to_gpu(x_cpu, stream)
     y_gpu = _clone_to_gpu(y_cpu, stream)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp({
         "x": x_gpu,
         "y": y_gpu

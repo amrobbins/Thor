@@ -27,22 +27,33 @@ void bind_physical_expression(nb::module_& physical) {
     expr.def(nb::init_implicit<double>());
     // expr.def(nb::init_implicit<int64_t>());
 
-    expr.def_static("input",
-                    &Expression::input,
-                    "input_name"_a,
-                    R"nbdoc(
-            Create an expression input node.
+    expr.def_static(
+        "input",
+        [](const std::string& name, nb::object as_type_obj) {
+            Optional<DataType> as_type = Optional<DataType>::empty();
+            if (!as_type_obj.is_none()) {
+                as_type = nb::cast<DataType>(as_type_obj);
+            }
+            return Expression::input(name, as_type);
+        },
+        "name"_a,
+        "as_type"_a.none() = nb::none(),
+        R"nbdoc(
+Create an input expression.
 
-            Parameters
-            ----------
-            input_name : str
-                The zero-based input number.
+Parameters
+----------
+name : str
+    Input name.
+as_type : thor.DataType | None
+    Optional dtype to cast the input value to when it enters the expression graph.
+    The actual bound runtime tensor may have a different dtype.
 
-            Returns
-            -------
-            thor.physical.Expression
-                Expression representing that input.
-        )nbdoc");
+Returns
+-------
+thor.physical.Expression
+    An Expression representing that input.
+)nbdoc");
 
     expr.def_static(
         "scalar",

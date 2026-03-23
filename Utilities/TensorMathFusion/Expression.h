@@ -78,6 +78,9 @@ struct ExprNode {
     uint32_t input_slot = UINT32_MAX;
     double scalar_fp = 0.0;
 
+    // For INPUT nodes only: actual dtype of the bound runtime tensor.
+    Optional<TensorDescriptor::DataType> input_tensor_dtype = Optional<TensorDescriptor::DataType>::empty();
+
     // Value semantics for this node.
     Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty();
     Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty();
@@ -148,7 +151,8 @@ class Expression {
     static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
     static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);
 
-    static Expression input(const std::string& name);
+    static Expression input(const std::string& name,
+                            Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty());
     static Expression scalar(double value);
 
     [[nodiscard]] PhysicalExpression expression() const;
