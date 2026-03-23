@@ -89,7 +89,6 @@ def _run_expr_broadcast(
 
     eq = ex.compile(
         expr,
-        dtype=dtype,
         device_num=gpu_num,
         use_fast_math=use_fast_math,
     )
@@ -307,7 +306,6 @@ def test_broadcast_requested_output_shape_add_singletons(dtype: thor.DataType):
 
     fused_equation = ex.compile(
         expr,
-        dtype=dtype,
         device_num=gpu_num,
         use_fast_math=False,
     )
@@ -384,7 +382,6 @@ def test_broadcast_nested_expression_fp32_numerical_stamped():
 
     fused_equation = ex.compile(
         expr,
-        dtype=thor.DataType.fp32,
         device_num=gpu_num,
         use_fast_math=False,
     )
@@ -418,7 +415,6 @@ def test_broadcast_incompatible_shapes_raises(dtype: thor.DataType):
 
     eq = ex.compile(
         expr,
-        dtype=dtype,
         device_num=0,
         use_fast_math=False,
     )
@@ -553,7 +549,6 @@ def test_broadcast_direct_run_requested_output_shape_add_singletons(dtype: thor.
 
     fused_equation = ex.compile(
         expr,
-        dtype=dtype,
         device_num=gpu_num,
         use_fast_math=False,
     )
@@ -610,7 +605,6 @@ def test_broadcast_stamped_reused_twice(dtype: thor.DataType):
 
     fused_equation = ex.compile(
         expr,
-        dtype=dtype,
         device_num=gpu_num,
         use_fast_math=False,
     )

@@ -109,6 +109,7 @@ static std::string formatOptionalDTypeCanonical(const Optional<DataType>& dtype)
 }
 
 static void appendNodeDTypeMetadata(std::string& out, const ExprNode& n) {
+    out += ";input=" + formatOptionalDTypeCanonical(n.input_tensor_dtype);
     out += ";out=" + formatOptionalDTypeCanonical(n.output_dtype);
     out += ";compute=" + formatOptionalDTypeCanonical(n.compute_dtype);
     out += ";bwd_out=" + formatOptionalDTypeCanonical(n.backward_output_dtype);
@@ -388,12 +389,18 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
 
 }  // namespace
 
-Expression Expression::input(const std::string& name) {
+Expression Expression::input(const std::string& name, Optional<DataType> as_type) {
     auto out = std::make_shared<PhysicalExpression>();
 
     ExprNode node;
     node.op = ExprOp::INPUT;
     node.input_slot = out->getOrCreateInputSlot(name);
+
+    // as_type means the graph value produced by this input defaults to that dtype,
+    // even though the actual bound runtime tensor may have a different dtype.
+    if (as_type.isPresent()) {
+        node.output_dtype = as_type.get();
+    }
 
     out->nodes.push_back(node);
     out->output_node = 0;

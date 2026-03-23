@@ -142,6 +142,13 @@ static DataType requireNodeOutputDType(const ExprNode& node) {
     return node.output_dtype.get();
 }
 
+static DataType requireNodeInputTensorDType(const ExprNode& node) {
+    if (!node.input_tensor_dtype.isPresent()) {
+        throw runtime_error("Fused stage INPUT node is missing resolved input_tensor_dtype.");
+    }
+    return node.input_tensor_dtype.get();
+}
+
 static DataType requireNodeComputeDType(const ExprNode& node) {
     if (!node.compute_dtype.isPresent()) {
         throw runtime_error("Fused stage node is missing resolved compute_dtype.");
@@ -190,6 +197,9 @@ static void emitRequiredHeaders(const PhysicalExpression& expr, std::ostringstre
     };
 
     for (const ExprNode& node : expr.nodes) {
+        if (node.input_tensor_dtype.isPresent()) {
+            note_dtype(node.input_tensor_dtype.get());
+        }
         if (node.output_dtype.isPresent()) {
             note_dtype(node.output_dtype.get());
         }
@@ -222,10 +232,10 @@ static std::vector<DataType> collectInputSlotDTypes(const PhysicalExpression& ex
             throw runtime_error("Input slot out of range while collecting fused stage input dtypes.");
         }
 
-        const DataType dtype = requireNodeOutputDType(node);
+        const DataType dtype = requireNodeInputTensorDType(node);
         if (seen[node.input_slot]) {
             if (input_dtypes[node.input_slot] != dtype) {
-                throw runtime_error("Inconsistent resolved output_dtype for fused stage input slot.");
+                throw runtime_error("Inconsistent resolved input_tensor_dtype for fused stage input slot.");
             }
         } else {
             input_dtypes[node.input_slot] = dtype;
@@ -300,6 +310,12 @@ static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpre
     for (const ExprNode& node : expr.nodes) {
         if (node.op == ExprOp::SCALAR_FP) {
             continue;
+        }
+
+        if (node.op == ExprOp::INPUT) {
+            if (requireNodeInputTensorDType(node) != stage_dtype) {
+                return Optional<DataType>::empty();
+            }
         }
 
         if (requireNodeOutputDType(node) != stage_dtype) {
@@ -509,7 +525,9 @@ static void emitScalarNode(
     switch (n.op) {
         case ExprOp::INPUT: {
             const std::string idx_expr = broadcast_support ? ("in" + std::to_string(n.input_slot) + "_offset") : "idx";
-            ss << indent << "const " << output_type << " t" << node_idx << " = in" << n.input_slot << "[" << idx_expr << "];\n";
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            ss << indent << "const " << output_type << " t" << node_idx << " = "
+               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]", input_tensor_dtype, output_dtype) << ";\n";
             return;
         }
 

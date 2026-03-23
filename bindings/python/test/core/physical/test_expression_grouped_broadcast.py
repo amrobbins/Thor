@@ -115,7 +115,7 @@ def test_outputs_grouped_broadcast_mixed_domains_numerical(dtype: thor.DataType)
     expected_xz_prod = x_np * z_np
     expected_y_shift = y_np - 1.0
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),
@@ -196,7 +196,7 @@ def test_outputs_mixed_broadcast_and_flat_domains_numerical(dtype: thor.DataType
     expected_flat_plus_one = flat_trunk_ref + 1.0
     expected_flat_square = flat_trunk_ref * flat_trunk_ref
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),
@@ -277,7 +277,7 @@ def test_outputs_grouped_broadcast_same_shape_group_and_smaller_group(dtype: tho
     expected_trunk_square = trunk_ref * trunk_ref
     expected_xz_prod = x_np * z_np
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),
@@ -349,7 +349,7 @@ def test_outputs_grouped_broadcast_requested_shapes_match(dtype: thor.DataType):
     expected_xy_sum = x_np + y_np
     expected_xz_prod = x_np * z_np
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),
@@ -416,7 +416,7 @@ def test_outputs_grouped_broadcast_requested_shape_mismatch_raises(dtype: thor.D
         dtype,
     )
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
 
     with pytest.raises(RuntimeError):
         eq.stamp(
@@ -488,7 +488,7 @@ def test_outputs_grouped_broadcast_with_reduction_mixed_plan(dtype: thor.DataTyp
     expected_xz_prod = x_np * z_np
     expected_sum_last = trunk_ref.sum(axis=2, keepdims=True)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),
@@ -554,7 +554,7 @@ def test_outputs_grouped_broadcast_two_reductions_from_broadcasted_trunk(dtype: 
     expected_sum_axis1 = trunk_ref.sum(axis=1, keepdims=True)
     expected_max_axis2 = trunk_ref.max(axis=2, keepdims=True)
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),
@@ -623,7 +623,7 @@ def test_outputs_grouped_broadcast_different_input_shapes(dtype: thor.DataType):
     expected_broadcast1 = x_np * z_np
     expected_broadcast2 = y_np * z_np
 
-    eq = outs.compile(dtype=dtype, device_num=0, use_fast_math=False)
+    eq = outs.compile(device_num=0, use_fast_math=False)
     stamped = eq.stamp(
         {
             "x": _clone_to_gpu(x_cpu, stream),

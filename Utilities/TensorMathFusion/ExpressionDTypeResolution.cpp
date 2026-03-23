@@ -125,6 +125,28 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         ExprNode& node = expr.nodes[node_idx];
 
+        if (node.op == ExprOp::INPUT) {
+            if (node.input_slot >= root_input_dtypes.size()) {
+                throw std::runtime_error("Input slot out of range in resolveExpressionDTypesInPlace.");
+            }
+
+            const DataType actual_input_dtype = root_input_dtypes[node.input_slot];
+            node.input_tensor_dtype = actual_input_dtype;
+            const DataType output_dtype = node.output_dtype.isPresent() ? node.output_dtype.get() : actual_input_dtype;
+            const DataType compute_dtype = node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(output_dtype);
+            const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
+            const DataType backward_compute_dtype =
+                node.backward_compute_dtype.isPresent() ? node.backward_compute_dtype.get() : compute_dtype;
+
+            node.output_dtype = output_dtype;
+            node.compute_dtype = compute_dtype;
+            node.backward_output_dtype = backward_output_dtype;
+            node.backward_compute_dtype = backward_compute_dtype;
+
+            resolved_output_dtypes[node_idx] = output_dtype;
+            continue;
+        }
+
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
         const DataType compute_dtype = node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(output_dtype);

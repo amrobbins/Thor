@@ -630,3 +630,156 @@ def test_fused_equation_output_shapes_rejects_missing_required_input():
         eq.output_shapes({
             "x": x_gpu
         })
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shape_as_type_single_input_pointwise():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    expr = (x + 1.0) * 2.0
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([17], thor.DataType.fp32)
+    shape = eq.output_shape({
+        "x": x_gpu
+    })
+
+    assert shape == [17]
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shape_as_type_single_output_broadcast_promoted():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+    expr = x + y
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([17, 1], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([1, 3], thor.DataType.fp32)
+
+    shape = eq.output_shape({
+        "x": x_gpu,
+        "y": y_gpu,
+    })
+
+    assert shape == [17, 3]
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shape_as_type_direct_reduction_single_output():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    expr = ex.reduce_sum(x, axis=2, squeeze=False)
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    shape = eq.output_shape({
+        "x": x_gpu
+    })
+
+    assert shape == [2, 3, 1]
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shape_as_type_direct_reduction_single_output_squeezed():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    expr = ex.reduce_sum(x, axis=[1, 2], squeeze=True)
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    shape = eq.output_shape({
+        "x": x_gpu
+    })
+
+    assert shape == [2]
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shapes_as_type_multi_output_with_broadcast_and_mixed_shapes():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    xy = x + y
+    y_shift = y - 0.5
+
+    outs = ex.outputs(
+        {
+            "wide_sum": xy,  # [17, 3]
+            "wide_mix": xy * y_shift,  # [17, 3]
+            "narrow_shift": x + 1.0,  # [17, 1]
+        })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([17, 1], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([1, 3], thor.DataType.fp32)
+
+    shapes = eq.output_shapes({
+        "x": x_gpu,
+        "y": y_gpu,
+    })
+
+    assert shapes == {
+        "wide_sum": [17, 3],
+        "wide_mix": [17, 3],
+        "narrow_shift": [17, 1],
+    }
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shapes_as_type_multi_output_with_reduction_and_epilogue():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    trunk = (x + 1.0) * (y - 0.5)
+
+    outs = ex.outputs(
+        {
+            "reduced": ex.reduce_sum(trunk, axis=2, squeeze=False),  # [B, M, 1]
+            "final": ex.sqrt(ex.reduce_sum(trunk, axis=2, squeeze=False) + 1.0),  # [B, M, 1]
+            "pointwise": x + 2.0,  # [B, M, N]
+        })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    y_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+
+    shapes = eq.output_shapes({
+        "x": x_gpu,
+        "y": y_gpu,
+    })
+
+    assert shapes == {
+        "reduced": [2, 3, 1],
+        "final": [2, 3, 1],
+        "pointwise": [2, 3, 4],
+    }
+
+
+@pytest.mark.cuda
+def test_fused_equation_output_shapes_as_type_homogeneous_broadcast_same_runtime_dtype():
+    x = ex.input("x", as_type=thor.DataType.fp16)
+    y = ex.input("y")
+
+    outs = ex.outputs({
+        "sum": x + y,
+        "prod": x * y,
+    })
+
+    eq = ex.compile(outs, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([17, 1], thor.DataType.fp16)
+    y_gpu = _gpu_tensor([1, 3], thor.DataType.fp16)
+
+    shapes = eq.output_shapes({
+        "x": x_gpu,
+        "y": y_gpu,
+    })
+
+    assert shapes == {
+        "sum": [17, 3],
+        "prod": [17, 3],
+    }
