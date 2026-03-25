@@ -67,6 +67,62 @@ bool dimsAllSingleton(const std::vector<uint64_t>& dims) {
     return true;
 }
 
+bool resolveBroadcastedDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
+    if (inputs.empty()) {
+        outputDimensions.clear();
+        return false;
+    }
+
+    uint64_t maxRank = 0;
+    for (const std::vector<uint64_t>& dims : inputs) {
+        maxRank = std::max<uint64_t>(maxRank, dims.size());
+    }
+
+    outputDimensions.assign(maxRank, 1);
+
+    for (uint64_t axis = 0; axis < maxRank; ++axis) {
+        uint64_t resolvedDim = 1;
+
+        for (const std::vector<uint64_t>& inDims : inputs) {
+            const uint64_t rankDiff = maxRank - inDims.size();
+            const uint64_t dim = (axis < rankDiff) ? 1 : inDims[axis - rankDiff];
+
+            if (dim == 1) {
+                continue;
+            }
+
+            if (resolvedDim == 1) {
+                resolvedDim = dim;
+            } else if (resolvedDim != dim) {
+                throw std::runtime_error("Autodiff constant-like folding encountered non-broadcast-compatible shapes.");
+            }
+        }
+
+        outputDimensions[axis] = resolvedDim;
+    }
+
+    bool requiresBroadcast = false;
+    for (const std::vector<uint64_t>& inDims : inputs) {
+        if (inDims.size() != maxRank) {
+            requiresBroadcast = true;
+            break;
+        }
+        for (uint64_t axis = 0; axis < maxRank; ++axis) {
+            if (inDims[axis] != outputDimensions[axis]) {
+                requiresBroadcast = true;
+                break;
+            }
+        }
+        if (requiresBroadcast) {
+            break;
+        }
+    }
+
+    return requiresBroadcast;
+}
+
+std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes);
+
 Optional<TensorDescriptor::DataType> preferredGradValueDType(const ExprNode& forward_node) {
     if (forward_node.backward_output_dtype.isPresent()) {
         return forward_node.backward_output_dtype;
@@ -167,6 +223,10 @@ class BackwardGraphBuilder {
     uint32_t fill(double value,
                   const std::vector<uint64_t>& dims,
                   Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty()) {
+        if (dims.empty()) {
+            return scalar(value);
+        }
+
         ExprNode node{};
         node.op = ExprOp::FILL;
         node.scalar_fp = value;
@@ -175,6 +235,12 @@ class BackwardGraphBuilder {
             node.output_dtype = as_type.get();
         }
         return push(std::move(node));
+    }
+
+    uint32_t constantLike(double value,
+                          const std::vector<uint64_t>& dims,
+                          Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty()) {
+        return dims.empty() ? scalar(value) : fill(value, dims, as_type);
     }
 
     bool tryGetScalarConstant(uint32_t node_idx, double& value) const {
@@ -189,28 +255,130 @@ class BackwardGraphBuilder {
         return true;
     }
 
-    bool tryGetConstantLikeValue(uint32_t node_idx, double& value) const {
+    bool tryGetConstantLike(uint32_t node_idx, double& value, std::vector<uint64_t>& dims) const {
         if (node_idx >= grad_expr.nodes.size()) {
             throw std::runtime_error("BackwardGraphBuilder constant-like query node index out of range.");
         }
         const ExprNode& node = grad_expr.nodes[node_idx];
         switch (node.op) {
             case ExprOp::SCALAR_FP:
+                value = node.scalar_fp;
+                dims.clear();
+                return true;
             case ExprOp::FILL:
                 value = node.scalar_fp;
+                dims = node.fill_dims;
                 return true;
-            case ExprOp::UNSQUEEZE:
-            case ExprOp::SQUEEZE:
-                return tryGetConstantLikeValue(node.lhs, value);
+            case ExprOp::UNSQUEEZE: {
+                std::vector<uint64_t> lhs_dims;
+                if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
+                    return false;
+                }
+
+                std::vector<uint64_t> actual_axes;
+                try {
+                    actual_axes = normalizeUnsqueezeAxesForInputDims(lhs_dims, node.unsqueeze_axes);
+                } catch (const std::runtime_error&) {
+                    // Generic backward graphs can temporarily contain shape ops whose
+                    // rank is only well-defined after runtime shape specialization.
+                    // In that case this node is not safely foldable as constant-like yet.
+                    return false;
+                }
+
+                dims.clear();
+                dims.reserve(lhs_dims.size() + actual_axes.size());
+                const uint64_t output_rank = static_cast<uint64_t>(lhs_dims.size() + actual_axes.size());
+                size_t lhs_i = 0;
+                size_t axis_i = 0;
+                for (uint64_t out_axis = 0; out_axis < output_rank; ++out_axis) {
+                    if (axis_i < actual_axes.size() && actual_axes[axis_i] == out_axis) {
+                        dims.push_back(1);
+                        ++axis_i;
+                    } else {
+                        if (lhs_i >= lhs_dims.size()) {
+                            return false;
+                        }
+                        dims.push_back(lhs_dims[lhs_i++]);
+                    }
+                }
+                if (lhs_i != lhs_dims.size() || axis_i != actual_axes.size()) {
+                    return false;
+                }
+                return true;
+            }
+            case ExprOp::SQUEEZE: {
+                std::vector<uint64_t> lhs_dims;
+                if (!tryGetConstantLike(node.lhs, value, lhs_dims)) {
+                    return false;
+                }
+
+                try {
+                    dims = applySqueezeDims(lhs_dims, normalizeSqueezeAxesForInputDims(lhs_dims, node.squeeze_axes));
+                } catch (const std::runtime_error&) {
+                    // See UNSQUEEZE case above: leave generic rank-dependent shape ops
+                    // untouched until runtime specialization makes them valid.
+                    return false;
+                }
+                return true;
+            }
             case ExprOp::NEG:
-                if (tryGetConstantLikeValue(node.lhs, value)) {
+                if (tryGetConstantLike(node.lhs, value, dims)) {
                     value = -value;
                     return true;
                 }
                 return false;
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV: {
+                double lhs_value = 0.0;
+                double rhs_value = 0.0;
+                std::vector<uint64_t> lhs_dims;
+                std::vector<uint64_t> rhs_dims;
+                if (!tryGetConstantLike(node.lhs, lhs_value, lhs_dims) || !tryGetConstantLike(node.rhs, rhs_value, rhs_dims)) {
+                    return false;
+                }
+
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!lhs_dims.empty()) {
+                    non_scalar_inputs.push_back(lhs_dims);
+                }
+                if (!rhs_dims.empty()) {
+                    non_scalar_inputs.push_back(rhs_dims);
+                }
+                if (non_scalar_inputs.empty()) {
+                    dims.clear();
+                } else if (non_scalar_inputs.size() == 1) {
+                    dims = non_scalar_inputs[0];
+                } else {
+                    resolveBroadcastedDims(non_scalar_inputs, dims);
+                }
+
+                switch (node.op) {
+                    case ExprOp::ADD:
+                        value = lhs_value + rhs_value;
+                        return true;
+                    case ExprOp::SUB:
+                        value = lhs_value - rhs_value;
+                        return true;
+                    case ExprOp::MUL:
+                        value = lhs_value * rhs_value;
+                        return true;
+                    case ExprOp::DIV:
+                        value = lhs_value / rhs_value;
+                        return true;
+                    default:
+                        return false;
+                }
+            }
             default:
                 return false;
         }
+    }
+
+    bool tryGetConstantLikeValue(uint32_t node_idx, double& value) const {
+        std::vector<uint64_t> dims;
+        return tryGetConstantLike(node_idx, value, dims);
     }
 
     bool isScalarZero(uint32_t node_idx) const {
@@ -230,9 +398,10 @@ class BackwardGraphBuilder {
 
     uint32_t unary(ExprOp op, uint32_t lhs) {
         double lhs_value = 0.0;
+        std::vector<uint64_t> lhs_dims;
         if (op == ExprOp::NEG) {
-            if (tryGetScalarConstant(lhs, lhs_value)) {
-                return scalar(-lhs_value);
+            if (tryGetConstantLike(lhs, lhs_value, lhs_dims)) {
+                return constantLike(-lhs_value, lhs_dims);
             }
 
             const ExprNode& lhs_node = grad_expr.nodes.at(lhs);
@@ -250,19 +419,40 @@ class BackwardGraphBuilder {
     uint32_t binary(ExprOp op, uint32_t lhs, uint32_t rhs) {
         double lhs_value = 0.0;
         double rhs_value = 0.0;
-        const bool lhs_const = tryGetScalarConstant(lhs, lhs_value);
-        const bool rhs_const = tryGetScalarConstant(rhs, rhs_value);
+        std::vector<uint64_t> lhs_dims;
+        std::vector<uint64_t> rhs_dims;
+        const bool lhs_const_like = tryGetConstantLike(lhs, lhs_value, lhs_dims);
+        const bool rhs_const_like = tryGetConstantLike(rhs, rhs_value, rhs_dims);
+        const bool lhs_const = lhs_const_like && lhs_dims.empty();
+        const bool rhs_const = rhs_const_like && rhs_dims.empty();
 
-        if (lhs_const && rhs_const) {
+        if (lhs_const_like && rhs_const_like) {
+            std::vector<std::vector<uint64_t>> non_scalar_inputs;
+            if (!lhs_dims.empty()) {
+                non_scalar_inputs.push_back(lhs_dims);
+            }
+            if (!rhs_dims.empty()) {
+                non_scalar_inputs.push_back(rhs_dims);
+            }
+
+            std::vector<uint64_t> out_dims;
+            if (non_scalar_inputs.empty()) {
+                out_dims.clear();
+            } else if (non_scalar_inputs.size() == 1) {
+                out_dims = non_scalar_inputs[0];
+            } else {
+                resolveBroadcastedDims(non_scalar_inputs, out_dims);
+            }
+
             switch (op) {
                 case ExprOp::ADD:
-                    return scalar(lhs_value + rhs_value);
+                    return constantLike(lhs_value + rhs_value, out_dims);
                 case ExprOp::SUB:
-                    return scalar(lhs_value - rhs_value);
+                    return constantLike(lhs_value - rhs_value, out_dims);
                 case ExprOp::MUL:
-                    return scalar(lhs_value * rhs_value);
+                    return constantLike(lhs_value * rhs_value, out_dims);
                 case ExprOp::DIV:
-                    return scalar(lhs_value / rhs_value);
+                    return constantLike(lhs_value / rhs_value, out_dims);
                 default:
                     break;
             }
@@ -499,53 +689,7 @@ bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std
     if (inputs.empty()) {
         throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
     }
-
-    uint64_t maxRank = 0;
-    for (const std::vector<uint64_t>& dims : inputs) {
-        maxRank = std::max<uint64_t>(maxRank, dims.size());
-    }
-
-    outputDimensions.assign(maxRank, 1);
-
-    for (uint64_t axis = 0; axis < maxRank; ++axis) {
-        uint64_t resolvedDim = 1;
-
-        for (const std::vector<uint64_t>& inDims : inputs) {
-            const uint64_t rankDiff = maxRank - inDims.size();
-            const uint64_t dim = (axis < rankDiff) ? 1 : inDims[axis - rankDiff];
-
-            if (dim == 1) {
-                continue;
-            }
-
-            if (resolvedDim == 1) {
-                resolvedDim = dim;
-            } else if (resolvedDim != dim) {
-                throw std::runtime_error("Autodiff shape inference encountered non-broadcast-compatible inputs.");
-            }
-        }
-
-        outputDimensions[axis] = resolvedDim;
-    }
-
-    bool requiresBroadcast = false;
-    for (const std::vector<uint64_t>& inDims : inputs) {
-        if (inDims.size() != maxRank) {
-            requiresBroadcast = true;
-            break;
-        }
-        for (uint64_t axis = 0; axis < maxRank; ++axis) {
-            if (inDims[axis] != outputDimensions[axis]) {
-                requiresBroadcast = true;
-                break;
-            }
-        }
-        if (requiresBroadcast) {
-            break;
-        }
-    }
-
-    return requiresBroadcast;
+    return resolveBroadcastedDims(inputs, outputDimensions);
 }
 
 std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes) {
@@ -866,6 +1010,18 @@ uint32_t sumToShape(BackwardGraphBuilder& builder,
     std::sort(reduction_axes.begin(), reduction_axes.end());
     std::sort(squeeze_axes.begin(), squeeze_axes.end());
 
+    double contrib_constant = 0.0;
+    if (builder.tryGetConstantLikeValue(contrib, contrib_constant)) {
+        double reduction_scale = 1.0;
+        for (uint64_t axis : reduction_axes) {
+            if (axis >= contrib_dims.size()) {
+                throw std::runtime_error("Autodiff sumToShape produced reduction axis out of range.");
+            }
+            reduction_scale *= static_cast<double>(contrib_dims[axis]);
+        }
+        return builder.fill(contrib_constant * reduction_scale, target_dims);
+    }
+
     bool has_numeric_reduction = false;
     for (uint64_t axis : reduction_axes) {
         if (axis >= contrib_dims.size()) {
@@ -978,35 +1134,25 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         builder.addContribution(child_idx, adjusted_contrib);
     };
 
-    auto shapeGradLikeNodeOutput =
-        [&](uint32_t grad_value, uint32_t forward_node_idx, const std::vector<uint64_t>& forward_node_output_dims) -> uint32_t {
-        if (!has_forward_dims || forward_node_output_dims.empty()) {
+    auto broadcastGradToDims = [&](uint32_t grad_value,
+                                   const std::vector<uint64_t>& target_dims,
+                                   Optional<TensorDescriptor::DataType> as_type =
+                                       Optional<TensorDescriptor::DataType>::empty()) -> uint32_t {
+        if (!has_forward_dims || target_dims.empty()) {
             return grad_value;
-        }
-
-        if (builder.isScalarOne(grad_value) && dimsAllSingleton(forward_node_output_dims)) {
-            std::vector<uint64_t> axes(forward_node_output_dims.size());
-            for (uint64_t axis = 0; axis < static_cast<uint64_t>(axes.size()); ++axis) {
-                axes[axis] = axis;
-            }
-            return builder.unsqueeze(grad_value, axes);
         }
 
         double grad_constant = 0.0;
         if (builder.tryGetConstantLikeValue(grad_value, grad_constant)) {
-            return builder.fill(grad_constant, forward_node_output_dims, preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
+            return builder.fill(grad_constant, target_dims, as_type);
         }
 
-        if (builder.tryGetScalarConstant(grad_value, grad_constant) && dimsAllSingleton(forward_node_output_dims)) {
-            std::vector<uint64_t> axes(forward_node_output_dims.size());
-            for (uint64_t axis = 0; axis < static_cast<uint64_t>(axes.size()); ++axis) {
-                axes[axis] = axis;
-            }
-            return builder.unsqueeze(grad_value, axes);
-        }
+        return builder.add(builder.fill(0.0, target_dims, as_type), grad_value);
+    };
 
-        const uint32_t out = builder.cloneForward(forward_node_idx);
-        return builder.add(builder.mul(out, builder.scalar(0.0)), grad_value);
+    auto shapeGradLikeNodeOutput =
+        [&](uint32_t grad_value, uint32_t forward_node_idx, const std::vector<uint64_t>& forward_node_output_dims) -> uint32_t {
+        return broadcastGradToDims(grad_value, forward_node_output_dims, preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
     };
 
     for (int64_t node_idx = static_cast<int64_t>(forward_expr.nodes.size()) - 1; node_idx >= 0; --node_idx) {
@@ -1235,14 +1381,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     //           << " lhs_dims=" << dbgDims(lhs_dims) << " reduction_axes=" << dbgDims(node.reduction_axes)
                     //           << " squeeze_axes=" << dbgDims(node.squeeze_axes) << std::endl;
 
-                    uint32_t expanded_grad = UINT32_MAX;
-                    double grad_constant = 0.0;
-                    if (builder.tryGetConstantLikeValue(grad_before_expand, grad_constant)) {
-                        expanded_grad = builder.fill(grad_constant, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
-                    } else {
-                        const uint32_t lhs = builder.cloneForward(node.lhs);
-                        expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
-                    }
+                    const uint32_t expanded_grad =
+                        broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
 
                     // std::cerr << "[AUTODIFF] REDUCE_SUM nodes"
                     //           << " grad_before_expand=" << grad_before_expand << " expanded_grad=" << expanded_grad << std::endl;
@@ -1270,14 +1410,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
                     }
 
-                    uint32_t expanded_grad = UINT32_MAX;
-                    double grad_constant = 0.0;
-                    if (builder.tryGetConstantLikeValue(grad_before_expand, grad_constant)) {
-                        expanded_grad = builder.fill(grad_constant, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
-                    } else {
-                        const uint32_t lhs = builder.cloneForward(node.lhs);
-                        expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
-                    }
+                    const uint32_t expanded_grad =
+                        broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
 
                     uint32_t scaled_grad = expanded_grad;
                     if (has_forward_dims) {
@@ -1304,14 +1438,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                         out = builder.unsqueeze(out, unsqueeze_axes);
                     }
 
-                    uint32_t expanded_grad = UINT32_MAX;
                     const uint32_t lhs = builder.cloneForward(node.lhs);
-                    double grad_constant = 0.0;
-                    if (builder.tryGetConstantLikeValue(grad_before_expand, grad_constant)) {
-                        expanded_grad = builder.fill(grad_constant, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
-                    } else {
-                        expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
-                    }
+                    const uint32_t expanded_grad =
+                        broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
                     const uint32_t scaled = builder.div(builder.mul(expanded_grad, lhs), out);
                     addContributionToChild(node.lhs, scaled, lhs_dims);
                 }
