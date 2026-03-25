@@ -519,12 +519,88 @@ static std::string emitBinaryComputeExpr(ExprOp op, const std::string& a, const 
     }
 }
 
+static bool tryGetEmitterConstantValue(const PhysicalExpression& expr, uint32_t node_idx, double& value) {
+    if (node_idx >= expr.nodes.size()) {
+        throw runtime_error("Node index out of range in constant emitter query.");
+    }
+
+    const ExprNode& n = expr.nodes[node_idx];
+    switch (n.op) {
+        case ExprOp::SCALAR_FP:
+        case ExprOp::FILL:
+            value = n.scalar_fp;
+            return true;
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+            return tryGetEmitterConstantValue(expr, n.lhs, value);
+        case ExprOp::NEG:
+            if (tryGetEmitterConstantValue(expr, n.lhs, value)) {
+                value = -value;
+                return true;
+            }
+            return false;
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV: {
+            double lhs = 0.0;
+            double rhs = 0.0;
+            if (!tryGetEmitterConstantValue(expr, n.lhs, lhs) || !tryGetEmitterConstantValue(expr, n.rhs, rhs)) {
+                return false;
+            }
+            switch (n.op) {
+                case ExprOp::ADD:
+                    value = lhs + rhs;
+                    return true;
+                case ExprOp::SUB:
+                    value = lhs - rhs;
+                    return true;
+                case ExprOp::MUL:
+                    value = lhs * rhs;
+                    return true;
+                case ExprOp::DIV:
+                    value = lhs / rhs;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        default:
+            return false;
+    }
+}
+
+static bool isEmitterConstantZero(const PhysicalExpression& expr, uint32_t node_idx) {
+    double value = 0.0;
+    return tryGetEmitterConstantValue(expr, node_idx, value) && value == 0.0;
+}
+
+static bool isEmitterConstantOne(const PhysicalExpression& expr, uint32_t node_idx) {
+    double value = 0.0;
+    return tryGetEmitterConstantValue(expr, node_idx, value) && value == 1.0;
+}
+static void emitScalarAliasNode(
+    std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, uint32_t source_node_idx, const std::string& indent) {
+    const DataType output_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
+    const std::string output_type = scalarStorageType(output_dtype);
+    const DataType source_dtype = requireNodeOutputDType(expr.nodes[source_node_idx]);
+    ss << indent << "const " << output_type << " t" << node_idx << " = "
+       << castScalarExpr(CudaSourceEmitter::ref(source_node_idx), source_dtype, output_dtype) << ";\n";
+}
+
 static void emitScalarNode(
     std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, bool broadcast_support, const std::string& indent) {
     const ExprNode& n = expr.nodes[node_idx];
     const DataType output_dtype = requireNodeOutputDType(n);
     const std::string output_type = scalarStorageType(output_dtype);
 
+    double folded_constant = 0.0;
+    if (n.op != ExprOp::INPUT && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+        const std::string literal = emitScalarFpLiteral(folded_constant);
+        ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
+           << ";\n";
+        return;
+    }
     switch (n.op) {
         case ExprOp::INPUT: {
             const std::string idx_expr = broadcast_support ? ("in" + std::to_string(n.input_slot) + "_offset") : "idx";
@@ -561,6 +637,50 @@ static void emitScalarNode(
         const DataType child_output_dtype = requireNodeOutputDType(expr.nodes[child_idx]);
         return castScalarExpr(CudaSourceEmitter::ref(child_idx), child_output_dtype, compute_dtype);
     };
+
+    if (n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+        emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
+        return;
+    }
+
+    if (Expression::isBinaryOp(n.op)) {
+        switch (n.op) {
+            case ExprOp::ADD:
+                if (isEmitterConstantZero(expr, n.lhs)) {
+                    emitScalarAliasNode(ss, expr, node_idx, n.rhs, indent);
+                    return;
+                }
+                if (isEmitterConstantZero(expr, n.rhs)) {
+                    emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
+                    return;
+                }
+                break;
+            case ExprOp::SUB:
+                if (isEmitterConstantZero(expr, n.rhs)) {
+                    emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
+                    return;
+                }
+                break;
+            case ExprOp::MUL:
+                if (isEmitterConstantOne(expr, n.lhs)) {
+                    emitScalarAliasNode(ss, expr, node_idx, n.rhs, indent);
+                    return;
+                }
+                if (isEmitterConstantOne(expr, n.rhs)) {
+                    emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
+                    return;
+                }
+                break;
+            case ExprOp::DIV:
+                if (isEmitterConstantOne(expr, n.rhs)) {
+                    emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
+                    return;
+                }
+                break;
+            default:
+                break;
+        }
+    }
 
     std::string compute_expr;
     if (Expression::isBinaryOp(n.op)) {
@@ -714,6 +834,11 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage, DataType
 
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
         const auto& n = stage.expr.nodes[node_idx];
+        double folded_constant = 0.0;
+        if (n.op != ExprOp::INPUT && tryGetEmitterConstantValue(stage.expr, node_idx, folded_constant)) {
+            ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(folded_constant, dtype) << ";\n";
+            continue;
+        }
         switch (n.op) {
             case ExprOp::INPUT: {
                 const std::string variable = "in" + to_string(n.input_slot) + "[idx]";
@@ -722,26 +847,44 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage, DataType
                 break;
             }
             case ExprOp::SCALAR_FP:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
-                break;
             case ExprOp::FILL:
                 ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
                 break;
             case ExprOp::ADD:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Add(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                if (isEmitterConstantZero(stage.expr, n.lhs)) {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                } else if (isEmitterConstantZero(stage.expr, n.rhs)) {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                } else {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Add(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                }
                 break;
             case ExprOp::SUB:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Sub(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                if (isEmitterConstantZero(stage.expr, n.rhs)) {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                } else {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Sub(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                }
                 break;
             case ExprOp::MUL:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Mul(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                if (isEmitterConstantOne(stage.expr, n.lhs)) {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                } else if (isEmitterConstantOne(stage.expr, n.rhs)) {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                } else {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Mul(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                }
                 break;
             case ExprOp::DIV:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Div(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                if (isEmitterConstantOne(stage.expr, n.rhs)) {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                } else {
+                    ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Div(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                }
                 break;
             case ExprOp::NEG:
                 ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Neg(CudaSourceEmitter::ref(n.lhs), dtype)
@@ -915,6 +1058,12 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
 
         for (uint32_t node_idx : required_nodes) {
             const auto& n = stage.expr.nodes[node_idx];
+            double folded_constant = 0.0;
+            if (n.op != ExprOp::INPUT && tryGetEmitterConstantValue(stage.expr, node_idx, folded_constant)) {
+                ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(folded_constant, dtype)
+                   << ";\n";
+                continue;
+            }
             switch (n.op) {
                 case ExprOp::INPUT: {
                     const uint32_t slot = n.input_slot;
@@ -936,30 +1085,46 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     }
                     break;
                 }
-
                 case ExprOp::SCALAR_FP:
-                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
-                       << ";\n";
-                    break;
                 case ExprOp::FILL:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
                        << ";\n";
                     break;
                 case ExprOp::ADD:
-                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
-                       << emitVector2Add(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    if (isEmitterConstantZero(stage.expr, n.lhs)) {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                    } else if (isEmitterConstantZero(stage.expr, n.rhs)) {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                    } else {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                           << emitVector2Add(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    }
                     break;
                 case ExprOp::SUB:
-                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
-                       << emitVector2Sub(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    if (isEmitterConstantZero(stage.expr, n.rhs)) {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                    } else {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                           << emitVector2Sub(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    }
                     break;
                 case ExprOp::MUL:
-                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
-                       << emitVector2Mul(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    if (isEmitterConstantOne(stage.expr, n.lhs)) {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.rhs) << ";\n";
+                    } else if (isEmitterConstantOne(stage.expr, n.rhs)) {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                    } else {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                           << emitVector2Mul(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    }
                     break;
                 case ExprOp::DIV:
-                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
-                       << emitVector2Div(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    if (isEmitterConstantOne(stage.expr, n.rhs)) {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                    } else {
+                        ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                           << emitVector2Div(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    }
                     break;
                 case ExprOp::NEG:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
@@ -1013,7 +1178,6 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     throw std::runtime_error("Unsupported op in specialized vector broadcast emitter.");
             }
         }
-
         ss << "\n";
         for (uint32_t out_idx : group.output_indices) {
             const CompiledStageOutput& output = stage.outputs[out_idx];
