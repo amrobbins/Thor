@@ -669,8 +669,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
-    const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
-    compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
+    compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
     compiled->uses_uint32_numel_arg = use_uint32_index_math;
 
     cacheInsert(key, compiled);

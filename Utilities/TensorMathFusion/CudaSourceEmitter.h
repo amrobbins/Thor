@@ -25,6 +25,7 @@ class CudaSourceEmitter {
 
     static Optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const PhysicalExecutionStage& stage);
     static Optional<TensorDescriptor::DataType> getVectorizedStageStorageDType(const CompiledExecutionStage& stage);
+    static uint32_t flatElementsPerThread(const PhysicalExecutionStage& stage);
 
     static std::string ref(uint32_t idx);
 };

@@ -384,6 +384,56 @@ Optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const Compi
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
 }
 
+static uint32_t dataTypeStorageBytes(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            return 1;
+        case DataType::FP16:
+        case DataType::BF16:
+            return 2;
+        case DataType::FP32:
+            return 4;
+        default:
+            throw runtime_error("Unsupported dtype in dataTypeStorageBytes.");
+    }
+}
+
+static uint32_t flatScalarElementsPerThreadImpl(const std::vector<DataType>& input_dtypes, const std::vector<DataType>& output_dtypes) {
+    uint32_t max_storage_bytes = 1;
+
+    for (DataType dtype : input_dtypes) {
+        max_storage_bytes = std::max(max_storage_bytes, dataTypeStorageBytes(dtype));
+    }
+    for (DataType dtype : output_dtypes) {
+        max_storage_bytes = std::max(max_storage_bytes, dataTypeStorageBytes(dtype));
+    }
+
+    return std::max<uint32_t>(1, 16u / max_storage_bytes);
+}
+
+uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        return 1;
+    }
+
+    const Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
+    if (vectorized_dtype.isPresent()) {
+        switch (vectorized_dtype.get()) {
+            case DataType::FP16:
+            case DataType::BF16:
+                return 8;
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+                return 16;
+            default:
+                break;
+        }
+    }
+
+    return flatScalarElementsPerThreadImpl(collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
+}
+
 static std::string castScalarExpr(const std::string& expr, DataType src_dtype, DataType dst_dtype) {
     if (src_dtype == dst_dtype) {
         return expr;
@@ -814,6 +864,158 @@ static void emitScalarNode(
        << ";\n";
 }
 
+static std::string refWithSuffix(uint32_t idx, const std::string& suffix) { return "t" + to_string(idx) + suffix; }
+
+static std::string emitResolvedScalarValueExprSuffixed(const PhysicalExpression& expr,
+                                                       uint32_t node_idx,
+                                                       DataType target_dtype,
+                                                       const std::string& suffix) {
+    if (node_idx >= expr.nodes.size()) {
+        throw runtime_error("Node index out of range in suffixed resolved scalar emitter query.");
+    }
+
+    double constant_value = 0.0;
+    if (tryGetEmitterConstantValue(expr, node_idx, constant_value)) {
+        return castScalarExpr(emitScalarFpLiteral(constant_value), DataType::FP32, target_dtype);
+    }
+
+    uint32_t source_idx = UINT32_MAX;
+    if (tryGetEmitterAliasSource(expr, node_idx, source_idx)) {
+        return emitResolvedScalarValueExprSuffixed(expr, source_idx, target_dtype, suffix);
+    }
+
+    const DataType source_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
+    return castScalarExpr(refWithSuffix(node_idx, suffix), source_dtype, target_dtype);
+}
+
+static void emitScalarAliasNodeSuffixed(std::ostringstream& ss,
+                                        const PhysicalExpression& expr,
+                                        uint32_t node_idx,
+                                        uint32_t source_node_idx,
+                                        const std::string& suffix,
+                                        const std::string& indent) {
+    const DataType output_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
+    const std::string output_type = scalarStorageType(output_dtype);
+    ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+       << emitResolvedScalarValueExprSuffixed(expr, source_node_idx, output_dtype, suffix) << ";\n";
+}
+
+static void emitScalarNodeSuffixed(std::ostringstream& ss,
+                                   const PhysicalExpression& expr,
+                                   uint32_t node_idx,
+                                   const std::string& idx_expr,
+                                   const std::string& suffix,
+                                   const std::string& indent,
+                                   const std::string& flat_chunk_lane_expr = "") {
+    const ExprNode& n = expr.nodes[node_idx];
+    const DataType output_dtype = requireNodeOutputDType(n);
+    const std::string output_type = scalarStorageType(output_dtype);
+
+    double folded_constant = 0.0;
+    if (n.op != ExprOp::INPUT && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+        const std::string literal = emitScalarFpLiteral(folded_constant);
+        ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+           << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
+        return;
+    }
+
+    switch (n.op) {
+        case ExprOp::INPUT: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
+            const std::string input_expr = flat_chunk_lane_expr.empty()
+                                               ? ("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]")
+                                               : ("reinterpret_cast<const " + input_storage_type + "*>(&in" + std::to_string(n.input_slot) +
+                                                  "_chunk)[" + flat_chunk_lane_expr + "]");
+            ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+               << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+            return;
+        }
+
+        case ExprOp::SCALAR_FP: {
+            const std::string literal = emitScalarFpLiteral(n.scalar_fp);
+            ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+               << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
+            return;
+        }
+
+        case ExprOp::FILL: {
+            const std::string literal = emitScalarFpLiteral(n.scalar_fp);
+            ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+               << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
+            return;
+        }
+
+        default:
+            break;
+    }
+
+    const DataType compute_dtype = requireNodeComputeDType(n);
+
+    auto child_value = [&](uint32_t child_idx) -> std::string {
+        if (child_idx >= expr.nodes.size()) {
+            throw runtime_error("Child node index out of range in suffixed fused stage emitter.");
+        }
+        return emitResolvedScalarValueExprSuffixed(expr, child_idx, compute_dtype, suffix);
+    };
+
+    if (n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
+        emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+        return;
+    }
+
+    if (Expression::isBinaryOp(n.op)) {
+        switch (n.op) {
+            case ExprOp::ADD:
+                if (isEmitterConstantZero(expr, n.lhs)) {
+                    emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.rhs, suffix, indent);
+                    return;
+                }
+                if (isEmitterConstantZero(expr, n.rhs)) {
+                    emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+                    return;
+                }
+                break;
+            case ExprOp::SUB:
+                if (isEmitterConstantZero(expr, n.rhs)) {
+                    emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+                    return;
+                }
+                break;
+            case ExprOp::MUL:
+                if (isEmitterConstantOne(expr, n.lhs)) {
+                    emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.rhs, suffix, indent);
+                    return;
+                }
+                if (isEmitterConstantOne(expr, n.rhs)) {
+                    emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+                    return;
+                }
+                break;
+            case ExprOp::DIV:
+                if (isEmitterConstantOne(expr, n.rhs)) {
+                    emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+                    return;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    std::string compute_expr;
+    if (Expression::isBinaryOp(n.op)) {
+        compute_expr = emitBinaryComputeExpr(n.op, child_value(n.lhs), child_value(n.rhs), compute_dtype);
+    } else if (Expression::isUnaryOp(n.op)) {
+        compute_expr = emitUnaryComputeExpr(n.op, child_value(n.lhs), compute_dtype);
+    } else {
+        throw runtime_error("Unsupported op in suffixed fused stage emitter.");
+    }
+
+    ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+       << castScalarExpr(compute_expr, compute_dtype, output_dtype) << ";\n";
+}
+
 static std::string vector_compute_conversion(const std::string& storage_dtype_vector, const std::string& variable) {
     if (storage_dtype_vector == "half2") {
         return variable;
@@ -903,33 +1105,33 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
 
     std::string compute_dtype;
     std::string compute_dtype_vector;
-    std::string storage_dtype;
     std::string storage_dtype_vector;
+    uint32_t packs_per_thread = 0;
 
     if (dtype == DataType::BF16) {
         compute_dtype = "__nv_bfloat16";
         compute_dtype_vector = "__nv_bfloat162";
-        storage_dtype = "__nv_bfloat16";
         storage_dtype_vector = "__nv_bfloat162";
+        packs_per_thread = 4;
         ss << "#include <cuda_bf16.h>\n";
     } else if (dtype == DataType::FP16) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
-        storage_dtype = "half";
         storage_dtype_vector = "half2";
+        packs_per_thread = 4;
         ss << "#include <cuda_fp16.h>\n";
     } else if (dtype == DataType::FP8_E4M3) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
-        storage_dtype = "__nv_fp8_e4m3";
         storage_dtype_vector = "__nv_fp8x2_e4m3";
+        packs_per_thread = 8;
         ss << "#include <cuda_fp16.h>\n";
         ss << "#include <cuda_fp8.h>\n";
     } else if (dtype == DataType::FP8_E5M2) {
         compute_dtype = "half";
         compute_dtype_vector = "half2";
-        storage_dtype = "__nv_fp8_e5m2";
         storage_dtype_vector = "__nv_fp8x2_e5m2";
+        packs_per_thread = 8;
         ss << "#include <cuda_fp16.h>\n";
         ss << "#include <cuda_fp8.h>\n";
     } else {
@@ -937,114 +1139,255 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     }
 
     const uint32_t num_inputs = stage.expr.numInputs();
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
 
+    ss << "#include <vector_types.h>\n";
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
     for (uint32_t i = 0; i < num_inputs; ++i) {
-        ss << "const " << storage_dtype_vector << "* in" << i << ", ";
+        ss << "const float4* in" << i << ", ";
     }
 
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-        ss << storage_dtype_vector << "* out" << i << ", ";
+        ss << "float4* out" << i << ", ";
     }
 
-    const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {\n";
     ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
        << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n";
     ss << "  const " << index_type << " packed_numel = (numel + " << emitUnsignedLiteral(1, use_uint32_index_math) << ") >> 1;\n";
-    ss << "  if (idx >= packed_numel) return;\n\n";
+    ss << "  const " << index_type << " packed_base = idx * "
+       << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
+    ss << "  if (packed_base >= packed_numel) return;\n\n";
 
-    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
-        const auto& n = stage.expr.nodes[node_idx];
-        switch (n.op) {
-            case ExprOp::INPUT: {
-                const std::string variable = "in" + to_string(n.input_slot) + "[idx]";
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << vector_compute_conversion(storage_dtype_vector, variable)
-                   << ";\n";
-                break;
-            }
-            case ExprOp::SCALAR_FP:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
-                break;
-            case ExprOp::FILL:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
-                break;
-            case ExprOp::ADD:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Add(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
-                break;
-            case ExprOp::SUB:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Sub(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
-                break;
-            case ExprOp::MUL:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Mul(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
-                break;
-            case ExprOp::DIV:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Div(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
-                break;
-            case ExprOp::NEG:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Neg(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::EXP:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::EXP2:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp2(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::EXP10:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Exp10(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::LN:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Ln(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::LOG2:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log2(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::LOG10:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Log10(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::SQRT:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sqrt(CudaSourceEmitter::ref(n.lhs), dtype)
-                   << ";\n";
-                break;
-            case ExprOp::UNSQUEEZE:
-            case ExprOp::SQUEEZE:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
-                break;
-            case ExprOp::POW:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Pow(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs), dtype) << ";\n";
-                break;
-            case ExprOp::MIN:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Min(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
-                break;
-            case ExprOp::MAX:
-                ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
-                   << emitVector2Max(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
-                break;
-            default:
-                throw runtime_error("Unsupported op in vectorized fused emitter: " + to_string((int32_t)n.op));
-        }
+    for (uint32_t i = 0; i < num_inputs; ++i) {
+        ss << "  const float4 in" << i << "_chunk = in" << i << "[idx];\n";
+    }
+    if (num_inputs > 0) {
+        ss << "\n";
     }
 
-    ss << "\n";
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
-        const CompiledStageOutput& output = stage.outputs[out_idx];
-        ss << "  out" << out_idx
-           << "[idx] = " << vector_storage_conversion(storage_dtype_vector, CudaSourceEmitter::ref(output.local_node_idx)) << ";\n";
+        ss << "  float4 out" << out_idx << "_chunk;\n";
+    }
+    if (!stage.outputs.empty()) {
+        ss << "\n";
+    }
+
+    for (uint32_t pack = 0; pack < packs_per_thread; ++pack) {
+        const std::string suffix = "_p" + std::to_string(pack);
+
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            const auto& n = stage.expr.nodes[node_idx];
+            switch (n.op) {
+                case ExprOp::INPUT: {
+                    const std::string variable = "reinterpret_cast<const " + storage_dtype_vector + "*>(&in" + to_string(n.input_slot) +
+                                                 "_chunk)[" + std::to_string(pack) + "]";
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << vector_compute_conversion(storage_dtype_vector, variable) << ";\n";
+                    break;
+                }
+                case ExprOp::SCALAR_FP:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                    break;
+                case ExprOp::FILL:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                    break;
+                case ExprOp::ADD:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Add(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                case ExprOp::SUB:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Sub(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                case ExprOp::MUL:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Mul(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                case ExprOp::DIV:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Div(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                case ExprOp::NEG:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Neg(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::EXP:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::EXP2:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Exp2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::EXP10:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Exp10(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::LN:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Ln(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::LOG2:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Log2(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::LOG10:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Log10(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::SQRT:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Sqrt(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::UNSQUEEZE:
+                case ExprOp::SQUEEZE:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = " << refWithSuffix(n.lhs, suffix)
+                       << ";\n";
+                    break;
+                case ExprOp::POW:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Pow(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix), dtype) << ";\n";
+                    break;
+                case ExprOp::MIN:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Min(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                case ExprOp::MAX:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Max(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                default:
+                    throw runtime_error("Unsupported op in vectorized fused emitter: " + to_string((int32_t)n.op));
+            }
+        }
+
+        ss << "\n";
+        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+            const CompiledStageOutput& output = stage.outputs[out_idx];
+            ss << "  reinterpret_cast<" << storage_dtype_vector << "*>(&out" << out_idx << "_chunk)[" << pack
+               << "] = " << vector_storage_conversion(storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
+        }
+        ss << "\n";
+    }
+
+    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+        ss << "  out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
+    }
+
+    ss << "}\n";
+    return ss.str();
+}
+
+static std::string chunkScalarTypeForBytes(uint32_t bytes) {
+    switch (bytes) {
+        case 4:
+            return "unsigned int";
+        case 8:
+            return "unsigned long long";
+        case 16:
+            return "float4";
+        default:
+            throw runtime_error("Unsupported wide flat chunk size: " + to_string(bytes));
+    }
+}
+
+static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
+                                      const std::string& kernel_name,
+                                      bool use_uint32_index_math,
+                                      uint32_t elements_per_thread) {
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+
+    std::vector<std::string> input_chunk_types;
+    input_chunk_types.reserve(input_dtypes.size());
+    for (DataType input_dtype : input_dtypes) {
+        input_chunk_types.push_back(chunkScalarTypeForBytes(dataTypeStorageBytes(input_dtype) * elements_per_thread));
+    }
+
+    std::vector<std::string> output_chunk_types;
+    output_chunk_types.reserve(output_dtypes.size());
+    for (DataType output_dtype : output_dtypes) {
+        output_chunk_types.push_back(chunkScalarTypeForBytes(dataTypeStorageBytes(output_dtype) * elements_per_thread));
+    }
+
+    std::ostringstream ss;
+    emitRequiredHeaders(stage.expr, ss);
+
+    ss << "#include <vector_types.h>\n";
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+
+    bool first_arg = true;
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (!first_arg) {
+            ss << ", ";
+        }
+        first_arg = false;
+        ss << "const " << input_chunk_types[i] << "* in" << i;
+    }
+
+    for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
+        if (!first_arg) {
+            ss << ", ";
+        }
+        first_arg = false;
+        ss << output_chunk_types[i] << "* out" << i;
+    }
+
+    if (!first_arg) {
+        ss << ", ";
+    }
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
+    ss << index_type << " numel) {\n";
+
+    ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
+       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n";
+    ss << "  const " << index_type << " base = idx * "
+       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
+    ss << "  if (base >= numel) return;\n\n";
+
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        ss << "  const " << input_chunk_types[i] << " in" << i << "_chunk = in" << i << "[idx];\n";
+    }
+    if (!input_dtypes.empty()) {
+        ss << "\n";
+    }
+
+    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+        ss << "  " << output_chunk_types[out_idx] << " out" << out_idx << "_chunk;\n";
+    }
+    if (!stage.outputs.empty()) {
+        ss << "\n";
+    }
+
+    for (uint32_t lane = 0; lane < elements_per_thread; ++lane) {
+        const std::string suffix = "_l" + std::to_string(lane);
+        const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
+
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+                continue;
+            }
+            emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, "  ", std::to_string(lane));
+        }
+
+        ss << "\n";
+        for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+            const CompiledStageOutput& output = stage.outputs[out_idx];
+            const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+            ss << "  reinterpret_cast<" << scalarStorageType(output_dtype) << "*>(&out" << out_idx << "_chunk)[" << lane
+               << "] = " << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+        }
+        ss << "\n";
+    }
+
+    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+        ss << "  out" << out_idx << "[idx] = out" << out_idx << "_chunk;\n";
     }
 
     ss << "}\n";
@@ -1312,6 +1655,11 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         return emitVector2Flat(stage, vectorized_dtype.get(), kernel_name, use_uint32_index_math);
     }
 
+    const uint32_t elements_per_thread = flatElementsPerThread(stage);
+    if (elements_per_thread > 1) {
+        return emitWideScalarFlat(stage, kernel_name, use_uint32_index_math, elements_per_thread);
+    }
+
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
 
@@ -1342,11 +1690,11 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         ss << ", ";
     }
     const std::string index_type = emittedIndexType(use_uint32_index_math);
-    ss << index_type << " numel) {\n";
+    ss << index_type << " numel) {";
 
     ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
-       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n";
-    ss << "  if (idx >= numel) return;\n\n";
+       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);";
+    ss << "  if (idx >= numel) return;";
 
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
         if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
@@ -1355,14 +1703,14 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, "  ");
     }
 
-    ss << "\n";
+    ss << "";
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
         const CompiledStageOutput& output = stage.outputs[out_idx];
         const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-        ss << "  out" << out_idx << "[idx] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
+        ss << "  out" << out_idx << "[idx] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";";
     }
 
-    ss << "}\n";
+    ss << "}";
     return ss.str();
 }
 
