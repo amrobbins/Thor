@@ -114,6 +114,51 @@ Return the elementwise square root of the input expression x
         return nb::cast<std::vector<uint64_t>>(axis);
     };
 
+    expr.def_static(
+        "unsqueeze",
+        [parse_axes](const Expression& x, const nb::object& axis) { return x.unsqueeze(parse_axes(axis)); },
+        "x"_a,
+        "axis"_a,
+        R"nbdoc(
+Insert singleton dimensions at the specified output axes.
+
+Parameters
+----------
+x : thor.physical.Expression
+    Input expression.
+axis : int | list[int]
+    Output-axis positions at which singleton dimensions of size 1 are inserted.
+
+Returns
+-------
+thor.physical.Expression
+    An Expression that views the same logical values with the requested singleton axes inserted.
+)nbdoc");
+
+    expr.def_static(
+        "squeeze",
+        [parse_axes](const Expression& x, const nb::object& axis) {
+            std::vector<uint64_t> all_singletons{UINT64_MAX};
+            return x.squeeze(axis.is_none() ? all_singletons : parse_axes(axis));
+        },
+        "x"_a,
+        "axis"_a.none() = nb::none(),
+        R"nbdoc(
+Remove singleton dimensions at the specified axes.
+
+Parameters
+----------
+x : thor.physical.Expression
+    Input expression.
+axis : int | list[int]
+    Axes that must be singleton dimensions of size 1.
+
+Returns
+-------
+thor.physical.Expression
+    An Expression that views the same logical values with the requested singleton axes removed.
+)nbdoc");
+
     auto parse_squeeze_axes = [](const nb::object& squeeze) -> std::vector<uint64_t> {
         if (squeeze.is_none()) {
             return {};
@@ -510,7 +555,7 @@ outputs: dict[str, PhysicalTensor]
         "wrt_names"_a = std::vector<std::string>{},
         "upstream_input_name"_a.none() = nb::none(),
         R"nbdoc(
-Compile a backward equation.
+Compile a backward equation for a single-output forward equation.
 
 By default, phase 1 seeds the backward pass with an implicit upstream gradient
 of 1. For non-scalar outputs, that means the resulting gradients are with
@@ -528,6 +573,31 @@ Args:
     upstream_input_name: str | None
         Optional name for an explicit upstream-gradient input tensor. If None,
         phase 1 uses the legacy implicit seed of 1.
+)nbdoc");
+
+    fused_equation.def(
+        "compile_backward",
+        [](const FusedEquation& self,
+           const std::vector<std::string>& wrt_names,
+           const std::unordered_map<std::string, std::string>& upstream_input_names_by_output) {
+            nb::gil_scoped_release release;
+            return self.compileBackward(wrt_names, upstream_input_names_by_output);
+        },
+        "wrt_names"_a,
+        "upstream_input_names_by_output"_a,
+        R"nbdoc(
+Compile a backward equation for a multi-output forward equation.
+
+This overload makes the upstream gradient explicit for each named forward
+output. The compiled backward equation will expect one additional input tensor
+per entry in ``upstream_input_names_by_output``.
+
+Args:
+    wrt_names: list[str]
+        Input names to differentiate with respect to.
+    upstream_input_names_by_output: dict[str, str]
+        Mapping from forward output name to the input name that should carry the
+        corresponding upstream gradient tensor.
 )nbdoc");
 
     fused_equation.def("output_names",

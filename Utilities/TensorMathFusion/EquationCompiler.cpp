@@ -82,6 +82,9 @@ struct StageNodeKey {
     int32_t compute_dtype = -1;
     int32_t backward_output_dtype = -1;
     int32_t backward_compute_dtype = -1;
+    std::vector<uint64_t> reduction_axes;
+    std::vector<uint64_t> squeeze_axes;
+    std::vector<uint64_t> unsqueeze_axes;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -98,6 +101,15 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<int32_t>{}(k.compute_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.backward_output_dtype));
         hashCombine(h, std::hash<int32_t>{}(k.backward_compute_dtype));
+        hashCombine(h, std::hash<size_t>{}(k.reduction_axes.size()));
+        for (uint64_t axis : k.reduction_axes)
+            hashCombine(h, std::hash<uint64_t>{}(axis));
+        hashCombine(h, std::hash<size_t>{}(k.squeeze_axes.size()));
+        for (uint64_t axis : k.squeeze_axes)
+            hashCombine(h, std::hash<uint64_t>{}(axis));
+        hashCombine(h, std::hash<size_t>{}(k.unsqueeze_axes.size()));
+        for (uint64_t axis : k.unsqueeze_axes)
+            hashCombine(h, std::hash<uint64_t>{}(axis));
         return h;
     }
 };
@@ -141,6 +153,9 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
                     std::swap(key.lhs, key.rhs);
                 }
             }
+            key.reduction_axes = n.reduction_axes;
+            key.squeeze_axes = n.squeeze_axes;
+            key.unsqueeze_axes = n.unsqueeze_axes;
             break;
     }
 
@@ -308,6 +323,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "LOG10";
         case ExprOp::SQRT:
             return "SQRT";
+        case ExprOp::UNSQUEEZE:
+            return "UNSQ";
+        case ExprOp::SQUEEZE:
+            return "SQZ";
         case ExprOp::POW:
             return "POW";
         case ExprOp::MIN:
@@ -400,7 +419,14 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     }
 
     if (!Expression::isBinaryOp(node.op)) {
-        std::string s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
+        std::string s;
+        if (node.op == ExprOp::UNSQUEEZE) {
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.unsqueeze_axes) + ")";
+        } else if (node.op == ExprOp::SQUEEZE) {
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.squeeze_axes) + ")";
+        } else {
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
+        }
         appendNodeDTypeSignature(s, node);
         return s;
     }

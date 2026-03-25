@@ -467,6 +467,9 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             return castScalarExpr("log10f(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::SQRT:
             return castScalarExpr("sqrtf(" + x_f + ")", DataType::FP32, compute_dtype);
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+            return x;
 
         default:
             throw runtime_error("Unsupported unary op in fused stage emitter.");
@@ -762,6 +765,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage, DataType
                 ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2Sqrt(CudaSourceEmitter::ref(n.lhs), dtype)
                    << ";\n";
                 break;
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
+                break;
             case ExprOp::POW:
                 ss << "  " << compute_dtype_vector << " t" << node_idx << " = "
                    << emitVector2Pow(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs), dtype) << ";\n";
@@ -971,6 +978,10 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 case ExprOp::SQRT:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Sqrt(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
+                case ExprOp::UNSQUEEZE:
+                case ExprOp::SQUEEZE:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << CudaSourceEmitter::ref(n.lhs) << ";\n";
                     break;
                 case ExprOp::POW:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "

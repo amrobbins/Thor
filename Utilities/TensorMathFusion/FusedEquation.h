@@ -9,6 +9,7 @@
 #include "Utilities/Cache/LruCache.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/SqueezeAxes.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
 
 namespace ThorImplementation {
@@ -121,7 +122,7 @@ struct PreparedConvenienceRunPlan {
 struct BackwardEquationConfig {
     PhysicalOutputs forward_outputs_template;
     std::vector<std::string> wrt_names;
-    std::optional<std::string> upstream_input_name;
+    std::optional<std::unordered_map<std::string, std::string>> upstream_input_names_by_output;
 };
 
 class FusedEquation {
@@ -132,6 +133,9 @@ class FusedEquation {
 
     [[nodiscard]] FusedEquation compileBackward(const std::vector<std::string>& wrt_names = {},
                                                 const std::optional<std::string>& upstream_input_name = std::nullopt) const;
+
+    [[nodiscard]] FusedEquation compileBackward(const std::vector<std::string>& wrt_names,
+                                                const std::unordered_map<std::string, std::string>& upstream_input_names_by_output) const;
 
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                              const Stream& stream,

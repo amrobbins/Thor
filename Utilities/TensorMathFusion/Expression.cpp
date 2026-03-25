@@ -58,6 +58,10 @@ std::string opName(ExprOp op) {
             return "LOG";
         case ExprOp::SQRT:
             return "SQRT";
+        case ExprOp::UNSQUEEZE:
+            return "UNSQ";
+        case ExprOp::SQUEEZE:
+            return "SQZ";
         case ExprOp::EXP2:
             return "EXP2";
         case ExprOp::EXP10:
@@ -149,6 +153,14 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::LOG10:
         case ExprOp::SQRT:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ")";
+            break;
+        case ExprOp::UNSQUEEZE:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";axes=" + formatUIntVectorCanonical(n.unsqueeze_axes) + ")";
+            break;
+        case ExprOp::SQUEEZE:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";axes=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
             break;
 
         case ExprOp::REDUCE_SUM:
@@ -267,6 +279,8 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::LOG2:
         case ExprOp::LOG10:
         case ExprOp::SQRT:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
@@ -543,6 +557,31 @@ Expression Expression::operator*(const Expression& other) const { return binaryO
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
+
+Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
+    if (!expr)
+        throw std::runtime_error("Cannot unsqueeze an empty expression");
+
+    Expression out = unaryOp(*this, ExprOp::UNSQUEEZE);
+    std::vector<uint64_t> normalized = unsqueeze_axes;
+    std::sort(normalized.begin(), normalized.end());
+    normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+    out.expr->nodes[out.nodeIndex].unsqueeze_axes = std::move(normalized);
+    return out;
+}
+
+Expression Expression::squeeze(const std::vector<uint64_t>& squeeze_axes) const {
+    if (!expr)
+        throw std::runtime_error("Cannot squeeze an empty expression");
+
+    Expression out = unaryOp(*this, ExprOp::SQUEEZE);
+    std::vector<uint64_t> normalized = squeeze_axes;
+    std::sort(normalized.begin(), normalized.end());
+    normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+    out.expr->nodes[out.nodeIndex].squeeze_axes = std::move(normalized);
+    return out;
+}
+
 Expression Expression::pow(const Expression& exponent) const { return binaryOp(*this, exponent, ExprOp::POW); }
 
 // Reductions
