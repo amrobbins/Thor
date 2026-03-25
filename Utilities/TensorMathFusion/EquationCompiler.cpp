@@ -641,20 +641,22 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     return ltoir;
 }
 
-shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage, const EquationSignature& sig) {
+shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage,
+                                                                 const EquationSignature& sig,
+                                                                 bool use_uint32_index_math) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         throw runtime_error("compileFusedStage called on non-fused stage.");
     }
 
     ensureCudaContextCurrent(sig.device_num);
 
-    EquationCacheKey key(canonicalize(stage), sig);
+    EquationCacheKey key(canonicalize(stage), sig, use_uint32_index_math);
     shared_ptr<CompiledEquation> hit = cacheLookup(key);
     if (hit)
         return hit;
 
     string kernel_name = "fused_kernel";
-    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name);
+    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name, use_uint32_index_math);
 
     vector<string> input_names;
     input_names.reserve(stage.expr.inputs.size());
@@ -669,6 +671,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
     const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
+    compiled->uses_uint32_numel_arg = use_uint32_index_math;
 
     cacheInsert(key, compiled);
     return compiled;
@@ -1407,6 +1410,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         EquationCacheKey(canonicalize(stage.expr), sig), cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
     const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
+
+    compiled->uses_uint32_numel_arg = false;
 
     if (groups.size() > 1) {
         compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;
