@@ -1468,9 +1468,13 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         }
     }
 
-    PhysicalOutputs backward_outputs;
-    backward_outputs.expr = std::make_shared<PhysicalExpression>(builder.takeExpression());
-    backward_outputs.outputs.reserve(normalized_wrt.size());
+    struct PendingBackwardOutput {
+        std::string name;
+        uint32_t node_idx;
+    };
+
+    std::vector<PendingBackwardOutput> pending_outputs;
+    pending_outputs.reserve(normalized_wrt.size());
 
     for (const std::string& wrt_name : normalized_wrt) {
         uint32_t slot = UINT32_MAX;
@@ -1501,54 +1505,32 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 continue;
             }
 
-            if (total_grad.has_value()) {
-                ExprNode sum_node{};
-                sum_node.op = ExprOp::ADD;
-                sum_node.lhs = total_grad.value();
-                sum_node.rhs = grad_opt.value();
-                total_grad = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
-                backward_outputs.expr->nodes.push_back(std::move(sum_node));
-            } else {
-                total_grad = grad_opt.value();
-            }
+            total_grad = total_grad.has_value() ? std::optional<uint32_t>(builder.add(total_grad.value(), grad_opt.value()))
+                                                : std::optional<uint32_t>(grad_opt.value());
         }
 
         if (!total_grad.has_value()) {
+            const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
+            const Optional<TensorDescriptor::DataType> zero_dtype = preferredGradValueDType(forward_input_node);
             if (has_forward_dims) {
-                ExprNode fill_node{};
-                fill_node.op = ExprOp::FILL;
-                fill_node.scalar_fp = 0.0;
-                fill_node.fill_dims = forward_node_dims.at(first_it->second);
-                const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
-                if (forward_input_node.backward_output_dtype.isPresent()) {
-                    fill_node.output_dtype = forward_input_node.backward_output_dtype.get();
-                } else if (forward_input_node.output_dtype.isPresent()) {
-                    fill_node.output_dtype = forward_input_node.output_dtype.get();
-                }
-                total_grad = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
-                backward_outputs.expr->nodes.push_back(std::move(fill_node));
+                total_grad = builder.fill(0.0, forward_node_dims.at(first_it->second), zero_dtype);
             } else {
-                std::unordered_map<uint32_t, uint32_t> zero_clone_memo;
-                const uint32_t input_clone = cloneForwardSubtree(forward_expr, first_it->second, *backward_outputs.expr, zero_clone_memo);
-                ExprNode zero_node{};
-                zero_node.op = ExprOp::SCALAR_FP;
-                zero_node.scalar_fp = 0.0;
-                const uint32_t zero_idx = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
-                backward_outputs.expr->nodes.push_back(std::move(zero_node));
-
-                ExprNode mul_node{};
-                mul_node.op = ExprOp::MUL;
-                mul_node.lhs = input_clone;
-                mul_node.rhs = zero_idx;
-                total_grad = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
-                backward_outputs.expr->nodes.push_back(std::move(mul_node));
+                const uint32_t input_clone = builder.cloneForward(first_it->second);
+                total_grad = builder.mul(input_clone, builder.scalar(0.0));
             }
         }
 
-        backward_outputs.outputs.push_back(NamedOutput{
+        pending_outputs.push_back(PendingBackwardOutput{
             .name = wrt_name + "_grad",
             .node_idx = total_grad.value(),
         });
+    }
+
+    PhysicalOutputs backward_outputs;
+    backward_outputs.expr = std::make_shared<PhysicalExpression>(builder.takeExpression());
+    backward_outputs.outputs.reserve(pending_outputs.size());
+    for (const PendingBackwardOutput& output : pending_outputs) {
+        backward_outputs.outputs.push_back(NamedOutput{.name = output.name, .node_idx = output.node_idx});
     }
 
     return backward_outputs;
