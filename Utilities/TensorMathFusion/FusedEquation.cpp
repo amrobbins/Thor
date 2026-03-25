@@ -1187,8 +1187,10 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
 }
 
 bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions) {
-    if (inputs.empty())
-        throw std::runtime_error("Tried to create a FusedEquation with 0 tensor inputs. You must have at least one.");
+    if (inputs.empty()) {
+        outputDimensions.clear();
+        return false;
+    }
 
     std::vector<std::vector<uint64_t>> originalInputDimensions;
     originalInputDimensions.reserve(inputs.size());
