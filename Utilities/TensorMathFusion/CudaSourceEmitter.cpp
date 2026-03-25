@@ -541,6 +541,13 @@ static void emitScalarNode(
             return;
         }
 
+        case ExprOp::FILL: {
+            const std::string literal = emitScalarFpLiteral(n.scalar_fp);
+            ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
+               << ";\n";
+            return;
+        }
+
         default:
             break;
     }
@@ -715,6 +722,9 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage, DataType
                 break;
             }
             case ExprOp::SCALAR_FP:
+                ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
+                break;
+            case ExprOp::FILL:
                 ss << "  " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
                 break;
             case ExprOp::ADD:
@@ -928,6 +938,10 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 }
 
                 case ExprOp::SCALAR_FP:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
+                       << ";\n";
+                    break;
+                case ExprOp::FILL:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
                        << ";\n";
                     break;

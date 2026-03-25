@@ -58,6 +58,8 @@ std::string opName(ExprOp op) {
             return "LOG";
         case ExprOp::SQRT:
             return "SQRT";
+        case ExprOp::FILL:
+            return "FILL";
         case ExprOp::UNSQUEEZE:
             return "UNSQ";
         case ExprOp::SQUEEZE:
@@ -142,6 +144,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
 
         case ExprOp::SCALAR_FP:
             out = "F32(" + formatFloatCanonical(n.scalar_fp) + ")";
+            break;
+
+        case ExprOp::FILL:
+            out = "FILL(" + formatFloatCanonical(n.scalar_fp) + ";dims=" + formatUIntVectorCanonical(n.fill_dims) + ")";
             break;
 
         case ExprOp::NEG:
@@ -263,6 +269,7 @@ bool Expression::isLeafOp(const ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
         case ExprOp::SCALAR_FP:
+        case ExprOp::FILL:
             return true;
         default:
             return false;
