@@ -116,357 +116,259 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
     }
 }
 
-static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
-                                                             size_t output_idx,
-                                                             const std::vector<Tensor>& stage_inputs) {
-    if (output_idx >= stage.outputs.size()) {
-        throw std::runtime_error("resolveOutputDimsForStageOutput output_idx out of range.");
-    }
+static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions);
 
-    std::unordered_set<uint32_t> used_input_slots;
-    collectReferencedLocalInputSlots(stage.expr, stage.outputs[output_idx].local_node_idx, used_input_slots);
+// static std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes) {
+//     if (squeeze_axes.empty()) {
+//         return input_dims;
+//     }
+//
+//     std::vector<uint64_t> normalized = squeeze_axes;
+//     std::sort(normalized.begin(), normalized.end());
+//     normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+//
+//     if (normalized.size() == 1 && normalized[0] == UINT64_MAX) {
+//         std::vector<uint64_t> out_dims;
+//         out_dims.reserve(input_dims.size());
+//         for (uint64_t dim : input_dims) {
+//             if (dim != 1) {
+//                 out_dims.push_back(dim);
+//             }
+//         }
+//         return out_dims;
+//     }
+//
+//     std::vector<uint64_t> out_dims;
+//     out_dims.reserve(input_dims.size());
+//     size_t next_axis_i = 0;
+//     uint64_t next_axis = normalized.empty() ? UINT64_MAX : normalized[0];
+//     for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
+//         if (next_axis_i < normalized.size() && axis == next_axis) {
+//             if (input_dims[axis] != 1) {
+//                 throw std::runtime_error("squeeze axes must refer to singleton dimensions.");
+//             }
+//             ++next_axis_i;
+//             next_axis = next_axis_i < normalized.size() ? normalized[next_axis_i] : UINT64_MAX;
+//             continue;
+//         }
+//         out_dims.push_back(input_dims[axis]);
+//     }
+//
+//     if (next_axis_i != normalized.size()) {
+//         throw std::runtime_error("squeeze axes are invalid for the input rank.");
+//     }
+//
+//     return out_dims;
+// }
 
-    if (used_input_slots.empty()) {
-        throw std::runtime_error("Broadcast output grouping currently requires each output to depend on at least one tensor input.");
-    }
+static std::vector<uint64_t> applyNormalizedUnsqueezeDims(const std::vector<uint64_t>& input_dims,
+                                                          const std::vector<uint64_t>& unsqueeze_axes) {
+    // Scalar literals are rank-0 broadcastable leaves in the IR.
+    // Unsqueezing a scalar produces an all-ones shape of the requested rank.
+    if (input_dims.empty()) {
+        std::vector<uint64_t> normalized = unsqueeze_axes;
+        std::sort(normalized.begin(), normalized.end());
+        normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
 
-    std::vector<Tensor> subset_inputs;
-    subset_inputs.reserve(used_input_slots.size());
-
-    for (uint32_t local_slot = 0; local_slot < stage_inputs.size(); ++local_slot) {
-        if (used_input_slots.contains(local_slot)) {
-            subset_inputs.push_back(stage_inputs[local_slot]);
+        for (uint64_t i = 0; i < normalized.size(); ++i) {
+            if (normalized[i] != i) {
+                throw std::runtime_error("unsqueeze axes are invalid for scalar input.");
+            }
         }
+
+        return std::vector<uint64_t>(normalized.size(), 1ULL);
     }
 
-    if (subset_inputs.empty()) {
-        throw std::runtime_error("Failed to collect subset inputs for stage output.");
+    const std::vector<uint64_t> actual_axes = normalizeUnsqueezeAxesForInputDims(input_dims, unsqueeze_axes);
+
+    std::vector<uint64_t> output_dims = input_dims;
+    for (uint64_t axis : actual_axes) {
+        output_dims.insert(output_dims.begin() + static_cast<std::ptrdiff_t>(axis), 1ULL);
+    }
+    return output_dims;
+}
+
+static std::vector<uint64_t> applyNormalizedSqueezeDims(const std::vector<uint64_t>& input_dims,
+                                                        const std::vector<uint64_t>& squeeze_axes) {
+    // Scalar literals are already rank-0. Any squeeze is shape-preserving for stage inference.
+    if (input_dims.empty()) {
+        return {};
     }
 
-    std::vector<std::vector<uint64_t>> original_input_dimensions;
-    original_input_dimensions.reserve(subset_inputs.size());
-    for (const Tensor& input : subset_inputs) {
-        original_input_dimensions.push_back(input.getDimensions());
+    const std::vector<uint64_t> actual_axes = normalizeSqueezeAxesForInputDims(input_dims, squeeze_axes);
+
+    if (actual_axes.empty()) {
+        return input_dims;
     }
 
-    uint64_t maxRank = 0;
-    for (const Tensor& input : subset_inputs) {
-        const std::vector<uint64_t>& dims = input.getDimensions();
-        if (dims.empty()) {
-            throw std::runtime_error("Input tensor has 0 dimensions, which is not supported.");
-        }
-        maxRank = std::max<uint64_t>(maxRank, dims.size());
-    }
+    std::vector<uint64_t> output_dims;
+    output_dims.reserve(input_dims.size() - actual_axes.size());
 
-    for (Tensor& input : subset_inputs) {
-        const std::vector<uint64_t>& oldDims = input.getDimensions();
-        if (oldDims.size() == maxRank) {
+    size_t next_remove = 0;
+    for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
+        if (next_remove < actual_axes.size() && actual_axes[next_remove] == axis) {
+            ++next_remove;
             continue;
         }
-
-        std::vector<uint64_t> paddedDims(maxRank - oldDims.size(), 1);
-        paddedDims.insert(paddedDims.end(), oldDims.begin(), oldDims.end());
-        input.reshape(paddedDims);
+        output_dims.push_back(input_dims[axis]);
     }
 
-    std::vector<uint64_t> outputDimensions(maxRank, 1);
+    return output_dims;
+}
 
-    for (uint64_t axis = 0; axis < maxRank; ++axis) {
-        uint64_t resolvedDim = 1;
+static std::string dimsToString(const std::vector<uint64_t>& dims) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < dims.size(); ++i) {
+        if (i) {
+            oss << ", ";
+        }
+        oss << dims[i];
+    }
+    oss << "]";
+    return oss.str();
+}
 
-        for (const Tensor& input : subset_inputs) {
-            const std::vector<uint64_t>& dims = input.getDimensions();
-            const uint64_t dim = dims[axis];
+// static std::vector<uint64_t> applyUnsqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& unsqueeze_axes) {
+//     std::vector<uint64_t> out_dims;
+//     out_dims.reserve(input_dims.size() + unsqueeze_axes.size());
+//
+//     const uint64_t output_rank = static_cast<uint64_t>(input_dims.size() + unsqueeze_axes.size());
+//     size_t input_i = 0;
+//     size_t axis_i = 0;
+//
+//     for (uint64_t out_axis = 0; out_axis < output_rank; ++out_axis) {
+//         if (axis_i < unsqueeze_axes.size() && unsqueeze_axes[axis_i] == out_axis) {
+//             out_dims.push_back(1);
+//             ++axis_i;
+//         } else {
+//             if (input_i >= input_dims.size()) {
+//                 throw std::runtime_error("unsqueeze axes are invalid for the input rank.");
+//             }
+//             out_dims.push_back(input_dims[input_i++]);
+//         }
+//     }
+//
+//     if (input_i != input_dims.size() || axis_i != unsqueeze_axes.size()) {
+//         throw std::runtime_error("unsqueeze axes are invalid for the input rank.");
+//     }
+//
+//     return out_dims;
+// }
 
-            if (dim == 1) {
-                continue;
-            }
+static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const PhysicalExpression& expr,
+                                                                  const std::vector<std::vector<uint64_t>>& stage_input_dims) {
+    std::vector<std::vector<uint64_t>> node_dims(expr.nodes.size());
 
-            if (resolvedDim == 1) {
-                resolvedDim = dim;
-            } else if (resolvedDim != dim) {
-                std::ostringstream err;
-                err << "Stage output inputs are not broadcast-compatible at axis " << axis << ". "
-                    << "Encountered dimension " << resolvedDim << " and dimension " << dim << ". "
-                    << "Input shapes: ";
-                for (size_t i = 0; i < original_input_dimensions.size(); ++i) {
-                    const std::vector<uint64_t>& inDims = original_input_dimensions[i];
-                    err << "[";
-                    for (size_t j = 0; j < inDims.size(); ++j) {
-                        err << inDims[j];
-                        if (j + 1 < inDims.size()) {
-                            err << ", ";
-                        }
-                    }
-                    err << "]";
-                    if (i + 1 < original_input_dimensions.size()) {
-                        err << ", ";
-                    }
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        const ExprNode& node = expr.nodes[i];
+
+        // std::cerr << "[FUSION] visiting node"
+        //           << " local_node=" << i << " op=" << static_cast<int>(node.op) << " lhs=" << node.lhs << " rhs=" << node.rhs
+        //           << " input_slot=" << node.input_slot << std::endl;
+
+        switch (node.op) {
+            case ExprOp::INPUT: {
+                if (node.input_slot >= stage_input_dims.size()) {
+                    throw std::runtime_error("Stage input slot out of range during fused-stage shape inference.");
                 }
-                throw std::runtime_error(err.str());
+                node_dims[i] = stage_input_dims[node.input_slot];
+                break;
             }
-        }
-
-        outputDimensions[axis] = resolvedDim;
-    }
-
-    return outputDimensions;
-}
-
-struct ResolvedBroadcastGroup {
-    SpecializedBroadcastGroup specialized;
-};
-
-static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& inputDims,
-                                                                   const std::vector<uint64_t>& outputDimensions) {
-    const uint32_t rank = static_cast<uint32_t>(outputDimensions.size());
-    if (inputDims.size() > outputDimensions.size()) {
-        throw std::runtime_error("Input rank exceeds output rank in computeInputPackedStridesForBroadcast.");
-    }
-
-    const uint32_t rankDiff = rank - static_cast<uint32_t>(inputDims.size());
-
-    uint64_t runningStride = 1;
-    std::vector<uint64_t> inputPackedStrides(rank, 0);
-
-    for (int64_t axis = static_cast<int64_t>(rank) - 1; axis >= 0; --axis) {
-        if (static_cast<uint32_t>(axis) < rankDiff) {
-            inputPackedStrides[static_cast<size_t>(axis)] = 0;
-            continue;
-        }
-
-        const uint32_t inputAxis = static_cast<uint32_t>(axis) - rankDiff;
-        const uint64_t inputDim = inputDims[inputAxis];
-        const uint64_t outputDim = outputDimensions[static_cast<size_t>(axis)];
-
-        if (inputDim == outputDim) {
-            inputPackedStrides[static_cast<size_t>(axis)] = runningStride;
-            runningStride *= inputDim;
-        } else if (inputDim == 1) {
-            inputPackedStrides[static_cast<size_t>(axis)] = 0;
-        } else {
-            throw std::runtime_error("Input shape is not broadcast-compatible with output shape.");
-        }
-    }
-
-    return inputPackedStrides;
-}
-
-static bool canUseNativeVectorLoadForUsedInput(const SpecializedBroadcastGroup& group, size_t used_input_idx) {
-    uint64_t contiguous_slice_size = 1;
-    uint64_t expected_stride = 1;
-    bool found_contiguous_suffix = false;
-
-    for (int64_t axis_i = static_cast<int64_t>(group.active_axes.size()) - 1; axis_i >= 0; --axis_i) {
-        const SpecializedBroadcastAxis& axis = group.active_axes[static_cast<size_t>(axis_i)];
-        const uint64_t input_stride = axis.input_strides[used_input_idx];
-
-        if (input_stride == 0) {
-            break;
-        }
-
-        if (input_stride != expected_stride) {
-            break;
-        }
-
-        found_contiguous_suffix = true;
-        contiguous_slice_size *= axis.dim;
-        expected_stride *= axis.dim;
-    }
-
-    if (!found_contiguous_suffix) {
-        return false;
-    }
-
-    // Safe when pair boundaries cannot cross an internal odd-sized reset.
-    // If the contiguous slice is even, every packed pair start stays aligned.
-    // If the contiguous slice is the full group, only the final tail can straddle,
-    // and tensor padding makes that safe.
-    return (contiguous_slice_size % 2ULL == 0ULL) || (contiguous_slice_size == group.numel);
-}
-
-static SpecializedBroadcastGroup buildSpecializedBroadcastGroup(const CompiledExecutionStage& stage,
-                                                                const std::vector<Tensor>& stage_inputs,
-                                                                const std::vector<uint64_t>& output_dims,
-                                                                const std::vector<uint32_t>& output_indices) {
-    SpecializedBroadcastGroup group;
-    group.output_dims = output_dims;
-    group.output_indices = output_indices;
-    group.numel = product(output_dims);
-
-    std::unordered_set<uint32_t> used_input_slots_set;
-    for (uint32_t out_idx : output_indices) {
-        if (out_idx >= stage.outputs.size()) {
-            throw std::runtime_error("buildSpecializedBroadcastGroup output index out of range.");
-        }
-        collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, used_input_slots_set);
-    }
-
-    group.used_input_slots.assign(used_input_slots_set.begin(), used_input_slots_set.end());
-    std::sort(group.used_input_slots.begin(), group.used_input_slots.end());
-
-    const uint32_t rank = static_cast<uint32_t>(output_dims.size());
-    const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
-
-    std::vector<std::vector<uint64_t>> per_input_strides;
-    per_input_strides.reserve(group.used_input_slots.size());
-    for (uint32_t local_slot : group.used_input_slots) {
-        if (local_slot >= stage_inputs.size()) {
-            throw std::runtime_error("buildSpecializedBroadcastGroup local input slot out of range.");
-        }
-        per_input_strides.push_back(computeInputPackedStridesForBroadcast(stage_inputs[local_slot].getDimensions(), output_dims));
-    }
-
-    for (uint32_t axis = 0; axis < rank; ++axis) {
-        if (output_dims[axis] == 1) {
-            continue;
-        }
-
-        SpecializedBroadcastAxis axis_desc;
-        axis_desc.dim = output_dims[axis];
-        axis_desc.output_stride = output_strides[axis];
-        axis_desc.input_strides.reserve(group.used_input_slots.size());
-
-        bool contributes_to_any_input = false;
-        for (const std::vector<uint64_t>& input_strides : per_input_strides) {
-            const uint64_t s = input_strides[axis];
-            axis_desc.input_strides.push_back(s);
-            if (s != 0) {
-                contributes_to_any_input = true;
-            }
-        }
-
-        if (!contributes_to_any_input) {
-            continue;
-        }
-
-        group.active_axes.push_back(std::move(axis_desc));
-    }
-
-    group.used_input_load_kinds.reserve(group.used_input_slots.size());
-    for (size_t used_i = 0; used_i < group.used_input_slots.size(); ++used_i) {
-        if (canUseNativeVectorLoadForUsedInput(group, used_i)) {
-            group.used_input_load_kinds.push_back(SpecializedInputLoadKind::NativeVector);
-        } else {
-            group.used_input_load_kinds.push_back(SpecializedInputLoadKind::ScalarPack);
-        }
-    }
-
-    return group;
-}
-
-static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
-                                                                        const std::vector<Tensor>& stage_inputs) {
-    std::map<std::vector<uint64_t>, std::vector<uint32_t>> grouped_output_indices;
-
-    for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
-        std::vector<uint64_t> dims = resolveOutputDimsForStageOutput(stage, i, stage_inputs);
-        grouped_output_indices[dims].push_back(i);
-    }
-
-    std::vector<ResolvedBroadcastGroup> groups;
-    groups.reserve(grouped_output_indices.size());
-
-    for (auto& [dims, output_indices] : grouped_output_indices) {
-        ResolvedBroadcastGroup resolved;
-        resolved.specialized = buildSpecializedBroadcastGroup(stage, stage_inputs, dims, output_indices);
-        groups.push_back(std::move(resolved));
-    }
-
-    std::sort(groups.begin(), groups.end(), [](const ResolvedBroadcastGroup& a, const ResolvedBroadcastGroup& b) {
-        if (a.specialized.numel != b.specialized.numel) {
-            return a.specialized.numel > b.specialized.numel;
-        }
-
-        if (a.specialized.output_dims.size() != b.specialized.output_dims.size()) {
-            return a.specialized.output_dims.size() > b.specialized.output_dims.size();
-        }
-
-        return a.specialized.output_dims < b.specialized.output_dims;
-    });
-
-    return groups;
-}
-
-static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
-    if (inputs.empty()) {
-        throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
-    }
-
-    std::vector<std::vector<uint64_t>> originalInputDimensions = inputs;
-
-    uint64_t maxRank = 0;
-    for (const std::vector<uint64_t>& dims : inputs) {
-        if (dims.empty()) {
-            throw std::runtime_error("Input tensor has 0 dimensions, which is not supported.");
-        }
-        maxRank = std::max<uint64_t>(maxRank, dims.size());
-    }
-
-    std::vector<std::vector<uint64_t>> paddedInputs;
-    paddedInputs.reserve(inputs.size());
-
-    for (const std::vector<uint64_t>& oldDims : inputs) {
-        if (oldDims.size() == maxRank) {
-            paddedInputs.push_back(oldDims);
-            continue;
-        }
-
-        std::vector<uint64_t> paddedDims(maxRank - oldDims.size(), 1);
-        paddedDims.insert(paddedDims.end(), oldDims.begin(), oldDims.end());
-        paddedInputs.push_back(std::move(paddedDims));
-    }
-
-    outputDimensions.clear();
-    outputDimensions.assign(maxRank, 1);
-
-    for (uint64_t axis = 0; axis < maxRank; ++axis) {
-        uint64_t resolvedDim = 1;
-
-        for (const std::vector<uint64_t>& dims : paddedInputs) {
-            uint64_t dim = dims[axis];
-
-            if (dim == 1) {
-                continue;
-            }
-
-            if (resolvedDim == 1) {
-                resolvedDim = dim;
-            } else if (resolvedDim != dim) {
-                std::ostringstream err;
-                err << "Input tensors are not broadcast-compatible at axis " << axis << ". "
-                    << "Encountered dimension " << resolvedDim << " and dimension " << dim << ". "
-                    << "Input shapes: ";
-                for (size_t i = 0; i < originalInputDimensions.size(); ++i) {
-                    const std::vector<uint64_t>& inDims = originalInputDimensions[i];
-                    err << "[";
-                    for (size_t j = 0; j < inDims.size(); ++j) {
-                        err << inDims[j];
-                        if (j + 1 < inDims.size()) {
-                            err << ", ";
-                        }
-                    }
-                    err << "]";
-                    if (i + 1 < originalInputDimensions.size()) {
-                        err << ", ";
-                    }
+            case ExprOp::SCALAR_FP:
+                node_dims[i] = {};
+                break;
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::MIN:
+            case ExprOp::MAX: {
+                std::vector<std::vector<uint64_t>> non_scalar_inputs;
+                if (!node_dims[node.lhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.lhs]);
+                if (!node_dims[node.rhs].empty())
+                    non_scalar_inputs.push_back(node_dims[node.rhs]);
+                if (non_scalar_inputs.empty()) {
+                    node_dims[i] = {};
+                } else if (non_scalar_inputs.size() == 1) {
+                    node_dims[i] = non_scalar_inputs[0];
+                } else {
+                    std::vector<uint64_t> out_dims;
+                    resolveLayoutFromDims(non_scalar_inputs, out_dims);
+                    node_dims[i] = std::move(out_dims);
                 }
-                throw std::runtime_error(err.str());
+                break;
             }
-        }
+            case ExprOp::NEG:
+            case ExprOp::EXP:
+            case ExprOp::EXP2:
+            case ExprOp::EXP10:
+            case ExprOp::LN:
+            case ExprOp::LOG2:
+            case ExprOp::LOG10:
+            case ExprOp::SQRT:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::UNSQUEEZE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
 
-        outputDimensions[axis] = resolvedDim;
+                // std::cerr << "[FUSION] infer node UNSQUEEZE begin"
+                //           << " local_node=" << i << " lhs=" << node.lhs << " lhs_dims=" << dimsToString(lhs_dims)
+                //           << " unsqueeze_axes=" << dimsToString(node.unsqueeze_axes) << std::endl;
+
+                try {
+                    node_dims[i] = applyNormalizedUnsqueezeDims(lhs_dims, node.unsqueeze_axes);
+                } catch (const std::exception& e) {
+                    std::ostringstream oss;
+                    oss << "inferFusedStageNodeDims UNSQUEEZE failed"
+                        << " local_node=" << i << " lhs=" << node.lhs << " lhs_dims=" << dimsToString(lhs_dims)
+                        << " unsqueeze_axes=" << dimsToString(node.unsqueeze_axes) << " error=" << e.what();
+                    throw std::runtime_error(oss.str());
+                }
+
+                // std::cerr << "[FUSION] infer node UNSQUEEZE end"
+                //           << " local_node=" << i << " out_dims=" << dimsToString(node_dims[i]) << std::endl;
+                break;
+            }
+
+            case ExprOp::SQUEEZE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+
+                // std::cerr << "[FUSION] infer node SQUEEZE begin"
+                //           << " local_node=" << i << " lhs=" << node.lhs << " lhs_dims=" << dimsToString(lhs_dims)
+                //           << " squeeze_axes=" << dimsToString(node.squeeze_axes) << std::endl;
+
+                try {
+                    node_dims[i] = applyNormalizedSqueezeDims(lhs_dims, node.squeeze_axes);
+                } catch (const std::exception& e) {
+                    std::ostringstream oss;
+                    oss << "inferFusedStageNodeDims SQUEEZE failed"
+                        << " local_node=" << i << " lhs=" << node.lhs << " lhs_dims=" << dimsToString(lhs_dims)
+                        << " squeeze_axes=" << dimsToString(node.squeeze_axes) << " error=" << e.what();
+                    throw std::runtime_error(oss.str());
+                }
+
+                // std::cerr << "[FUSION] infer node SQUEEZE end"
+                //           << " local_node=" << i << " out_dims=" << dimsToString(node_dims[i]) << std::endl;
+                break;
+            }
+            case ExprOp::REDUCE_SUM:
+            case ExprOp::REDUCE_PROD:
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_AVG:
+            case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_NORM2:
+                node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
+                break;
+            default:
+                throw std::runtime_error("inferFusedStageNodeDims encountered unknown ExprOp.");
+        }
     }
 
-    bool requiresBroadcast = false;
-    for (const std::vector<uint64_t>& dims : paddedInputs) {
-        if (dims != outputDimensions) {
-            requiresBroadcast = true;
-            break;
-        }
-    }
-
-    return requiresBroadcast;
+    return node_dims;
 }
 
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
@@ -476,29 +378,301 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
         throw std::runtime_error("resolveOutputDimsForStageOutput output_idx out of range.");
     }
 
-    std::unordered_set<uint32_t> used_input_slots;
-    collectReferencedLocalInputSlots(stage.expr, stage.outputs[output_idx].local_node_idx, used_input_slots);
+    const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
+    const uint32_t local_node_idx = stage.outputs[output_idx].local_node_idx;
+    if (local_node_idx >= node_dims.size()) {
+        throw std::runtime_error("resolveOutputDimsForStageOutput local_node_idx out of range.");
+    }
+    return node_dims[local_node_idx];
+}
 
-    if (used_input_slots.empty()) {
-        throw std::runtime_error("Shape inference currently requires each output to depend on at least one tensor input.");
+static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
+                                                             size_t output_idx,
+                                                             const std::vector<Tensor>& stage_inputs) {
+    std::vector<std::vector<uint64_t>> stage_input_dims;
+    stage_input_dims.reserve(stage_inputs.size());
+    for (const Tensor& input : stage_inputs) {
+        stage_input_dims.push_back(input.getDimensions());
+    }
+    return resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
+}
+
+struct ResolvedBroadcastGroup {
+    SpecializedBroadcastGroup specialized;
+};
+
+static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return false;
+    }
+    for (const ExprNode& node : stage.expr.nodes) {
+        if (node.op == ExprOp::UNSQUEEZE || node.op == ExprOp::SQUEEZE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void mergeEffectiveInputDimsMaps(std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& dst,
+                                        const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& src) {
+    for (const auto& [slot, dims_set] : src) {
+        auto& out = dst[slot];
+        out.insert(dims_set.begin(), dims_set.end());
+    }
+}
+
+static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffectiveInputDimsForNode(
+    const PhysicalExpression& expr, const std::vector<std::vector<uint64_t>>& node_dims, uint32_t node_idx) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
+        throw std::runtime_error("collectEffectiveInputDimsForNode node index out of range.");
     }
 
-    std::vector<std::vector<uint64_t>> subset_input_dims;
-    subset_input_dims.reserve(used_input_slots.size());
+    const ExprNode& node = expr.nodes[node_idx];
+    switch (node.op) {
+        case ExprOp::INPUT: {
+            return {{node.input_slot, {node_dims[node_idx]}}};
+        }
+        case ExprOp::SCALAR_FP:
+            return {};
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE: {
+            auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            for (auto& [slot, dims_set] : result) {
+                dims_set.clear();
+                dims_set.insert(node_dims[node_idx]);
+            }
+            return result;
+        }
+        case ExprOp::NEG:
+        case ExprOp::EXP:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_AVG:
+        case ExprOp::REDUCE_NORM1:
+        case ExprOp::REDUCE_NORM2:
+            return collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::POW:
+        case ExprOp::MIN:
+        case ExprOp::MAX: {
+            auto lhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            auto rhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);
+            mergeEffectiveInputDimsMaps(lhs_map, rhs_map);
+            return lhs_map;
+        }
+        default:
+            throw std::runtime_error("collectEffectiveInputDimsForNode encountered unknown ExprOp.");
+    }
+}
 
-    for (uint32_t local_slot = 0; local_slot < stage_input_dims.size(); ++local_slot) {
-        if (used_input_slots.contains(local_slot)) {
-            subset_input_dims.push_back(stage_input_dims[local_slot]);
+static bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
+    if (inputs.empty()) {
+        throw std::runtime_error("resolveLayoutFromDims requires at least one input shape.");
+    }
+
+    uint64_t maxRank = 0;
+    for (const auto& dims : inputs) {
+        maxRank = std::max<uint64_t>(maxRank, dims.size());
+    }
+
+    outputDimensions.assign(maxRank, 1);
+
+    for (uint64_t axis = 0; axis < maxRank; ++axis) {
+        uint64_t resolvedDim = 1;
+
+        for (const auto& dims : inputs) {
+            const uint64_t pad = maxRank - dims.size();
+            const uint64_t dim = (axis < pad) ? 1ULL : dims[axis - pad];
+
+            if (dim == 1) {
+                continue;
+            }
+
+            if (resolvedDim == 1) {
+                resolvedDim = dim;
+            } else if (resolvedDim != dim) {
+                throw std::runtime_error("resolveLayoutFromDims found non-broadcast-compatible dimensions.");
+            }
+        }
+
+        outputDimensions[axis] = resolvedDim;
+    }
+
+    bool requiresBroadcast = false;
+    for (const auto& dims : inputs) {
+        std::vector<uint64_t> padded(maxRank - dims.size(), 1ULL);
+        padded.insert(padded.end(), dims.begin(), dims.end());
+        if (padded != outputDimensions) {
+            requiresBroadcast = true;
+            break;
         }
     }
 
-    if (subset_input_dims.empty()) {
-        throw std::runtime_error("Failed to collect subset input shapes for stage output.");
+    return requiresBroadcast;
+}
+
+static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::vector<uint64_t>& input_dims,
+                                                                   const std::vector<uint64_t>& output_dims) {
+    if (input_dims.size() > output_dims.size()) {
+        throw std::runtime_error("Input rank exceeds broadcast output rank.");
     }
 
-    std::vector<uint64_t> output_dims;
-    resolveLayoutFromDims(subset_input_dims, output_dims);
-    return output_dims;
+    const size_t rank = output_dims.size();
+
+    std::vector<uint64_t> padded_dims(rank, 1ULL);
+    std::copy(input_dims.begin(), input_dims.end(), padded_dims.begin() + (rank - input_dims.size()));
+
+    std::vector<uint64_t> packed_strides(rank, 1ULL);
+    if (rank > 0) {
+        packed_strides[rank - 1] = 1ULL;
+        for (int64_t i = static_cast<int64_t>(rank) - 2; i >= 0; --i) {
+            packed_strides[static_cast<size_t>(i)] = packed_strides[static_cast<size_t>(i) + 1] * padded_dims[static_cast<size_t>(i) + 1];
+        }
+    }
+
+    std::vector<uint64_t> result(rank, 0ULL);
+    for (size_t axis = 0; axis < rank; ++axis) {
+        const uint64_t in_dim = padded_dims[axis];
+        const uint64_t out_dim = output_dims[axis];
+
+        if (in_dim == out_dim) {
+            result[axis] = packed_strides[axis];
+        } else if (in_dim == 1ULL) {
+            result[axis] = 0ULL;
+        } else {
+            std::ostringstream oss;
+            oss << "Input dimensions are not broadcast-compatible with output dimensions. "
+                << "axis=" << axis << ", input_dims=" << dimsToString(input_dims) << ", padded_input_dims=" << dimsToString(padded_dims)
+                << ", output_dims=" << dimsToString(output_dims) << ", conflicting_in_dim=" << in_dim
+                << ", conflicting_out_dim=" << out_dim;
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    return result;
+}
+
+static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
+                                                                        const std::vector<Tensor>& stage_inputs) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("buildResolvedBroadcastGroups expects a fused-kernel stage.");
+    }
+    if (stage_inputs.size() != stage.input_value_ids.size()) {
+        throw std::runtime_error("buildResolvedBroadcastGroups stage input count mismatch.");
+    }
+
+    std::vector<std::vector<uint64_t>> stage_input_dims;
+    stage_input_dims.reserve(stage_inputs.size());
+    for (const Tensor& input : stage_inputs) {
+        stage_input_dims.push_back(input.getDimensions());
+    }
+    const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
+
+    std::map<std::vector<uint64_t>, std::vector<uint32_t>> outputs_by_dims;
+    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+        outputs_by_dims[resolveOutputDimsForStageOutput(stage, out_idx, stage_input_dims)].push_back(out_idx);
+    }
+
+    std::vector<ResolvedBroadcastGroup> groups;
+    groups.reserve(outputs_by_dims.size());
+
+    for (const auto& [output_dims, output_indices] : outputs_by_dims) {
+        std::unordered_set<uint32_t> used_slots_set;
+        for (uint32_t out_idx : output_indices) {
+            collectReferencedLocalInputSlots(stage.expr, stage.outputs[out_idx].local_node_idx, used_slots_set);
+        }
+
+        std::vector<uint32_t> used_input_slots(used_slots_set.begin(), used_slots_set.end());
+        std::sort(used_input_slots.begin(), used_input_slots.end());
+
+        SpecializedBroadcastGroup specialized;
+        specialized.output_indices = output_indices;
+        specialized.output_dims = output_dims;
+        specialized.numel = product(output_dims);
+        specialized.used_input_slots = used_input_slots;
+        specialized.used_input_load_kinds.assign(used_input_slots.size(), SpecializedInputLoadKind::ScalarPack);
+
+        const std::vector<uint64_t> output_strides = computePackedOutputStrides(output_dims);
+
+        const auto effective_dims_by_slot =
+            collectEffectiveInputDimsForNode(stage.expr, node_dims, stage.outputs[output_indices.front()].local_node_idx);
+
+        std::vector<std::vector<uint64_t>> input_strides_by_used;
+        input_strides_by_used.reserve(used_input_slots.size());
+        for (uint32_t slot : used_input_slots) {
+            if (slot >= stage_inputs.size()) {
+                throw std::runtime_error("Broadcast group input slot out of range.");
+            }
+            std::vector<uint64_t> effective_dims = stage_inputs[slot].getDimensions();
+            auto dims_it = effective_dims_by_slot.find(slot);
+            if (dims_it != effective_dims_by_slot.end()) {
+                if (dims_it->second.size() > 1) {
+                    std::ostringstream oss;
+                    oss << "Broadcast group input slot " << slot << " is used with multiple logical shapes in one fused stage. shapes=";
+                    bool first = true;
+                    for (const auto& dims : dims_it->second) {
+                        if (!first) {
+                            oss << ", ";
+                        }
+                        first = false;
+                        oss << dimsToString(dims);
+                    }
+                    throw std::runtime_error(oss.str());
+                }
+                if (!dims_it->second.empty()) {
+                    effective_dims = *dims_it->second.begin();
+                }
+            }
+
+            // std::cerr << "[FUSION] broadcast group input slot=" << slot << " raw_dims=" <<
+            // dimsToString(stage_inputs[slot].getDimensions())
+            //           << " effective_dims=" << dimsToString(effective_dims) << " output_dims=" << dimsToString(output_dims) << std::endl;
+
+            input_strides_by_used.push_back(computeInputPackedStridesForBroadcast(effective_dims, output_dims));
+        }
+
+        for (size_t axis = 0; axis < output_dims.size(); ++axis) {
+            if (output_dims[axis] == 1ULL) {
+                continue;
+            }
+
+            SpecializedBroadcastAxis axis_desc;
+            axis_desc.dim = output_dims[axis];
+            axis_desc.output_stride = output_strides[axis];
+            axis_desc.input_strides.resize(used_input_slots.size(), 0ULL);
+
+            bool any_nonzero = false;
+            for (size_t used_i = 0; used_i < used_input_slots.size(); ++used_i) {
+                axis_desc.input_strides[used_i] = input_strides_by_used[used_i][axis];
+                if (axis_desc.input_strides[used_i] != 0ULL) {
+                    any_nonzero = true;
+                }
+            }
+
+            if (any_nonzero) {
+                specialized.active_axes.push_back(std::move(axis_desc));
+            }
+        }
+
+        groups.push_back(ResolvedBroadcastGroup{std::move(specialized)});
+    }
+
+    std::sort(groups.begin(), groups.end(), [](const ResolvedBroadcastGroup& a, const ResolvedBroadcastGroup& b) {
+        return a.specialized.numel > b.specialized.numel;
+    });
+
+    return groups;
 }
 
 std::vector<std::string> FusedEquation::getOutputNames() const {
@@ -585,17 +759,8 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
         }
 
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
-            std::vector<uint64_t> resolved_output_dims;
-            bool requiresBroadcast = resolveLayoutFromDims(stage_input_dims, resolved_output_dims);
-
-            if (!requiresBroadcast) {
-                for (const CompiledStageOutput& produced : stage.outputs) {
-                    value_dims[produced.value_id] = resolved_output_dims;
-                }
-            } else {
-                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-                    value_dims[stage.outputs[output_idx].value_id] = resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
-                }
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                value_dims[stage.outputs[output_idx].value_id] = resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
             }
         } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
             if (!stage.reduction) {
@@ -672,8 +837,14 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
         }
     }
 
-    return buildBackwardOutputs(
-        backward_config->forward_outputs_template, backward_config->wrt_names, backward_config->upstream_input_name, forward_input_dims);
+    if (backward_config->upstream_input_names_by_output.has_value()) {
+        return buildBackwardOutputs(backward_config->forward_outputs_template,
+                                    backward_config->wrt_names,
+                                    backward_config->upstream_input_names_by_output.value(),
+                                    forward_input_dims);
+    }
+
+    return buildBackwardOutputs(backward_config->forward_outputs_template, backward_config->wrt_names, std::nullopt, forward_input_dims);
 }
 
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
@@ -766,7 +937,13 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
 
         std::vector<Tensor> layout_inputs = ordered_inputs;
         std::vector<uint64_t> resolved_output_dims;
-        const bool requires_broadcast = resolveLayout(layout_inputs, resolved_output_dims);
+        const bool has_shape_only_ops = stageHasShapeOnlyOps(stage);
+        const bool requires_broadcast = has_shape_only_ops ? true : resolveLayout(layout_inputs, resolved_output_dims);
+        if (has_shape_only_ops) {
+            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, ordered_inputs);
+            // std::cerr << "[FUSION] forcing specialized broadcast for stage with squeeze/unsqueeze ops. "
+            //           << "first_output_dims=" << dimsToString(resolved_output_dims) << std::endl;
+        }
 
         if (!requires_broadcast) {
             if (!stage.flat) {
@@ -774,7 +951,10 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
             }
 
             prepared_stage.compiled_equation = stage.flat;
-            prepared_stage.expected_output_dims.assign(stage.outputs.size(), resolved_output_dims);
+            prepared_stage.expected_output_dims.resize(stage.outputs.size());
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                prepared_stage.expected_output_dims[output_idx] = resolveOutputDimsForStageOutput(stage, output_idx, ordered_inputs);
+            }
         } else {
             std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, ordered_inputs);
             if (groups.empty()) {
@@ -867,7 +1047,27 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
                          BackwardEquationConfig{
                              .forward_outputs_template = outputs_template,
                              .wrt_names = wrt_names,
-                             .upstream_input_name = upstream_input_name,
+                             .upstream_input_names_by_output =
+                                 upstream_input_name.has_value() ? std::optional<std::unordered_map<std::string, std::string>>(
+                                                                       std::unordered_map<std::string, std::string>{
+                                                                           {outputs_template.outputs[0].name, upstream_input_name.value()},
+                                                                       })
+                                                                 : std::nullopt,
+                         });
+}
+
+FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt_names,
+                                             const std::unordered_map<std::string, std::string>& upstream_input_names_by_output) const {
+    PhysicalOutputs backward_outputs = buildBackwardOutputs(outputs_template, wrt_names, upstream_input_names_by_output);
+    const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
+    return FusedEquation(backward_outputs,
+                         device_num,
+                         use_fast_math,
+                         backward_signature,
+                         BackwardEquationConfig{
+                             .forward_outputs_template = outputs_template,
+                             .wrt_names = wrt_names,
+                             .upstream_input_names_by_output = upstream_input_names_by_output,
                          });
 }
 
@@ -1123,7 +1323,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
             std::vector<Tensor> layoutInputs = stageInputs;
             std::vector<uint64_t> resolvedOutputDims;
-            bool requiresBroadcast = resolveLayout(layoutInputs, resolvedOutputDims);
+            const bool hasShapeOnlyOps = stageHasShapeOnlyOps(stage);
+            bool requiresBroadcast = hasShapeOnlyOps ? true : resolveLayout(layoutInputs, resolvedOutputDims);
+            if (hasShapeOnlyOps) {
+                resolvedOutputDims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                // std::cerr << "[FUSION] forcing specialized broadcast for staged kernel with squeeze/unsqueeze ops. "
+                //           << "first_output_dims=" << dimsToString(resolvedOutputDims) << std::endl;
+            }
 
             std::vector<Tensor> stageOutputs;
             stageOutputs.reserve(stage.outputs.size());
@@ -1133,25 +1339,26 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             if (!requiresBroadcast) {
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& produced = stage.outputs[output_idx];
+                    std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
 
                     auto requested_it = requestedOutputShapes.find(produced.name);
                     const std::vector<uint64_t>* requested_shape =
                         (requested_it != requestedOutputShapes.end()) ? &requested_it->second : nullptr;
 
                     if (requested_shape && !requested_shape->empty()) {
-                        verifyRequestedOutputLayout(*requested_shape, resolvedOutputDims);
+                        verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
                     }
 
                     TensorDescriptor outputDescriptor(
                         stage.flat->output_dtypes[output_idx],
-                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolvedOutputDims);
+                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims);
                     stageOutputs.emplace_back(outputPlacement, outputDescriptor);
                 }
             } else {
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& produced = stage.outputs[output_idx];
 
-                    std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, layoutInputs);
+                    std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
 
                     auto requested_it = requestedOutputShapes.find(produced.name);
                     const std::vector<uint64_t>* requested_shape =
@@ -1170,7 +1377,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
             std::shared_ptr<StampedEquation> stamped;
             if (requiresBroadcast) {
-                std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, layoutInputs);
+                std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, stageInputs);
 
                 std::vector<SpecializedBroadcastGroup> specialized_groups;
                 specialized_groups.reserve(groups.size());
@@ -1181,7 +1388,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::shared_ptr<CompiledEquation> specialized_broadcast =
                     EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
 
-                stamped = stampEquation(specialized_broadcast, layoutInputs, stageOutputs, stream);
+                stamped = stampEquation(specialized_broadcast, stageInputs, stageOutputs, stream);
             } else {
                 stamped = stampEquation(stage.flat, layoutInputs, stageOutputs, stream);
             }

@@ -10,7 +10,6 @@
 
 namespace ThorImplementation {
 namespace {
-
 uint32_t cloneForwardSubtree(const PhysicalExpression& src,
                              uint32_t src_node_index,
                              PhysicalExpression& dst,
@@ -109,6 +108,22 @@ class BackwardGraphBuilder {
     uint32_t mul(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::MUL, lhs, rhs); }
     uint32_t div(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::DIV, lhs, rhs); }
 
+    uint32_t unsqueeze(uint32_t value, const std::vector<uint64_t>& unsqueeze_axes) {
+        ExprNode node{};
+        node.op = ExprOp::UNSQUEEZE;
+        node.lhs = value;
+        node.unsqueeze_axes = unsqueeze_axes;
+        return push(std::move(node));
+    }
+
+    uint32_t squeeze(uint32_t value, const std::vector<uint64_t>& squeeze_axes) {
+        ExprNode node{};
+        node.op = ExprOp::SQUEEZE;
+        node.lhs = value;
+        node.squeeze_axes = squeeze_axes;
+        return push(std::move(node));
+    }
+
     uint32_t cloneForward(uint32_t forward_node_index) {
         return cloneForwardSubtree(forward_expr, forward_node_index, grad_expr, forward_to_grad_node_map);
     }
@@ -117,6 +132,9 @@ class BackwardGraphBuilder {
         if (forward_node_index >= node_grads.size()) {
             throw std::runtime_error("Autodiff addContribution node index out of range.");
         }
+
+        // std::cerr << "[AUTODIFF] addContribution"
+        //           << " forward_node_index=" << forward_node_index << " contrib_root=" << contrib_root << std::endl;
 
         if (node_grads[forward_node_index].has_value()) {
             node_grads[forward_node_index] = add(node_grads[forward_node_index].value(), contrib_root);
@@ -179,16 +197,21 @@ std::vector<std::string> normalizeWrtNames(const PhysicalExpression& forward_exp
     return normalized;
 }
 
-std::optional<std::string> normalizeUpstreamInputName(const PhysicalExpression& forward_expr,
-                                                      const std::optional<std::string>& upstream_input_name) {
+std::optional<std::unordered_map<std::string, std::string>> normalizeUpstreamInputNamesByOutput(
+    const PhysicalOutputs& forward_outputs, const std::optional<std::string>& upstream_input_name) {
     if (!upstream_input_name.has_value()) {
         return std::nullopt;
+    }
+
+    if (forward_outputs.outputs.size() != 1) {
+        throw std::runtime_error("compileBackward single upstream input name overload only supports exactly one forward output.");
     }
 
     if (upstream_input_name->empty()) {
         throw std::runtime_error("compileBackward explicit upstream input name cannot be empty.");
     }
 
+    const PhysicalExpression& forward_expr = *forward_outputs.expr;
     for (const NamedInput& input : forward_expr.inputs) {
         if (input.name == upstream_input_name.value()) {
             throw std::runtime_error("compileBackward explicit upstream input name collides with an existing forward input: " +
@@ -196,7 +219,38 @@ std::optional<std::string> normalizeUpstreamInputName(const PhysicalExpression& 
         }
     }
 
-    return upstream_input_name;
+    return std::unordered_map<std::string, std::string>{{forward_outputs.outputs[0].name, upstream_input_name.value()}};
+}
+
+std::optional<std::unordered_map<std::string, std::string>> normalizeUpstreamInputNamesByOutput(
+    const PhysicalOutputs& forward_outputs, const std::unordered_map<std::string, std::string>& upstream_input_names_by_output) {
+    if (!forward_outputs.expr) {
+        throw std::runtime_error("compileBackward upstream-input validation requires non-null forward expr.");
+    }
+
+    const PhysicalExpression& forward_expr = *forward_outputs.expr;
+    std::unordered_set<std::string> valid_output_names;
+    valid_output_names.reserve(forward_outputs.outputs.size());
+    for (const NamedOutput& output : forward_outputs.outputs) {
+        valid_output_names.insert(output.name);
+    }
+
+    for (const auto& [output_name, upstream_name] : upstream_input_names_by_output) {
+        if (!valid_output_names.contains(output_name)) {
+            throw std::runtime_error("compileBackward explicit upstream map contains unknown forward output: " + output_name);
+        }
+        if (upstream_name.empty()) {
+            throw std::runtime_error("compileBackward explicit upstream input name cannot be empty for output: " + output_name);
+        }
+        for (const NamedInput& input : forward_expr.inputs) {
+            if (input.name == upstream_name) {
+                throw std::runtime_error("compileBackward explicit upstream input name collides with an existing forward input: " +
+                                         upstream_name);
+            }
+        }
+    }
+
+    return upstream_input_names_by_output;
 }
 
 bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std::vector<uint64_t>& outputDimensions) {
@@ -251,6 +305,115 @@ bool resolveLayoutFromDims(const std::vector<std::vector<uint64_t>>& inputs, std
 
     return requiresBroadcast;
 }
+
+std::vector<uint64_t> applySqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& squeeze_axes) {
+    if (squeeze_axes.empty()) {
+        return input_dims;
+    }
+
+    std::vector<uint64_t> normalized = squeeze_axes;
+    std::sort(normalized.begin(), normalized.end());
+    normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+
+    if (normalized.size() == 1 && normalized[0] == UINT64_MAX) {
+        std::vector<uint64_t> out_dims;
+        out_dims.reserve(input_dims.size());
+        for (uint64_t dim : input_dims) {
+            if (dim != 1) {
+                out_dims.push_back(dim);
+            }
+        }
+        return out_dims;
+    }
+
+    std::vector<uint64_t> out_dims;
+    out_dims.reserve(input_dims.size());
+    size_t next_axis_i = 0;
+    uint64_t next_axis = normalized.empty() ? UINT64_MAX : normalized[0];
+    for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
+        if (next_axis_i < normalized.size() && axis == next_axis) {
+            if (input_dims[axis] != 1) {
+                throw std::runtime_error("inferForwardNodeDims squeeze axes must refer to singleton dimensions.");
+            }
+            ++next_axis_i;
+            next_axis = next_axis_i < normalized.size() ? normalized[next_axis_i] : UINT64_MAX;
+            continue;
+        }
+        out_dims.push_back(input_dims[axis]);
+    }
+
+    if (next_axis_i != normalized.size()) {
+        throw std::runtime_error("inferForwardNodeDims squeeze axes are invalid for the input rank.");
+    }
+
+    return out_dims;
+}
+
+// std::vector<uint64_t> normalizeSqueezeAxesForInputDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>&
+// squeeze_axes) {
+//     if (squeeze_axes.empty()) {
+//         return {};
+//     }
+//
+//     std::vector<uint64_t> normalized = squeeze_axes;
+//     std::sort(normalized.begin(), normalized.end());
+//     normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+//
+//     if (normalized.size() == 1 && normalized[0] == UINT64_MAX) {
+//         std::vector<uint64_t> actual_axes;
+//         actual_axes.reserve(input_dims.size());
+//         for (uint64_t axis = 0; axis < input_dims.size(); ++axis) {
+//             if (input_dims[axis] == 1) {
+//                 actual_axes.push_back(axis);
+//             }
+//         }
+//         return actual_axes;
+//     }
+//
+//     for (uint64_t axis : normalized) {
+//         if (axis >= input_dims.size()) {
+//             throw std::runtime_error("Autodiff squeeze axes are out of range for the input rank.");
+//         }
+//         if (input_dims[axis] != 1) {
+//             throw std::runtime_error("Autodiff squeeze axes must refer to singleton dimensions.");
+//         }
+//     }
+//
+//     return normalized;
+// }
+//
+// std::vector<uint64_t> normalizeUnsqueezeAxesForInputDims(const std::vector<uint64_t>& input_dims,
+//                                                          const std::vector<uint64_t>& unsqueeze_axes) {
+//     const uint64_t input_rank = input_dims.size();
+//
+//     if (unsqueeze_axes.empty()) {
+//         return {};
+//     }
+//
+//     std::vector<uint64_t> normalized = unsqueeze_axes;
+//     std::sort(normalized.begin(), normalized.end());
+//     normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+//
+//     const uint64_t output_rank = input_rank + normalized.size();
+//
+//     for (uint64_t axis : normalized) {
+//         if (axis == UINT64_MAX) {
+//             throw std::runtime_error("Autodiff unsqueeze axes must be explicit.");
+//         }
+//         if (axis >= output_rank) {
+//             throw std::runtime_error("Autodiff unsqueeze axes are out of range for the output rank.");
+//         }
+//     }
+//
+//     return normalized;
+// }
+//
+// std::vector<uint64_t> normalizedReductionUnsqueezeAxes(const std::vector<uint64_t>& input_dims,
+//                                                        const std::vector<uint64_t>& reduction_axes,
+//                                                        const std::vector<uint64_t>& squeeze_axes) {
+//     const std::vector<uint64_t> unsqueezed_output_dims = StampedEquation::computeReductionOutputDims(input_dims, reduction_axes, {});
+//     return normalizeSqueezeAxesForInputDims(unsqueezed_output_dims, squeeze_axes);
+// }
 
 std::vector<std::vector<uint64_t>> inferForwardNodeDims(
     const PhysicalExpression& forward_expr,
@@ -319,6 +482,35 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SQRT:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::UNSQUEEZE: {
+                const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
+                const std::vector<uint64_t>& axes = node.unsqueeze_axes;
+                std::vector<uint64_t> out_dims;
+                out_dims.reserve(lhs_dims.size() + axes.size());
+                const uint64_t output_rank = static_cast<uint64_t>(lhs_dims.size() + axes.size());
+
+                size_t lhs_i = 0;
+                size_t axis_i = 0;
+                for (uint64_t out_axis = 0; out_axis < output_rank; ++out_axis) {
+                    if (axis_i < axes.size() && axes[axis_i] == out_axis) {
+                        out_dims.push_back(1);
+                        ++axis_i;
+                    } else {
+                        if (lhs_i >= lhs_dims.size()) {
+                            throw std::runtime_error("inferForwardNodeDims unsqueeze axes are out of range.");
+                        }
+                        out_dims.push_back(lhs_dims[lhs_i++]);
+                    }
+                }
+                if (lhs_i != lhs_dims.size() || axis_i != axes.size()) {
+                    throw std::runtime_error("inferForwardNodeDims unsqueeze axes are invalid for the input rank.");
+                }
+                node_dims[i] = std::move(out_dims);
+                break;
+            }
+            case ExprOp::SQUEEZE:
+                node_dims[i] = applySqueezeDims(node_dims[node.lhs], node.squeeze_axes);
+                break;
             case ExprOp::REDUCE_SUM:
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_MIN:
@@ -352,68 +544,185 @@ uint32_t sumToShape(BackwardGraphBuilder& builder,
         throw std::runtime_error("Autodiff cannot sum a contribution to a higher-rank target shape.");
     }
 
-    const uint64_t rank = static_cast<uint64_t>(contrib_dims.size());
-    const uint64_t target_rank = static_cast<uint64_t>(target_dims.size());
-    const uint64_t rank_diff = rank - target_rank;
-
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
 
-    for (uint64_t axis = 0; axis < rank; ++axis) {
-        const uint64_t target_dim = (axis < rank_diff) ? 1 : target_dims[axis - rank_diff];
-        const uint64_t contrib_dim = contrib_dims[axis];
+    int64_t contrib_axis = static_cast<int64_t>(contrib_dims.size()) - 1;
+    int64_t target_axis = static_cast<int64_t>(target_dims.size()) - 1;
 
-        if (target_dim == contrib_dim) {
+    while (contrib_axis >= 0 && target_axis >= 0) {
+        const uint64_t contrib_dim = contrib_dims[static_cast<size_t>(contrib_axis)];
+        const uint64_t target_dim = target_dims[static_cast<size_t>(target_axis)];
+
+        if (contrib_dim == target_dim) {
+            --contrib_axis;
+            --target_axis;
             continue;
         }
 
-        if (target_dim != 1) {
-            throw std::runtime_error("Autodiff broadcast backward found incompatible target shape while summing to input shape.");
+        if (contrib_dim == 1) {
+            reduction_axes.push_back(static_cast<uint64_t>(contrib_axis));
+            squeeze_axes.push_back(static_cast<uint64_t>(contrib_axis));
+            --contrib_axis;
+            continue;
         }
 
-        reduction_axes.push_back(axis);
-        if (axis < rank_diff) {
-            squeeze_axes.push_back(axis);
+        if (target_dim == 1) {
+            reduction_axes.push_back(static_cast<uint64_t>(contrib_axis));
+            --contrib_axis;
+            --target_axis;
+            continue;
         }
+
+        throw std::runtime_error("Autodiff broadcast backward found incompatible target shape while summing to input shape.");
+    }
+
+    while (contrib_axis >= 0) {
+        reduction_axes.push_back(static_cast<uint64_t>(contrib_axis));
+        squeeze_axes.push_back(static_cast<uint64_t>(contrib_axis));
+        --contrib_axis;
+    }
+
+    if (target_axis >= 0) {
+        auto formatDims = [](const std::vector<uint64_t>& dims) {
+            std::ostringstream oss;
+            oss << "[";
+            for (size_t i = 0; i < dims.size(); ++i) {
+                if (i > 0) {
+                    oss << ", ";
+                }
+                oss << dims[i];
+            }
+            oss << "]";
+            return oss.str();
+        };
+
+        auto formatAxes = [](const std::vector<uint64_t>& axes) {
+            std::ostringstream oss;
+            oss << "[";
+            for (size_t i = 0; i < axes.size(); ++i) {
+                if (i > 0) {
+                    oss << ", ";
+                }
+                oss << axes[i];
+            }
+            oss << "]";
+            return oss.str();
+        };
+
+        throw std::runtime_error(
+            "Autodiff could not match all target axes while summing to input shape. "
+            "contribution shape = " +
+            formatDims(contrib_dims) + ", target shape = " + formatDims(target_dims) + ", reduction_axes = " + formatAxes(reduction_axes) +
+            ", squeeze_axes = " + formatAxes(squeeze_axes) + ".");
     }
 
     if (reduction_axes.empty()) {
         return contrib;
     }
 
+    std::sort(reduction_axes.begin(), reduction_axes.end());
+    std::sort(squeeze_axes.begin(), squeeze_axes.end());
+
+    bool has_numeric_reduction = false;
+    for (uint64_t axis : reduction_axes) {
+        if (axis >= contrib_dims.size()) {
+            throw std::runtime_error("Autodiff sumToShape produced reduction axis out of range.");
+        }
+        if (contrib_dims[axis] != 1) {
+            has_numeric_reduction = true;
+            break;
+        }
+    }
+
+    if (!has_numeric_reduction) {
+        return builder.squeeze(contrib, squeeze_axes);
+    }
+
     return builder.reduction(ExprOp::REDUCE_SUM, contrib, reduction_axes, squeeze_axes);
+}
+
+uint64_t reductionElementCount(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& reduction_axes) {
+    if (input_dims.empty()) {
+        throw std::runtime_error("Phase-1 autodiff reduce_mean backward requires tensor-valued input shapes.");
+    }
+
+    uint64_t count = 1;
+    if (reduction_axes.empty()) {
+        for (uint64_t dim : input_dims) {
+            count *= dim;
+        }
+        return count;
+    }
+
+    for (uint64_t axis : reduction_axes) {
+        if (axis >= input_dims.size()) {
+            throw std::runtime_error("Phase-1 autodiff reduce_mean backward saw reduction axis out of range.");
+        }
+        count *= input_dims[axis];
+    }
+    return count;
 }
 
 }  // namespace
 
-PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
-                                     const std::vector<std::string>& wrt_names,
-                                     const std::optional<std::string>& upstream_input_name,
-                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
+static std::string dbgDims(const std::vector<uint64_t>& dims) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < dims.size(); ++i) {
+        if (i)
+            oss << ", ";
+        oss << dims[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
+                                         const std::vector<std::string>& wrt_names,
+                                         const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
+                                         const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
-    if (forward_outputs.outputs.size() != 1) {
-        throw std::runtime_error("Phase-1 autodiff currently supports exactly one forward output. Multi-output backward will come later.");
-    }
 
     const PhysicalExpression& forward_expr = *forward_outputs.expr;
-    const NamedOutput& forward_output = forward_outputs.outputs[0];
-    if (forward_output.node_idx >= forward_expr.nodes.size()) {
-        throw std::runtime_error("Forward output node index is out of range in buildBackwardOutputs.");
+    for (const NamedOutput& forward_output : forward_outputs.outputs) {
+        if (forward_output.node_idx >= forward_expr.nodes.size()) {
+            throw std::runtime_error("Forward output node index is out of range in buildBackwardOutputs.");
+        }
     }
 
     const std::vector<std::string> normalized_wrt = normalizeWrtNames(forward_expr, wrt_names);
-    const std::optional<std::string> normalized_upstream_input_name = normalizeUpstreamInputName(forward_expr, upstream_input_name);
     const std::vector<std::vector<uint64_t>> forward_node_dims = inferForwardNodeDims(forward_expr, forward_input_dims);
     const bool has_forward_dims = !forward_node_dims.empty();
+
+    if (forward_outputs.outputs.size() > 1 && !upstream_input_names_by_output.has_value()) {
+        throw std::runtime_error(
+            "buildBackwardOutputs for multi-output forward equations requires explicit upstream input names for each output.");
+    }
+
+    if (upstream_input_names_by_output.has_value()) {
+        for (const NamedOutput& forward_output : forward_outputs.outputs) {
+            if (!upstream_input_names_by_output->contains(forward_output.name)) {
+                throw std::runtime_error("buildBackwardOutputs missing explicit upstream input name for forward output: " +
+                                         forward_output.name);
+            }
+        }
+    }
 
     BackwardGraphBuilder builder(forward_expr);
     builder.initializeAdjoints();
 
-    const uint32_t output_seed =
-        normalized_upstream_input_name.has_value() ? builder.input(normalized_upstream_input_name.value()) : builder.scalar(1.0);
-    builder.addContribution(forward_output.node_idx, output_seed);
+    for (const NamedOutput& forward_output : forward_outputs.outputs) {
+        uint32_t output_seed = UINT32_MAX;
+        if (upstream_input_names_by_output.has_value()) {
+            output_seed = builder.input(upstream_input_names_by_output->at(forward_output.name));
+        } else {
+            output_seed = builder.scalar(1.0);
+        }
+        builder.addContribution(forward_output.node_idx, output_seed);
+    }
 
     auto addContributionToChild = [&](uint32_t child_idx, uint32_t contrib, const std::vector<uint64_t>& contrib_dims) {
         uint32_t adjusted_contrib = contrib;
@@ -424,6 +733,16 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
             }
         }
         builder.addContribution(child_idx, adjusted_contrib);
+    };
+
+    auto shapeGradLikeNodeOutput =
+        [&](uint32_t grad_value, uint32_t forward_node_idx, const std::vector<uint64_t>& forward_node_output_dims) -> uint32_t {
+        if (!has_forward_dims || forward_node_output_dims.empty()) {
+            return grad_value;
+        }
+
+        const uint32_t out = builder.cloneForward(forward_node_idx);
+        return builder.add(builder.mul(out, builder.scalar(0.0)), grad_value);
     };
 
     for (int64_t node_idx = static_cast<int64_t>(forward_expr.nodes.size()) - 1; node_idx >= 0; --node_idx) {
@@ -472,6 +791,64 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
             case ExprOp::NEG:
                 addContributionToChild(node.lhs, builder.neg(grad), node_dims);
                 break;
+
+            case ExprOp::UNSQUEEZE: {
+                if (has_forward_dims) {
+                    const std::vector<uint64_t>& lhs_dims = forward_node_dims.at(node.lhs);
+                    const std::vector<uint64_t> actual_unsqueeze_axes = normalizeUnsqueezeAxesForInputDims(lhs_dims, node.unsqueeze_axes);
+                    const uint32_t squeezed_grad = builder.squeeze(grad, actual_unsqueeze_axes);
+                    builder.addContribution(node.lhs, squeezed_grad);
+
+                    // std::cerr << "[AUTODIFF] builder.unsqueeze"
+                    //           << " input_node=" << node_idx << " actual_unsqueeze_axes=" << dbgDims(actual_unsqueeze_axes)
+                    //           << " node.unsqueeze_axes=" << dbgDims(node.unsqueeze_axes) << std::endl;
+                } else {
+                    const uint32_t squeezed_grad = builder.squeeze(grad, node.unsqueeze_axes);
+                    builder.addContribution(node.lhs, squeezed_grad);
+                }
+                break;
+            }
+
+            case ExprOp::SQUEEZE: {
+                // std::cerr << "[AUTODIFF] SQUEEZE backward"
+                //           << " node=" << node_idx << " lhs=" << node.lhs << " grad_node=" << grad << " node_dims=" << dbgDims(node_dims)
+                //           << " raw_squeeze_axes=" << dbgDims(node.squeeze_axes) << std::endl;
+
+                if (has_forward_dims) {
+                    const std::vector<uint64_t>& lhs_dims = forward_node_dims.at(node.lhs);
+                    const std::vector<uint64_t> actual_squeeze_axes = normalizeSqueezeAxesForInputDims(lhs_dims, node.squeeze_axes);
+
+                    // std::cerr << "[AUTODIFF] SQUEEZE normalized"
+                    //           << " lhs_dims=" << dbgDims(lhs_dims) << " actual_squeeze_axes=" << dbgDims(actual_squeeze_axes) <<
+                    //           std::endl;
+
+                    const uint32_t unsqueezed_grad = builder.unsqueeze(grad, actual_squeeze_axes);
+
+                    // std::cerr << "[AUTODIFF] SQUEEZE nodes"
+                    //           << " incoming_grad_node=" << grad << " unsqueezed_grad_node=" << unsqueezed_grad
+                    //           << " expected_incoming_grad_dims=" << dbgDims(node_dims)
+                    //           << " expected_unsqueezed_grad_dims=" << dbgDims(lhs_dims) << std::endl;
+
+                    builder.addContribution(node.lhs, unsqueezed_grad);
+
+                    // const uint32_t lhs_grad_after_squeeze = builder.gradOf(node.lhs).value();
+                    // std::cerr << "[AUTODIFF] SQUEEZE stored lhs grad"
+                    //           << " lhs=" << node.lhs << " lhs_grad_node=" << lhs_grad_after_squeeze
+                    //           << " expected_lhs_dims=" << dbgDims(lhs_dims) << std::endl;
+                } else {
+                    const uint32_t unsqueezed_grad = builder.unsqueeze(grad, node.squeeze_axes);
+
+                    // std::cerr << "[AUTODIFF] SQUEEZE nodes (no forward dims)"
+                    //           << " incoming_grad_node=" << grad << " unsqueezed_grad_node=" << unsqueezed_grad << std::endl;
+
+                    builder.addContribution(node.lhs, unsqueezed_grad);
+
+                    // const uint32_t lhs_grad_after_squeeze = builder.gradOf(node.lhs).value();
+                    // std::cerr << "[AUTODIFF] SQUEEZE stored lhs grad (no forward dims)"
+                    //           << " lhs=" << node.lhs << " lhs_grad_node=" << lhs_grad_after_squeeze << std::endl;
+                }
+                break;
+            }
 
             case ExprOp::EXP: {
                 const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
@@ -532,15 +909,77 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
             }
 
             case ExprOp::REDUCE_SUM: {
-                if (!node.squeeze_axes.empty()) {
-                    throw std::runtime_error(
-                        "Phase-1 autodiff only supports reduce_sum backward when squeeze=False / no squeeze axes are requested.");
+                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+
+                uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                if (has_forward_dims && !node.squeeze_axes.empty()) {
+                    const std::vector<uint64_t> unsqueeze_axes =
+                        normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                    grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                }
+
+                // std::cerr << "[AUTODIFF] REDUCE_SUM backward"
+                //           << " node=" << node_idx << " lhs=" << node.lhs << " grad_node=" << grad << " node_dims=" << dbgDims(node_dims)
+                //           << " lhs_dims=" << dbgDims(lhs_dims) << " reduction_axes=" << dbgDims(node.reduction_axes)
+                //           << " squeeze_axes=" << dbgDims(node.squeeze_axes) << std::endl;
+
+                const uint32_t lhs = builder.cloneForward(node.lhs);
+                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
+
+                // std::cerr << "[AUTODIFF] REDUCE_SUM nodes"
+                //           << " grad_before_expand=" << grad_before_expand << " expanded_grad=" << expanded_grad << std::endl;
+
+                addContributionToChild(node.lhs, expanded_grad, lhs_dims);
+
+                // const uint32_t lhs_grad_after_reduce = builder.gradOf(node.lhs).value();
+                // std::cerr << "[AUTODIFF] REDUCE_SUM stored lhs grad"
+                //           << " lhs=" << node.lhs << " lhs_grad_node=" << lhs_grad_after_reduce << " expected_lhs_dims=" <<
+                //           dbgDims(lhs_dims)
+                //           << std::endl;
+
+                break;
+            }
+
+            case ExprOp::REDUCE_AVG: {
+                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+
+                uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                if (has_forward_dims && !node.squeeze_axes.empty()) {
+                    const std::vector<uint64_t> unsqueeze_axes =
+                        normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                    grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
                 }
 
                 const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad);
+                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
+
+                uint32_t scaled_grad = expanded_grad;
+                if (has_forward_dims) {
+                    const uint64_t count = reductionElementCount(lhs_dims, node.reduction_axes);
+                    scaled_grad = builder.div(expanded_grad, builder.scalar(static_cast<double>(count)));
+                }
+
+                addContributionToChild(node.lhs, scaled_grad, lhs_dims);
+                break;
+            }
+
+            case ExprOp::REDUCE_NORM2: {
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
-                addContributionToChild(node.lhs, expanded_grad, lhs_dims);
+
+                uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+
+                if (has_forward_dims && !node.squeeze_axes.empty()) {
+                    const std::vector<uint64_t> unsqueeze_axes =
+                        normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                    grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    out = builder.unsqueeze(out, unsqueeze_axes);
+                }
+
+                const uint32_t lhs = builder.cloneForward(node.lhs);
+                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
+                const uint32_t scaled = builder.div(builder.mul(expanded_grad, lhs), out);
+                addContributionToChild(node.lhs, scaled, lhs_dims);
                 break;
             }
 
@@ -549,9 +988,7 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_MIN:
             case ExprOp::REDUCE_MAX:
-            case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2:
                 throw std::runtime_error("Phase-1 autodiff does not yet support backward for op " + opName(node.op) + ".");
 
             default:
@@ -636,6 +1073,24 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
     }
 
     return backward_outputs;
+}
+
+PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
+                                     const std::vector<std::string>& wrt_names,
+                                     const std::optional<std::string>& upstream_input_name,
+                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
+    return buildBackwardOutputsImpl(
+        forward_outputs, wrt_names, normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name), forward_input_dims);
+}
+
+PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
+                                     const std::vector<std::string>& wrt_names,
+                                     const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+                                    forward_input_dims);
 }
 
 }  // namespace ThorImplementation

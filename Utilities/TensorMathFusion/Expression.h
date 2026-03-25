@@ -33,6 +33,8 @@ enum class ExprOp : uint16_t {
     LOG2,
     LOG10,
     SQRT,
+    UNSQUEEZE,
+    SQUEEZE,
     MIN,
     MAX,
     REDUCE_SUM,
@@ -87,9 +89,10 @@ struct ExprNode {
     Optional<TensorDescriptor::DataType> backward_output_dtype = Optional<TensorDescriptor::DataType>::empty();
     Optional<TensorDescriptor::DataType> backward_compute_dtype = Optional<TensorDescriptor::DataType>::empty();
 
-    // for reduction nodes only
+    // for shape/reduction nodes only
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
+    std::vector<uint64_t> unsqueeze_axes;
 };
 
 struct NamedInput {
@@ -172,6 +175,8 @@ class Expression {
     [[nodiscard]] Expression exp2() const;
     [[nodiscard]] Expression exp10() const;
     [[nodiscard]] Expression sqrt() const;
+    [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
+    [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
 
     [[nodiscard]] Expression reduction(ExprOp op,
