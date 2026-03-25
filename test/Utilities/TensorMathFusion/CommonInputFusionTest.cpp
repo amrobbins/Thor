@@ -1,5 +1,6 @@
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
 
+#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
 #include "gtest/gtest.h"
 
 using namespace ThorImplementation;
@@ -66,7 +67,14 @@ TEST(EquationCompiler, ReductionBoundaryStillSplitsStages) {
         {"sum_last", trunk.reduce_sum({1}, {})},
     });
 
-    auto stages = EquationCompiler::splitAtReductionBoundaries(outs.physicalOutputs());
+    auto physical = outs.physicalOutputs();
+    resolveOutputsDTypesInPlace(physical,
+                                {
+                                    TensorDescriptor::DataType::FP32,
+                                    TensorDescriptor::DataType::FP32,
+                                });
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
 
     ASSERT_EQ(stages.size(), 2);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
@@ -83,7 +91,14 @@ TEST(EquationCompiler, ReductionBoundaryCommonSubexpressionDoesNotCreateExtraKer
         {"sum_last", (x + y).reduce_sum({1}, {})},
     });
 
-    auto stages = EquationCompiler::splitAtReductionBoundaries(outs.physicalOutputs());
+    auto physical = outs.physicalOutputs();
+    resolveOutputsDTypesInPlace(physical,
+                                {
+                                    TensorDescriptor::DataType::FP32,
+                                    TensorDescriptor::DataType::FP32,
+                                });
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
 
     ASSERT_EQ(stages.size(), 2);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);

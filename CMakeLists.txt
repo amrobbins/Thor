@@ -141,6 +141,17 @@ target_link_libraries(Thor PRIVATE OpenMP::OpenMP_CXX)
 
 find_package(CUDAToolkit REQUIRED)
 
+# Main CUDA headers directory for things like cuda.h.
+# CUDAToolkit_INCLUDE_DIRS is a list; take the primary include dir and
+# normalize it so CMake never treats it as relative.
+list(GET CUDAToolkit_INCLUDE_DIRS 0 THOR_CUDA_INCLUDE_DIR)
+cmake_path(ABSOLUTE_PATH THOR_CUDA_INCLUDE_DIR NORMALIZE)
+
+if (NOT EXISTS "${THOR_CUDA_INCLUDE_DIR}/cuda.h")
+    message(FATAL_ERROR
+            "Resolved CUDA include dir is invalid: ${THOR_CUDA_INCLUDE_DIR}")
+endif ()
+
 target_link_libraries(Thor PRIVATE
         CUDA::cudart
         CUDA::cuda_driver
@@ -150,22 +161,30 @@ target_link_libraries(Thor PRIVATE
         CUDA::nvrtc
 )
 
-# Manually include cuDNN and cuFile
-target_link_directories(Thor PRIVATE
-        /usr/local/cuda/lib64
-        /usr/lib/x86_64-linux-gnu
+# Find cuDNN without hard-coding platform-specific library directories.
+# Prefer the detected CUDA toolkit library locations, then fall back to the
+# normal system library search path.
+find_library(THOR_CUDNN_LIBRARY
+        NAMES cudnn
+        HINTS
+        "${CUDAToolkit_LIBRARY_DIR}"
+        "${CUDAToolkit_TARGET_DIR}/lib"
+        "${CUDAToolkit_TARGET_DIR}/lib64"
 )
+if (NOT THOR_CUDNN_LIBRARY)
+    find_library(THOR_CUDNN_LIBRARY NAMES cudnn REQUIRED)
+endif ()
 
 target_link_libraries(Thor PRIVATE
-        cudnn
+        "${THOR_CUDNN_LIBRARY}"
 )
 
 target_include_directories(Thor PUBLIC
-        $<BUILD_INTERFACE:${CUDAToolkit_INCLUDE_DIRS}>
+        ${CUDAToolkit_INCLUDE_DIRS}
 )
 
 target_compile_definitions(Thor PRIVATE
-        THOR_CUDA_INCLUDE_DIR="${CUDAToolkit_INCLUDE_DIRS}"
+        THOR_CUDA_INCLUDE_DIR=\"${THOR_CUDA_INCLUDE_DIR}\"
 )
 
 find_package(Curses REQUIRED)
@@ -386,14 +405,7 @@ target_compile_definitions(Thor PRIVATE
 file(GLOB_RECURSE TEST_SOURCES "${CMAKE_SOURCE_DIR}/test/*.cpp")
 add_executable(thor_tests ${TEST_SOURCES})
 target_link_libraries(thor_tests PRIVATE Thor GTest::gtest_main CUDA::cudart CUDA::cudart CUDA::cublas CUDA::cublasLt CUDA::cusolver)
-# Manually include cuDNN and cuFile
-target_link_directories(thor_tests PRIVATE
-        /usr/local/cuda/lib64
-        /usr/lib/x86_64-linux-gnu
-)
-target_link_libraries(thor_tests PRIVATE
-        cudnn
-)
+target_link_libraries(thor_tests PRIVATE "${THOR_CUDNN_LIBRARY}")
 find_package(OpenMP REQUIRED)
 target_link_libraries(thor_tests PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(thor_tests PRIVATE Boost::boost)

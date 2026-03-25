@@ -9,6 +9,7 @@
 
 #include <cuda_runtime.h>
 
+#include <limits>
 #include <stdexcept>
 
 using namespace std;
@@ -76,6 +77,43 @@ static uint64_t product(const std::vector<uint64_t>& dims) {
     for (uint64_t d : dims)
         p *= d;
     return p;
+}
+
+static uint64_t maxNumel(const std::vector<std::vector<uint64_t>>& dims_by_output) {
+    uint64_t max_numel = 0;
+    for (const std::vector<uint64_t>& dims : dims_by_output) {
+        max_numel = std::max<uint64_t>(max_numel, product(dims));
+    }
+    return max_numel;
+}
+
+static PhysicalExecutionStage toPhysicalFusedStage(const CompiledExecutionStage& stage) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("toPhysicalFusedStage called on non-fused stage.");
+    }
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::FusedKernel,
+        .expr = stage.expr,
+        .input_value_ids = stage.input_value_ids,
+        .outputs = stage.outputs,
+    };
+}
+
+static std::shared_ptr<CompiledEquation> selectFlatCompiledEquation(const CompiledExecutionStage& stage,
+                                                                    const EquationSignature& sig,
+                                                                    uint64_t max_numel) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("selectFlatCompiledEquation called on non-fused stage.");
+    }
+    if (max_numel <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        if (!stage.flat) {
+            throw std::runtime_error("Missing default flat fused kernel.");
+        }
+        return stage.flat;
+    }
+
+    return EquationCompiler::compileFusedStage(toPhysicalFusedStage(stage), sig, /*use_uint32_index_math=*/false);
 }
 
 static std::vector<uint64_t> computePackedOutputStrides(const std::vector<uint64_t>& outputDimensions) {
@@ -1049,7 +1087,6 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                 throw std::runtime_error("FusedEquation::run found a flat fused stage with no compiled kernel.");
             }
 
-            prepared_stage.compiled_equation = stage.flat;
             prepared_stage.expected_output_dims.resize(stage.outputs.size());
             for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                 std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, ordered_inputs);
@@ -1062,6 +1099,9 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                 }
                 prepared_stage.expected_output_dims[output_idx] = std::move(output_dims);
             }
+
+            prepared_stage.compiled_equation =
+                selectFlatCompiledEquation(stage, compiled_outputs->signature, maxNumel(prepared_stage.expected_output_dims));
         } else {
             std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, ordered_inputs);
             if (groups.empty()) {
@@ -1491,7 +1531,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
                 stamped = stampEquation(specialized_broadcast, stageInputs, stageOutputs, stream);
             } else {
-                stamped = stampEquation(stage.flat, stageInputs, stageOutputs, stream);
+                uint64_t max_output_numel = 0;
+                for (const Tensor& output : stageOutputs) {
+                    max_output_numel = std::max<uint64_t>(max_output_numel, output.getTotalNumElements());
+                }
+
+                stamped = stampEquation(
+                    selectFlatCompiledEquation(stage, compiled_outputs->signature, max_output_numel), stageInputs, stageOutputs, stream);
             }
 
             for (size_t i = 0; i < stage.outputs.size(); ++i) {

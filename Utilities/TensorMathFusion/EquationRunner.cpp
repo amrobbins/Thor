@@ -1,4 +1,5 @@
 #include "Utilities/TensorMathFusion/EquationRunner.h"
+#include <limits>
 
 namespace ThorImplementation {
 
@@ -82,7 +83,17 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     for (size_t i = 0; i < output_ptrs.size(); ++i) {
         args.push_back((void*)&output_ptrs[i]);
     }
-    args.push_back((void*)&max_numel);
+
+    uint32_t max_numel_u32 = 0;
+    if (compiledEquation->uses_uint32_numel_arg) {
+        if (max_numel > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::runtime_error("Flat kernel compiled for uint32_t numel was launched with numel exceeding uint32_t.");
+        }
+        max_numel_u32 = static_cast<uint32_t>(max_numel);
+        args.push_back((void*)&max_numel_u32);
+    } else {
+        args.push_back((void*)&max_numel);
+    }
 
     const uint64_t launch_numel = (max_numel + static_cast<uint64_t>(compiledEquation->elements_per_thread) - 1ULL) /
                                   static_cast<uint64_t>(compiledEquation->elements_per_thread);
