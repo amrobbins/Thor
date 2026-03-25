@@ -50,6 +50,97 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
     return new_index;
 }
 
+std::vector<uint64_t> normalizeAxes(std::vector<uint64_t> axes) {
+    std::sort(axes.begin(), axes.end());
+    axes.erase(std::unique(axes.begin(), axes.end()), axes.end());
+    return axes;
+}
+
+bool axesEqualNormalized(const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) { return normalizeAxes(a) == normalizeAxes(b); }
+
+bool dimsAllSingleton(const std::vector<uint64_t>& dims) {
+    for (uint64_t dim : dims) {
+        if (dim != 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Optional<TensorDescriptor::DataType> preferredGradValueDType(const ExprNode& forward_node) {
+    if (forward_node.backward_output_dtype.isPresent()) {
+        return forward_node.backward_output_dtype;
+    }
+    if (forward_node.output_dtype.isPresent()) {
+        return forward_node.output_dtype;
+    }
+    return Optional<TensorDescriptor::DataType>::empty();
+}
+
+std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& expr, const std::vector<std::string>& wrt_names) {
+    std::unordered_set<uint32_t> wrt_slots;
+    wrt_slots.reserve(wrt_names.size());
+
+    for (const std::string& name : wrt_names) {
+        bool found = false;
+        for (const NamedInput& input : expr.inputs) {
+            if (input.name == name) {
+                wrt_slots.insert(input.slot);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("Requested gradient for unknown input while computing reverse relevance: " + name);
+        }
+    }
+
+    std::vector<bool> reaches(expr.nodes.size(), false);
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        const ExprNode& node = expr.nodes[i];
+        switch (node.op) {
+            case ExprOp::INPUT:
+                reaches[i] = wrt_slots.contains(node.input_slot);
+                break;
+            case ExprOp::SCALAR_FP:
+                reaches[i] = false;
+                break;
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::MIN:
+            case ExprOp::MAX:
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
+                break;
+            case ExprOp::NEG:
+            case ExprOp::EXP:
+            case ExprOp::EXP2:
+            case ExprOp::EXP10:
+            case ExprOp::LN:
+            case ExprOp::LOG2:
+            case ExprOp::LOG10:
+            case ExprOp::SQRT:
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+            case ExprOp::REDUCE_SUM:
+            case ExprOp::REDUCE_PROD:
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_AVG:
+            case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_NORM2:
+                reaches[i] = reaches.at(node.lhs);
+                break;
+            default:
+                throw std::runtime_error("Unsupported op while computing reverse relevance: " + std::to_string((int)node.op));
+        }
+    }
+
+    return reaches;
+}
+
 class BackwardGraphBuilder {
    public:
     explicit BackwardGraphBuilder(const PhysicalExpression& forward_expr) : forward_expr(forward_expr) {
@@ -73,7 +164,83 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t fill(double value,
+                  const std::vector<uint64_t>& dims,
+                  Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty()) {
+        ExprNode node{};
+        node.op = ExprOp::FILL;
+        node.scalar_fp = value;
+        node.fill_dims = dims;
+        if (as_type.isPresent()) {
+            node.output_dtype = as_type.get();
+        }
+        return push(std::move(node));
+    }
+
+    bool tryGetScalarConstant(uint32_t node_idx, double& value) const {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder constant query node index out of range.");
+        }
+        const ExprNode& node = grad_expr.nodes[node_idx];
+        if (node.op != ExprOp::SCALAR_FP) {
+            return false;
+        }
+        value = node.scalar_fp;
+        return true;
+    }
+
+    bool tryGetConstantLikeValue(uint32_t node_idx, double& value) const {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder constant-like query node index out of range.");
+        }
+        const ExprNode& node = grad_expr.nodes[node_idx];
+        switch (node.op) {
+            case ExprOp::SCALAR_FP:
+            case ExprOp::FILL:
+                value = node.scalar_fp;
+                return true;
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                return tryGetConstantLikeValue(node.lhs, value);
+            case ExprOp::NEG:
+                if (tryGetConstantLikeValue(node.lhs, value)) {
+                    value = -value;
+                    return true;
+                }
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    bool isScalarZero(uint32_t node_idx) const {
+        double value = 0.0;
+        return tryGetScalarConstant(node_idx, value) && value == 0.0;
+    }
+
+    bool isScalarOne(uint32_t node_idx) const {
+        double value = 0.0;
+        return tryGetScalarConstant(node_idx, value) && value == 1.0;
+    }
+
+    bool isConstantLikeZero(uint32_t node_idx) const {
+        double value = 0.0;
+        return tryGetConstantLikeValue(node_idx, value) && value == 0.0;
+    }
+
     uint32_t unary(ExprOp op, uint32_t lhs) {
+        double lhs_value = 0.0;
+        if (op == ExprOp::NEG) {
+            if (tryGetScalarConstant(lhs, lhs_value)) {
+                return scalar(-lhs_value);
+            }
+
+            const ExprNode& lhs_node = grad_expr.nodes.at(lhs);
+            if (lhs_node.op == ExprOp::NEG) {
+                return lhs_node.lhs;
+            }
+        }
+
         ExprNode node{};
         node.op = op;
         node.lhs = lhs;
@@ -81,6 +248,57 @@ class BackwardGraphBuilder {
     }
 
     uint32_t binary(ExprOp op, uint32_t lhs, uint32_t rhs) {
+        double lhs_value = 0.0;
+        double rhs_value = 0.0;
+        const bool lhs_const = tryGetScalarConstant(lhs, lhs_value);
+        const bool rhs_const = tryGetScalarConstant(rhs, rhs_value);
+
+        if (lhs_const && rhs_const) {
+            switch (op) {
+                case ExprOp::ADD:
+                    return scalar(lhs_value + rhs_value);
+                case ExprOp::SUB:
+                    return scalar(lhs_value - rhs_value);
+                case ExprOp::MUL:
+                    return scalar(lhs_value * rhs_value);
+                case ExprOp::DIV:
+                    return scalar(lhs_value / rhs_value);
+                default:
+                    break;
+            }
+        }
+
+        switch (op) {
+            case ExprOp::ADD:
+                if (lhs_const && lhs_value == 0.0) {
+                    return rhs;
+                }
+                if (rhs_const && rhs_value == 0.0) {
+                    return lhs;
+                }
+                break;
+            case ExprOp::SUB:
+                if (rhs_const && rhs_value == 0.0) {
+                    return lhs;
+                }
+                break;
+            case ExprOp::MUL:
+                if (lhs_const && lhs_value == 1.0) {
+                    return rhs;
+                }
+                if (rhs_const && rhs_value == 1.0) {
+                    return lhs;
+                }
+                break;
+            case ExprOp::DIV:
+                if (rhs_const && rhs_value == 1.0) {
+                    return lhs;
+                }
+                break;
+            default:
+                break;
+        }
+
         ExprNode node{};
         node.op = op;
         node.lhs = lhs;
@@ -109,18 +327,38 @@ class BackwardGraphBuilder {
     uint32_t div(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::DIV, lhs, rhs); }
 
     uint32_t unsqueeze(uint32_t value, const std::vector<uint64_t>& unsqueeze_axes) {
+        const std::vector<uint64_t> normalized_axes = normalizeAxes(unsqueeze_axes);
+        if (normalized_axes.empty()) {
+            return value;
+        }
+
+        const ExprNode& value_node = grad_expr.nodes.at(value);
+        if (value_node.op == ExprOp::SQUEEZE && axesEqualNormalized(value_node.squeeze_axes, normalized_axes)) {
+            return value_node.lhs;
+        }
+
         ExprNode node{};
         node.op = ExprOp::UNSQUEEZE;
         node.lhs = value;
-        node.unsqueeze_axes = unsqueeze_axes;
+        node.unsqueeze_axes = normalized_axes;
         return push(std::move(node));
     }
 
     uint32_t squeeze(uint32_t value, const std::vector<uint64_t>& squeeze_axes) {
+        const std::vector<uint64_t> normalized_axes = normalizeAxes(squeeze_axes);
+        if (normalized_axes.empty()) {
+            return value;
+        }
+
+        const ExprNode& value_node = grad_expr.nodes.at(value);
+        if (value_node.op == ExprOp::UNSQUEEZE && axesEqualNormalized(value_node.unsqueeze_axes, normalized_axes)) {
+            return value_node.lhs;
+        }
+
         ExprNode node{};
         node.op = ExprOp::SQUEEZE;
         node.lhs = value;
-        node.squeeze_axes = squeeze_axes;
+        node.squeeze_axes = normalized_axes;
         return push(std::move(node));
     }
 
@@ -131,6 +369,10 @@ class BackwardGraphBuilder {
     void addContribution(uint32_t forward_node_index, uint32_t contrib_root) {
         if (forward_node_index >= node_grads.size()) {
             throw std::runtime_error("Autodiff addContribution node index out of range.");
+        }
+
+        if (isConstantLikeZero(contrib_root)) {
+            return;
         }
 
         // std::cerr << "[AUTODIFF] addContribution"
@@ -696,6 +938,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     const std::vector<std::string> normalized_wrt = normalizeWrtNames(forward_expr, wrt_names);
     const std::vector<std::vector<uint64_t>> forward_node_dims = inferForwardNodeDims(forward_expr, forward_input_dims);
     const bool has_forward_dims = !forward_node_dims.empty();
+    const std::vector<bool> node_reaches_requested_inputs = computeNodeReachesRequestedInputs(forward_expr, normalized_wrt);
 
     if (forward_outputs.outputs.size() > 1 && !upstream_input_names_by_output.has_value()) {
         throw std::runtime_error(
@@ -741,6 +984,27 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             return grad_value;
         }
 
+        if (builder.isScalarOne(grad_value) && dimsAllSingleton(forward_node_output_dims)) {
+            std::vector<uint64_t> axes(forward_node_output_dims.size());
+            for (uint64_t axis = 0; axis < static_cast<uint64_t>(axes.size()); ++axis) {
+                axes[axis] = axis;
+            }
+            return builder.unsqueeze(grad_value, axes);
+        }
+
+        double grad_constant = 0.0;
+        if (builder.tryGetConstantLikeValue(grad_value, grad_constant)) {
+            return builder.fill(grad_constant, forward_node_output_dims, preferredGradValueDType(forward_expr.nodes.at(forward_node_idx)));
+        }
+
+        if (builder.tryGetScalarConstant(grad_value, grad_constant) && dimsAllSingleton(forward_node_output_dims)) {
+            std::vector<uint64_t> axes(forward_node_output_dims.size());
+            for (uint64_t axis = 0; axis < static_cast<uint64_t>(axes.size()); ++axis) {
+                axes[axis] = axis;
+            }
+            return builder.unsqueeze(grad_value, axes);
+        }
+
         const uint32_t out = builder.cloneForward(forward_node_idx);
         return builder.add(builder.mul(out, builder.scalar(0.0)), grad_value);
     };
@@ -762,34 +1026,53 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 break;
 
             case ExprOp::ADD:
-                addContributionToChild(node.lhs, grad, node_dims);
-                addContributionToChild(node.rhs, grad, node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    addContributionToChild(node.lhs, grad, node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    addContributionToChild(node.rhs, grad, node_dims);
+                }
                 break;
 
             case ExprOp::SUB:
-                addContributionToChild(node.lhs, grad, node_dims);
-                addContributionToChild(node.rhs, builder.neg(grad), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    addContributionToChild(node.lhs, grad, node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    addContributionToChild(node.rhs, builder.neg(grad), node_dims);
+                }
                 break;
 
             case ExprOp::MUL: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t rhs = builder.cloneForward(node.rhs);
-                addContributionToChild(node.lhs, builder.mul(grad, rhs), node_dims);
-                addContributionToChild(node.rhs, builder.mul(grad, lhs), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, rhs), node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.rhs, builder.mul(grad, lhs), node_dims);
+                }
                 break;
             }
 
             case ExprOp::DIV: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t rhs = builder.cloneForward(node.rhs);
-                const uint32_t rhs_sq = builder.mul(rhs, rhs);
-                addContributionToChild(node.lhs, builder.div(grad, rhs), node_dims);
-                addContributionToChild(node.rhs, builder.neg(builder.div(builder.mul(grad, lhs), rhs_sq)), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    addContributionToChild(node.lhs, builder.div(grad, rhs), node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t rhs_sq = builder.mul(rhs, rhs);
+                    addContributionToChild(node.rhs, builder.neg(builder.div(builder.mul(grad, lhs), rhs_sq)), node_dims);
+                }
                 break;
             }
 
             case ExprOp::NEG:
-                addContributionToChild(node.lhs, builder.neg(grad), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    addContributionToChild(node.lhs, builder.neg(grad), node_dims);
+                }
                 break;
 
             case ExprOp::UNSQUEEZE: {
@@ -797,14 +1080,18 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     const std::vector<uint64_t>& lhs_dims = forward_node_dims.at(node.lhs);
                     const std::vector<uint64_t> actual_unsqueeze_axes = normalizeUnsqueezeAxesForInputDims(lhs_dims, node.unsqueeze_axes);
                     const uint32_t squeezed_grad = builder.squeeze(grad, actual_unsqueeze_axes);
-                    builder.addContribution(node.lhs, squeezed_grad);
+                    if (node_reaches_requested_inputs.at(node.lhs)) {
+                        builder.addContribution(node.lhs, squeezed_grad);
+                    }
 
                     // std::cerr << "[AUTODIFF] builder.unsqueeze"
                     //           << " input_node=" << node_idx << " actual_unsqueeze_axes=" << dbgDims(actual_unsqueeze_axes)
                     //           << " node.unsqueeze_axes=" << dbgDims(node.unsqueeze_axes) << std::endl;
                 } else {
                     const uint32_t squeezed_grad = builder.squeeze(grad, node.unsqueeze_axes);
-                    builder.addContribution(node.lhs, squeezed_grad);
+                    if (node_reaches_requested_inputs.at(node.lhs)) {
+                        builder.addContribution(node.lhs, squeezed_grad);
+                    }
                 }
                 break;
             }
@@ -829,7 +1116,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     //           << " expected_incoming_grad_dims=" << dbgDims(node_dims)
                     //           << " expected_unsqueezed_grad_dims=" << dbgDims(lhs_dims) << std::endl;
 
-                    builder.addContribution(node.lhs, unsqueezed_grad);
+                    if (node_reaches_requested_inputs.at(node.lhs)) {
+                        builder.addContribution(node.lhs, unsqueezed_grad);
+                    }
 
                     // const uint32_t lhs_grad_after_squeeze = builder.gradOf(node.lhs).value();
                     // std::cerr << "[AUTODIFF] SQUEEZE stored lhs grad"
@@ -841,7 +1130,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     // std::cerr << "[AUTODIFF] SQUEEZE nodes (no forward dims)"
                     //           << " incoming_grad_node=" << grad << " unsqueezed_grad_node=" << unsqueezed_grad << std::endl;
 
-                    builder.addContribution(node.lhs, unsqueezed_grad);
+                    if (node_reaches_requested_inputs.at(node.lhs)) {
+                        builder.addContribution(node.lhs, unsqueezed_grad);
+                    }
 
                     // const uint32_t lhs_grad_after_squeeze = builder.gradOf(node.lhs).value();
                     // std::cerr << "[AUTODIFF] SQUEEZE stored lhs grad (no forward dims)"
@@ -851,135 +1142,179 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             }
 
             case ExprOp::EXP: {
-                const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
-                addContributionToChild(node.lhs, builder.mul(grad, out), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    addContributionToChild(node.lhs, builder.mul(grad, out), node_dims);
+                }
                 break;
             }
 
             case ExprOp::EXP2: {
-                const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
-                const uint32_t scale = builder.scalar(std::log(2.0));
-                addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, scale)), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t scale = builder.scalar(std::log(2.0));
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, scale)), node_dims);
+                }
                 break;
             }
 
             case ExprOp::EXP10: {
-                const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
-                const uint32_t scale = builder.scalar(std::log(10.0));
-                addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, scale)), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t scale = builder.scalar(std::log(10.0));
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, scale)), node_dims);
+                }
                 break;
             }
 
             case ExprOp::LN: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                addContributionToChild(node.lhs, builder.div(grad, lhs), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    addContributionToChild(node.lhs, builder.div(grad, lhs), node_dims);
+                }
                 break;
             }
 
             case ExprOp::LOG2: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t denom = builder.mul(lhs, builder.scalar(std::log(2.0)));
-                addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t denom = builder.mul(lhs, builder.scalar(std::log(2.0)));
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
                 break;
             }
 
             case ExprOp::LOG10: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t denom = builder.mul(lhs, builder.scalar(std::log(10.0)));
-                addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t denom = builder.mul(lhs, builder.scalar(std::log(10.0)));
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
                 break;
             }
 
             case ExprOp::SQRT: {
-                const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
-                const uint32_t denom = builder.mul(builder.scalar(2.0), out);
-                addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t denom = builder.mul(builder.scalar(2.0), out);
+                    addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
+                }
                 break;
             }
 
             case ExprOp::POW: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t rhs = builder.cloneForward(node.rhs);
-                const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
-                const uint32_t rhs_minus_one = builder.sub(rhs, builder.scalar(1.0));
-                const uint32_t lhs_pow_rhs_minus_one = builder.binary(ExprOp::POW, lhs, rhs_minus_one);
-                addContributionToChild(node.lhs, builder.mul(grad, builder.mul(rhs, lhs_pow_rhs_minus_one)), node_dims);
-                addContributionToChild(node.rhs, builder.mul(grad, builder.mul(out, builder.unary(ExprOp::LN, lhs))), node_dims);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t rhs_minus_one = builder.sub(rhs, builder.scalar(1.0));
+                    const uint32_t lhs_pow_rhs_minus_one = builder.binary(ExprOp::POW, lhs, rhs_minus_one);
+                    addContributionToChild(node.lhs, builder.mul(grad, builder.mul(rhs, lhs_pow_rhs_minus_one)), node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    addContributionToChild(node.rhs, builder.mul(grad, builder.mul(out, builder.unary(ExprOp::LN, lhs))), node_dims);
+                }
                 break;
             }
 
             case ExprOp::REDUCE_SUM: {
-                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
 
-                uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                if (has_forward_dims && !node.squeeze_axes.empty()) {
-                    const std::vector<uint64_t> unsqueeze_axes =
-                        normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
-                    grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    if (has_forward_dims && !node.squeeze_axes.empty()) {
+                        const std::vector<uint64_t> unsqueeze_axes =
+                            normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                        grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    }
+
+                    // std::cerr << "[AUTODIFF] REDUCE_SUM backward"
+                    //           << " node=" << node_idx << " lhs=" << node.lhs << " grad_node=" << grad << " node_dims=" <<
+                    //           dbgDims(node_dims)
+                    //           << " lhs_dims=" << dbgDims(lhs_dims) << " reduction_axes=" << dbgDims(node.reduction_axes)
+                    //           << " squeeze_axes=" << dbgDims(node.squeeze_axes) << std::endl;
+
+                    uint32_t expanded_grad = UINT32_MAX;
+                    double grad_constant = 0.0;
+                    if (builder.tryGetConstantLikeValue(grad_before_expand, grad_constant)) {
+                        expanded_grad = builder.fill(grad_constant, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    } else {
+                        const uint32_t lhs = builder.cloneForward(node.lhs);
+                        expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
+                    }
+
+                    // std::cerr << "[AUTODIFF] REDUCE_SUM nodes"
+                    //           << " grad_before_expand=" << grad_before_expand << " expanded_grad=" << expanded_grad << std::endl;
+
+                    addContributionToChild(node.lhs, expanded_grad, lhs_dims);
+
+                    // const uint32_t lhs_grad_after_reduce = builder.gradOf(node.lhs).value();
+                    // std::cerr << "[AUTODIFF] REDUCE_SUM stored lhs grad"
+                    //           << " lhs=" << node.lhs << " lhs_grad_node=" << lhs_grad_after_reduce << " expected_lhs_dims=" <<
+                    //           dbgDims(lhs_dims)
+                    //           << std::endl;
                 }
-
-                // std::cerr << "[AUTODIFF] REDUCE_SUM backward"
-                //           << " node=" << node_idx << " lhs=" << node.lhs << " grad_node=" << grad << " node_dims=" << dbgDims(node_dims)
-                //           << " lhs_dims=" << dbgDims(lhs_dims) << " reduction_axes=" << dbgDims(node.reduction_axes)
-                //           << " squeeze_axes=" << dbgDims(node.squeeze_axes) << std::endl;
-
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
-
-                // std::cerr << "[AUTODIFF] REDUCE_SUM nodes"
-                //           << " grad_before_expand=" << grad_before_expand << " expanded_grad=" << expanded_grad << std::endl;
-
-                addContributionToChild(node.lhs, expanded_grad, lhs_dims);
-
-                // const uint32_t lhs_grad_after_reduce = builder.gradOf(node.lhs).value();
-                // std::cerr << "[AUTODIFF] REDUCE_SUM stored lhs grad"
-                //           << " lhs=" << node.lhs << " lhs_grad_node=" << lhs_grad_after_reduce << " expected_lhs_dims=" <<
-                //           dbgDims(lhs_dims)
-                //           << std::endl;
 
                 break;
             }
 
             case ExprOp::REDUCE_AVG: {
-                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
 
-                uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                if (has_forward_dims && !node.squeeze_axes.empty()) {
-                    const std::vector<uint64_t> unsqueeze_axes =
-                        normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
-                    grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    if (has_forward_dims && !node.squeeze_axes.empty()) {
+                        const std::vector<uint64_t> unsqueeze_axes =
+                            normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                        grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    }
+
+                    uint32_t expanded_grad = UINT32_MAX;
+                    double grad_constant = 0.0;
+                    if (builder.tryGetConstantLikeValue(grad_before_expand, grad_constant)) {
+                        expanded_grad = builder.fill(grad_constant, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    } else {
+                        const uint32_t lhs = builder.cloneForward(node.lhs);
+                        expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
+                    }
+
+                    uint32_t scaled_grad = expanded_grad;
+                    if (has_forward_dims) {
+                        const uint64_t count = reductionElementCount(lhs_dims, node.reduction_axes);
+                        scaled_grad = builder.div(expanded_grad, builder.scalar(static_cast<double>(count)));
+                    }
+
+                    addContributionToChild(node.lhs, scaled_grad, lhs_dims);
                 }
-
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
-
-                uint32_t scaled_grad = expanded_grad;
-                if (has_forward_dims) {
-                    const uint64_t count = reductionElementCount(lhs_dims, node.reduction_axes);
-                    scaled_grad = builder.div(expanded_grad, builder.scalar(static_cast<double>(count)));
-                }
-
-                addContributionToChild(node.lhs, scaled_grad, lhs_dims);
                 break;
             }
 
             case ExprOp::REDUCE_NORM2: {
-                const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
 
-                uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
 
-                if (has_forward_dims && !node.squeeze_axes.empty()) {
-                    const std::vector<uint64_t> unsqueeze_axes =
-                        normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
-                    grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
-                    out = builder.unsqueeze(out, unsqueeze_axes);
+                    if (has_forward_dims && !node.squeeze_axes.empty()) {
+                        const std::vector<uint64_t> unsqueeze_axes =
+                            normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                        grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                        out = builder.unsqueeze(out, unsqueeze_axes);
+                    }
+
+                    uint32_t expanded_grad = UINT32_MAX;
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    double grad_constant = 0.0;
+                    if (builder.tryGetConstantLikeValue(grad_before_expand, grad_constant)) {
+                        expanded_grad = builder.fill(grad_constant, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    } else {
+                        expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
+                    }
+                    const uint32_t scaled = builder.div(builder.mul(expanded_grad, lhs), out);
+                    addContributionToChild(node.lhs, scaled, lhs_dims);
                 }
-
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t expanded_grad = builder.add(builder.mul(lhs, builder.scalar(0.0)), grad_before_expand);
-                const uint32_t scaled = builder.div(builder.mul(expanded_grad, lhs), out);
-                addContributionToChild(node.lhs, scaled, lhs_dims);
                 break;
             }
 
@@ -1050,20 +1385,35 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         }
 
         if (!total_grad.has_value()) {
-            std::unordered_map<uint32_t, uint32_t> zero_clone_memo;
-            const uint32_t input_clone = cloneForwardSubtree(forward_expr, first_it->second, *backward_outputs.expr, zero_clone_memo);
-            ExprNode zero_node{};
-            zero_node.op = ExprOp::SCALAR_FP;
-            zero_node.scalar_fp = 0.0;
-            const uint32_t zero_idx = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
-            backward_outputs.expr->nodes.push_back(std::move(zero_node));
+            if (has_forward_dims) {
+                ExprNode fill_node{};
+                fill_node.op = ExprOp::FILL;
+                fill_node.scalar_fp = 0.0;
+                fill_node.fill_dims = forward_node_dims.at(first_it->second);
+                const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
+                if (forward_input_node.backward_output_dtype.isPresent()) {
+                    fill_node.output_dtype = forward_input_node.backward_output_dtype.get();
+                } else if (forward_input_node.output_dtype.isPresent()) {
+                    fill_node.output_dtype = forward_input_node.output_dtype.get();
+                }
+                total_grad = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
+                backward_outputs.expr->nodes.push_back(std::move(fill_node));
+            } else {
+                std::unordered_map<uint32_t, uint32_t> zero_clone_memo;
+                const uint32_t input_clone = cloneForwardSubtree(forward_expr, first_it->second, *backward_outputs.expr, zero_clone_memo);
+                ExprNode zero_node{};
+                zero_node.op = ExprOp::SCALAR_FP;
+                zero_node.scalar_fp = 0.0;
+                const uint32_t zero_idx = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
+                backward_outputs.expr->nodes.push_back(std::move(zero_node));
 
-            ExprNode mul_node{};
-            mul_node.op = ExprOp::MUL;
-            mul_node.lhs = input_clone;
-            mul_node.rhs = zero_idx;
-            total_grad = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
-            backward_outputs.expr->nodes.push_back(std::move(mul_node));
+                ExprNode mul_node{};
+                mul_node.op = ExprOp::MUL;
+                mul_node.lhs = input_clone;
+                mul_node.rhs = zero_idx;
+                total_grad = static_cast<uint32_t>(backward_outputs.expr->nodes.size());
+                backward_outputs.expr->nodes.push_back(std::move(mul_node));
+            }
         }
 
         backward_outputs.outputs.push_back(NamedOutput{

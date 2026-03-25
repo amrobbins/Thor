@@ -90,7 +90,7 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.isPresent() ? node.output_dtype.get() : default_output;
     }
 
-    if (node.op == ExprOp::SCALAR_FP) {
+    if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) {
         return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::FP32;
     }
 

@@ -33,6 +33,7 @@ enum class ExprOp : uint16_t {
     LOG2,
     LOG10,
     SQRT,
+    FILL,
     UNSQUEEZE,
     SQUEEZE,
     MIN,
@@ -93,6 +94,7 @@ struct ExprNode {
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
+    std::vector<uint64_t> fill_dims;
 };
 
 struct NamedInput {

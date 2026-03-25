@@ -278,6 +278,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::SCALAR_FP:
                 node_dims[i] = {};
                 break;
+            case ExprOp::FILL:
+                node_dims[i] = node.fill_dims;
+                break;
             case ExprOp::ADD:
             case ExprOp::SUB:
             case ExprOp::MUL:
@@ -412,6 +415,104 @@ static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
     }
     return false;
 }
+static TensorPlacement pickStageOutputPlacement(const std::vector<Tensor>& stage_inputs,
+                                                const std::unordered_map<uint32_t, Tensor>& available_values) {
+    if (!stage_inputs.empty()) {
+        return stage_inputs.front().getPlacement();
+    }
+    if (!available_values.empty()) {
+        return available_values.begin()->second.getPlacement();
+    }
+    throw std::runtime_error("Unable to infer output placement for fused stage with no available tensors.");
+}
+
+static std::unordered_map<std::string, std::vector<uint64_t>> defaultBackwardRequestedOutputShapes(
+    const std::optional<BackwardEquationConfig>& backward_config,
+    const std::vector<NamedInput>& root_inputs,
+    const std::unordered_map<uint32_t, Tensor>& root_values,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) {
+    std::unordered_map<std::string, std::vector<uint64_t>> effective = requested_output_shapes;
+
+    if (!backward_config.has_value()) {
+        return effective;
+    }
+
+    std::unordered_map<std::string, uint32_t> root_slot_by_name;
+    root_slot_by_name.reserve(root_inputs.size());
+    for (const NamedInput& input : root_inputs) {
+        root_slot_by_name.emplace(input.name, input.slot);
+    }
+
+    for (const std::string& wrt_name : backward_config->wrt_names) {
+        const std::string output_name = wrt_name + "_grad";
+        if (effective.contains(output_name)) {
+            continue;
+        }
+
+        auto slot_it = root_slot_by_name.find(wrt_name);
+        if (slot_it == root_slot_by_name.end()) {
+            continue;
+        }
+
+        auto value_it = root_values.find(slot_it->second);
+        if (value_it == root_values.end()) {
+            continue;
+        }
+
+        effective.emplace(output_name, value_it->second.getDimensions());
+    }
+
+    return effective;
+}
+
+static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stage,
+                                              const std::vector<Tensor>& stage_inputs,
+                                              const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes,
+                                              bool trust_requested_output_shapes,
+                                              std::vector<uint64_t>& resolved_output_dims) {
+    resolved_output_dims.clear();
+
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return false;
+    }
+
+    if (stageHasShapeOnlyOps(stage)) {
+        if (!stage.outputs.empty()) {
+            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
+        }
+        return true;
+    }
+
+    if (stage_inputs.empty()) {
+        if (!stage.outputs.empty()) {
+            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, stage_inputs);
+            auto requested_it = requested_output_shapes.find(stage.outputs[0].name);
+            if (requested_it != requested_output_shapes.end() && !requested_it->second.empty()) {
+                resolved_output_dims = requested_it->second;
+            }
+        }
+        return false;
+    }
+
+    std::vector<Tensor> layout_inputs = stage_inputs;
+    const bool requires_broadcast = FusedEquation::resolveLayout(layout_inputs, resolved_output_dims);
+
+    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+        std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stage_inputs);
+        auto requested_it = requested_output_shapes.find(stage.outputs[output_idx].name);
+        if (requested_it != requested_output_shapes.end() && !requested_it->second.empty()) {
+            if (!trust_requested_output_shapes) {
+                verifyRequestedOutputLayout(requested_it->second, output_dims);
+            }
+            output_dims = requested_it->second;
+        }
+        if (output_dims != resolved_output_dims) {
+            return true;
+        }
+    }
+
+    return requires_broadcast;
+}
 
 static void mergeEffectiveInputDimsMaps(std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& dst,
                                         const std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>>& src) {
@@ -433,6 +534,8 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {{node.input_slot, {node_dims[node_idx]}}};
         }
         case ExprOp::SCALAR_FP:
+            return {};
+        case ExprOp::FILL:
             return {};
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE: {
@@ -913,6 +1016,8 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
     plan->compiled_outputs = compiled_outputs;
     plan->stages.reserve(compiled_outputs->stages.size());
 
+    const auto effectiveRequestedOutputShapes = defaultBackwardRequestedOutputShapes(backward_config, root_inputs, root_values, {});
+
     std::unordered_set<std::string> expected_output_names;
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
@@ -935,15 +1040,9 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
 
         PreparedConvenienceRunStage prepared_stage;
 
-        std::vector<Tensor> layout_inputs = ordered_inputs;
         std::vector<uint64_t> resolved_output_dims;
-        const bool has_shape_only_ops = stageHasShapeOnlyOps(stage);
-        const bool requires_broadcast = has_shape_only_ops ? true : resolveLayout(layout_inputs, resolved_output_dims);
-        if (has_shape_only_ops) {
-            resolved_output_dims = resolveOutputDimsForStageOutput(stage, 0, ordered_inputs);
-            // std::cerr << "[FUSION] forcing specialized broadcast for stage with squeeze/unsqueeze ops. "
-            //           << "first_output_dims=" << dimsToString(resolved_output_dims) << std::endl;
-        }
+        const bool requires_broadcast = fusedStageRequiresBroadcastLaunch(
+            stage, ordered_inputs, effectiveRequestedOutputShapes, backward_config.has_value(), resolved_output_dims);
 
         if (!requires_broadcast) {
             if (!stage.flat) {
@@ -953,7 +1052,15 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
             prepared_stage.compiled_equation = stage.flat;
             prepared_stage.expected_output_dims.resize(stage.outputs.size());
             for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-                prepared_stage.expected_output_dims[output_idx] = resolveOutputDimsForStageOutput(stage, output_idx, ordered_inputs);
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, ordered_inputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    if (!backward_config.has_value() && !(ordered_inputs.empty() && output_dims.empty())) {
+                        verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    }
+                    output_dims = requested_it->second;
+                }
+                prepared_stage.expected_output_dims[output_idx] = std::move(output_dims);
             }
         } else {
             std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, ordered_inputs);
@@ -973,7 +1080,15 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                     if (output_idx >= prepared_stage.expected_output_dims.size()) {
                         throw std::runtime_error("Broadcast group output index out of range.");
                     }
-                    prepared_stage.expected_output_dims[output_idx] = group.specialized.output_dims;
+                    std::vector<uint64_t> output_dims = group.specialized.output_dims;
+                    auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
+                    if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                        if (!backward_config.has_value() && !(ordered_inputs.empty() && output_dims.empty())) {
+                            verifyRequestedOutputLayout(requested_it->second, output_dims);
+                        }
+                        output_dims = requested_it->second;
+                    }
+                    prepared_stage.expected_output_dims[output_idx] = std::move(output_dims);
                 }
             }
 
@@ -1185,9 +1300,6 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
         throw std::runtime_error("Cannot stamp an empty compiled equation.");
     }
 
-    if (inputs.empty()) {
-        throw std::runtime_error("FusedEquation::stampEquation requires at least one input tensor.");
-    }
     if (outputs.size() != compiledEquation->numOutputs()) {
         throw std::runtime_error("Wrong number of outputs passed to FusedEquation::stampEquation.");
     }
@@ -1200,20 +1312,7 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
         throw std::runtime_error("FusedEquation::stampEquation requires at least one output tensor.");
     }
 
-    const Tensor& firstInput = inputs[0];
-    if (!firstInput.isInitialized()) {
-        throw std::runtime_error("First input tensor is not initialized.");
-    }
-
-    if (firstInput.getDescriptor().getDataType() != compiledEquation->input_dtypes[0]) {
-        throw std::runtime_error("Input tensor data type does not match compiled equation data type.");
-    }
-
-    if (firstInput.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
-        throw std::runtime_error("Input tensor GPU does not match compiled equation device.");
-    }
-
-    for (uint64_t i = 1; i < inputs.size(); ++i) {
+    for (uint64_t i = 0; i < inputs.size(); ++i) {
         if (!inputs[i].isInitialized()) {
             throw std::runtime_error("Input tensor is not initialized.");
         }
@@ -1281,6 +1380,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
 
     std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
+    const auto effectiveRequestedOutputShapes =
+        defaultBackwardRequestedOutputShapes(backward_config, root_inputs, values, requestedOutputShapes);
 
     std::vector<StampedExecutionStage> stampedStages;
     stampedStages.reserve(compiled_outputs->stages.size());
@@ -1321,32 +1422,28 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 throw std::runtime_error("Missing compiled fused kernel stage.");
             }
 
-            std::vector<Tensor> layoutInputs = stageInputs;
             std::vector<uint64_t> resolvedOutputDims;
-            const bool hasShapeOnlyOps = stageHasShapeOnlyOps(stage);
-            bool requiresBroadcast = hasShapeOnlyOps ? true : resolveLayout(layoutInputs, resolvedOutputDims);
-            if (hasShapeOnlyOps) {
-                resolvedOutputDims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
-                // std::cerr << "[FUSION] forcing specialized broadcast for staged kernel with squeeze/unsqueeze ops. "
-                //           << "first_output_dims=" << dimsToString(resolvedOutputDims) << std::endl;
-            }
+            const bool requiresBroadcast = fusedStageRequiresBroadcastLaunch(
+                stage, stageInputs, effectiveRequestedOutputShapes, backward_config.has_value(), resolvedOutputDims);
 
             std::vector<Tensor> stageOutputs;
             stageOutputs.reserve(stage.outputs.size());
 
-            TensorPlacement outputPlacement = layoutInputs[0].getPlacement();
+            TensorPlacement outputPlacement = pickStageOutputPlacement(stageInputs, values);
 
             if (!requiresBroadcast) {
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& produced = stage.outputs[output_idx];
                     std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
 
-                    auto requested_it = requestedOutputShapes.find(produced.name);
+                    auto requested_it = effectiveRequestedOutputShapes.find(produced.name);
                     const std::vector<uint64_t>* requested_shape =
-                        (requested_it != requestedOutputShapes.end()) ? &requested_it->second : nullptr;
+                        (requested_it != effectiveRequestedOutputShapes.end()) ? &requested_it->second : nullptr;
 
                     if (requested_shape && !requested_shape->empty()) {
-                        verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
+                        if (!backward_config.has_value() && !(stageInputs.empty() && resolved_output_dims.empty())) {
+                            verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
+                        }
                     }
 
                     TensorDescriptor outputDescriptor(
@@ -1360,12 +1457,14 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
                     std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
 
-                    auto requested_it = requestedOutputShapes.find(produced.name);
+                    auto requested_it = effectiveRequestedOutputShapes.find(produced.name);
                     const std::vector<uint64_t>* requested_shape =
-                        (requested_it != requestedOutputShapes.end()) ? &requested_it->second : nullptr;
+                        (requested_it != effectiveRequestedOutputShapes.end()) ? &requested_it->second : nullptr;
 
                     if (requested_shape && !requested_shape->empty()) {
-                        verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
+                        if (!backward_config.has_value() && !(stageInputs.empty() && resolved_output_dims.empty())) {
+                            verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
+                        }
                     }
 
                     TensorDescriptor outputDescriptor(
@@ -1390,7 +1489,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
                 stamped = stampEquation(specialized_broadcast, stageInputs, stageOutputs, stream);
             } else {
-                stamped = stampEquation(stage.flat, layoutInputs, stageOutputs, stream);
+                stamped = stampEquation(stage.flat, stageInputs, stageOutputs, stream);
             }
 
             for (size_t i = 0; i < stage.outputs.size(); ++i) {

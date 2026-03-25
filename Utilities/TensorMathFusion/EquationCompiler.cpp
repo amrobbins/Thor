@@ -85,6 +85,7 @@ struct StageNodeKey {
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
+    std::vector<uint64_t> fill_dims;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -110,6 +111,9 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<size_t>{}(k.unsqueeze_axes.size()));
         for (uint64_t axis : k.unsqueeze_axes)
             hashCombine(h, std::hash<uint64_t>{}(axis));
+        hashCombine(h, std::hash<size_t>{}(k.fill_dims.size()));
+        for (uint64_t dim : k.fill_dims)
+            hashCombine(h, std::hash<uint64_t>{}(dim));
         return h;
     }
 };
@@ -141,6 +145,11 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
 
         case ExprOp::SCALAR_FP:
             key.scalar_bits = scalarBits(n.scalar_fp);
+            break;
+
+        case ExprOp::FILL:
+            key.scalar_bits = scalarBits(n.scalar_fp);
+            key.fill_dims = n.fill_dims;
             break;
 
         default:
@@ -323,6 +332,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "LOG10";
         case ExprOp::SQRT:
             return "SQRT";
+        case ExprOp::FILL:
+            return "FILL";
         case ExprOp::UNSQUEEZE:
             return "UNSQ";
         case ExprOp::SQUEEZE:
@@ -395,6 +406,13 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
 
         case ExprOp::SCALAR_FP: {
             std::string s = std::string("F(") + std::to_string(scalarBits(node.scalar_fp)) + ")";
+            appendNodeDTypeSignature(s, node);
+            return s;
+        }
+
+        case ExprOp::FILL: {
+            std::string s =
+                std::string("FILL(") + std::to_string(scalarBits(node.scalar_fp)) + ",dims=" + uintVecSignature(node.fill_dims) + ")";
             appendNodeDTypeSignature(s, node);
             return s;
         }
@@ -585,7 +603,7 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
-constexpr bool PRINT_KERNELS = false;
+constexpr bool PRINT_KERNELS = true;
 
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
     if (PRINT_KERNELS) {
