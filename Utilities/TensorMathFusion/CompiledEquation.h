@@ -103,6 +103,36 @@ struct CompiledReduction {
     }
 };
 
+struct CompiledReduceMinMaxBackward {
+    const ExprOp op;
+    std::vector<uint64_t> reduction_axes;
+    std::vector<uint64_t> squeeze_axes;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType output_dtype;
+    const TensorDescriptor::DataType compute_dtype;
+
+    bool operator==(const CompiledReduceMinMaxBackward& other) const = default;
+
+    CompiledReduceMinMaxBackward(ExprOp op,
+                                 std::vector<uint64_t> reduction_axes,
+                                 std::vector<uint64_t> squeeze_axes,
+                                 TensorDescriptor::DataType input_dtype,
+                                 TensorDescriptor::DataType output_dtype,
+                                 Optional<TensorDescriptor::DataType> compute_dtype)
+        : op(op),
+          reduction_axes(std::move(reduction_axes)),
+          squeeze_axes(std::move(squeeze_axes)),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : input_dtype) {
+        std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
+        this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
+
+        std::sort(this->squeeze_axes.begin(), this->squeeze_axes.end());
+        this->squeeze_axes.erase(std::unique(this->squeeze_axes.begin(), this->squeeze_axes.end()), this->squeeze_axes.end());
+    }
+};
+
 }  // namespace ThorImplementation
 
 inline void hashCombine(std::size_t& seed, std::size_t value) { seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >> 2); }

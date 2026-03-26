@@ -227,7 +227,9 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
     stage_expr.output_node = stage_outputs.front().local_node_idx;
 }
 
-static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op); }
+static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
+
+static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op) || isReduceMinMaxBackwardOp(op); }
 
 static void collectExternalValueIds(const PhysicalExpression& expr,
                                     const std::unordered_set<uint32_t>& region_nodes,
@@ -352,6 +354,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "RMIN";
         case ExprOp::REDUCE_MAX:
             return "RMAX";
+        case ExprOp::REDUCE_MIN_BACKWARD:
+            return "RMIN_BW";
+        case ExprOp::REDUCE_MAX_BACKWARD:
+            return "RMAX_BW";
         case ExprOp::REDUCE_AVG:
             return "RAVG";
         case ExprOp::REDUCE_NORM1:
@@ -430,8 +436,15 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     const std::string lhs = fusedRegionSignatureRec(expr, node.lhs);
 
     if (isStageBoundaryOp(node.op)) {
-        std::string s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
-                        ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        std::string s;
+        if (isReduceMinMaxBackwardOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",axes=" + uintVecSignature(node.reduction_axes) +
+                ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        } else {
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
+                ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+        }
         appendNodeDTypeSignature(s, node);
         return s;
     }
@@ -714,6 +727,44 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
         node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
 }
 
+shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBackward(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 2) {
+        throw std::runtime_error("ReduceMinMaxBackward stage must have exactly two inputs.");
+    }
+
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("ReduceMinMaxBackward stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (node.op != ExprOp::REDUCE_MIN_BACKWARD && node.op != ExprOp::REDUCE_MAX_BACKWARD) {
+        throw std::runtime_error("ReduceMinMaxBackward stage output node is not a supported min/max backward op.");
+    }
+
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
+        throw std::runtime_error("ReduceMinMaxBackward node is missing an input.");
+    }
+    if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("ReduceMinMaxBackward input node is out of range.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    const ExprNode& grad_node = expr.nodes[node.rhs];
+    if (input_node.op != ExprOp::INPUT || grad_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("ReduceMinMaxBackward stage inputs must be local INPUT nodes.");
+    }
+
+    if (!input_node.input_tensor_dtype.isPresent()) {
+        throw std::runtime_error("ReduceMinMaxBackward input node missing resolved input_tensor_dtype.");
+    }
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("ReduceMinMaxBackward node missing resolved output_dtype.");
+    }
+
+    return make_shared<CompiledReduceMinMaxBackward>(
+        node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+}
+
 static bool inputRequiresMaterialization(const ExprNode& node) {
     if (node.op != ExprOp::INPUT) {
         return false;
@@ -737,7 +788,7 @@ static void collectFusableRegion(const PhysicalExpression& expr, uint32_t root_i
 
         const ExprNode& node = expr.nodes[node_idx];
         if (isStageBoundaryOp(node.op)) {
-            throw std::runtime_error("collectFusableRegion called on reduction root.");
+            throw std::runtime_error("collectFusableRegion called on stage-boundary root.");
         }
 
         if (Expression::isLeafOp(node.op)) {
@@ -1029,6 +1080,87 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     };
 }
 
+static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpression& expr,
+                                                             uint32_t node_idx,
+                                                             uint32_t output_value_id,
+                                                             const std::string& output_name,
+                                                             const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isReduceMinMaxBackwardOp(node.op)) {
+        throw std::runtime_error("buildReduceMinMaxBackwardStage called on unsupported node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
+        throw std::runtime_error("ReduceMinMaxBackward node missing lhs or rhs input.");
+    }
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"arg0", 0});
+    stage_expr.inputs.push_back(NamedInput{"arg1", 1});
+
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(2);
+
+    auto bind_parent_to_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+        if (parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("ReduceMinMaxBackward input node index out of range.");
+        }
+
+        const ExprNode& parent = expr.nodes[parent_idx];
+        Optional<DataType> actual_input_dtype = Optional<DataType>::empty();
+
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            input_value_ids.push_back(out_it->second);
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for ReduceMinMaxBackward input.");
+        }
+
+        if (!parent.output_dtype.isPresent()) {
+            throw std::runtime_error("ReduceMinMaxBackward parent node missing resolved output_dtype.");
+        }
+        if (!actual_input_dtype.isPresent()) {
+            throw std::runtime_error("ReduceMinMaxBackward parent node missing resolved actual input dtype.");
+        }
+
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.get();
+        input_node.output_dtype = parent.output_dtype;
+        input_node.compute_dtype = parent.compute_dtype;
+        input_node.backward_output_dtype = parent.backward_output_dtype;
+        input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    bind_parent_to_local_input(node.lhs, 0);
+    bind_parent_to_local_input(node.rhs, 1);
+
+    ExprNode route = node;
+    route.lhs = 0;
+    route.rhs = 1;
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = 2;
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = 2,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::ReduceMinMaxBackward,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
 struct PlannedExecution {
     std::vector<PhysicalExecutionStage> stages;
     std::vector<CompiledStageOutput> final_outputs;
@@ -1103,19 +1235,28 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         const ExprNode& root = expr.nodes[root_idx];
         if (isStageBoundaryOp(root.op)) {
-            uint32_t parent_idx = root.lhs;
-            if (parent_idx >= expr.nodes.size()) {
-                throw std::runtime_error("Reduction lhs out of range.");
+            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
+                if (parent_idx >= expr.nodes.size()) {
+                    throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
+                }
+                const ExprNode& parent = expr.nodes[parent_idx];
+                if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
+                    emitForDependency(parent_idx);
+                }
+            };
+
+            ensureBoundaryParentEmitted(root.lhs, "lhs");
+            if (isReduceMinMaxBackwardOp(root.op)) {
+                ensureBoundaryParentEmitted(root.rhs, "rhs");
             }
 
-            const ExprNode& parent = expr.nodes[parent_idx];
-            if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
-                emitForDependency(parent_idx);
+            uint32_t stage_out_id = next_value_id++;
+            node_output_value_id[root_idx] = stage_out_id;
+            if (isReduceMinMaxBackwardOp(root.op)) {
+                planned.stages.push_back(buildReduceMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else {
+                planned.stages.push_back(buildReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             }
-
-            uint32_t reduce_out_id = next_value_id++;
-            node_output_value_id[root_idx] = reduce_out_id;
-            planned.stages.push_back(buildReductionStage(expr, root_idx, reduce_out_id, "", node_output_value_id));
             return;
         }
 
@@ -1223,25 +1364,35 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
 
         if (isStageBoundaryOp(root.op)) {
-            uint32_t parent_idx = root.lhs;
-            if (parent_idx >= expr.nodes.size()) {
-                throw std::runtime_error("Reduction lhs out of range.");
+            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
+                if (parent_idx >= expr.nodes.size()) {
+                    throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
+                }
+                const ExprNode& parent = expr.nodes[parent_idx];
+                if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
+                    emitForDependency(parent_idx);
+                }
+            };
+
+            ensureBoundaryParentEmitted(root.lhs, "lhs");
+            if (isReduceMinMaxBackwardOp(root.op)) {
+                ensureBoundaryParentEmitted(root.rhs, "rhs");
             }
 
-            const ExprNode& parent = expr.nodes[parent_idx];
-            if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
-                emitForDependency(parent_idx);
+            uint32_t stage_out_id = next_value_id++;
+            node_output_value_id[named_output.node_idx] = stage_out_id;
+            if (isReduceMinMaxBackwardOp(root.op)) {
+                planned.stages.push_back(
+                    buildReduceMinMaxBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else {
+                planned.stages.push_back(
+                    buildReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             }
-
-            uint32_t reduce_out_id = next_value_id++;
-            node_output_value_id[named_output.node_idx] = reduce_out_id;
-            planned.stages.push_back(
-                buildReductionStage(expr, named_output.node_idx, reduce_out_id, named_output.name, node_output_value_id));
 
             planned.final_outputs.push_back(CompiledStageOutput{
                 .name = named_output.name,
                 .local_node_idx = UINT32_MAX,
-                .value_id = reduce_out_id,
+                .value_id = stage_out_id,
             });
             continue;
         }
@@ -1353,6 +1504,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 reduction = compileReduction(stage.expr);
                 compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
                 break;
+            case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {
+                std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = compileReduceMinMaxBackward(stage.expr);
+                compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs);
+                break;
+            }
             default:
                 throw std::runtime_error("Unknown stage kind in EquationCompiler::compile(PhysicalOutputs).");
         }

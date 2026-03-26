@@ -2,6 +2,7 @@
 #include "Utilities/TensorMathFusion/CudaHelpers.h"
 #include "Utilities/TensorMathFusion/EquationRunner.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
+#include "Utilities/TensorMathFusion/ReduceMinMaxBackwardKernel.h"
 
 #include <optional>
 #include <stdexcept>
@@ -59,6 +60,68 @@ void StampedReduction::runOn(Stream& run_stream) const {
                                   beta,
                                   built_reduction->c_desc,
                                   (void*)output.getMemPtr()));
+}
+
+StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
+                                                         const Tensor& input,
+                                                         const Tensor& grad_output,
+                                                         const Tensor& output,
+                                                         const Tensor& indices,
+                                                         const Tensor& reduction_value_output,
+                                                         const Stream& stream,
+                                                         Optional<Tensor> workspace)
+    : built_reduction(built),
+      input(input),
+      grad_output(grad_output),
+      output(output),
+      indices(indices),
+      reduction_value_output(reduction_value_output),
+      workspace(workspace),
+      stream(stream) {
+    if (!built_reduction->key.output_indices) {
+        throw std::runtime_error("StampedReduceMinMaxBackward requires a BuiltReduction configured for indices.");
+    }
+    if (built_reduction->workspace_bytes != 0) {
+        assert(workspace.isPresent());
+        assert(workspace.get().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+    }
+}
+
+void StampedReduceMinMaxBackward::run() { runOn(stream); }
+
+void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
+    void* workspace_ptr = nullptr;
+    if (built_reduction->workspace_bytes > 0) {
+        assert(workspace.isPresent());
+        workspace_ptr = workspace.get().getMemPtr();
+    }
+
+    CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
+                                  built_reduction->reduce_desc,
+                                  (void*)indices.getMemPtr(),
+                                  built_reduction->indices_bytes,
+                                  workspace_ptr,
+                                  built_reduction->workspace_bytes,
+                                  alpha,
+                                  built_reduction->a_desc,
+                                  input.getMemPtr(),
+                                  beta,
+                                  built_reduction->c_desc,
+                                  (void*)reduction_value_output.getMemPtr()));
+
+    output.memsetAsync(run_stream, 0);
+
+    cudaStream_t cuda_stream = nullptr;
+    CUDNN_CHECK(cudnnGetStream(run_stream.getCudnnHandle(), &cuda_stream));
+
+    launchReduceMinMaxBackwardScatter(grad_output.getMemPtr(),
+                                      static_cast<const uint32_t*>(indices.getMemPtr()),
+                                      (void*)output.getMemPtr(),
+                                      input.getDimensions(),
+                                      built_reduction->key.reduction_axes,
+                                      built_reduction->key.squeeze_axes,
+                                      grad_output.getDataType(),
+                                      cuda_stream);
 }
 
 void StampedExecutionPlan::run() {
@@ -256,14 +319,14 @@ static cudnnTensorDescriptor_t createCudnnTensorDescriptor(std::vector<uint64_t>
     return desc;
 }
 
-static cudnnReduceTensorDescriptor_t createCudnnReduceDescriptor(ExprOp op, TensorDescriptor::DataType compute_dtype) {
+static cudnnReduceTensorDescriptor_t createCudnnReduceDescriptor(ExprOp op, TensorDescriptor::DataType compute_dtype, bool output_indices) {
     cudnnReduceTensorDescriptor_t desc;
     CUDNN_CHECK(cudnnCreateReduceTensorDescriptor(&desc));
     CUDNN_CHECK(cudnnSetReduceTensorDescriptor(desc,
                                                toCudnnReduceTensorOp(op),
                                                toCudnnDataType(compute_dtype),
                                                CUDNN_PROPAGATE_NAN,
-                                               CUDNN_REDUCE_TENSOR_NO_INDICES,
+                                               output_indices ? CUDNN_REDUCE_TENSOR_FLATTENED_INDICES : CUDNN_REDUCE_TENSOR_NO_INDICES,
                                                CUDNN_32BIT_INDICES));
     return desc;
 }
@@ -278,19 +341,43 @@ static size_t getReductionWorkspaceSize(int device_num,
     return workspace_bytes;
 }
 
+static size_t getReductionIndicesSize(int device_num,
+                                      cudnnReduceTensorDescriptor_t reduce_desc,
+                                      cudnnTensorDescriptor_t a_desc,
+                                      cudnnTensorDescriptor_t c_desc) {
+    Stream stream(device_num);
+    size_t indices_bytes = 0;
+    CUDNN_CHECK(cudnnGetReductionIndicesSize(stream.getCudnnHandle(), reduce_desc, a_desc, c_desc, &indices_bytes));
+    return indices_bytes;
+}
+
 std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::shared_ptr<CompiledReduction>& compiled_reduction,
                                                                 const Tensor& input,
                                                                 int device_num) {
-    const std::vector<uint64_t> input_dims = input.getDimensions();
-
-    ReductionCacheKey key(compiled_reduction->op,
-                          input_dims,
+    return buildReduction(compiled_reduction->op,
                           compiled_reduction->reduction_axes,
                           compiled_reduction->squeeze_axes,
                           compiled_reduction->input_dtype,
                           compiled_reduction->output_dtype,
                           compiled_reduction->compute_dtype,
+                          /*output_indices=*/false,
+                          input,
                           device_num);
+}
+
+std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
+                                                                const std::vector<uint64_t>& reduction_axes,
+                                                                const std::vector<uint64_t>& squeeze_axes,
+                                                                TensorDescriptor::DataType input_dtype,
+                                                                TensorDescriptor::DataType output_dtype,
+                                                                TensorDescriptor::DataType compute_dtype,
+                                                                bool output_indices,
+                                                                const Tensor& input,
+                                                                int device_num) {
+    const std::vector<uint64_t> input_dims = input.getDimensions();
+
+    ReductionCacheKey key(
+        op, input_dims, reduction_axes, squeeze_axes, input_dtype, output_dtype, compute_dtype, output_indices, device_num);
 
     std::shared_ptr<BuiltReduction> hit = cacheLookup(key);
     if (hit)
@@ -302,10 +389,13 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(const std::share
                                                                          built->key.reduction_axes,
                                                                          /*squeeze_axes=*/{});
     built->a_desc = createCudnnTensorDescriptor(input_dims, built->key.input_dtype);
-    built->reduce_desc = createCudnnReduceDescriptor(built->key.op, built->key.compute_dtype);
+    built->reduce_desc = createCudnnReduceDescriptor(built->key.op, built->key.compute_dtype, built->key.output_indices);
     built->c_desc = createCudnnTensorDescriptor(output_dims, built->key.output_dtype);
 
     built->workspace_bytes = getReductionWorkspaceSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
+    if (built->key.output_indices) {
+        built->indices_bytes = getReductionIndicesSize(device_num, built->reduce_desc, built->a_desc, built->c_desc);
+    }
 
     builtReductionCache.put(key, built);
     return built;

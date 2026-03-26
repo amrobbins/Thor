@@ -21,13 +21,15 @@ struct CompiledStageOutput {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction };
+    enum class Kind { FusedKernel, Reduction, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
                 return "FusedKernel";
             case Kind::Reduction:
                 return "Reduction";
+            case Kind::ReduceMinMaxBackward:
+                return "ReduceMinMaxBackward";
         }
         return "<unknown>";
     }
@@ -38,6 +40,7 @@ struct CompiledExecutionStage {
 
     const std::shared_ptr<CompiledEquation> flat = nullptr;
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
+    const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
@@ -52,6 +55,14 @@ struct CompiledExecutionStage {
                            std::vector<uint32_t> input_value_ids,
                            std::vector<CompiledStageOutput> outputs)
         : kind(Kind::Reduction), reduction(reduction), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledReduceMinMaxBackward>& reduce_minmax_backward,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs)
+        : kind(Kind::ReduceMinMaxBackward),
+          reduce_minmax_backward(reduce_minmax_backward),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)) {}
 };
 
 struct CompiledOutputs {
@@ -188,6 +199,9 @@ class FusedEquation {
                                                                    Tensor& input,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
+
+    [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
+        const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
     [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(const std::unordered_map<uint32_t, Tensor>& root_values) const;

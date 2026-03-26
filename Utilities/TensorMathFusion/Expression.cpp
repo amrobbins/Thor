@@ -84,6 +84,10 @@ std::string opName(ExprOp op) {
             return "RMIN";
         case ExprOp::REDUCE_MAX:
             return "RMAX";
+        case ExprOp::REDUCE_MIN_BACKWARD:
+            return "RMIN_BW";
+        case ExprOp::REDUCE_MAX_BACKWARD:
+            return "RMAX_BW";
         case ExprOp::REDUCE_AVG:
             return "RAVG";
         case ExprOp::REDUCE_NORM1:
@@ -178,6 +182,15 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::REDUCE_NORM2: {
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";axes=" + formatUIntVectorCanonical(n.reduction_axes) + ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
+            break;
+        }
+
+        case ExprOp::REDUCE_MIN_BACKWARD:
+        case ExprOp::REDUCE_MAX_BACKWARD: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b + ";axes=" + formatUIntVectorCanonical(n.reduction_axes) +
+                  ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
             break;
         }
 
@@ -310,6 +323,8 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::POW:
         case ExprOp::MIN:
         case ExprOp::MAX:
+        case ExprOp::REDUCE_MIN_BACKWARD:
+        case ExprOp::REDUCE_MAX_BACKWARD:
             return true;
         default:
             return false;
