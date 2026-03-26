@@ -84,6 +84,10 @@ std::string opName(ExprOp op) {
             return "RMIN";
         case ExprOp::REDUCE_MAX:
             return "RMAX";
+        case ExprOp::REDUCE_ARGMIN:
+            return "RARGMIN";
+        case ExprOp::REDUCE_ARGMAX:
+            return "RARGMAX";
         case ExprOp::REDUCE_MIN_BACKWARD:
             return "RMIN_BW";
         case ExprOp::REDUCE_MAX_BACKWARD:
@@ -177,6 +181,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMIN:
+        case ExprOp::REDUCE_ARGMAX:
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2: {
@@ -242,6 +248,12 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
         case PhysicalExecutionStage::Kind::Reduction:
             ss << "reduction";
             break;
+        case PhysicalExecutionStage::Kind::ArgMinMax:
+            ss << "argminmax";
+            break;
+        case PhysicalExecutionStage::Kind::ReduceMinMaxBackward:
+            ss << "reduce_minmax_backward";
+            break;
         default:
             throw std::runtime_error("canonicalize(PhysicalExecutionStage): unknown stage kind.");
     }
@@ -305,6 +317,8 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMIN:
+        case ExprOp::REDUCE_ARGMAX:
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
@@ -615,6 +629,8 @@ DataType validate_reduction_compute_type(Optional<DataType> compute_dtype) {
     return DataType::FP32;
 }
 
+static bool isArgReductionOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
+
 Expression Expression::reduction(ExprOp op,
                                  const std::vector<uint64_t>& reduction_axes,
                                  const std::vector<uint64_t>& squeeze_axes,
@@ -624,6 +640,11 @@ Expression Expression::reduction(ExprOp op,
     out.expr->nodes[out.nodeIndex].reduction_axes = reduction_axes;
     out.expr->nodes[out.nodeIndex].squeeze_axes = squeeze_axes;
     out.expr->nodes[out.nodeIndex].compute_dtype = validate_reduction_compute_type(compute_dtype);
+    if (isArgReductionOp(op)) {
+        out.expr->nodes[out.nodeIndex].output_dtype = DataType::UINT32;
+        out.expr->nodes[out.nodeIndex].backward_output_dtype = DataType::UINT32;
+        out.expr->nodes[out.nodeIndex].backward_compute_dtype = DataType::FP32;
+    }
     return out;
 }
 
@@ -649,6 +670,18 @@ Expression Expression::reduce_max(const std::vector<uint64_t>& reduction_axes,
                                   const std::vector<uint64_t>& squeeze_axes,
                                   Optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_MAX, reduction_axes, squeeze_axes, compute_dtype);
+}
+
+Expression Expression::argmin(const std::vector<uint64_t>& reduction_axes,
+                              const std::vector<uint64_t>& squeeze_axes,
+                              Optional<DataType> compute_dtype) const {
+    return reduction(ExprOp::REDUCE_ARGMIN, reduction_axes, squeeze_axes, compute_dtype);
+}
+
+Expression Expression::argmax(const std::vector<uint64_t>& reduction_axes,
+                              const std::vector<uint64_t>& squeeze_axes,
+                              Optional<DataType> compute_dtype) const {
+    return reduction(ExprOp::REDUCE_ARGMAX, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::reduce_mean(const std::vector<uint64_t>& reduction_axes,

@@ -21,13 +21,15 @@ struct CompiledStageOutput {
 };
 
 struct CompiledExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
                 return "FusedKernel";
             case Kind::Reduction:
                 return "Reduction";
+            case Kind::ArgMinMax:
+                return "ArgMinMax";
             case Kind::ReduceMinMaxBackward:
                 return "ReduceMinMaxBackward";
         }
@@ -40,6 +42,7 @@ struct CompiledExecutionStage {
 
     const std::shared_ptr<CompiledEquation> flat = nullptr;
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
+    const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     const std::vector<uint32_t> input_value_ids;
@@ -55,6 +58,11 @@ struct CompiledExecutionStage {
                            std::vector<uint32_t> input_value_ids,
                            std::vector<CompiledStageOutput> outputs)
         : kind(Kind::Reduction), reduction(reduction), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledArgMinMax>& arg_minmax,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs)
+        : kind(Kind::ArgMinMax), arg_minmax(arg_minmax), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
 
     CompiledExecutionStage(const std::shared_ptr<CompiledReduceMinMaxBackward>& reduce_minmax_backward,
                            std::vector<uint32_t> input_value_ids,
@@ -196,6 +204,10 @@ class FusedEquation {
                                                                  const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduction> stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
+                                                                   Tensor& input,
+                                                                   const Stream& stream,
+                                                                   const std::vector<uint64_t>& requested_output_shape) const;
+    [[nodiscard]] std::shared_ptr<StampedArgMinMax> stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
                                                                    Tensor& input,
                                                                    const Stream& stream,
                                                                    const std::vector<uint64_t>& requested_output_shape) const;

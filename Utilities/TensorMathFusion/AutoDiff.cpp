@@ -184,6 +184,8 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_MIN:
             case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
@@ -923,6 +925,8 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_MIN:
             case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
@@ -1473,6 +1477,8 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::MAX:
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_NORM1:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
                 throw std::runtime_error("Phase-1 autodiff does not yet support backward for op " + opName(node.op) + ".");
 
             case ExprOp::REDUCE_MIN:

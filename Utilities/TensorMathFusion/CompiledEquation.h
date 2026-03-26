@@ -103,6 +103,37 @@ struct CompiledReduction {
     }
 };
 
+// FIXME: Get rid of this it is essentially duplicate
+struct CompiledArgMinMax {
+    const ExprOp op;
+    std::vector<uint64_t> reduction_axes;
+    std::vector<uint64_t> squeeze_axes;
+    const TensorDescriptor::DataType input_dtype;
+    const TensorDescriptor::DataType output_dtype;
+    const TensorDescriptor::DataType compute_dtype;
+
+    bool operator==(const CompiledArgMinMax& other) const = default;
+
+    CompiledArgMinMax(ExprOp op,
+                      std::vector<uint64_t> reduction_axes,
+                      std::vector<uint64_t> squeeze_axes,
+                      TensorDescriptor::DataType input_dtype,
+                      TensorDescriptor::DataType output_dtype,
+                      Optional<TensorDescriptor::DataType> compute_dtype)
+        : op(op),
+          reduction_axes(std::move(reduction_axes)),
+          squeeze_axes(std::move(squeeze_axes)),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : TensorDescriptor::DataType::FP32) {
+        std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
+        this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
+
+        std::sort(this->squeeze_axes.begin(), this->squeeze_axes.end());
+        this->squeeze_axes.erase(std::unique(this->squeeze_axes.begin(), this->squeeze_axes.end()), this->squeeze_axes.end());
+    }
+};
+
 struct CompiledReduceMinMaxBackward {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;

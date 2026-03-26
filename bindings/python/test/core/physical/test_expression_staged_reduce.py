@@ -798,3 +798,152 @@ def test_multi_level_diamond_then_downstream_reduction_synchronizes(dtype: thor.
         got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
         assert got.shape == expected.shape
         _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmax_staged_single_axis_squeeze_false(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    expr = ex.argmax(((x * 2.0) - y), axis=1, squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [
+            [[1.0, 4.0], [3.0, 2.0], [5.0, 0.0]],
+            [[2.0, 1.0], [0.0, 6.0], [4.0, 3.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    y_np = np.array(
+        [
+            [[0.0, 1.0], [4.0, 0.0], [1.0, 2.0]],
+            [[1.0, 0.0], [0.0, 5.0], [2.0, 1.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = (x_np.astype(compute_dtype) * 2.0) - y_np.astype(compute_dtype)
+    expected = np.argmax(ref, axis=1).astype(np.uint32)
+    expected = np.expand_dims(expected, axis=1)  # keep reduced axis as singleton
+
+    got = _run_staged_expr(expr, ["x", "y"], x_np, y_np, dtype=dtype)
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmin_staged_multi_axis_flattened_indices_squeeze_false(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    expr = ex.argmin(((x + 1.0) * 0.5) - y, axis=[1, 2], squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [
+            [[4.0, 8.0], [2.0, 7.0], [5.0, 9.0]],
+            [[6.0, 3.0], [1.0, 4.0], [8.0, 2.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    y_np = np.array(
+        [
+            [[0.0, 1.0], [3.0, 0.0], [1.0, 2.0]],
+            [[2.0, 0.0], [0.0, 1.0], [3.0, 0.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = ((x_np.astype(compute_dtype) + 1.0) * 0.5) - y_np.astype(compute_dtype)
+    expected = np.argmin(ref.reshape(ref.shape[0], -1), axis=1).astype(np.uint32)
+    expected = expected.reshape(ref.shape[0], 1, 1)
+
+    got = _run_staged_expr(expr, ["x", "y"], x_np, y_np, dtype=dtype)
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmax_staged_all_axes_scalar_like_output(dtype: thor.DataType):
+    x = ex.input("x")
+    expr = ex.argmax((x * 1.5) - 2.0, axis=None, squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [[1.0, 5.0, 3.0], [2.0, 4.0, 6.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = (x_np.astype(compute_dtype) * 1.5) - 2.0
+    expected = np.array([[np.argmax(ref.reshape(-1))]], dtype=np.uint32)
+
+    got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmin_staged_single_axis_squeeze_true(dtype: thor.DataType):
+    x = ex.input("x")
+    expr = ex.argmin((x - 3.0) * (x + 1.0), axis=1, squeeze=True)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [
+            [[4.0, 8.0], [2.0, 7.0], [5.0, 9.0]],
+            [[6.0, 3.0], [1.0, 4.0], [8.0, 2.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = (x_np.astype(compute_dtype) - 3.0) * (x_np.astype(compute_dtype) + 1.0)
+    reduced = np.argmin(ref, axis=1)
+    expected = reduced.astype(np.uint32)
+
+    got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmax_staged_multi_axis_squeeze_specific_axes_list(dtype: thor.DataType):
+    x = ex.input("x")
+    expr = ex.argmax((x * 0.25) + 7.0, axis=[1, 2], squeeze=[1, 2])
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [
+            [[1.0, 9.0], [3.0, 4.0], [5.0, 2.0]],
+            [[8.0, 0.0], [6.0, 7.0], [1.0, 3.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = (x_np.astype(compute_dtype) * 0.25) + 7.0
+    reduced = np.argmax(ref.reshape(ref.shape[0], -1), axis=1).astype(np.uint32)
+    expected = reduced
+
+    got = _run_staged_expr(expr, ["x"], x_np, dtype=dtype)
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)

@@ -399,6 +399,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_MIN:
             case ExprOp::REDUCE_MAX:
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
@@ -603,6 +605,8 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMIN:
+        case ExprOp::REDUCE_ARGMAX:
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
@@ -921,6 +925,17 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.reduction->reduction_axes, stage.reduction->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ArgMinMax) {
+            if (!stage.arg_minmax) {
+                throw std::runtime_error("Missing compiled arg-min/max stage.");
+            }
+
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
+            }
+
+            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
+                stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
@@ -1433,6 +1448,53 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     return make_shared<StampedReduction>(std::move(built), input, output, stream, workspace);
 }
 
+std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
+                                                                Tensor& input,
+                                                                const Stream& stream,
+                                                                const std::vector<uint64_t>& requested_output_shape) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampArgMinMax requires non-null compiled stage.");
+    }
+    if (input.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error("Input dtype does not match compiled arg-min/max input dtype.");
+    }
+
+    const ExprOp reduce_op = compiledStage->op == ExprOp::REDUCE_ARGMIN ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
+    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(reduce_op,
+                                                                            compiledStage->reduction_axes,
+                                                                            compiledStage->squeeze_axes,
+                                                                            compiledStage->input_dtype,
+                                                                            compiledStage->input_dtype,
+                                                                            compiledStage->compute_dtype,
+                                                                            /*output_indices=*/true,
+                                                                            input,
+                                                                            stream.getGpuNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        workspace = Tensor(input.getPlacement(), workspaceDescriptor);
+    }
+
+    std::vector<uint64_t> resolved_output_dimensions =
+        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
+    std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
+    if (!requested_output_shape.empty()) {
+        verifyRequestedOutputLayout(requested_output_shape, resolved_output_dimensions);
+        output_dimensions = requested_output_shape;
+    }
+
+    TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dimensions);
+    Tensor output(input.getPlacement(), outputDescriptor);
+
+    const std::vector<uint64_t> unsqueezed_output_dims =
+        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, {});
+    TensorDescriptor reductionValueDescriptor(compiledStage->input_dtype, unsqueezed_output_dims);
+    Tensor reductionValueOutput(input.getPlacement(), reductionValueDescriptor);
+
+    return make_shared<StampedArgMinMax>(std::move(built), input, output, reductionValueOutput, stream, workspace);
+}
+
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
     if (!compiledStage) {
@@ -1630,6 +1692,27 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             if (requested_it != requestedOutputShapes.end())
                 requested_shape = requested_it->second;
             std::shared_ptr<StampedReduction> stamped = stampReduction(stage.reduction, reductionInput, stream, requested_shape);
+
+            const uint32_t produced_value_id = stage.outputs[0].value_id;
+            values[produced_value_id] = stamped->getOutputTensor();
+            producer_stage_by_value_id[produced_value_id] = this_stage_idx;
+
+            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
+        } else if (stage.kind == CompiledExecutionStage::Kind::ArgMinMax) {
+            if (!stage.arg_minmax) {
+                throw std::runtime_error("Missing compiled arg-min/max stage.");
+            }
+
+            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
+            }
+
+            Tensor& reductionInput = stageInputs[0];
+            auto requested_it = requestedOutputShapes.find(stage.outputs[0].name);
+            std::vector<uint64_t> requested_shape;
+            if (requested_it != requestedOutputShapes.end())
+                requested_shape = requested_it->second;
+            std::shared_ptr<StampedArgMinMax> stamped = stampArgMinMax(stage.arg_minmax, reductionInput, stream, requested_shape);
 
             const uint32_t produced_value_id = stage.outputs[0].value_id;
             values[produced_value_id] = stamped->getOutputTensor();

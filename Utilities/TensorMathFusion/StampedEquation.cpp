@@ -62,6 +62,50 @@ void StampedReduction::runOn(Stream& run_stream) const {
                                   (void*)output.getMemPtr()));
 }
 
+StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
+                                   const Tensor& input,
+                                   const Tensor& output,
+                                   const Tensor& reduction_value_output,
+                                   const Stream& stream,
+                                   Optional<Tensor> workspace)
+    : built_reduction(built),
+      input(input),
+      output(output),
+      reduction_value_output(reduction_value_output),
+      workspace(workspace),
+      stream(stream) {
+    if (!built_reduction->key.output_indices) {
+        throw std::runtime_error("StampedArgMinMax requires a BuiltReduction configured for indices.");
+    }
+    if (built_reduction->workspace_bytes != 0) {
+        assert(workspace.isPresent());
+        assert(workspace.get().getArraySizeInBytes() >= built_reduction->workspace_bytes);
+    }
+}
+
+void StampedArgMinMax::run() { runOn(stream); }
+
+void StampedArgMinMax::runOn(Stream& run_stream) const {
+    void* workspace_ptr = nullptr;
+    if (built_reduction->workspace_bytes > 0) {
+        assert(workspace.isPresent());
+        workspace_ptr = workspace.get().getMemPtr();
+    }
+
+    CUDNN_CHECK(cudnnReduceTensor(run_stream.getCudnnHandle(),
+                                  built_reduction->reduce_desc,
+                                  (void*)output.getMemPtr(),
+                                  built_reduction->indices_bytes,
+                                  workspace_ptr,
+                                  built_reduction->workspace_bytes,
+                                  alpha,
+                                  built_reduction->a_desc,
+                                  input.getMemPtr(),
+                                  beta,
+                                  built_reduction->c_desc,
+                                  (void*)reduction_value_output.getMemPtr()));
+}
+
 StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
                                                          const Tensor& input,
                                                          const Tensor& grad_output,
@@ -229,8 +273,10 @@ static cudnnReduceTensorOp_t toCudnnReduceTensorOp(ExprOp op) {
         case ExprOp::REDUCE_PROD:
             return CUDNN_REDUCE_TENSOR_MUL;
         case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_ARGMIN:
             return CUDNN_REDUCE_TENSOR_MIN;
         case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMAX:
             return CUDNN_REDUCE_TENSOR_MAX;
         case ExprOp::REDUCE_AVG:
             return CUDNN_REDUCE_TENSOR_AVG;
