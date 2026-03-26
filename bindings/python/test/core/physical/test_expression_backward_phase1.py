@@ -1180,3 +1180,234 @@ def test_compile_backward_multi_output_explicit_upstreams_mixed_constant_and_non
 
     assert got.shape == expected["x_grad"].shape
     _assert_close(got, expected["x_grad"], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_min_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+
+    loss = ex.reduce_min(x, axis=1, squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[3.0, 1.0, 4.0], [2.0, -5.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    expected = {
+        "x_grad": np.array(
+            [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+            dtype=np.float32,
+        ).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected["x_grad"].shape
+    _assert_close(got, expected["x_grad"], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_min_explicit_upstream_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    upstream_name = "__grad_output"
+
+    loss = ex.reduce_min(x, axis=1, squeeze=[1])
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [
+            [[1.0, 9.0], [0.0, 3.0], [5.0, 7.0]],
+            [[4.0, 2.0], [6.0, 8.0], [1.0, 0.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+    grad_np = np.array(
+        [[2.0, -1.5], [0.25, 3.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    expected = np.zeros_like(x_np, dtype=storage_dtype)
+    expected[0, 1, 0] = 2.0
+    expected[0, 1, 1] = -1.5
+    expected[1, 2, 0] = 0.25
+    expected[1, 2, 1] = 3.0
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_max_with_squeeze_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+
+    loss = ex.reduce_max(x, axis=1, squeeze=[1])
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [
+            [[1.0, 9.0], [0.0, 3.0], [5.0, 7.0]],
+            [[4.0, 2.0], [6.0, 8.0], [1.0, 0.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    expected = np.zeros_like(x_np, dtype=storage_dtype)
+    expected[0, 2, 0] = 1.0
+    expected[0, 0, 1] = 1.0
+    expected[1, 1, 0] = 1.0
+    expected[1, 1, 1] = 1.0
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_min_reduce_max_multi_output_explicit_upstreams_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+
+    outs = ex.outputs(
+        {
+            "row_min": ex.reduce_min(x, axis=1, squeeze=[1]),
+            "row_max": ex.reduce_max(x, axis=1, squeeze=[1]),
+        })
+
+    fwd_eq = ex.compile(outs, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x"],
+        upstream_input_names_by_output={
+            "row_min": "__grad_row_min",
+            "row_max": "__grad_row_max",
+        },
+    )
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[3.0, 1.0, 4.0], [2.0, -5.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+    grad_row_min_np = np.array([2.0, -3.0], dtype=np.float32).astype(storage_dtype)
+    grad_row_max_np = np.array([0.5, 1.25], dtype=np.float32).astype(storage_dtype)
+
+    expected = np.array(
+        [[0.0, 2.0, 0.5], [1.25, -3.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "__grad_row_min": _host_to_gpu(grad_row_min_np, dtype, stream),
+        "__grad_row_max": _host_to_gpu(grad_row_max_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_max_all_axes_scalar_output_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    upstream_name = "__grad_output"
+
+    loss = ex.reduce_max(x, axis=[0, 1], squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[3.0, 1.0, 4.0], [2.0, -5.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+    grad_np = np.array([[1.75]], dtype=np.float32).astype(storage_dtype)
+
+    expected = np.zeros_like(x_np, dtype=storage_dtype)
+    expected[0, 2] = 1.75
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)

@@ -510,6 +510,28 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t reduceMinMaxBackward(ExprOp op,
+                                  uint32_t lhs,
+                                  uint32_t grad,
+                                  const std::vector<uint64_t>& reduction_axes,
+                                  const std::vector<uint64_t>& squeeze_axes,
+                                  Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                                  Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+        if (op != ExprOp::REDUCE_MIN_BACKWARD && op != ExprOp::REDUCE_MAX_BACKWARD) {
+            throw std::runtime_error("reduceMinMaxBackward requires REDUCE_MIN_BACKWARD or REDUCE_MAX_BACKWARD.");
+        }
+
+        ExprNode node{};
+        node.op = op;
+        node.lhs = lhs;
+        node.rhs = grad;
+        node.reduction_axes = reduction_axes;
+        node.squeeze_axes = squeeze_axes;
+        node.output_dtype = output_dtype;
+        node.compute_dtype = compute_dtype;
+        return push(std::move(node));
+    }
+
     uint32_t neg(uint32_t value) { return unary(ExprOp::NEG, value); }
     uint32_t add(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::ADD, lhs, rhs); }
     uint32_t sub(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::SUB, lhs, rhs); }
@@ -1450,10 +1472,26 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             case ExprOp::MIN:
             case ExprOp::MAX:
             case ExprOp::REDUCE_PROD:
-            case ExprOp::REDUCE_MIN:
-            case ExprOp::REDUCE_MAX:
             case ExprOp::REDUCE_NORM1:
                 throw std::runtime_error("Phase-1 autodiff does not yet support backward for op " + opName(node.op) + ".");
+
+            case ExprOp::REDUCE_MIN:
+            case ExprOp::REDUCE_MAX: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : std::vector<uint64_t>{};
+                    uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    const uint32_t routed = builder.reduceMinMaxBackward(
+                        node.op == ExprOp::REDUCE_MIN ? ExprOp::REDUCE_MIN_BACKWARD : ExprOp::REDUCE_MAX_BACKWARD,
+                        builder.cloneForward(node.lhs),
+                        grad_like_output,
+                        node.reduction_axes,
+                        node.squeeze_axes,
+                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                        node.compute_dtype);
+                    addContributionToChild(node.lhs, routed, lhs_dims);
+                }
+                break;
+            }
 
             default:
                 throw std::runtime_error("buildBackwardOutputs encountered unknown ExprOp.");

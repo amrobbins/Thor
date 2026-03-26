@@ -419,6 +419,13 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
         throw std::runtime_error("resolveOutputDimsForStageOutput output_idx out of range.");
     }
 
+    if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
+        if (stage_input_dims.empty()) {
+            throw std::runtime_error("resolveOutputDimsForStageOutput reduce-min/max-backward stage expected at least one input shape.");
+        }
+        return stage_input_dims[0];
+    }
+
     const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
     const uint32_t local_node_idx = stage.outputs[output_idx].local_node_idx;
     if (local_node_idx >= node_dims.size()) {
@@ -914,6 +921,16 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
             value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
                 stage_input_dims[0], stage.reduction->reduction_axes, stage.reduction->squeeze_axes);
+        } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
+            if (!stage.reduce_minmax_backward) {
+                throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
+            }
+
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
+            }
+
+            value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else {
             throw std::runtime_error("Unknown execution stage kind in getOutputShapes.");
         }
@@ -1416,6 +1433,57 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     return make_shared<StampedReduction>(std::move(built), input, output, stream, workspace);
 }
 
+std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
+    const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampReduceMinMaxBackward requires non-null compiled stage.");
+    }
+    if (input.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error("Input dtype does not match compiled reduce-min/max-backward input dtype.");
+    }
+    if (grad_output.getDataType() != compiledStage->output_dtype) {
+        throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward output dtype.");
+    }
+
+    const std::vector<uint64_t> expected_grad_dims =
+        StampedEquation::computeReductionOutputDims(input.getDimensions(), compiledStage->reduction_axes, compiledStage->squeeze_axes);
+    if (!outputDimensionsMatchIgnoringSingletons(grad_output.getDimensions(), expected_grad_dims)) {
+        throw std::runtime_error("Grad-output tensor dimensions are incompatible with reduce-min/max-backward stage.");
+    }
+
+    const ExprOp reduce_op = compiledStage->op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
+    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(reduce_op,
+                                                                            compiledStage->reduction_axes,
+                                                                            compiledStage->squeeze_axes,
+                                                                            compiledStage->input_dtype,
+                                                                            compiledStage->input_dtype,
+                                                                            compiledStage->compute_dtype,
+                                                                            /*output_indices=*/true,
+                                                                            input,
+                                                                            stream.getGpuNum());
+
+    Optional<Tensor> workspace = Optional<Tensor>::empty();
+    if (built->workspace_bytes > 0) {
+        TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
+        workspace = Tensor(input.getPlacement(), workspaceDescriptor);
+    }
+
+    const std::vector<uint64_t> unsqueezed_output_dims =
+        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, {});
+
+    TensorDescriptor indicesDescriptor(TensorDescriptor::DataType::UINT32, unsqueezed_output_dims);
+    Tensor indices(input.getPlacement(), indicesDescriptor);
+
+    TensorDescriptor reductionValueDescriptor(compiledStage->input_dtype, unsqueezed_output_dims);
+    Tensor reductionValueOutput(input.getPlacement(), reductionValueDescriptor);
+
+    TensorDescriptor outputDescriptor(compiledStage->output_dtype, input.getDimensions());
+    Tensor output(input.getPlacement(), outputDescriptor);
+
+    return make_shared<StampedReduceMinMaxBackward>(
+        std::move(built), input, grad_output, output, indices, reductionValueOutput, stream, workspace);
+}
+
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
@@ -1547,7 +1615,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
 
             stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
-        } else {
+        } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
             if (!stage.reduction) {
                 throw std::runtime_error("Missing compiled reduction stage.");
             }
@@ -1568,6 +1636,27 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             producer_stage_by_value_id[produced_value_id] = this_stage_idx;
 
             stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
+        } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
+            if (!stage.reduce_minmax_backward) {
+                throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
+            }
+
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
+            }
+
+            Tensor& reductionInput = stageInputs[0];
+            Tensor& gradOutput = stageInputs[1];
+            std::shared_ptr<StampedReduceMinMaxBackward> stamped =
+                stampReduceMinMaxBackward(stage.reduce_minmax_backward, reductionInput, gradOutput, stream);
+
+            const uint32_t produced_value_id = stage.outputs[0].value_id;
+            values[produced_value_id] = stamped->getOutputTensor();
+            producer_stage_by_value_id[produced_value_id] = this_stage_idx;
+
+            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
+        } else {
+            throw std::runtime_error("Unknown compiled execution stage kind in FusedEquation::stamp.");
         }
     }
 

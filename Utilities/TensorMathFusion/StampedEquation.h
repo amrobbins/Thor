@@ -26,6 +26,7 @@ struct ReductionCacheKey {
     const TensorDescriptor::DataType input_dtype;
     const TensorDescriptor::DataType compute_dtype;
     const TensorDescriptor::DataType output_dtype;
+    const bool output_indices;
     const int device_num;
 
     bool operator==(const ReductionCacheKey& other) const = default;
@@ -37,6 +38,7 @@ struct ReductionCacheKey {
                       TensorDescriptor::DataType input_dtype,
                       TensorDescriptor::DataType output_dtype,
                       TensorDescriptor::DataType compute_dtype,
+                      bool output_indices,
                       int device_num)
         : op(op),
           input_dims(std::move(input_dims)),
@@ -45,6 +47,7 @@ struct ReductionCacheKey {
           input_dtype(input_dtype),
           compute_dtype(compute_dtype),
           output_dtype(output_dtype),
+          output_indices(output_indices),
           device_num(device_num) {
         if (this->reduction_axes.empty()) {
             this->reduction_axes.resize(this->input_dims.size());
@@ -66,6 +69,7 @@ struct BuiltReduction {
     cudnnReduceTensorDescriptor_t reduce_desc = nullptr;
 
     size_t workspace_bytes = 0;
+    size_t indices_bytes = 0;
 
     explicit BuiltReduction(ReductionCacheKey key) : key(std::move(key)) {}
 
@@ -120,6 +124,16 @@ class StampedEquation {
                                                           const Tensor& input,
                                                           int device_num);
 
+    static std::shared_ptr<BuiltReduction> buildReduction(ExprOp op,
+                                                          const std::vector<uint64_t>& reduction_axes,
+                                                          const std::vector<uint64_t>& squeeze_axes,
+                                                          TensorDescriptor::DataType input_dtype,
+                                                          TensorDescriptor::DataType output_dtype,
+                                                          TensorDescriptor::DataType compute_dtype,
+                                                          bool output_indices,
+                                                          const Tensor& input,
+                                                          int device_num);
+
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
     std::vector<Tensor> inputs;
@@ -152,8 +166,42 @@ class StampedReduction {
     const void* beta = &beta_0;
 };
 
+class StampedReduceMinMaxBackward {
+   public:
+    void run();
+    void runOn(Stream& run_stream);
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
+                                const Tensor& input,
+                                const Tensor& grad_output,
+                                const Tensor& output,
+                                const Tensor& indices,
+                                const Tensor& reduction_value_output,
+                                const Stream& stream,
+                                Optional<Tensor> workspace);
+
+   private:
+    const std::shared_ptr<BuiltReduction> built_reduction;
+    const Tensor input;
+    const Tensor grad_output;
+    Tensor output;
+    const Tensor indices;
+    const Tensor reduction_value_output;
+    const Optional<Tensor> workspace;
+    Stream stream;
+
+    const float alpha_1 = 1.0f;
+    const float beta_0 = 0.0f;
+    const void* alpha = &alpha_1;
+    const void* beta = &beta_0;
+};
+
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction };
+    enum class Kind { FusedKernel, Reduction, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -161,6 +209,7 @@ struct StampedExecutionStage {
 
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
+    const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
         : kind(Kind::FusedKernel), dependency_stage_indices(std::move(dependency_stage_indices)), gpu_num(fused->gpuNum()), kernel(fused) {}
@@ -171,6 +220,13 @@ struct StampedExecutionStage {
           gpu_num(reduction->gpuNum()),
           reduction(reduction) {}
 
+    explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
+                                   std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::ReduceMinMaxBackward),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(reduce_minmax_backward->gpuNum()),
+          reduce_minmax_backward(reduce_minmax_backward) {}
+
     void runOn(Stream& run_stream) const {
         if (kind == Kind::FusedKernel) {
             assert(kernel != nullptr);
@@ -178,6 +234,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::Reduction) {
             assert(reduction != nullptr);
             reduction->runOn(run_stream);
+        } else if (kind == Kind::ReduceMinMaxBackward) {
+            assert(reduce_minmax_backward != nullptr);
+            reduce_minmax_backward->runOn(run_stream);
         } else {
             throw std::runtime_error("Unknown StampedExecutionStage kind: " + std::to_string((int)kind));
         }
@@ -246,6 +305,7 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.input_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.compute_dtype));
         hashCombine(h, hash<ThorImplementation::TensorDescriptor::DataType>{}(k.output_dtype));
+        hashCombine(h, hash<bool>{}(k.output_indices));
         hashCombine(h, hash<int>{}(k.device_num));
         return h;
     }

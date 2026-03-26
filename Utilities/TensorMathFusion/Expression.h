@@ -42,6 +42,8 @@ enum class ExprOp : uint16_t {
     REDUCE_PROD,
     REDUCE_MIN,
     REDUCE_MAX,
+    REDUCE_MIN_BACKWARD,
+    REDUCE_MAX_BACKWARD,
     // REDUCE_AMAX, <-- requires indices, not doing for now.
     REDUCE_AVG,
     REDUCE_NORM1,
