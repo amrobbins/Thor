@@ -227,6 +227,7 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
     stage_expr.output_node = stage_outputs.front().local_node_idx;
 }
 
+static bool isArgMinMaxOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }
 static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
 
 static bool isStageBoundaryOp(ExprOp op) { return isCudnnReduceOp(op) || isReduceMinMaxBackwardOp(op); }
@@ -354,6 +355,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "RMIN";
         case ExprOp::REDUCE_MAX:
             return "RMAX";
+        case ExprOp::REDUCE_ARGMIN:
+            return "RARGMIN";
+        case ExprOp::REDUCE_ARGMAX:
+            return "RARGMAX";
         case ExprOp::REDUCE_MIN_BACKWARD:
             return "RMIN_BW";
         case ExprOp::REDUCE_MAX_BACKWARD:
@@ -699,8 +704,8 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
     }
 
     const ExprNode& node = expr.nodes[expr.output_node];
-    if (!isCudnnReduceOp(node.op)) {
-        throw std::runtime_error("Reduction stage output node is not a cuDNN reduction op.");
+    if (!isCudnnReduceOp(node.op) || isArgMinMaxOp(node.op)) {
+        throw std::runtime_error("Reduction stage output node is not a supported value reduction op.");
     }
 
     if (node.lhs == UINT32_MAX) {
@@ -724,6 +729,44 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
     }
 
     return make_shared<CompiledReduction>(
+        node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+}
+
+shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 1) {
+        throw std::runtime_error("ArgMinMax stage must have exactly one input.");
+    }
+
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("ArgMinMax stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isArgMinMaxOp(node.op)) {
+        throw std::runtime_error("ArgMinMax stage output node is not a supported arg min/max op.");
+    }
+
+    if (node.lhs == UINT32_MAX) {
+        throw std::runtime_error("ArgMinMax node is missing its input.");
+    }
+
+    if (node.lhs >= expr.nodes.size()) {
+        throw std::runtime_error("ArgMinMax node lhs is out of range.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    if (input_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("ArgMinMax stage input must be a local INPUT node.");
+    }
+
+    if (!input_node.input_tensor_dtype.isPresent()) {
+        throw std::runtime_error("ArgMinMax input node missing resolved input_tensor_dtype.");
+    }
+    if (!node.output_dtype.isPresent()) {
+        throw std::runtime_error("ArgMinMax node missing resolved output_dtype.");
+    }
+
+    return make_shared<CompiledArgMinMax>(
         node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
 }
 
@@ -1073,7 +1116,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     });
 
     return PhysicalExecutionStage{
-        .kind = PhysicalExecutionStage::Kind::Reduction,
+        .kind = isArgMinMaxOp(node.op) ? PhysicalExecutionStage::Kind::ArgMinMax : PhysicalExecutionStage::Kind::Reduction,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -1504,6 +1547,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 reduction = compileReduction(stage.expr);
                 compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
                 break;
+            case PhysicalExecutionStage::Kind::ArgMinMax: {
+                std::shared_ptr<CompiledArgMinMax> arg_minmax = compileArgMinMax(stage.expr);
+                compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs);
+                break;
+            }
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {
                 std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = compileReduceMinMaxBackward(stage.expr);
                 compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs);

@@ -114,6 +114,10 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         add_tensor_parent(node.rhs);
     }
 
+    if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX) {
+        return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::UINT32;
+    }
+
     const DataType default_output = tensor_parent_dtypes.empty() ? DataType::FP32 : promoteTensorValueDTypes(tensor_parent_dtypes);
 
     return node.output_dtype.isPresent() ? node.output_dtype.get() : default_output;
@@ -149,7 +153,10 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
 
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
-        const DataType compute_dtype = node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(output_dtype);
+        const bool is_arg_reduction = node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX;
+        const DataType compute_dtype = node.compute_dtype.isPresent()
+                                           ? node.compute_dtype.get()
+                                           : (is_arg_reduction ? DataType::FP32 : defaultComputeDType(output_dtype));
 
         const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
 

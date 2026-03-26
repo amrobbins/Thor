@@ -194,6 +194,13 @@ thor.physical.Expression
         return DataType::FP32;
     };
 
+    auto parse_arg_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> output_dtype) -> Optional<DataType> {
+        if (output_dtype.has_value() && output_dtype.value() != DataType::UINT32) {
+            throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.uint32");
+        }
+        return DataType::UINT32;
+    };
+
     static constexpr std::string_view kReductionDocTemplate = R"doc(
 Reduce by {} across the specified axes.
 
@@ -208,6 +215,22 @@ Args:
         The data type used during compute. Currently only fp32 is supported for this operation.
     output_dtype: thor.DataType: default thor.DataType.fp32
         The data type that is written back to memory. Currently only fp32 is supported for this operation.
+)doc";
+
+    static constexpr std::string_view kArgReductionDocTemplate = R"doc(
+Return the flattened index of the {} across the specified axes.
+
+Args:
+    axis: int | list[int] | None
+        Single axis or sequence of axes to reduce. If None, reduce across all axes.
+    squeeze: bool | int | list[int]
+        If False, keep reduced axes as singleton dimensions.
+        If True, remove all singleton dimensions after reduction.
+        If an int or sequence of ints, remove those specific singleton axes after reduction.
+    compute_dtype: thor.DataType: default thor.DataType.fp32
+        The data type used during compute. Currently only fp32 is supported for this operation.
+    output_dtype: thor.DataType: default thor.DataType.uint32
+        The flattened reduced-space index dtype written back to memory. Currently only uint32 is supported.
 )doc";
 
     std::string reduce_sum_doc = std::format(kReductionDocTemplate, "summation");
@@ -289,6 +312,44 @@ Args:
         "compute_dtype"_a.none() = DataType::FP32,
         "output_dtype"_a.none() = DataType::FP32,
         reduce_max_doc.c_str());
+
+    std::string argmin_doc = std::format(kArgReductionDocTemplate, "minimum");
+    expr.def_static(
+        "argmin",
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_arg_reduction_output_dtype](
+            const Expression& expr,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_arg_reduction_output_dtype("argmin", output_dtype);
+            return expr.argmin(parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("argmin", compute_dtype));
+        },
+        "expr"_a,
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::UINT32,
+        argmin_doc.c_str());
+
+    std::string argmax_doc = std::format(kArgReductionDocTemplate, "maximum");
+    expr.def_static(
+        "argmax",
+        [parse_axes, parse_squeeze_axes, parse_reduction_compute_dtype, parse_arg_reduction_output_dtype](
+            const Expression& expr,
+            nb::object axis,
+            nb::object squeeze,
+            std::optional<DataType> compute_dtype,
+            std::optional<DataType> output_dtype) {
+            parse_arg_reduction_output_dtype("argmax", output_dtype);
+            return expr.argmax(parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("argmax", compute_dtype));
+        },
+        "expr"_a,
+        "axis"_a = nb::none(),
+        "squeeze"_a = false,
+        "compute_dtype"_a.none() = DataType::FP32,
+        "output_dtype"_a.none() = DataType::UINT32,
+        argmax_doc.c_str());
 
     std::string reduce_mean_doc = std::format(kReductionDocTemplate, "arithmetic mean");
     expr.def_static(

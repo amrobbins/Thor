@@ -23,7 +23,7 @@
 namespace ThorImplementation {
 
 struct PhysicalExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, ReduceMinMaxBackward };
 
     Kind kind;
     PhysicalExpression expr;
@@ -50,6 +50,7 @@ class EquationCompiler {
     static std::vector<PhysicalExecutionStage> splitAtReductionBoundaries(const PhysicalOutputs& outputs);
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledArgMinMax> compileArgMinMax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledReduceMinMaxBackward> compileReduceMinMaxBackward(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledEquation> compileSpecializedBroadcastStage(const CompiledExecutionStage& stage,
                                                                               const EquationSignature& sig,

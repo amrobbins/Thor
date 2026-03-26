@@ -166,6 +166,36 @@ class StampedReduction {
     const void* beta = &beta_0;
 };
 
+class StampedArgMinMax {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+    Tensor getOutputTensor() const { return output; }
+
+    StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
+                     const Tensor& input,
+                     const Tensor& output,
+                     const Tensor& reduction_value_output,
+                     const Stream& stream,
+                     Optional<Tensor> workspace);
+
+   private:
+    const std::shared_ptr<BuiltReduction> built_reduction;
+    const Tensor input;
+    Tensor output;
+    const Tensor reduction_value_output;
+    const Optional<Tensor> workspace;
+    Stream stream;
+
+    const float alpha_1 = 1.0f;
+    const float beta_0 = 0.0f;
+    const void* alpha = &alpha_1;
+    const void* beta = &beta_0;
+};
+
 class StampedReduceMinMaxBackward {
    public:
     void run();
@@ -201,7 +231,7 @@ class StampedReduceMinMaxBackward {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, Reduction, ReduceMinMaxBackward };
+    enum class Kind { FusedKernel, Reduction, ArgMinMax, ReduceMinMaxBackward };
     const Kind kind;
 
     const std::vector<uint32_t> dependency_stage_indices;
@@ -209,6 +239,7 @@ struct StampedExecutionStage {
 
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedReduction> reduction = nullptr;
+    const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedReduceMinMaxBackward> reduce_minmax_backward = nullptr;
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused, std::vector<uint32_t> dependency_stage_indices = {})
@@ -219,6 +250,12 @@ struct StampedExecutionStage {
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(reduction->gpuNum()),
           reduction(reduction) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedArgMinMax>& arg_minmax, std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::ArgMinMax),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(arg_minmax->gpuNum()),
+          arg_minmax(arg_minmax) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedReduceMinMaxBackward>& reduce_minmax_backward,
                                    std::vector<uint32_t> dependency_stage_indices = {})
@@ -234,6 +271,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::Reduction) {
             assert(reduction != nullptr);
             reduction->runOn(run_stream);
+        } else if (kind == Kind::ArgMinMax) {
+            assert(arg_minmax != nullptr);
+            arg_minmax->runOn(run_stream);
         } else if (kind == Kind::ReduceMinMaxBackward) {
             assert(reduce_minmax_backward != nullptr);
             reduce_minmax_backward->runOn(run_stream);

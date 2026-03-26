@@ -42,6 +42,8 @@ enum class ExprOp : uint16_t {
     REDUCE_PROD,
     REDUCE_MIN,
     REDUCE_MAX,
+    REDUCE_ARGMIN,
+    REDUCE_ARGMAX,
     REDUCE_MIN_BACKWARD,
     REDUCE_MAX_BACKWARD,
     // REDUCE_AMAX, <-- requires indices, not doing for now.
@@ -52,7 +54,8 @@ enum class ExprOp : uint16_t {
 
 inline bool isCudnnReduceOp(ExprOp op) {
     return op == ExprOp::REDUCE_SUM || op == ExprOp::REDUCE_PROD || op == ExprOp::REDUCE_MIN || op == ExprOp::REDUCE_MAX ||
-           op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2;
+           op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX || op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 ||
+           op == ExprOp::REDUCE_NORM2;
 }
 
 inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
@@ -62,8 +65,10 @@ inline cudnnReduceTensorOp_t toCudnnReduceOp(ExprOp op) {
         case ExprOp::REDUCE_PROD:
             return CUDNN_REDUCE_TENSOR_MUL;
         case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_ARGMIN:
             return CUDNN_REDUCE_TENSOR_MIN;
         case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMAX:
             return CUDNN_REDUCE_TENSOR_MAX;
         case ExprOp::REDUCE_AVG:
             return CUDNN_REDUCE_TENSOR_AVG;
@@ -200,6 +205,14 @@ class Expression {
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
     [[nodiscard]] Expression reduce_max(
+        const std::vector<uint64_t>& reduction_axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression argmin(
+        const std::vector<uint64_t>& reduction_axes = {},
+        const std::vector<uint64_t>& squeeze_axes = {},
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression argmax(
         const std::vector<uint64_t>& reduction_axes = {},
         const std::vector<uint64_t>& squeeze_axes = {},
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
