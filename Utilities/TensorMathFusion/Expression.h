@@ -26,6 +26,7 @@ enum class ExprOp : uint16_t {
     DIV,
     POW,
     NEG,
+    ABS,
     EXP,
     EXP2,
     EXP10,
@@ -38,6 +39,10 @@ enum class ExprOp : uint16_t {
     SQUEEZE,
     MIN,
     MAX,
+    MIN_GRAD_LEFT,
+    MIN_GRAD_RIGHT,
+    MAX_GRAD_LEFT,
+    MAX_GRAD_RIGHT,
     REDUCE_SUM,
     REDUCE_PROD,
     REDUCE_MIN,
@@ -176,6 +181,7 @@ class Expression {
 
     Expression operator-() const;
 
+    [[nodiscard]] Expression abs() const;
     [[nodiscard]] Expression ln() const;
     [[nodiscard]] Expression log2() const;
     [[nodiscard]] Expression log10() const;

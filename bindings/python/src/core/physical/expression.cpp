@@ -80,6 +80,14 @@ Create a floating-point scalar constant expression.
     expr.def_static("min", [](const Expression& a, const Expression& b) { return a.min(b); }, "a"_a, "b"_a);
     expr.def_static("max", [](const Expression& a, const Expression& b) { return a.max(b); }, "a"_a, "b"_a);
 
+    expr.def_static(
+        "abs",
+        [](const Expression& x) { return x.abs(); },
+        "x"_a,
+        R"nbdoc(
+Return the absolute value of the input expression x
+)nbdoc");
+
     expr.def_static("exp", [](const Expression& x) { return x.exp(); }, "x"_a);
     expr.def_static("exp2", [](const Expression& x) { return x.exp2(); }, "x"_a);
     expr.def_static("exp10", [](const Expression& x) { return x.exp10(); }, "x"_a);

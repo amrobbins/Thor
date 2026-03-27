@@ -49,6 +49,8 @@ class Optimizer {
                                      bool saveOptimizerState) const {
         return architectureJson();
     }
+
+    // FIXME: remove network pointer from deserialize
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader,
                                                   const nlohmann::json &j,
                                                   Network *network);

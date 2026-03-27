@@ -168,9 +168,14 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::POW:
             case ExprOp::MIN:
             case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT:
                 reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
                 break;
             case ExprOp::NEG:
+            case ExprOp::ABS:
             case ExprOp::EXP:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
@@ -329,6 +334,12 @@ class BackwardGraphBuilder {
                     return true;
                 }
                 return false;
+            case ExprOp::ABS:
+                if (tryGetConstantLike(node.lhs, value, dims)) {
+                    value = std::fabs(value);
+                    return true;
+                }
+                return false;
             case ExprOp::ADD:
             case ExprOp::SUB:
             case ExprOp::MUL:
@@ -409,6 +420,15 @@ class BackwardGraphBuilder {
             const ExprNode& lhs_node = grad_expr.nodes.at(lhs);
             if (lhs_node.op == ExprOp::NEG) {
                 return lhs_node.lhs;
+            }
+        } else if (op == ExprOp::ABS) {
+            if (tryGetConstantLike(lhs, lhs_value, lhs_dims)) {
+                return constantLike(std::fabs(lhs_value), lhs_dims);
+            }
+
+            const ExprNode& lhs_node = grad_expr.nodes.at(lhs);
+            if (lhs_node.op == ExprOp::ABS) {
+                return lhs;
             }
         }
 
@@ -863,7 +883,11 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::DIV:
             case ExprOp::POW:
             case ExprOp::MIN:
-            case ExprOp::MAX: {
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT: {
                 std::vector<std::vector<uint64_t>> non_scalar_inputs;
                 if (!node_dims[node.lhs].empty()) {
                     non_scalar_inputs.push_back(node_dims[node.lhs]);
@@ -883,6 +907,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             }
             case ExprOp::NEG:
+            case ExprOp::ABS:
             case ExprOp::EXP:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
@@ -1247,6 +1272,24 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 break;
 
+            case ExprOp::ABS: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t neg_lhs = builder.neg(lhs);
+
+                    // sign(lhs) with safe 0 handling:
+                    //   x > 0  ->  1
+                    //   x < 0  -> -1
+                    //   x == 0 ->  0
+                    const uint32_t sign_lhs = builder.sub(builder.binary(ExprOp::MAX_GRAD_LEFT, lhs, neg_lhs),
+                                                          builder.binary(ExprOp::MAX_GRAD_RIGHT, lhs, neg_lhs));
+
+                    const uint32_t scaled = builder.mul(grad, sign_lhs);
+                    addContributionToChild(node.lhs, scaled, node_dims);
+                }
+                break;
+            }
+
             case ExprOp::UNSQUEEZE: {
                 if (has_forward_dims) {
                     const std::vector<uint64_t>& lhs_dims = forward_node_dims.at(node.lhs);
@@ -1473,13 +1516,84 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 break;
             }
 
-            case ExprOp::MIN:
-            case ExprOp::MAX:
-            case ExprOp::REDUCE_PROD:
-            case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_ARGMIN:
-            case ExprOp::REDUCE_ARGMAX:
-                throw std::runtime_error("Phase-1 autodiff does not yet support backward for op " + opName(node.op) + ".");
+            case ExprOp::MIN: {
+                const uint32_t lhs = builder.cloneForward(node.lhs);
+                const uint32_t rhs = builder.cloneForward(node.rhs);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs_mask = builder.binary(ExprOp::MIN_GRAD_LEFT, lhs, rhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, lhs_mask), node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t rhs_mask = builder.binary(ExprOp::MIN_GRAD_RIGHT, lhs, rhs);
+                    addContributionToChild(node.rhs, builder.mul(grad, rhs_mask), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::MAX: {
+                const uint32_t lhs = builder.cloneForward(node.lhs);
+                const uint32_t rhs = builder.cloneForward(node.rhs);
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t lhs_mask = builder.binary(ExprOp::MAX_GRAD_LEFT, lhs, rhs);
+                    addContributionToChild(node.lhs, builder.mul(grad, lhs_mask), node_dims);
+                }
+                if (node_reaches_requested_inputs.at(node.rhs)) {
+                    const uint32_t rhs_mask = builder.binary(ExprOp::MAX_GRAD_RIGHT, lhs, rhs);
+                    addContributionToChild(node.rhs, builder.mul(grad, rhs_mask), node_dims);
+                }
+                break;
+            }
+
+            case ExprOp::REDUCE_PROD: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+
+                    uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+
+                    if (has_forward_dims && !node.squeeze_axes.empty()) {
+                        const std::vector<uint64_t> unsqueeze_axes =
+                            normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                        grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                        out = builder.unsqueeze(out, unsqueeze_axes);
+                    }
+
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t expanded_grad =
+                        broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+
+                    // Safe-case assumption: reduced product inputs are nonzero where this backward is used.
+                    const uint32_t scaled = builder.div(builder.mul(expanded_grad, out), lhs);
+                    addContributionToChild(node.lhs, scaled, lhs_dims);
+                }
+                break;
+            }
+
+            case ExprOp::REDUCE_NORM1: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+
+                    uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+
+                    if (has_forward_dims && !node.squeeze_axes.empty()) {
+                        const std::vector<uint64_t> unsqueeze_axes =
+                            normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                        grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    }
+
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t expanded_grad =
+                        broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+
+                    const uint32_t neg_lhs = builder.neg(lhs);
+                    const uint32_t sign_lhs = builder.sub(builder.binary(ExprOp::MAX_GRAD_LEFT, lhs, neg_lhs),
+                                                          builder.binary(ExprOp::MAX_GRAD_RIGHT, lhs, neg_lhs));
+
+                    const uint32_t scaled = builder.mul(expanded_grad, sign_lhs);
+                    addContributionToChild(node.lhs, scaled, lhs_dims);
+                }
+                break;
+            }
 
             case ExprOp::REDUCE_MIN:
             case ExprOp::REDUCE_MAX: {
@@ -1498,6 +1612,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 break;
             }
+
+            case ExprOp::REDUCE_ARGMIN:
+            case ExprOp::REDUCE_ARGMAX:
+                throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
 
             default:
                 throw std::runtime_error("buildBackwardOutputs encountered unknown ExprOp.");

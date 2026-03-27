@@ -321,6 +321,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "DIV";
         case ExprOp::NEG:
             return "NEG";
+        case ExprOp::ABS:
+            return "ABS";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::EXP2:
@@ -347,6 +349,14 @@ static const char* fusedOpTag(ExprOp op) {
             return "MIN";
         case ExprOp::MAX:
             return "MAX";
+        case ExprOp::MIN_GRAD_LEFT:
+            return "MIN_GL";
+        case ExprOp::MIN_GRAD_RIGHT:
+            return "MIN_GR";
+        case ExprOp::MAX_GRAD_LEFT:
+            return "MAX_GL";
+        case ExprOp::MAX_GRAD_RIGHT:
+            return "MAX_GR";
         case ExprOp::REDUCE_SUM:
             return "RSUM";
         case ExprOp::REDUCE_PROD:

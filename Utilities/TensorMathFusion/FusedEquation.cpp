@@ -325,7 +325,11 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::DIV:
             case ExprOp::POW:
             case ExprOp::MIN:
-            case ExprOp::MAX: {
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT: {
                 std::vector<std::vector<uint64_t>> non_scalar_inputs;
                 if (!node_dims[node.lhs].empty())
                     non_scalar_inputs.push_back(node_dims[node.lhs]);
@@ -343,6 +347,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 break;
             }
             case ExprOp::NEG:
+            case ExprOp::ABS:
             case ExprOp::EXP:
             case ExprOp::EXP2:
             case ExprOp::EXP10:
@@ -594,6 +599,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return result;
         }
         case ExprOp::NEG:
+        case ExprOp::ABS:
         case ExprOp::EXP:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
@@ -617,7 +623,11 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::DIV:
         case ExprOp::POW:
         case ExprOp::MIN:
-        case ExprOp::MAX: {
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT: {
             auto lhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
             auto rhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);
             mergeEffectiveInputDimsMaps(lhs_map, rhs_map);
