@@ -155,9 +155,6 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
 
     output.memsetAsync(run_stream, 0);
 
-    cudaStream_t cuda_stream = nullptr;
-    CUDNN_CHECK(cudnnGetStream(run_stream.getCudnnHandle(), &cuda_stream));
-
     launchReduceMinMaxBackwardScatter(grad_output.getMemPtr(),
                                       static_cast<const uint32_t*>(indices.getMemPtr()),
                                       (void*)output.getMemPtr(),
@@ -165,7 +162,7 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
                                       built_reduction->key.reduction_axes,
                                       built_reduction->key.squeeze_axes,
                                       grad_output.getDataType(),
-                                      cuda_stream);
+                                      run_stream);
 }
 
 void StampedExecutionPlan::run() {

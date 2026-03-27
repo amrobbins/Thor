@@ -52,6 +52,8 @@ std::string opName(ExprOp op) {
             return "POW";
         case ExprOp::NEG:
             return "NEG";
+        case ExprOp::ABS:
+            return "ABS";
         case ExprOp::EXP:
             return "EXP";
         case ExprOp::LN:
@@ -76,6 +78,14 @@ std::string opName(ExprOp op) {
             return "MIN";
         case ExprOp::MAX:
             return "MAX";
+        case ExprOp::MIN_GRAD_LEFT:
+            return "MIN_GL";
+        case ExprOp::MIN_GRAD_RIGHT:
+            return "MIN_GR";
+        case ExprOp::MAX_GRAD_LEFT:
+            return "MAX_GL";
+        case ExprOp::MAX_GRAD_RIGHT:
+            return "MAX_GR";
         case ExprOp::REDUCE_SUM:
             return "RSUM";
         case ExprOp::REDUCE_PROD:
@@ -159,6 +169,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             break;
 
         case ExprOp::NEG:
+        case ExprOp::ABS:
         case ExprOp::EXP:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
@@ -206,7 +217,11 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::DIV:
         case ExprOp::POW:
         case ExprOp::MIN:
-        case ExprOp::MAX: {
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT: {
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
 
@@ -304,6 +319,7 @@ bool Expression::isLeafOp(const ExprOp op) {
 bool Expression::isUnaryOp(const ExprOp op) {
     switch (op) {
         case ExprOp::NEG:
+        case ExprOp::ABS:
         case ExprOp::EXP:
         case ExprOp::EXP2:
         case ExprOp::EXP10:
@@ -337,6 +353,10 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::POW:
         case ExprOp::MIN:
         case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
             return true;
@@ -592,6 +612,7 @@ Expression Expression::operator-(const Expression& other) const { return binaryO
 Expression Expression::operator*(const Expression& other) const { return binaryOp(*this, other, ExprOp::MUL); }
 Expression Expression::operator/(const Expression& other) const { return binaryOp(*this, other, ExprOp::DIV); }
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
+Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
 
 Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {

@@ -103,7 +103,6 @@ struct CompiledReduction {
     }
 };
 
-// FIXME: Get rid of this it is essentially duplicate
 struct CompiledArgMinMax {
     const ExprOp op;
     std::vector<uint64_t> reduction_axes;

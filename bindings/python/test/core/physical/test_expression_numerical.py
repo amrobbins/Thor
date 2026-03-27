@@ -637,3 +637,47 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reducti
                 "pointwise": [2, 3, 4],
             },
         )
+
+
+def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num: int = 0) -> PhysicalTensor:
+    cpu = Placement(DeviceType.cpu, 0)
+    gpu = Placement(DeviceType.gpu, gpu_num)
+    desc = PhysicalTensor.Descriptor(dtype, list(arr.shape))
+    host = PhysicalTensor(cpu, desc)
+    host.numpy()[...] = arr
+    device = PhysicalTensor(gpu, desc)
+    device.copy_from_async(host, stream)
+    return device
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_abs_forward_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    out = ex.abs(x)
+
+    eq = ex.compile(out, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[-2.0, 0.0, 3.5], [4.25, -5.75, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+    expected = np.abs(x_np.astype(np.float32)).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output()
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)

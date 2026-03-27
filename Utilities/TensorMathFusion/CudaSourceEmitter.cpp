@@ -541,6 +541,9 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
             }
             return castScalarExpr("(-" + x_f + ")", DataType::FP32, compute_dtype);
 
+        case ExprOp::ABS:
+            return castScalarExpr("fabsf(" + x_f + ")", DataType::FP32, compute_dtype);
+
         case ExprOp::EXP:
             return castScalarExpr("expf(" + x_f + ")", DataType::FP32, compute_dtype);
         case ExprOp::EXP2:
@@ -601,6 +604,22 @@ static std::string emitBinaryComputeExpr(ExprOp op, const std::string& a, const 
 
         case ExprOp::MAX:
             return castScalarExpr("fmaxf(" + a_f + ", " + b_f + ")", DataType::FP32, compute_dtype);
+
+        case ExprOp::MIN_GRAD_LEFT:
+            return castScalarExpr(
+                "((" + a_f + " < " + b_f + ") ? 1.0f : ((" + a_f + " > " + b_f + ") ? 0.0f : 0.5f))", DataType::FP32, compute_dtype);
+
+        case ExprOp::MIN_GRAD_RIGHT:
+            return castScalarExpr(
+                "((" + a_f + " > " + b_f + ") ? 1.0f : ((" + a_f + " < " + b_f + ") ? 0.0f : 0.5f))", DataType::FP32, compute_dtype);
+
+        case ExprOp::MAX_GRAD_LEFT:
+            return castScalarExpr(
+                "((" + a_f + " > " + b_f + ") ? 1.0f : ((" + a_f + " < " + b_f + ") ? 0.0f : 0.5f))", DataType::FP32, compute_dtype);
+
+        case ExprOp::MAX_GRAD_RIGHT:
+            return castScalarExpr(
+                "((" + a_f + " < " + b_f + ") ? 1.0f : ((" + a_f + " > " + b_f + ") ? 0.0f : 0.5f))", DataType::FP32, compute_dtype);
 
         default:
             throw runtime_error("Unsupported binary op in fused stage emitter.");
@@ -1065,6 +1084,7 @@ static std::string emitVector2Sub(const std::string& a, const std::string& b) { 
 static std::string emitVector2Mul(const std::string& a, const std::string& b) { return "__hmul2(" + a + ", " + b + ")"; }
 static std::string emitVector2Div(const std::string& a, const std::string& b) { return "__h2div(" + a + ", " + b + ")"; }
 static std::string emitVector2Neg(const std::string& x, DataType dtype) { return "__hneg2(" + x + ")"; }
+static std::string emitVector2Abs(const std::string& x, DataType dtype) { return "__hmax2(" + x + ", " + emitVector2Neg(x, dtype) + ")"; }
 static std::string emitVector2Exp(const std::string& x, DataType dtype) { return "h2exp(" + x + ")"; }
 static std::string emitVector2Exp2(const std::string& x, DataType dtype) { return "h2exp2(" + x + ")"; }
 static std::string emitVector2Exp10(const std::string& x, DataType dtype) { return "h2exp10(" + x + ")"; }
@@ -1080,6 +1100,36 @@ static std::string emitVector2Pow(const std::string& a, const std::string& b, Da
 }
 static std::string emitVector2Min(const std::string& a, const std::string& b) { return "__hmin2(" + a + ", " + b + ")"; }
 static std::string emitVector2Max(const std::string& a, const std::string& b) { return "__hmax2(" + a + ", " + b + ")"; }
+
+static std::string emitVector2MinMaxGradMask(ExprOp op, const std::string& a, const std::string& b, DataType dtype) {
+    std::string x_expr;
+    std::string y_expr;
+    switch (op) {
+        case ExprOp::MIN_GRAD_LEFT:
+            x_expr = "((" + a + ".x < " + b + ".x) ? 1.0f : ((" + a + ".x > " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y < " + b + ".y) ? 1.0f : ((" + a + ".y > " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        case ExprOp::MIN_GRAD_RIGHT:
+            x_expr = "((" + a + ".x > " + b + ".x) ? 1.0f : ((" + a + ".x < " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y > " + b + ".y) ? 1.0f : ((" + a + ".y < " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        case ExprOp::MAX_GRAD_LEFT:
+            x_expr = "((" + a + ".x > " + b + ".x) ? 1.0f : ((" + a + ".x < " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y > " + b + ".y) ? 1.0f : ((" + a + ".y < " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        case ExprOp::MAX_GRAD_RIGHT:
+            x_expr = "((" + a + ".x < " + b + ".x) ? 1.0f : ((" + a + ".x > " + b + ".x) ? 0.0f : 0.5f))";
+            y_expr = "((" + a + ".y < " + b + ".y) ? 1.0f : ((" + a + ".y > " + b + ".y) ? 0.0f : 0.5f))";
+            break;
+        default:
+            throw runtime_error("Unsupported min/max grad mask op in vector emitter.");
+    }
+
+    if (dtype == DataType::BF16) {
+        return "__floats2bfloat162_rn(" + x_expr + ", " + y_expr + ")";
+    }
+    return "__floats2half2_rn(" + x_expr + ", " + y_expr + ")";
+}
 
 static std::string emitVector2BroadcastPackLoad(const std::string& storage_dtype,
                                                 const std::string& variable0,
@@ -1216,6 +1266,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Neg(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
+                case ExprOp::ABS:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2Abs(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
+                    break;
                 case ExprOp::EXP:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Exp(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
@@ -1260,6 +1314,13 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                 case ExprOp::MAX:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Max(refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix)) << ";\n";
+                    break;
+                case ExprOp::MIN_GRAD_LEFT:
+                case ExprOp::MIN_GRAD_RIGHT:
+                case ExprOp::MAX_GRAD_LEFT:
+                case ExprOp::MAX_GRAD_RIGHT:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2MinMaxGradMask(n.op, refWithSuffix(n.lhs, suffix), refWithSuffix(n.rhs, suffix), dtype) << ";\n";
                     break;
                 default:
                     throw runtime_error("Unsupported op in vectorized fused emitter: " + to_string((int32_t)n.op));
@@ -1556,6 +1617,10 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Neg(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
+                case ExprOp::ABS:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2Abs(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
+                    break;
                 case ExprOp::EXP:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Exp(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
@@ -1599,6 +1664,13 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 case ExprOp::MAX:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Max(CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs)) << ";\n";
+                    break;
+                case ExprOp::MIN_GRAD_LEFT:
+                case ExprOp::MIN_GRAD_RIGHT:
+                case ExprOp::MAX_GRAD_LEFT:
+                case ExprOp::MAX_GRAD_RIGHT:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
+                       << emitVector2MinMaxGradMask(n.op, CudaSourceEmitter::ref(n.lhs), CudaSourceEmitter::ref(n.rhs), dtype) << ";\n";
                     break;
                 default:
                     throw std::runtime_error("Unsupported op in specialized vector broadcast emitter.");
