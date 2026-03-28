@@ -1,7 +1,27 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
 
+#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
+
 using namespace ThorImplementation;
 using namespace std;
+
+// This version uses the layer to compute the gradient.
+void Optimizer::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
+    // Lazy compile on first use
+    if (!compiled)
+        compile();
+    assert(compiled);
+
+    // FIXME: Temporary sanity check. These types should ultimately not have to match. And why optional tensors. This is for later cleanup.
+    assert(featureIn.isPresent());
+    assert(errorIn.isPresent());
+    assert(featureIn.get().getDataType() == weightsUpdateDataType);  // Contract is must be set in virtual compile()
+    assert(errorIn.get().getDataType() == weightsUpdateDataType);
+
+    assert(trainableLayer != nullptr);
+    trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
+    computeWeightsUpdate(weightsGradient, gradientUpdateStream, accumulateValues);
+}
 
 void Optimizer::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) {
     updateWeightsWithScale(weights, biases, 1.0f / batchSize);

@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <memory>
 
 // Note: The interface here is what the end user can use, and should include only all of the functionality that the user may want,
 //       that is common to all (or the vast majority) of optimizers.
@@ -44,8 +45,8 @@ class Optimizer {
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
-                                     TrainableWeightsBiasesLayer const *owningLayer,
-                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                                     std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                                     std::string filenamePrefix,
                                      bool saveOptimizerState) const {
         return architectureJson();
     }

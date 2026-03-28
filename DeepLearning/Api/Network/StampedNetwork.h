@@ -9,6 +9,9 @@
 #include <assert.h>
 #include <vector>
 
+#include "DeepLearning/Api/Parameter/Parameterizable.h"
+#include "DeepLearning/Implementation/Parameter/Parameterizable.h"
+
 namespace Thor {
 class Network;
 class PlacedNetwork;
@@ -49,6 +52,10 @@ class StampedNetwork {
     }
     std::shared_ptr<ThorImplementation::Layer> getPhysicalLayerFromApiLayer(std::shared_ptr<Thor::Layer> apiLayer) {
         return apiLayerToPhysicalLayerShared[apiLayer->getId()];
+    }
+    std::shared_ptr<ThorImplementation::Parameterizable> getPhysicalParameterizableFromApiParameterizable(uint64_t apiParameterizableId) {
+        // FIXME
+        return nullptr;
     }
 
 #if defined(THOR_GTEST) || defined(__JETBRAINS_IDE__)

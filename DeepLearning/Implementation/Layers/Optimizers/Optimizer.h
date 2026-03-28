@@ -6,6 +6,7 @@
 #include "Utilities/Common/CudnnHelper.h"
 
 namespace ThorImplementation {
+class TrainableWeightsBiasesLayer;
 
 class Optimizer {
    public:
@@ -23,7 +24,8 @@ class Optimizer {
 
     // Note: It is the responsibility of the layer to ensure all dependencies are available at the start of gradient update stream.
     //       And that the data stream will be blocked until
-    virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) { assert(false); }
+    virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
+    virtual void computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues) = 0;
     virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize);
     virtual void updateWeightsWithScale(Tensor weights, Optional<Tensor> biases, float weightUpdateScalingFactor);
 
@@ -69,6 +71,9 @@ class Optimizer {
     Tensor weightsUpdate;
     Optional<Tensor> biasesUpdate;
 
+    Optional<TensorDescriptor::DataType> weightsUpdateDataType;
+
+    std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer = nullptr;
     bool compiled = false;
 
    private:

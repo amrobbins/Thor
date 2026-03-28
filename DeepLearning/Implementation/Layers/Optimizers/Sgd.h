@@ -21,7 +21,8 @@ class Sgd : public Optimizer {
         bool useNesterovMomentum,
         uint64_t startResumeEpoch = 0);
 
-    virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
+    using Optimizer::computeWeightsUpdate;
+    virtual void computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues);
     virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batch_size);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
@@ -59,9 +60,6 @@ class Sgd : public Optimizer {
     uint32_t epoch;
 
     uint32_t gpuNum;
-
-    std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayerShared;
-    TrainableWeightsBiasesLayer *trainableLayer;
 
     uint32_t numInputFeatures;
     uint32_t numOutputputFeatures;

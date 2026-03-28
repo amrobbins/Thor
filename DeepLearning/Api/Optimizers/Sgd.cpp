@@ -112,18 +112,16 @@ json Sgd::architectureJson() const {
 
 json Sgd::serialize(thor_file::TarWriter &archiveWriter,
                     Stream stream,
-                    TrainableWeightsBiasesLayer const *owningLayer,
-                    shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                    shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                    std::string filenamePrefix,
                     bool saveOptimizerState) const {
     json j = architectureJson();
-
-    if (physicalOwningLayer != nullptr && saveOptimizerState) {
-        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
+    if (saveOptimizerState) {
+        assert(physicalOptimizer != nullptr);
         shared_ptr<ThorImplementation::Sgd> physicalSgd = dynamic_pointer_cast<ThorImplementation::Sgd>(physicalOptimizer);
         assert(physicalSgd != nullptr);
         j["epoch"] = physicalSgd->getEpoch();
     }
-
     return j;
 }
 
