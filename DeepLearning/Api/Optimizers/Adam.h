@@ -35,8 +35,8 @@ class Adam : public Optimizer {
 
     virtual nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                                      Stream stream,
-                                     TrainableWeightsBiasesLayer const *owningLayer,
-                                     std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                                     std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                                     std::string filenamePrefix,
                                      bool saveOptimizerState) const;
     static std::shared_ptr<Optimizer> deserialize(std::shared_ptr<thor_file::TarReader> &archiveReader,
                                                   const nlohmann::json &j,

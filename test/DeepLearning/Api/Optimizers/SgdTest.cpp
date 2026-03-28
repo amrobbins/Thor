@@ -567,7 +567,7 @@ TEST(Sgd, SerializeDeserialize) {
     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> initial_phys_twb =
         dynamic_pointer_cast<ThorImplementation::TrainableWeightsBiasesLayer>(initial_phys_layer);
     assert(initial_phys_twb != nullptr);
-    json sgdJ = sgd->serialize(archiveWriter, stream, &fullyConnected, initial_phys_twb, true);
+    json sgdJ = sgd->serialize(archiveWriter, stream, initial_phys_twb->getOptimizer(), "layer" + to_string(fullyConnected.getId()), true);
 
     ASSERT_EQ(fullyConnectedJ["version"], "1.0.0");
     ASSERT_EQ(fullyConnectedJ["layer_type"], "fully_connected");

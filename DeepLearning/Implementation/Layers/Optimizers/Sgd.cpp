@@ -11,11 +11,7 @@ Sgd::Sgd(uint64_t id,
          bool useNesterovMomentum,
          uint64_t startResumeEpoch)
     : Optimizer(id) {
-    // I think the fix here is to just grab params and parent, then lazy compile
-
-    assert(trainableLayer != nullptr);
-    this->trainableLayerShared = trainableLayer;
-    this->trainableLayer = trainableLayer.get();
+    this->trainableLayer = trainableLayer;
 
     this->initialLearningRate = initialLearningRate;
     this->decay = decay;
@@ -40,6 +36,7 @@ void Sgd::compile() {
 
     Tensor weights = trainableLayer->getWeights();
     weightsGradient = weights.clone();
+    weightsUpdateDataType = weightsGradient.getDataType();
 
     Optional<Tensor> biases = trainableLayer->getBiases();
     if (biases.isPresent()) {
@@ -68,18 +65,14 @@ void Sgd::compile() {
     compiled = true;
 }
 
-// This function just accumulates the gradient
-void Sgd::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
+// This version takes in the pre-computed gradient directly, which is ready by the end of weightsGradientReadyStream.
+void Sgd::computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues) {
     // Lazy compile on first use
     if (!compiled)
         compile();
     assert(compiled);
-
-    if (errorIn.isEmpty())
-        return;
-    assert(featureIn.isPresent());
-
-    trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
+ if (gradientUpdateStream != weightsGradientReadyStream)
+        gradientUpdateStream.waitEvent(weightsGradientReadyStream.putEvent());
 }
 
 // Now having the full gradient the weight update computation is completed in this function

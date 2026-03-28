@@ -171,7 +171,7 @@ json FullyConnected::serialize(thor_file::TarWriter &archiveWriter,
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, twbLayer, saveOptimizerState);
+        j["optimizer"] = optimizer->serialize(archiveWriter, stream, twbLayer->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
     }
 
     return j;

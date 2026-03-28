@@ -11,8 +11,7 @@ Adam::Adam(uint64_t id, std::shared_ptr<TrainableWeightsBiasesLayer> trainableLa
     this->epsilon = epsilon;
     this->t = 0.0f;
 
-    this->trainableLayerShared = trainableLayer;
-    this->trainableLayer = trainableLayer.get();
+    this->trainableLayer = trainableLayer;
 }
 
 void Adam::compile() {
@@ -23,6 +22,7 @@ void Adam::compile() {
     gpuNum = layerPlacement.getDeviceNum();
     gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
 
+    // FIXME: Trainable layer is not guaranteed to be available
     // Allocate all params
     Tensor weights = trainableLayer->getWeights();
     weightsGradient = weights.clone();
@@ -35,6 +35,7 @@ void Adam::compile() {
         biasesUpdate = biasesGradient.get().clone();
     else
         biasesUpdate = Optional<Tensor>::empty();
+    weightsUpdateDataType = weights.getDataType();
 
     m = weightsGradient.clone(TensorDescriptor::DataType::FP32);
     v = weightsGradient.clone(TensorDescriptor::DataType::FP32);
@@ -55,13 +56,15 @@ void Adam::compile() {
     compiled = true;
 }
 
-void Adam::computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues) {
-    trainableLayer->computeWeightsGradient(weightsGradient, biasesGradient, featureIn, errorIn, gradientUpdateStream, accumulateValues);
+// This version takes in the pre-computed gradient directly, which is ready by the end of weightsGradientReadyStream.
+void Adam::computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues) {
+    // Lazy compile on first use
+    if (!compiled)
+        compile();
+    assert(compiled);
 
-    if (featureDataType.isEmpty()) {
-        featureDataType = featureIn.get().getDataType();
-        assert(errorIn.get().getDataType() == featureDataType);
-    }
+    if (gradientUpdateStream != weightsGradientReadyStream)
+        gradientUpdateStream.waitEvent(weightsGradientReadyStream.putEvent());
 
     stepFromPrecomputedGradient(accumulateValues);
 }
@@ -71,7 +74,7 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
     // multiple error inputs
     if (!accumulateValues)
         t += 1;
-    if (featureDataType.get() == TensorDescriptor::DataType::FP16) {
+    if (weightsUpdateDataType.get() == TensorDescriptor::DataType::FP16) {
         launchAdamStep<half>(weightsUpdate.getMemPtr<half>(),
                              weightsGradient.getMemPtr<half>(),
                              m.getMemPtr<float>(),
@@ -97,7 +100,7 @@ void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
                                  biasesGradient.get().getTotalNumElements(),
                                  gradientUpdateStream);
         }
-    } else if (featureDataType.get() == TensorDescriptor::DataType::FP32) {
+    } else if (weightsUpdateDataType.get() == TensorDescriptor::DataType::FP32) {
         launchAdamStep<float>(weightsUpdate.getMemPtr<float>(),
                               weightsGradient.getMemPtr<float>(),
                               m.getMemPtr<float>(),

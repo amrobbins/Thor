@@ -15,7 +15,8 @@ class Adam : public Optimizer {
 
     virtual void compile();
 
-    virtual void computeWeightsUpdate(Optional<Tensor> featureIn, Optional<Tensor> errorIn, bool accumulateValues);
+    using Optimizer::computeWeightsUpdate;
+    virtual void computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues);
     virtual void stepFromPrecomputedGradient(bool accumulateValues);
 
     virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
@@ -49,7 +50,7 @@ class Adam : public Optimizer {
     virtual void loadMBiasFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
     virtual void loadVBiasFromFile(std::string filename, Optional<Stream> stream = Optional<Stream>::empty());
 
-    void testSetDataType(TensorDescriptor::DataType dataType) { featureDataType = dataType; }
+    void testSetDataType(TensorDescriptor::DataType dataType) { weightsUpdateDataType = dataType; }
 
     static constexpr float MIN_FP16_EPSILON = 1.0e-4f;
 
@@ -67,18 +68,12 @@ class Adam : public Optimizer {
     Optional<Tensor> mBias;
     Optional<Tensor> vBias;
 
-    std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayerShared;
-    TrainableWeightsBiasesLayer *trainableLayer;
-
     uint32_t gpuNum;
-    Optional<TensorDescriptor::DataType> featureDataType;
 
     Optional<std::string> mFile;
     Optional<std::string> vFile;
     Optional<std::string> mBiasFile;
     Optional<std::string> vBiasFile;
-
-    bool compiled = false;
 };
 
 }  // namespace ThorImplementation

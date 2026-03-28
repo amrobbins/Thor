@@ -84,8 +84,7 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
     }
 
     if (hasOptimizer()) {
-        // Not stamped so there is no physical optimizer, so then what do I do? Maybe I expect it can be null?
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, this, batchNorm, saveOptimizerState);
+        j["optimizer"] = optimizer->serialize(archiveWriter, stream, batchNorm->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
     }
 
     return j;

@@ -92,22 +92,23 @@ json Adam::architectureJson() const {
 
 json Adam::serialize(thor_file::TarWriter &archiveWriter,
                      Stream stream,
-                     TrainableWeightsBiasesLayer const *owningLayer,
-                     shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> physicalOwningLayer,
+                     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                     std::string filenamePrefix,
                      bool saveOptimizerState) const {
     json j = architectureJson();
 
-    if (saveOptimizerState && physicalOwningLayer != nullptr) {
-        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalOwningLayer->getOptimizer();
-        shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
-        assert(physicalAdam != nullptr);
+    if (saveOptimizerState) {
+        assert(physicalOptimizer != nullptr);
+        assert(!filenamePrefix.empty());
 
-        string optimizerName = string("layer") + to_string(owningLayer->getId()) + "_adam";
+        string optimizerName = filenamePrefix + "_adam";
         string mFile = optimizerName + "_m.gds";
         string vFile = optimizerName + "_v.gds";
         j["m_tensor"] = mFile;
         j["v_tensor"] = vFile;
 
+        shared_ptr<ThorImplementation::Adam> physicalAdam = dynamic_pointer_cast<ThorImplementation::Adam>(physicalOptimizer);
+        assert(physicalAdam != nullptr);
         ThorImplementation::Tensor m = physicalAdam->getM();
         archiveWriter.addArchiveFile(mFile, m);
 
