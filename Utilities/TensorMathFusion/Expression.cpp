@@ -26,6 +26,12 @@ Stream& Expression::getNextHelperStream(uint32_t gpu_num) {
     return runnerHelperStreams[gpu_num][cur_index];
 }
 
+std::set<std::string> Expression::getInputNames() const {
+    if (expr == nullptr)
+        return {};
+    return expr->getInputNames();
+}
+
 std::string formatFloatCanonical(double x) {
     std::ostringstream ss;
     ss << std::setprecision(9) << x;

@@ -24,6 +24,10 @@ class Parameter {
     virtual std::string getName();
     virtual Tensor getStorage();
 
+    bool isTrainable() const;
+    bool isTrainingEnabled() const;
+    void setTrainingEnabled(bool enabled);
+
    protected:
     const std::string name;
     Tensor storage;

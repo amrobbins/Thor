@@ -658,6 +658,7 @@ void Network::stampNetworkInput(const shared_ptr<Thor::NetworkInput> networkInpu
     stampedNetwork.apiLayerToPhysicalLayer[networkInput->getId()] = implementationNetworkInput.get();
     stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkInput] = networkInput->getId();
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkInput.get()] = networkInput->getId();
+ stampedNetwork.recordIfParameterizable(networkInput, implementationNetworkInput);
 
     // Map the api tensor to its physical driving layer
     stampedNetwork.apiTensorToPhysicalDrivingLayerShared[outputTensor] = outputLayer;
@@ -829,6 +830,8 @@ void Network::stampLayer(Tensor inputTensor,
         stampedNetwork.physicalLayerToApiLayerShared[implementationLayer] = layer->getId();
         stampedNetwork.physicalLayerToApiLayer[implementationLayer.get()] = layer->getId();
 
+        stampedNetwork.recordIfParameterizable(layer, implementationLayer);
+
         if (DEBUG_STAMP) {
             printf("stamped %s (physical layer id = %ld, api layer id = %ld) driven by physical layer id = %ld\n",
                    layer->getLayerType().c_str(),
@@ -914,6 +917,8 @@ void Network::stampNetworkOutput(Tensor inputTensor,
     stampedNetwork.apiLayerToPhysicalLayer[networkOutput->getId()] = implementationNetworkOutput.get();
     stampedNetwork.physicalLayerToApiLayerShared[implementationNetworkOutput] = networkOutput->getId();
     stampedNetwork.physicalLayerToApiLayer[implementationNetworkOutput.get()] = networkOutput->getId();
+
+    stampedNetwork.recordIfParameterizable(networkOutput, implementationNetworkOutput);
 }
 
 Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {

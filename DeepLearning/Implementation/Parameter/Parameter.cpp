@@ -25,4 +25,13 @@ void Parameter::clearOptimizer() { optimizer = nullptr; }
 string Parameter::getName() { return name; }
 Tensor Parameter::getStorage() { return storage; }
 
+bool Parameter::isTrainable() const { return trainable; }
+bool Parameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled; }
+void Parameter::setTrainingEnabled(bool enabled) {
+    assert(isTrainable());
+
+    throw runtime_error("Toggling parameter trainabilty on/off is not yet supported.");
+    trainingEnabled = enabled;
+}
+
 }  // namespace ThorImplementation

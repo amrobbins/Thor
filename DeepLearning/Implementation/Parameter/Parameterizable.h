@@ -20,11 +20,11 @@ class Parameterizable {
     std::shared_ptr<Parameter> getParam(const std::string &name);
     Tensor getParamStorage(const std::string &name);
 
-    std::vector<std::string> listParams(const std::string &name);
+    std::vector<std::string> listParams();
 
-   private:
+   protected:
     std::vector<std::shared_ptr<Parameter>> parameters;
-    std::shared_ptr<Optimizer> optimizer;
+    std::unordered_map<std::string, size_t> parameterIndexByName;
 };
 
 }  // namespace ThorImplementation

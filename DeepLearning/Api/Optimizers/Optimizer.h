@@ -6,10 +6,10 @@
 
 #include <nlohmann/json.hpp>
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <memory>
 
 // Note: The interface here is what the end user can use, and should include only all of the functionality that the user may want,
 //       that is common to all (or the vast majority) of optimizers.
@@ -91,6 +91,7 @@ class Optimizer {
     uint64_t id;
     static std::atomic<int64_t> nextId;
 
+    static std::mutex originalIdMapLock;
     static std::unordered_map<uint64_t, uint64_t> orignalIdToId;
 };
 

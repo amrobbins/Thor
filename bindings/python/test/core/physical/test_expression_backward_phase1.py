@@ -180,7 +180,7 @@ def test_compile_backward_explicit_upstream_numerical(dtype: thor.DataType):
     out = (x * y) + ex.exp(x) - ex.ln(y)
 
     fwd_eq = ex.compile(out, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x", "y"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x", "y"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad", "y_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -226,7 +226,7 @@ def test_compile_backward_rejects_explicit_upstream_name_collision():
     fwd_eq = ex.compile(out, device_num=0)
 
     with pytest.raises(RuntimeError, match="collides with an existing forward input"):
-        fwd_eq.compile_backward(["x"], upstream_input_name="x")
+        fwd_eq.compile_backward(["x"], error_input_name="x")
 
 
 @pytest.mark.cuda
@@ -275,7 +275,7 @@ def test_compile_backward_reduce_mean_explicit_upstream_numerical(dtype: thor.Da
     loss = ex.reduce_mean(x, axis=1, squeeze=False)
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -667,7 +667,7 @@ def test_compile_backward_multi_output_explicit_upstreams_numerical(dtype: thor.
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x", "y"],
-        upstream_input_names_by_output={
+        error_output_name_to_error_input_name={
             "prod": "__grad_prod",
             "row_sum": "__grad_row_sum",
         },
@@ -1066,7 +1066,7 @@ def test_compile_backward_reduce_sum_with_squeeze_explicit_upstream_broadcast_nu
     loss = ex.reduce_sum(x, axis=1, squeeze=[1])
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1117,7 +1117,7 @@ def test_compile_backward_multi_output_explicit_upstreams_mixed_constant_and_non
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x"],
-        upstream_input_names_by_output={
+        error_output_name_to_error_input_name={
             "prod": "__grad_prod",
             "total_x": "__grad_total_x",
         },
@@ -1212,7 +1212,7 @@ def test_compile_backward_reduce_min_explicit_upstream_numerical(dtype: thor.Dat
     loss = ex.reduce_min(x, axis=1, squeeze=[1])
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1311,7 +1311,7 @@ def test_compile_backward_reduce_min_reduce_max_multi_output_explicit_upstreams_
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x"],
-        upstream_input_names_by_output={
+        error_output_name_to_error_input_name={
             "row_min": "__grad_row_min",
             "row_max": "__grad_row_max",
         },
@@ -1360,7 +1360,7 @@ def test_compile_backward_reduce_max_all_axes_scalar_output_numerical(dtype: tho
     loss = ex.reduce_max(x, axis=[0, 1], squeeze=False)
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1402,7 +1402,7 @@ def test_compile_backward_elementwise_min_explicit_upstream_numerical(dtype: tho
     out = ex.min(x, y)
 
     fwd_eq = ex.compile(out, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x", "y"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x", "y"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad", "y_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1462,7 +1462,7 @@ def test_compile_backward_elementwise_max_explicit_upstream_numerical(dtype: tho
     out = ex.max(x, y)
 
     fwd_eq = ex.compile(out, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x", "y"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x", "y"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad", "y_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1526,7 +1526,7 @@ def test_compile_backward_elementwise_min_max_multi_output_explicit_upstreams_nu
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x", "y"],
-        upstream_input_names_by_output={
+        error_output_name_to_error_input_name={
             "mn": "__grad_mn",
             "mx": "__grad_mx",
         },
@@ -1638,7 +1638,7 @@ def test_compile_backward_reduce_prod_explicit_upstream_numerical(dtype: thor.Da
     loss = ex.reduce_prod(x, axis=1, squeeze=[1])
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1726,7 +1726,7 @@ def test_compile_backward_reduce_norm1_explicit_upstream_numerical(dtype: thor.D
     loss = ex.reduce_norm1(x, axis=1, squeeze=[1])
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1844,7 +1844,7 @@ def test_compile_backward_abs_explicit_upstream_numerical(dtype: thor.DataType):
     loss = ex.abs(x)
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1889,7 +1889,7 @@ def test_compile_backward_abs_zero_rule_explicit_upstream_numerical(dtype: thor.
     out = ex.abs(x)
 
     fwd_eq = ex.compile(out, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -1939,7 +1939,7 @@ def test_compile_backward_reduce_norm1_zero_rule_explicit_upstream_numerical(dty
     loss = ex.reduce_norm1(x, axis=1, squeeze=[1])
 
     fwd_eq = ex.compile(loss, device_num=0)
-    bwd_eq = fwd_eq.compile_backward(["x"], upstream_input_name=upstream_name)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
     assert bwd_eq.output_names() == ["x_grad"]
 
     storage_dtype = _numpy_storage_dtype(dtype)

@@ -172,6 +172,15 @@ class MultiConnectionLayer : public Layer {
         ensureNoDeviceCrossing();
     }
 
+    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber) {
+        // backPropagateError allows the previous layer to specify that it does not support back propagation,
+        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
+        if (backPropagateError && !isInferenceOnly())
+            return featureInput.get().clone();
+        else
+            return Optional<Tensor>::empty();
+    }
+
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) {
         assert(!compiled);
@@ -186,12 +195,7 @@ class MultiConnectionLayer : public Layer {
 
         previousLayers.push_back(previousLayer);
         featureInputs.emplace_back(featureInput);
-        // backPropagateError allows the previous layer to specify that it does not support back propagation,
-        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
-        if (backPropagateError && !isInferenceOnly())
-            errorOutputs.emplace_back(featureInput.get().clone());
-        else
-            errorOutputs.emplace_back(Optional<Tensor>::empty());
+        errorOutputs.emplace_back(createErrorOutputTensor(backPropagateError, errorOutputs.size()));
 
         Optional<Tensor> lastFeatureInput = getLastPresentTensor(featureInputs);
         Optional<Tensor> firstFeatureInput = getFirstPresentTensor(featureInputs);
@@ -395,6 +399,7 @@ class MultiConnectionLayer : public Layer {
 
     virtual void infer(Optional<Tensor> inputTensor, Optional<Tensor> outputTensor, Stream stream) { assert(false); }
     virtual void backProp(Optional<Tensor> dataIn, Optional<Tensor> errorIn, Optional<Tensor> errorOut, Stream stream) { assert(false); }
+    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError) { assert(false); }
 };
 
 }  // namespace ThorImplementation

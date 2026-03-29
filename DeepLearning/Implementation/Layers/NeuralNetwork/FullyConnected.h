@@ -245,7 +245,7 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
             // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
 
-            // Upon processing the last connection, schedule the upate to the weights memory.
+            // Upon processing the last connection, schedule the update to the weights memory.
             if (stillWaitingForErrorInputTensors.empty()) {
                 optimizer.get()->updateWeights(weights, biases, batchSize);
             }
