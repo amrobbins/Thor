@@ -1130,7 +1130,8 @@ static std::string dbgDims(const std::vector<uint64_t>& dims) {
 PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                          const std::vector<std::string>& wrt_names,
                                          const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
-                                         const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
+                                         const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+                                         bool accumulate_grad_outputs) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
@@ -1655,6 +1656,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             throw std::runtime_error("No INPUT node found for requested gradient input: " + wrt_name);
         }
 
+        const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
+        const Optional<TensorDescriptor::DataType> grad_dtype = preferredGradValueDType(forward_input_node);
+        const std::string grad_output_name = wrt_name + "_grad";
+
         std::optional<uint32_t> total_grad;
         for (uint32_t i = 0; i < forward_expr.nodes.size(); ++i) {
             const ExprNode& node = forward_expr.nodes[i];
@@ -1672,18 +1677,20 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         }
 
         if (!total_grad.has_value()) {
-            const ExprNode& forward_input_node = forward_expr.nodes.at(first_it->second);
-            const Optional<TensorDescriptor::DataType> zero_dtype = preferredGradValueDType(forward_input_node);
-            if (has_forward_dims) {
-                total_grad = builder.fill(0.0, forward_node_dims.at(first_it->second), zero_dtype);
+            if (accumulate_grad_outputs) {
+                total_grad = builder.input(grad_output_name, grad_dtype);
+            } else if (has_forward_dims) {
+                total_grad = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);
             } else {
                 const uint32_t input_clone = builder.cloneForward(first_it->second);
                 total_grad = builder.mul(input_clone, builder.scalar(0.0));
             }
+        } else if (accumulate_grad_outputs) {
+            total_grad = builder.add(builder.input(grad_output_name, grad_dtype), total_grad.value());
         }
 
         pending_outputs.push_back(PendingBackwardOutput{
-            .name = wrt_name + "_grad",
+            .name = grad_output_name,
             .node_idx = total_grad.value(),
         });
     }
@@ -1701,19 +1708,25 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
                                      const std::vector<std::string>& wrt_names,
                                      const std::optional<std::string>& upstream_input_name,
-                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
-    return buildBackwardOutputsImpl(
-        forward_outputs, wrt_names, normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name), forward_input_dims);
+                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+                                     bool accumulate_grad_outputs) {
+    return buildBackwardOutputsImpl(forward_outputs,
+                                    wrt_names,
+                                    normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_name),
+                                    forward_input_dims,
+                                    accumulate_grad_outputs);
 }
 
 PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
                                      const std::vector<std::string>& wrt_names,
                                      const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
-                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
+                                     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+                                     bool accumulate_grad_outputs) {
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
-                                    forward_input_dims);
+                                    forward_input_dims,
+                                    accumulate_grad_outputs);
 }
 
 }  // namespace ThorImplementation

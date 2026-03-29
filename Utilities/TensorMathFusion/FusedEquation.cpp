@@ -50,6 +50,81 @@ static RuntimeShapeKey makeRuntimeShapeKey(const std::vector<NamedInput>& root_i
     return key;
 }
 
+static bool accumulatesIntoGradOutputs(const std::optional<BackwardEquationConfig>& backward_config) {
+    return backward_config.has_value() && backward_config->accumulate_grad_outputs;
+}
+
+static std::unordered_set<std::string> backwardAccumulationOutputNames(const std::optional<BackwardEquationConfig>& backward_config) {
+    std::unordered_set<std::string> names;
+    if (!accumulatesIntoGradOutputs(backward_config)) {
+        return names;
+    }
+
+    names.reserve(backward_config->wrt_names.size());
+    for (const std::string& wrt_name : backward_config->wrt_names) {
+        names.insert(wrt_name + "_grad");
+    }
+    return names;
+}
+
+static size_t externalRootInputCount(const std::vector<NamedInput>& root_inputs,
+                                     const std::optional<BackwardEquationConfig>& backward_config) {
+    const size_t accumulation_count = backwardAccumulationOutputNames(backward_config).size();
+    if (accumulation_count > root_inputs.size()) {
+        throw std::runtime_error("Invalid backward accumulation input accounting.");
+    }
+    return root_inputs.size() - accumulation_count;
+}
+
+static std::vector<std::string> inferBackwardWrtNamesFromOutputs(const PhysicalOutputs& backward_outputs) {
+    std::vector<std::string> wrt_names;
+    wrt_names.reserve(backward_outputs.outputs.size());
+    for (const NamedOutput& output : backward_outputs.outputs) {
+        constexpr const char* suffix = "_grad";
+        constexpr size_t suffix_len = 5;
+        if (output.name.size() >= suffix_len && output.name.compare(output.name.size() - suffix_len, suffix_len, suffix) == 0) {
+            wrt_names.push_back(output.name.substr(0, output.name.size() - suffix_len));
+        } else {
+            wrt_names.push_back(output.name);
+        }
+    }
+    return wrt_names;
+}
+
+static std::string dimsToString(const std::vector<uint64_t>& dims);
+static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimensions, const std::vector<uint64_t>& expectedDimensions);
+
+static Optional<DataType> preferredBackwardGradBufferDType(const BackwardEquationConfig& backward_config, const std::string& wrt_name) {
+    if (!backward_config.forward_outputs_template.expr) {
+        throw std::runtime_error("Backward grad-buffer dtype lookup requires non-null forward expr.");
+    }
+
+    uint32_t slot = UINT32_MAX;
+    for (const NamedInput& input : backward_config.forward_outputs_template.expr->inputs) {
+        if (input.name == wrt_name) {
+            slot = input.slot;
+            break;
+        }
+    }
+    if (slot == UINT32_MAX) {
+        throw std::runtime_error("Unknown backward grad-buffer input name: " + wrt_name);
+    }
+
+    for (const ExprNode& node : backward_config.forward_outputs_template.expr->nodes) {
+        if (node.op == ExprOp::INPUT && node.input_slot == slot) {
+            if (node.backward_output_dtype.isPresent()) {
+                return node.backward_output_dtype;
+            }
+            if (node.output_dtype.isPresent()) {
+                return node.output_dtype;
+            }
+            return Optional<DataType>::empty();
+        }
+    }
+
+    throw std::runtime_error("No INPUT node found for backward grad-buffer input: " + wrt_name);
+}
+
 static std::vector<uint64_t> stripSingletonDimensions(const std::vector<uint64_t>& dims) {
     std::vector<uint64_t> stripped;
     stripped.reserve(dims.size());
@@ -64,6 +139,91 @@ static std::vector<uint64_t> stripSingletonDimensions(const std::vector<uint64_t
 
 static bool outputDimensionsMatchIgnoringSingletons(const std::vector<uint64_t>& actual, const std::vector<uint64_t>& expected) {
     return stripSingletonDimensions(actual) == stripSingletonDimensions(expected);
+}
+
+static void validateBackwardAccumulationOutputs(const std::optional<BackwardEquationConfig>& backward_config,
+                                                const std::unordered_map<std::string, Tensor>& named_inputs,
+                                                const std::unordered_map<std::string, Tensor>& named_outputs,
+                                                const std::unordered_map<std::string, std::vector<uint64_t>>& expected_output_shapes) {
+    if (!accumulatesIntoGradOutputs(backward_config)) {
+        return;
+    }
+
+    std::unordered_set<std::string> expected_output_names;
+    expected_output_names.reserve(backward_config->wrt_names.size());
+    for (const std::string& wrt_name : backward_config->wrt_names) {
+        expected_output_names.insert(wrt_name + "_grad");
+    }
+
+    if (named_outputs.size() != expected_output_names.size()) {
+        throw std::runtime_error("Backward accumulation stamp requires exactly " + std::to_string(expected_output_names.size()) +
+                                 " gradient output tensors, but received " + std::to_string(named_outputs.size()) + ".");
+    }
+
+    for (const auto& [name, _] : named_outputs) {
+        if (!expected_output_names.contains(name)) {
+            throw std::runtime_error("Unexpected output tensor supplied for backward accumulation stamp: " + name);
+        }
+    }
+
+    for (const std::string& wrt_name : backward_config->wrt_names) {
+        const std::string grad_output_name = wrt_name + "_grad";
+
+        auto output_it = named_outputs.find(grad_output_name);
+        if (output_it == named_outputs.end()) {
+            throw std::runtime_error("Missing required gradient accumulator for backward stamp: " + grad_output_name);
+        }
+
+        auto input_it = named_inputs.find(wrt_name);
+        if (input_it == named_inputs.end()) {
+            throw std::runtime_error("Missing forward input required to validate backward accumulator: " + wrt_name);
+        }
+
+        const Tensor& accumulator = output_it->second;
+        const Tensor& wrt_input = input_it->second;
+
+        std::vector<uint64_t> expected_dims;
+
+        auto expected_it = expected_output_shapes.find(grad_output_name);
+        if (expected_it != expected_output_shapes.end() && !expected_it->second.empty()) {
+            expected_dims = expected_it->second;
+        } else {
+            expected_dims = wrt_input.getDimensions();
+        }
+
+        if (!outputDimensionsMatchIgnoringSingletons(accumulator.getDimensions(), expected_dims)) {
+            throw std::runtime_error("Gradient accumulator tensor dimensions are incompatible for output '" + grad_output_name +
+                                     "'. Expected compatible with " + dimsToString(expected_dims) + ", got " +
+                                     dimsToString(accumulator.getDimensions()) + ".");
+        }
+
+        const Optional<DataType> preferred_dtype = preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
+        const DataType expected_dtype = preferred_dtype.isPresent() ? preferred_dtype.get() : wrt_input.getDataType();
+        if (accumulator.getDataType() != expected_dtype) {
+            throw std::runtime_error("Gradient accumulator tensor dtype mismatch for output '" + grad_output_name + "'.");
+        }
+
+        if (accumulator.getPlacement().getMemDevice() != wrt_input.getPlacement().getMemDevice() ||
+            accumulator.getPlacement().getDeviceNum() != wrt_input.getPlacement().getDeviceNum()) {
+            throw std::runtime_error("Gradient accumulator tensor placement mismatch for output '" + grad_output_name + "'.");
+        }
+    }
+}
+
+static std::unordered_map<std::string, std::vector<uint64_t>> mergeRequestedOutputShapesWithProvidedOutputs(
+    const std::unordered_map<std::string, Tensor>& provided_outputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) {
+    std::unordered_map<std::string, std::vector<uint64_t>> effective = requested_output_shapes;
+
+    for (const auto& [name, output] : provided_outputs) {
+        auto requested_it = effective.find(name);
+        if (requested_it != effective.end() && !requested_it->second.empty()) {
+            verifyRequestedOutputLayout(output.getDimensions(), requested_it->second);
+        }
+        effective[name] = output.getDimensions();
+    }
+
+    return effective;
 }
 
 static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimensions, const std::vector<uint64_t>& expectedDimensions) {
@@ -85,6 +245,37 @@ static uint64_t maxNumel(const std::vector<std::vector<uint64_t>>& dims_by_outpu
         max_numel = std::max<uint64_t>(max_numel, product(dims));
     }
     return max_numel;
+}
+
+static DataType compiledStageOutputDType(const CompiledExecutionStage& stage, size_t output_idx) {
+    if (output_idx >= stage.outputs.size()) {
+        throw std::runtime_error("compiledStageOutputDType output index out of range.");
+    }
+
+    switch (stage.kind) {
+        case CompiledExecutionStage::Kind::FusedKernel:
+            if (!stage.flat) {
+                throw std::runtime_error("compiledStageOutputDType missing fused stage kernel.");
+            }
+            return stage.flat->output_dtypes.at(output_idx);
+        case CompiledExecutionStage::Kind::Reduction:
+            if (!stage.reduction) {
+                throw std::runtime_error("compiledStageOutputDType missing reduction stage.");
+            }
+            return stage.reduction->output_dtype;
+        case CompiledExecutionStage::Kind::ArgMinMax:
+            if (!stage.arg_minmax) {
+                throw std::runtime_error("compiledStageOutputDType missing arg-min/max stage.");
+            }
+            return stage.arg_minmax->output_dtype;
+        case CompiledExecutionStage::Kind::ReduceMinMaxBackward:
+            if (!stage.reduce_minmax_backward) {
+                throw std::runtime_error("compiledStageOutputDType missing reduce-min/max-backward stage.");
+            }
+            return stage.reduce_minmax_backward->output_dtype;
+    }
+
+    throw std::runtime_error("compiledStageOutputDType encountered unknown stage kind.");
 }
 
 static PhysicalExecutionStage toPhysicalFusedStage(const CompiledExecutionStage& stage) {
@@ -853,9 +1044,10 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const Tensor& input) const {
             "Use getOutputShapes(...) instead.");
     }
 
-    if (root_inputs.size() != 1) {
+    if (externalRootInputCount(root_inputs, backward_config) != 1) {
         throw std::runtime_error("FusedEquation::getOutputShape was passed a single input, but this equation requires " +
-                                 std::to_string(root_inputs.size()) + " inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
+                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
+                                 " inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
     }
 
     std::unordered_map<std::string, Tensor> input_map = {
@@ -872,9 +1064,10 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std
             "Use getOutputShapes(...) instead.");
     }
 
-    if (root_inputs.size() != inputs.size()) {
+    if (externalRootInputCount(root_inputs, backward_config) != inputs.size()) {
         throw std::runtime_error("FusedEquation::getOutputShape was passed " + to_string(inputs.size()) +
-                                 " inputs, but this equation requires " + std::to_string(root_inputs.size()) +
+                                 " inputs, but this equation requires " +
+                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
                                  " inputs. Pass a dict of name -> Tensor to getOutputShape(...).");
     }
 
@@ -884,6 +1077,12 @@ std::vector<uint64_t> FusedEquation::getOutputShape(const std::unordered_map<std
 }
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(const Tensor& input) const {
+    if (externalRootInputCount(root_inputs, backward_config) != 1) {
+        throw std::runtime_error("FusedEquation::getOutputShapes was passed a single input, but this equation requires " +
+                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
+                                 " inputs. Pass a dict of name -> Tensor to getOutputShapes(...).");
+    }
+
     std::unordered_map<std::string, Tensor> input_map = {
         {root_inputs[0].name, input},
     };
@@ -893,9 +1092,8 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
     const std::unordered_map<std::string, Tensor>& inputs) const {
-    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
-
-    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs);
+    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputsForCompilation(inputs);
+    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::getOutputShapes requires at least one bound root input.");
@@ -1024,14 +1222,19 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
         return buildBackwardOutputs(backward_config->forward_outputs_template,
                                     backward_config->wrt_names,
                                     backward_config->upstream_input_names_by_output.value(),
-                                    forward_input_dims);
+                                    forward_input_dims,
+                                    backward_config->accumulate_grad_outputs);
     }
 
-    return buildBackwardOutputs(backward_config->forward_outputs_template, backward_config->wrt_names, std::nullopt, forward_input_dims);
+    return buildBackwardOutputs(backward_config->forward_outputs_template,
+                                backward_config->wrt_names,
+                                std::nullopt,
+                                forward_input_dims,
+                                backward_config->accumulate_grad_outputs);
 }
 
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
-    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(namedInputs);
+    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputsForCompilation(namedInputs);
 
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::compileForInputs requires at least one bound root input.");
@@ -1234,8 +1437,10 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_
 }
 
 FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt_names,
-                                             const std::optional<std::string>& upstream_input_name) const {
-    PhysicalOutputs backward_outputs = buildBackwardOutputs(outputs_template, wrt_names, upstream_input_name);
+                                             const std::optional<std::string>& upstream_input_name,
+                                             bool accumulate_grad_outputs) const {
+    PhysicalOutputs backward_outputs =
+        buildBackwardOutputs(outputs_template, wrt_names, upstream_input_name, std::nullopt, accumulate_grad_outputs);
     const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
     return FusedEquation(backward_outputs,
                          device_num,
@@ -1243,19 +1448,22 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
                          backward_signature,
                          BackwardEquationConfig{
                              .forward_outputs_template = outputs_template,
-                             .wrt_names = wrt_names,
+                             .wrt_names = inferBackwardWrtNamesFromOutputs(backward_outputs),
                              .upstream_input_names_by_output =
                                  upstream_input_name.has_value() ? std::optional<std::unordered_map<std::string, std::string>>(
                                                                        std::unordered_map<std::string, std::string>{
                                                                            {outputs_template.outputs[0].name, upstream_input_name.value()},
                                                                        })
                                                                  : std::nullopt,
+                             .accumulate_grad_outputs = accumulate_grad_outputs,
                          });
 }
 
 FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt_names,
-                                             const std::unordered_map<std::string, std::string>& upstream_input_names_by_output) const {
-    PhysicalOutputs backward_outputs = buildBackwardOutputs(outputs_template, wrt_names, upstream_input_names_by_output);
+                                             const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+                                             bool accumulate_grad_outputs) const {
+    PhysicalOutputs backward_outputs =
+        buildBackwardOutputs(outputs_template, wrt_names, upstream_input_names_by_output, std::nullopt, accumulate_grad_outputs);
     const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
     return FusedEquation(backward_outputs,
                          device_num,
@@ -1263,8 +1471,9 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
                          backward_signature,
                          BackwardEquationConfig{
                              .forward_outputs_template = outputs_template,
-                             .wrt_names = wrt_names,
+                             .wrt_names = inferBackwardWrtNamesFromOutputs(backward_outputs),
                              .upstream_input_names_by_output = upstream_input_names_by_output,
+                             .accumulate_grad_outputs = accumulate_grad_outputs,
                          });
 }
 
@@ -1349,21 +1558,32 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
     return requiresBroadcast;
 }
 
-std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
+std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
+                                                                   const std::unordered_map<std::string, Tensor>* namedOutputs) const {
     std::unordered_map<uint32_t, Tensor> values;
     values.reserve(root_inputs.size());
 
-    for (const NamedInput& input : root_inputs) {
-        auto it = namedInputs.find(input.name);
-        if (it == namedInputs.end()) {
-            throw std::runtime_error("Missing required fused equation input: " + input.name);
-        }
-        values.emplace(input.slot, it->second);
-    }
+    const std::unordered_set<std::string> accumulation_output_names = backwardAccumulationOutputNames(backward_config);
 
     std::unordered_set<std::string> expected_input_set;
     expected_input_set.reserve(root_inputs.size());
+
     for (const NamedInput& input : root_inputs) {
+        const bool bind_from_outputs = namedOutputs != nullptr && accumulation_output_names.contains(input.name);
+        if (bind_from_outputs) {
+            auto output_it = namedOutputs->find(input.name);
+            if (output_it == namedOutputs->end()) {
+                throw std::runtime_error("Missing required gradient output tensor for accumulation: " + input.name);
+            }
+            values.emplace(input.slot, output_it->second);
+            continue;
+        }
+
+        auto input_it = namedInputs.find(input.name);
+        if (input_it == namedInputs.end()) {
+            throw std::runtime_error("Missing required fused equation input: " + input.name);
+        }
+        values.emplace(input.slot, input_it->second);
         expected_input_set.insert(input.name);
     }
 
@@ -1371,6 +1591,73 @@ std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::un
         if (!expected_input_set.contains(name)) {
             throw std::runtime_error("Unexpected input sent to fused equation: " + name);
         }
+    }
+
+    return values;
+}
+
+std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputsForCompilation(
+    const std::unordered_map<std::string, Tensor>& namedInputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    if (!accumulatesIntoGradOutputs(backward_config)) {
+        return bindRootInputs(namedInputs);
+    }
+
+    std::unordered_map<uint32_t, Tensor> values;
+    values.reserve(root_inputs.size());
+
+    std::unordered_set<std::string> expected_input_set;
+    expected_input_set.reserve(root_inputs.size());
+
+    std::unordered_map<std::string, uint32_t> root_slot_by_name;
+    root_slot_by_name.reserve(root_inputs.size());
+    for (const NamedInput& input : root_inputs) {
+        root_slot_by_name.emplace(input.name, input.slot);
+    }
+
+    const auto accumulation_output_names = backwardAccumulationOutputNames(backward_config);
+
+    for (const NamedInput& input : root_inputs) {
+        if (accumulation_output_names.contains(input.name)) {
+            continue;
+        }
+
+        auto it = namedInputs.find(input.name);
+        if (it == namedInputs.end()) {
+            throw std::runtime_error("Missing required fused equation input: " + input.name);
+        }
+        values.emplace(input.slot, it->second);
+        expected_input_set.insert(input.name);
+    }
+
+    for (const auto& [name, _] : namedInputs) {
+        if (!expected_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected input sent to fused equation: " + name);
+        }
+    }
+
+    for (const std::string& wrt_name : backward_config->wrt_names) {
+        const std::string grad_output_name = wrt_name + "_grad";
+        auto slot_it = root_slot_by_name.find(grad_output_name);
+        if (slot_it == root_slot_by_name.end()) {
+            throw std::runtime_error("Missing backward accumulation root input for output: " + grad_output_name);
+        }
+
+        auto forward_input_it = namedInputs.find(wrt_name);
+        if (forward_input_it == namedInputs.end()) {
+            throw std::runtime_error("Missing forward input required to infer backward accumulation output: " + wrt_name);
+        }
+
+        std::vector<uint64_t> dims = forward_input_it->second.getDimensions();
+        auto requested_it = requestedOutputShapes.find(grad_output_name);
+        if (requested_it != requestedOutputShapes.end() && !requested_it->second.empty()) {
+            dims = requested_it->second;
+        }
+
+        const Optional<DataType> preferred_dtype = preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
+        const DataType grad_buffer_dtype = preferred_dtype.isPresent() ? preferred_dtype.get() : forward_input_it->second.getDataType();
+        TensorDescriptor descriptor(grad_buffer_dtype, dims);
+        values.emplace(slot_it->second, Tensor(forward_input_it->second.getPlacement(), descriptor));
     }
 
     return values;
@@ -1557,13 +1844,33 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForInputs(inputs);
+    if (accumulatesIntoGradOutputs(backward_config) && preallocated_outputs.empty()) {
+        throw std::runtime_error(
+            "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
+    }
 
-    std::unordered_map<uint32_t, Tensor> values = bindRootInputs(inputs);
+    const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapesWithOutputs =
+        mergeRequestedOutputShapesWithProvidedOutputs(preallocated_outputs, requestedOutputShapes);
+
+    std::unordered_map<uint32_t, Tensor> compile_root_values = accumulatesIntoGradOutputs(backward_config)
+                                                                   ? bindRootInputs(inputs, &preallocated_outputs)
+                                                                   : bindRootInputsForCompilation(inputs, requestedOutputShapesWithOutputs);
     const auto effectiveRequestedOutputShapes =
-        defaultBackwardRequestedOutputShapes(backward_config, root_inputs, values, requestedOutputShapes);
+        defaultBackwardRequestedOutputShapes(backward_config, root_inputs, compile_root_values, requestedOutputShapesWithOutputs);
+
+    if (accumulatesIntoGradOutputs(backward_config)) {
+        validateBackwardAccumulationOutputs(backward_config, inputs, preallocated_outputs, effectiveRequestedOutputShapes);
+    }
+
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(compile_root_values);
+
+    std::unordered_map<uint32_t, Tensor> values =
+        accumulatesIntoGradOutputs(backward_config) ? compile_root_values : bindRootInputs(inputs);
+
+    std::unordered_map<std::string, Tensor> preallocated_final_outputs_by_name = preallocated_outputs;
 
     std::vector<StampedExecutionStage> stampedStages;
     stampedStages.reserve(compiled_outputs->stages.size());
@@ -1628,10 +1935,15 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         }
                     }
 
-                    TensorDescriptor outputDescriptor(
-                        stage.flat->output_dtypes[output_idx],
-                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims);
-                    stageOutputs.emplace_back(outputPlacement, outputDescriptor);
+                    const std::vector<uint64_t>& output_dims =
+                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims;
+                    auto preallocated_it = preallocated_final_outputs_by_name.find(produced.name);
+                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                        stageOutputs.push_back(preallocated_it->second);
+                    } else {
+                        TensorDescriptor outputDescriptor(stage.flat->output_dtypes[output_idx], output_dims);
+                        stageOutputs.emplace_back(outputPlacement, outputDescriptor);
+                    }
                 }
             } else {
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
@@ -1649,10 +1961,15 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         }
                     }
 
-                    TensorDescriptor outputDescriptor(
-                        stage.flat->output_dtypes[output_idx],
-                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims);
-                    stageOutputs.emplace_back(outputPlacement, outputDescriptor);
+                    const std::vector<uint64_t>& output_dims =
+                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims;
+                    auto preallocated_it = preallocated_final_outputs_by_name.find(produced.name);
+                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                        stageOutputs.push_back(preallocated_it->second);
+                    } else {
+                        TensorDescriptor outputDescriptor(stage.flat->output_dtypes[output_idx], output_dims);
+                        stageOutputs.emplace_back(outputPlacement, outputDescriptor);
+                    }
                 }
             }
 
@@ -1697,9 +2014,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
 
             Tensor& reductionInput = stageInputs[0];
-            auto requested_it = requestedOutputShapes.find(stage.outputs[0].name);
+            auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[0].name);
             std::vector<uint64_t> requested_shape;
-            if (requested_it != requestedOutputShapes.end())
+            if (requested_it != effectiveRequestedOutputShapes.end())
                 requested_shape = requested_it->second;
             std::shared_ptr<StampedReduction> stamped = stampReduction(stage.reduction, reductionInput, stream, requested_shape);
 
@@ -1718,9 +2035,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
 
             Tensor& reductionInput = stageInputs[0];
-            auto requested_it = requestedOutputShapes.find(stage.outputs[0].name);
+            auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[0].name);
             std::vector<uint64_t> requested_shape;
-            if (requested_it != requestedOutputShapes.end())
+            if (requested_it != effectiveRequestedOutputShapes.end())
                 requested_shape = requested_it->second;
             std::shared_ptr<StampedArgMinMax> stamped = stampArgMinMax(stage.arg_minmax, reductionInput, stream, requested_shape);
 
@@ -1768,6 +2085,28 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const Stream& stream,
+                                          const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    if (accumulatesIntoGradOutputs(backward_config)) {
+        throw std::runtime_error(
+            "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
+    }
+    static const std::unordered_map<std::string, Tensor> empty_outputs;
+    return stamp(inputs, empty_outputs, stream, requestedOutputShapes);
+}
+
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, Tensor>& outputs,
+                                          const Stream& stream,
+                                          const std::vector<uint64_t>& requestedOutputShape) const {
+    std::unordered_map<std::string, std::vector<uint64_t>> requested;
+    if (!requestedOutputShape.empty()) {
+        requested["output"] = requestedOutputShape;
+    }
+    return stamp(inputs, outputs, stream, requested);
+}
+
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
     std::unordered_map<std::string, std::vector<uint64_t>> requested;
     if (!requestedOutputShape.empty()) {
@@ -1777,9 +2116,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {
-    if (root_inputs.size() != 1) {
+    if (externalRootInputCount(root_inputs, backward_config) != 1) {
         throw std::runtime_error("FusedEquation::run was only passed a single input, but this equation requires " +
-                                 std::to_string(root_inputs.size()) +
+                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
                                  " inputs. "
                                  "Pass a dict of name -> PhysicalTensor of inputs to run it.");
     }
@@ -1804,9 +2143,9 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, T
 }
 
 void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const {
-    if (root_inputs.size() != 1) {
+    if (externalRootInputCount(root_inputs, backward_config) != 1) {
         throw std::runtime_error("FusedEquation::run was only passed a single input, but this equation requires " +
-                                 std::to_string(root_inputs.size()) +
+                                 std::to_string(externalRootInputCount(root_inputs, backward_config)) +
                                  " inputs. "
                                  "Pass a dict of name -> PhysicalTensor of inputs to run it.");
     }
@@ -1820,7 +2159,7 @@ void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Ten
 void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
                         std::unordered_map<std::string, Tensor>& outputs,
                         Stream& stream) const {
-    const std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs);
+    const std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs, &outputs);
     const std::shared_ptr<PreparedConvenienceRunPlan> prepared_plan = prepareConvenienceRunPlan(root_values);
     const std::shared_ptr<CompiledOutputs>& compiled_outputs = prepared_plan->compiled_outputs;
 

@@ -562,6 +562,22 @@ inputs: dict[str, PhysicalTensor]
     A dict mapping input names to tensors
 )nbdoc");
 
+    fused_equation.def("stamp",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const std::unordered_map<std::string, Tensor>&,
+                                         const Stream&,
+                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
+                       "inputs"_a,
+                       "preallocated_outputs"_a,
+                       "stream"_a,
+                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+                       R"nbdoc(
+Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
+
+inputs: dict[str, PhysicalTensor]
+    A dict mapping input names to tensors
+)nbdoc");
+
     fused_equation.def("run",
                        nb::overload_cast<const Tensor&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
                        "input"_a,
@@ -617,12 +633,16 @@ outputs: dict[str, PhysicalTensor]
 
     fused_equation.def(
         "compile_backward",
-        [](const FusedEquation& self, const std::vector<std::string>& wrt_names, std::optional<std::string> error_input_name) {
+        [](const FusedEquation& self,
+           const std::vector<std::string>& wrt_names,
+           std::optional<std::string> error_input_name,
+           bool accumulate_grad_outputs) {
             nb::gil_scoped_release release;
-            return self.compileBackward(wrt_names, error_input_name);
+            return self.compileBackward(wrt_names, error_input_name, accumulate_grad_outputs);
         },
         "wrt_names"_a = std::vector<std::string>{},
         "error_input_name"_a.none() = nb::none(),
+        "accumulate_grad_outputs"_a = false,
         R"nbdoc(
 Compile a backward equation for a single-output forward equation.
 
@@ -644,14 +664,16 @@ Args:
         "compile_backward",
         [](const FusedEquation& self,
            const std::vector<std::string>& wrt_names,
-           const std::unordered_map<std::string, std::string>& error_output_name_to_error_input_name) {
+           const std::unordered_map<std::string, std::string>& error_output_name_to_error_input_name,
+           bool accumulate_grad_outputs) {
             if (error_output_name_to_error_input_name.size() == 0)
                 throw std::runtime_error("Cannot compute backward expression with no error inputs.");
             nb::gil_scoped_release release;
-            return self.compileBackward(wrt_names, error_output_name_to_error_input_name);
+            return self.compileBackward(wrt_names, error_output_name_to_error_input_name, accumulate_grad_outputs);
         },
         "wrt_names"_a,
         "error_output_name_to_error_input_name"_a,
+        "accumulate_grad_outputs"_a = false,
         R"nbdoc(
 Compile a backward equation for a multi-output forward equation.
 
