@@ -1978,3 +1978,386 @@ def test_compile_backward_reduce_norm1_zero_rule_explicit_upstream_numerical(dty
 
     assert got.shape == expected["x_grad"].shape
     _assert_close(got, expected["x_grad"], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_accumulate_grad_outputs_run_distinguishes_overwrite_and_accumulate_numerical(
+        dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    upstream_name = "__grad_output"
+
+    out = (x * y) + ex.exp(x) - ex.ln(y)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq_overwrite = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=False,
+    )
+    bwd_eq_accumulate = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=True,
+    )
+
+    assert bwd_eq_overwrite.output_names() == ["x_grad", "y_grad"]
+    assert bwd_eq_accumulate.output_names() == ["x_grad", "y_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+
+    x_np = np.array([[1.0, 2.0, 3.0], [1.5, 2.5, 3.5]], dtype=np.float32).astype(storage_dtype)
+    y_np = np.array([[2.5, 3.5, 4.0], [1.75, 2.25, 2.75]], dtype=np.float32).astype(storage_dtype)
+    grad_np = np.array([[0.5, -1.0, 0.25], [1.5, -0.75, 2.0]], dtype=np.float32).astype(storage_dtype)
+
+    prefill_x_grad_np = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]], dtype=np.float32).astype(storage_dtype)
+    prefill_y_grad_np = np.array([[-3.0, -2.0, -1.0], [1.0, 2.0, 3.0]], dtype=np.float32).astype(storage_dtype)
+
+    x_ref = x_np.astype(np.float32)
+    y_ref = y_np.astype(np.float32)
+    grad_ref = grad_np.astype(np.float32)
+    prefill_x_ref = prefill_x_grad_np.astype(np.float32)
+    prefill_y_ref = prefill_y_grad_np.astype(np.float32)
+
+    computed = {
+        "x_grad": grad_ref * (y_ref + np.exp(x_ref)),
+        "y_grad": grad_ref * (x_ref - (1.0 / y_ref)),
+    }
+
+    expected_overwrite = {
+        "x_grad": computed["x_grad"].astype(storage_dtype),
+        "y_grad": computed["y_grad"].astype(storage_dtype),
+    }
+
+    expected_accumulate = {
+        "x_grad": (prefill_x_ref + computed["x_grad"]).astype(storage_dtype),
+        "y_grad": (prefill_y_ref + computed["y_grad"]).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    overwrite_outputs_gpu = {
+        "x_grad": _host_to_gpu(prefill_x_grad_np, dtype, stream),
+        "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
+    }
+    accumulate_outputs_gpu = {
+        "x_grad": _host_to_gpu(prefill_x_grad_np, dtype, stream),
+        "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
+    }
+
+    bwd_eq_overwrite.run(inputs_gpu, overwrite_outputs_gpu, stream)
+    bwd_eq_accumulate.run(inputs_gpu, accumulate_outputs_gpu, stream)
+
+    for name in bwd_eq_overwrite.output_names():
+        out_host = _cpu_tensor(list(overwrite_outputs_gpu[name].dimensions), dtype)
+        out_host.copy_from_async(overwrite_outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+        assert got.shape == expected_overwrite[name].shape
+        _assert_close(got, expected_overwrite[name], dtype)
+
+    for name in bwd_eq_accumulate.output_names():
+        out_host = _cpu_tensor(list(accumulate_outputs_gpu[name].dimensions), dtype)
+        out_host.copy_from_async(accumulate_outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+        assert got.shape == expected_accumulate[name].shape
+        _assert_close(got, expected_accumulate[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_multi_output_accumulate_grad_outputs_run_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+
+    outs = ex.outputs({
+        "prod": x * y,
+        "row_sum": ex.reduce_sum(x, axis=1, squeeze=[1]),
+    })
+
+    fwd_eq = ex.compile(outs, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_output_name_to_error_input_name={
+            "prod": "__grad_prod",
+            "row_sum": "__grad_row_sum",
+        },
+        accumulate_grad_outputs=True,
+    )
+    assert bwd_eq.output_names() == ["x_grad", "y_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32).astype(storage_dtype)
+    y_np = np.array([[0.5, 1.5, -2.0], [2.0, -1.0, 0.25]], dtype=np.float32).astype(storage_dtype)
+    grad_prod_np = np.array([[1.0, -0.5, 2.0], [0.25, 1.5, -1.0]], dtype=np.float32).astype(storage_dtype)
+    grad_row_sum_np = np.array([2.0, -3.0], dtype=np.float32).astype(storage_dtype)
+
+    prefill_x_grad_np = np.array([[5.0, 4.0, 3.0], [2.0, 1.0, 0.0]], dtype=np.float32).astype(storage_dtype)
+    prefill_y_grad_np = np.array([[-1.0, -2.0, -3.0], [1.0, 2.0, 3.0]], dtype=np.float32).astype(storage_dtype)
+
+    x_ref = x_np.astype(np.float32)
+    y_ref = y_np.astype(np.float32)
+    grad_prod_ref = grad_prod_np.astype(np.float32)
+    grad_row_sum_ref = grad_row_sum_np.astype(np.float32)
+    prefill_x_ref = prefill_x_grad_np.astype(np.float32)
+    prefill_y_ref = prefill_y_grad_np.astype(np.float32)
+
+    computed = {
+        "x_grad": grad_prod_ref * y_ref + grad_row_sum_ref[:, None],
+        "y_grad": grad_prod_ref * x_ref,
+    }
+
+    expected = {
+        "x_grad": (prefill_x_ref + computed["x_grad"]).astype(storage_dtype),
+        "y_grad": (prefill_y_ref + computed["y_grad"]).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        "__grad_prod": _host_to_gpu(grad_prod_np, dtype, stream),
+        "__grad_row_sum": _host_to_gpu(grad_row_sum_np, dtype, stream),
+    }
+    outputs_gpu = {
+        "x_grad": _host_to_gpu(prefill_x_grad_np, dtype, stream),
+        "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
+    }
+
+    bwd_eq.run(inputs_gpu, outputs_gpu, stream)
+
+    for name in bwd_eq.output_names():
+        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), dtype)
+        out_host.copy_from_async(outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_accumulate_grad_outputs_stamp_requires_outputs(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    upstream_name = "__grad_output"
+
+    out = (x * y) + ex.exp(x)
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=True,
+    )
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32).astype(storage_dtype)
+    y_np = np.array([[0.5, 1.5], [2.0, 2.5]], dtype=np.float32).astype(storage_dtype)
+    grad_np = np.array([[1.0, -0.5], [0.25, 2.0]], dtype=np.float32).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bwd_eq.stamp(inputs_gpu, stream)
+
+    msg = str(excinfo.value).lower()
+    assert "accumulate" in msg or "gradient output" in msg or "caller-provided" in msg
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_accumulate_grad_outputs_stamp_uses_provided_accumulators_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    upstream_name = "__grad_output"
+
+    out = (x * y) + ex.exp(x) - ex.ln(y)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=True,
+    )
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+
+    x_np = np.array([[1.0, 2.0, 3.0], [1.5, 2.5, 3.5]], dtype=np.float32).astype(storage_dtype)
+    y_np = np.array([[2.5, 3.5, 4.0], [1.75, 2.25, 2.75]], dtype=np.float32).astype(storage_dtype)
+    grad_np = np.array([[0.5, -1.0, 0.25], [1.5, -0.75, 2.0]], dtype=np.float32).astype(storage_dtype)
+
+    prefill_x_grad_np = np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]], dtype=np.float32).astype(storage_dtype)
+    prefill_y_grad_np = np.array([[-3.0, -2.0, -1.0], [1.0, 2.0, 3.0]], dtype=np.float32).astype(storage_dtype)
+
+    x_ref = x_np.astype(np.float32)
+    y_ref = y_np.astype(np.float32)
+    grad_ref = grad_np.astype(np.float32)
+    prefill_x_ref = prefill_x_grad_np.astype(np.float32)
+    prefill_y_ref = prefill_y_grad_np.astype(np.float32)
+
+    expected = {
+        "x_grad": (prefill_x_ref + grad_ref * (y_ref + np.exp(x_ref))).astype(storage_dtype),
+        "y_grad": (prefill_y_ref + grad_ref * (x_ref - (1.0 / y_ref))).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+    outputs_gpu = {
+        "x_grad": _host_to_gpu(prefill_x_grad_np, dtype, stream),
+        "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, outputs_gpu, stream)
+    stamped.run()
+
+    for name in bwd_eq.output_names():
+        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), dtype)
+        out_host.copy_from_async(outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_shape():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    y = ex.input("y")
+    upstream_name = "__grad_output"
+
+    out = x * y
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=True,
+    )
+
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    y_np = np.array([[0.5, 1.5, -2.0], [2.0, -1.0, 0.25]], dtype=np.float32)
+    grad_np = np.array([[1.0, -0.5, 2.0], [0.25, 1.5, -1.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    wrong_x_grad_np = np.zeros((2, 4), dtype=np.float32)  # incompatible with x shape (2, 3)
+    correct_y_grad_np = np.zeros_like(y_np, dtype=np.float32)
+
+    outputs_gpu = {
+        "x_grad": _host_to_gpu(wrong_x_grad_np, dtype, stream),
+        "y_grad": _host_to_gpu(correct_y_grad_np, dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bwd_eq.stamp(inputs_gpu, outputs_gpu, stream)
+
+    msg = str(excinfo.value).lower()
+    assert "dimension" in msg or "incompatible" in msg or "shape" in msg
+
+
+@pytest.mark.cuda
+def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_dtype():
+    input_dtype = thor.DataType.fp16
+    wrong_output_dtype = thor.DataType.fp32
+
+    x = ex.input("x")
+    y = ex.input("y")
+    upstream_name = "__grad_output"
+
+    out = x + y
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=True,
+    )
+
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float16)
+    y_np = np.array([[0.5, 1.5], [2.0, 2.5]], dtype=np.float16)
+    grad_np = np.array([[1.0, -0.5], [0.25, 2.0]], dtype=np.float16)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, input_dtype, stream),
+        "y": _host_to_gpu(y_np, input_dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, input_dtype, stream),
+    }
+
+    wrong_x_grad_np = np.zeros_like(x_np, dtype=np.float32)
+    correct_y_grad_np = np.zeros_like(y_np, dtype=np.float16)
+
+    outputs_gpu = {
+        "x_grad": _host_to_gpu(wrong_x_grad_np, wrong_output_dtype, stream),
+        "y_grad": _host_to_gpu(correct_y_grad_np, input_dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bwd_eq.stamp(inputs_gpu, outputs_gpu, stream)
+
+    msg = str(excinfo.value).lower()
+    assert "dtype" in msg
+
+
+@pytest.mark.cuda
+def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_placement():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    y = ex.input("y")
+    upstream_name = "__grad_output"
+
+    out = x - y
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(
+        ["x", "y"],
+        error_input_name=upstream_name,
+        accumulate_grad_outputs=True,
+    )
+
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    y_np = np.array([[0.5, 1.5], [2.0, 2.5]], dtype=np.float32)
+    grad_np = np.array([[1.0, -0.5], [0.25, 2.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    cpu_x_grad = _cpu_tensor(list(x_np.shape), dtype)
+    cpu_x_grad.numpy()[...] = 0
+    gpu_y_grad = _host_to_gpu(np.zeros_like(y_np, dtype=np.float32), dtype, stream)
+
+    outputs = {
+        "x_grad": cpu_x_grad,
+        "y_grad": gpu_y_grad,
+    }
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bwd_eq.stamp(inputs_gpu, outputs, stream)
+
+    msg = str(excinfo.value).lower()
+    assert "placement" in msg
