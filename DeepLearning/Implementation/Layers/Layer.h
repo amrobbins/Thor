@@ -166,6 +166,15 @@ class Layer {
 
     virtual bool hasFeatureInput() { return true; }
 
+    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError) {
+        // backPropagateError allows the previous layer to specify that it does not support back propagation,
+        // inferenceOnly means that even though back propagation may be supported, we are not using it since we are not training.
+        if (backPropagateError && !isInferenceOnly())
+            return featureInput.get().clone();
+        else
+            return Optional<Tensor>::empty();
+    }
+
     virtual Optional<Tensor> connectToPreviousLayer(
         Layer *previousLayer, Optional<Tensor> featureInput, Stream stream, bool backPropagateError, int loaderConnectionType = 0) {
         assert(!compiled);
@@ -178,12 +187,9 @@ class Layer {
         this->previousLayer = previousLayer;
         this->stream = stream;
         this->featureInput = featureInput;
-        if (backPropagateError && !isInferenceOnly())
-            errorOutput = featureInput.get().clone();
-        else
-            errorOutput = Optional<Tensor>::empty();
+        this->errorOutput = createErrorOutputTensor(backPropagateError);
 
-        return errorOutput;
+        return this->errorOutput;
     }
 
     // For situations where the error input should just pass through to the error output,

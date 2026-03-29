@@ -127,6 +127,14 @@ struct PhysicalExpression {
     uint32_t numInputs() const { return static_cast<uint32_t>(inputs.size()); }
 
     uint32_t getOrCreateInputSlot(const std::string& name);
+
+    std::set<std::string> getInputNames() const {
+        std::set<std::string> names;
+        for (const auto& in : inputs) {
+            names.insert(in.name);
+        }
+        return names;
+    }
 };
 
 struct PhysicalOutputs {
@@ -164,6 +172,8 @@ class Expression {
     static Stream& getNextHelperStream(uint32_t gpu_num);
 
     Expression(double value);
+
+    std::set<std::string> getInputNames() const;
 
     static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
     static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);

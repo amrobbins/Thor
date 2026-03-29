@@ -56,6 +56,7 @@ A Network that contains layers. FIXME.
            bool inference_only,
            std::vector<int32_t> forced_devices,
            uint32_t forced_num_stamps_per_gpu) {
+            nb::gil_scoped_release release;
             std::vector<Event> init_done_events;
             shared_ptr<PlacedNetwork> placedNetwork =
                 self.place(batch_size, init_done_events, inference_only, forced_devices, forced_num_stamps_per_gpu);

@@ -76,6 +76,8 @@ bool Parameter::isTrainable() const { return trainable; }
 bool Parameter::isTrainingEnabled() const { return isTrainable() && trainingEnabled; }
 void Parameter::setTrainingEnabled(bool enabled) {
     assert(isTrainable());
+
+    throw runtime_error("Toggling parameter trainabilty on/off is not yet supported.");
     trainingEnabled = enabled;
 }
 
@@ -109,6 +111,8 @@ std::shared_ptr<Parameter> Parameter::Builder::build() {
 Parameter::Builder &Parameter::Builder::name(const std::string &_name) {
     assert(this->_name.empty());
     assert(!_name.empty());
+    if (_name.length() >= 2 && _name[0] == '_' && _name[0] == '_')
+        throw runtime_error("Parameter names cannot start with __ that is reserved. Parameter name " + _name + " is illegal.");
     this->_name = _name;
     return *this;
 }

@@ -617,56 +617,81 @@ outputs: dict[str, PhysicalTensor]
 
     fused_equation.def(
         "compile_backward",
-        [](const FusedEquation& self, const std::vector<std::string>& wrt_names, std::optional<std::string> upstream_input_name) {
+        [](const FusedEquation& self, const std::vector<std::string>& wrt_names, std::optional<std::string> error_input_name) {
             nb::gil_scoped_release release;
-            return self.compileBackward(wrt_names, upstream_input_name);
+            return self.compileBackward(wrt_names, error_input_name);
         },
         "wrt_names"_a = std::vector<std::string>{},
-        "upstream_input_name"_a.none() = nb::none(),
+        "error_input_name"_a.none() = nb::none(),
         R"nbdoc(
 Compile a backward equation for a single-output forward equation.
 
-By default, phase 1 seeds the backward pass with an implicit upstream gradient
-of 1. For non-scalar outputs, that means the resulting gradients are with
-respect to the sum of the output tensor elements.
-
-Pass ``upstream_input_name`` to make the upstream gradient explicit instead.
-The compiled backward equation will then expect an additional input tensor with
-that name whose shape is compatible with the forward output. A common choice is
-``"__grad_output"``.
+The compiled backward equation expects an additional input tensor named by
+error_input_name, whose shape is compatible with the forward output.
 
 Args:
     wrt_names: list[str]
         Input names to differentiate with respect to. If omitted, all forward
-        root inputs are differentiated.
-    upstream_input_name: str | None
-        Optional name for an explicit upstream-gradient input tensor. If None,
-        phase 1 uses the legacy implicit seed of 1.
+        root inputs are differentiated and need to be supplied to the backward
+        expression.
+    error_input_name: str | None
+        Name for the upstream-gradient input tensor.
+        I.e. the incoming error gradient (for the backward computation) from the
+        layer downstream in the forward direction.
 )nbdoc");
 
     fused_equation.def(
         "compile_backward",
         [](const FusedEquation& self,
            const std::vector<std::string>& wrt_names,
-           const std::unordered_map<std::string, std::string>& upstream_input_names_by_output) {
+           const std::unordered_map<std::string, std::string>& error_output_name_to_error_input_name) {
+            if (error_output_name_to_error_input_name.size() == 0)
+                throw std::runtime_error("Cannot compute backward expression with no error inputs.");
             nb::gil_scoped_release release;
-            return self.compileBackward(wrt_names, upstream_input_names_by_output);
+            return self.compileBackward(wrt_names, error_output_name_to_error_input_name);
         },
         "wrt_names"_a,
-        "upstream_input_names_by_output"_a,
+        "error_output_name_to_error_input_name"_a,
         R"nbdoc(
 Compile a backward equation for a multi-output forward equation.
 
 This overload makes the upstream gradient explicit for each named forward
 output. The compiled backward equation will expect one additional input tensor
-per entry in ``upstream_input_names_by_output``.
+per entry in ``error_output_name_to_error_input_name``.
 
 Args:
     wrt_names: list[str]
         Input names to differentiate with respect to.
-    upstream_input_names_by_output: dict[str, str]
+    error_output_name_to_error_input_name: dict[str, str]
         Mapping from forward output name to the input name that should carry the
         corresponding upstream gradient tensor.
+
+For example:
+
+bwd = fwd.compile_backward(
+    ["x", "w"],
+    {
+        "main": "__grad_main",
+        "aux": "__grad_aux",
+    },
+)
+
+Then the backward equation will supply x_grad and w_grad as outputs.
+
+In the case that w is frozen and you don't want the gradient with respect to w,
+you would instead do:
+
+bwd = fwd.compile_backward(
+    ["x"],
+    {
+        "main": "__grad_main",
+        "aux": "__grad_aux",
+    },
+)
+
+Then the backward equation will only supply x_grad as an ouput. When either
+__grad_main or __grad_aux does not participate in the gradient computation
+for x, the unused tensor will not be accessed - it will be ignored in that case.
 )nbdoc");
 
     fused_equation.def("output_names",
