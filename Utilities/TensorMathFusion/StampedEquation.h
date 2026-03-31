@@ -89,7 +89,7 @@ struct BuiltReduction {
 class StampedEquation {
    public:
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
-                    const std::vector<Tensor>& inputs,
+                    const std::vector<RuntimeInputValue>& inputs,
                     const std::vector<Tensor>& outputs,
                     const Stream& stream)
         : compiledEquation(std::move(compiledEquation)), inputs(inputs), outputs(outputs), stream(stream) {}
@@ -101,8 +101,10 @@ class StampedEquation {
         if (!outputs.empty()) {
             return outputs[0].getPlacement().getDeviceNum();
         }
-        if (!inputs.empty()) {
-            return inputs[0].getPlacement().getDeviceNum();
+        for (const RuntimeInputValue& input : inputs) {
+            if (std::holds_alternative<Tensor>(input)) {
+                return std::get<Tensor>(input).getPlacement().getDeviceNum();
+            }
         }
         throw std::runtime_error("StampedEquation::gpuNum() requires at least one input or output tensor.");
     }
@@ -136,7 +138,7 @@ class StampedEquation {
 
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
-    std::vector<Tensor> inputs;
+    std::vector<RuntimeInputValue> inputs;
     std::vector<Tensor> outputs;
     Stream stream;
 };

@@ -17,24 +17,54 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
 
+static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
+
+static const Tensor& runtimeInputTensor(const RuntimeInputValue& value) {
+    if (!std::holds_alternative<Tensor>(value)) {
+        throw std::runtime_error("Expected tensor runtime input.");
+    }
+    return std::get<Tensor>(value);
+}
+
+static std::vector<uint64_t> runtimeInputDims(const RuntimeInputValue& value) {
+    if (std::holds_alternative<Tensor>(value)) {
+        return std::get<Tensor>(value).getDimensions();
+    }
+    return {};
+}
+
+static DataType runtimeInputDType(const RuntimeInputValue& value) {
+    if (std::holds_alternative<Tensor>(value)) {
+        return std::get<Tensor>(value).getDataType();
+    }
+    return DataType::FP32;
+}
+
+static const Optional<TensorPlacement> runtimeInputPlacementOrNull(const RuntimeInputValue& value) {
+    if (std::holds_alternative<Tensor>(value)) {
+        return std::get<Tensor>(value).getPlacement();
+    }
+    return Optional<TensorPlacement>::empty();
+}
+
 static RuntimeDTypeKey makeRuntimeDTypeKey(const std::vector<NamedInput>& root_inputs,
-                                           const std::unordered_map<uint32_t, Tensor>& root_values) {
+                                           const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     RuntimeDTypeKey key;
     key.root_input_dtypes.resize(root_inputs.size());
 
     for (const NamedInput& input : root_inputs) {
         auto it = root_values.find(input.slot);
         if (it == root_values.end()) {
-            throw std::runtime_error("Missing bound tensor for root input slot " + std::to_string(input.slot) + ".");
+            throw std::runtime_error("Missing bound runtime input for root input slot " + std::to_string(input.slot) + ".");
         }
-        key.root_input_dtypes[input.slot] = it->second.getDataType();
+        key.root_input_dtypes[input.slot] = runtimeInputDType(it->second);
     }
 
     return key;
 }
 
 static RuntimeShapeKey makeRuntimeShapeKey(const std::vector<NamedInput>& root_inputs,
-                                           const std::unordered_map<uint32_t, Tensor>& root_values) {
+                                           const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     RuntimeShapeKey key;
     key.dtype_key = makeRuntimeDTypeKey(root_inputs, root_values);
     key.root_input_dims.resize(root_inputs.size());
@@ -42,9 +72,9 @@ static RuntimeShapeKey makeRuntimeShapeKey(const std::vector<NamedInput>& root_i
     for (const NamedInput& input : root_inputs) {
         auto it = root_values.find(input.slot);
         if (it == root_values.end()) {
-            throw std::runtime_error("Missing bound tensor for root input slot " + std::to_string(input.slot) + ".");
+            throw std::runtime_error("Missing bound runtime input for root input slot " + std::to_string(input.slot) + ".");
         }
-        key.root_input_dims[input.slot] = it->second.getDimensions();
+        key.root_input_dims[input.slot] = runtimeInputDims(it->second);
     }
 
     return key;
@@ -111,7 +141,7 @@ static Optional<DataType> preferredBackwardGradBufferDType(const BackwardEquatio
     }
 
     for (const ExprNode& node : backward_config.forward_outputs_template.expr->nodes) {
-        if (node.op == ExprOp::INPUT && node.input_slot == slot) {
+        if ((node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) && node.input_slot == slot) {
             if (node.backward_output_dtype.isPresent()) {
                 return node.backward_output_dtype;
             }
@@ -329,7 +359,7 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
 
     const ExprNode& node = expr.nodes[node_idx];
 
-    if (node.op == ExprOp::INPUT) {
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
         slots.insert(node.input_slot);
         return;
     }
@@ -504,6 +534,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 node_dims[i] = stage_input_dims[node.input_slot];
                 break;
             }
+            case ExprOp::RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
                 node_dims[i] = {};
                 break;
@@ -634,11 +665,11 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
 
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
                                                              size_t output_idx,
-                                                             const std::vector<Tensor>& stage_inputs) {
+                                                             const std::vector<RuntimeInputValue>& stage_inputs) {
     std::vector<std::vector<uint64_t>> stage_input_dims;
     stage_input_dims.reserve(stage_inputs.size());
-    for (const Tensor& input : stage_inputs) {
-        stage_input_dims.push_back(input.getDimensions());
+    for (const RuntimeInputValue& input : stage_inputs) {
+        stage_input_dims.push_back(runtimeInputDims(input));
     }
     return resolveOutputDimsForStageOutput(stage, output_idx, stage_input_dims);
 }
@@ -658,13 +689,22 @@ static bool stageHasShapeOnlyOps(const CompiledExecutionStage& stage) {
     }
     return false;
 }
-static TensorPlacement pickStageOutputPlacement(const std::vector<Tensor>& stage_inputs,
-                                                const std::unordered_map<uint32_t, Tensor>& available_values) {
-    if (!stage_inputs.empty()) {
-        return stage_inputs.front().getPlacement();
+static TensorPlacement pickStageOutputPlacement(const std::vector<RuntimeInputValue>& stage_inputs,
+                                                const std::unordered_map<uint32_t, RuntimeInputValue>& available_values) {
+    for (const RuntimeInputValue& input : stage_inputs) {
+        Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(input);
+        if (placement.isPresent()) {
+            return placement;
+        }
     }
     if (!available_values.empty()) {
-        return available_values.begin()->second.getPlacement();
+        for (const auto& [value_id, value] : available_values) {
+            (void)value_id;
+            Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
+            if (placement.isPresent()) {
+                return placement;
+            }
+        }
     }
     throw std::runtime_error("Unable to infer output placement for fused stage with no available tensors.");
 }
@@ -672,7 +712,7 @@ static TensorPlacement pickStageOutputPlacement(const std::vector<Tensor>& stage
 static std::unordered_map<std::string, std::vector<uint64_t>> defaultBackwardRequestedOutputShapes(
     const std::optional<BackwardEquationConfig>& backward_config,
     const std::vector<NamedInput>& root_inputs,
-    const std::unordered_map<uint32_t, Tensor>& root_values,
+    const std::unordered_map<uint32_t, RuntimeInputValue>& root_values,
     const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) {
     std::unordered_map<std::string, std::vector<uint64_t>> effective = requested_output_shapes;
 
@@ -702,14 +742,14 @@ static std::unordered_map<std::string, std::vector<uint64_t>> defaultBackwardReq
             continue;
         }
 
-        effective.emplace(output_name, value_it->second.getDimensions());
+        effective.emplace(output_name, runtimeInputDims(value_it->second));
     }
 
     return effective;
 }
 
 static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stage,
-                                              const std::vector<Tensor>& stage_inputs,
+                                              const std::vector<RuntimeInputValue>& stage_inputs,
                                               const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes,
                                               bool trust_requested_output_shapes,
                                               std::vector<uint64_t>& resolved_output_dims) {
@@ -737,8 +777,14 @@ static bool fusedStageRequiresBroadcastLaunch(const CompiledExecutionStage& stag
         return false;
     }
 
-    std::vector<Tensor> layout_inputs = stage_inputs;
-    const bool requires_broadcast = FusedEquation::resolveLayout(layout_inputs, resolved_output_dims);
+    std::vector<Tensor> layout_inputs;
+    layout_inputs.reserve(stage_inputs.size());
+    for (const RuntimeInputValue& input : stage_inputs) {
+        if (runtimeInputIsTensor(input)) {
+            layout_inputs.push_back(runtimeInputTensor(input));
+        }
+    }
+    const bool requires_broadcast = layout_inputs.empty() ? false : FusedEquation::resolveLayout(layout_inputs, resolved_output_dims);
 
     for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
         std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stage_inputs);
@@ -776,6 +822,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::INPUT: {
             return {{node.input_slot, {node_dims[node_idx]}}};
         }
+        case ExprOp::RUNTIME_SCALAR:
         case ExprOp::SCALAR_FP:
             return {};
         case ExprOp::FILL:
@@ -917,7 +964,7 @@ static std::vector<uint64_t> computeInputPackedStridesForBroadcast(const std::ve
 }
 
 static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
-                                                                        const std::vector<Tensor>& stage_inputs) {
+                                                                        const std::vector<RuntimeInputValue>& stage_inputs) {
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         throw std::runtime_error("buildResolvedBroadcastGroups expects a fused-kernel stage.");
     }
@@ -927,8 +974,8 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
 
     std::vector<std::vector<uint64_t>> stage_input_dims;
     stage_input_dims.reserve(stage_inputs.size());
-    for (const Tensor& input : stage_inputs) {
-        stage_input_dims.push_back(input.getDimensions());
+    for (const RuntimeInputValue& input : stage_inputs) {
+        stage_input_dims.push_back(runtimeInputDims(input));
     }
     const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
 
@@ -967,7 +1014,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             if (slot >= stage_inputs.size()) {
                 throw std::runtime_error("Broadcast group input slot out of range.");
             }
-            std::vector<uint64_t> effective_dims = stage_inputs[slot].getDimensions();
+            std::vector<uint64_t> effective_dims = runtimeInputDims(stage_inputs[slot]);
             auto dims_it = effective_dims_by_slot.find(slot);
             if (dims_it != effective_dims_by_slot.end()) {
                 if (dims_it->second.size() > 1) {
@@ -1092,7 +1139,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
     const std::unordered_map<std::string, Tensor>& inputs) const {
-    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputsForCompilation(inputs);
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs);
     std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
     if (root_values.empty()) {
@@ -1102,8 +1149,8 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
     std::unordered_map<uint32_t, std::vector<uint64_t>> value_dims;
     value_dims.reserve(root_values.size() + compiled_outputs->stages.size());
 
-    for (const auto& [value_id, tensor] : root_values) {
-        value_dims.emplace(value_id, tensor.getDimensions());
+    for (const auto& [value_id, value] : root_values) {
+        value_dims.emplace(value_id, runtimeInputDims(value));
     }
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
@@ -1189,7 +1236,7 @@ EquationSignature FusedEquation::buildSignature(uint32_t num_inputs, int device_
     return sig;
 }
 
-PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, Tensor>& root_values) const {
+PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
     if (!backward_config.has_value()) {
         return outputs_template;
     }
@@ -1206,10 +1253,10 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
             }
             auto it = root_values.find(root_input.slot);
             if (it == root_values.end()) {
-                throw std::runtime_error("Missing bound tensor for backward forward-input shape specialization input: " +
+                throw std::runtime_error("Missing bound runtime input for backward forward-input shape specialization input: " +
                                          forward_input.name);
             }
-            forward_input_dims.emplace(forward_input.name, it->second.getDimensions());
+            forward_input_dims.emplace(forward_input.name, runtimeInputDims(it->second));
             found_name = true;
             break;
         }
@@ -1233,8 +1280,9 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
                                 backward_config->accumulate_grad_outputs);
 }
 
-std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const {
-    std::unordered_map<uint32_t, Tensor> root_values = bindRootInputsForCompilation(namedInputs);
+std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
+                                                                 const std::unordered_map<std::string, float>& scalarInputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(namedInputs, scalarInputs);
 
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::compileForInputs requires at least one bound root input.");
@@ -1243,7 +1291,8 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unor
     return compileForRootValues(root_values);
 }
 
-std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(const std::unordered_map<uint32_t, Tensor>& root_values) const {
+std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
+    const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::compileForRootValues requires at least one bound root input.");
     }
@@ -1281,7 +1330,7 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(const std::
 }
 
 std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRunPlan(
-    const std::unordered_map<uint32_t, Tensor>& root_values) const {
+    const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::prepareConvenienceRunPlan requires at least one bound root input.");
     }
@@ -1309,7 +1358,7 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                                      stage.kindToString(stage.kind) + ". Use stamp(...).run() for staged expressions.");
         }
 
-        std::vector<Tensor> ordered_inputs;
+        std::vector<RuntimeInputValue> ordered_inputs;
         ordered_inputs.reserve(stage.input_value_ids.size());
         for (uint32_t value_id : stage.input_value_ids) {
             auto it = root_values.find(value_id);
@@ -1558,15 +1607,19 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
     return requiresBroadcast;
 }
 
-std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
-                                                                   const std::unordered_map<std::string, Tensor>* namedOutputs) const {
-    std::unordered_map<uint32_t, Tensor> values;
+std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
+    const std::unordered_map<std::string, Tensor>& namedInputs,
+    const std::unordered_map<std::string, float>& scalar_inputs,
+    const std::unordered_map<std::string, Tensor>* namedOutputs) const {
+    std::unordered_map<uint32_t, RuntimeInputValue> values;
     values.reserve(root_inputs.size());
 
     const std::unordered_set<std::string> accumulation_output_names = backwardAccumulationOutputNames(backward_config);
 
     std::unordered_set<std::string> expected_input_set;
     expected_input_set.reserve(root_inputs.size());
+    std::unordered_set<std::string> expected_scalar_input_set;
+    expected_scalar_input_set.reserve(root_inputs.size());
 
     for (const NamedInput& input : root_inputs) {
         const bool bind_from_outputs = namedOutputs != nullptr && accumulation_output_names.contains(input.name);
@@ -1579,12 +1632,21 @@ std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::un
             continue;
         }
 
-        auto input_it = namedInputs.find(input.name);
-        if (input_it == namedInputs.end()) {
-            throw std::runtime_error("Missing required fused equation input: " + input.name);
+        if (input.kind == NamedInput::Kind::Tensor) {
+            auto input_it = namedInputs.find(input.name);
+            if (input_it == namedInputs.end()) {
+                throw std::runtime_error("Missing required fused equation input: " + input.name);
+            }
+            values.emplace(input.slot, input_it->second);
+            expected_input_set.insert(input.name);
+        } else {
+            auto scalar_it = scalar_inputs.find(input.name);
+            if (scalar_it == scalar_inputs.end()) {
+                throw std::runtime_error("Missing required fused equation runtime scalar input: " + input.name);
+            }
+            values.emplace(input.slot, scalar_it->second);
+            expected_scalar_input_set.insert(input.name);
         }
-        values.emplace(input.slot, input_it->second);
-        expected_input_set.insert(input.name);
     }
 
     for (const auto& [name, _] : namedInputs) {
@@ -1592,22 +1654,30 @@ std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputs(const std::un
             throw std::runtime_error("Unexpected input sent to fused equation: " + name);
         }
     }
+    for (const auto& [name, _] : scalar_inputs) {
+        if (!expected_scalar_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected runtime scalar input sent to fused equation: " + name);
+        }
+    }
 
     return values;
 }
 
-std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputsForCompilation(
+std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsForCompilation(
     const std::unordered_map<std::string, Tensor>& namedInputs,
+    const std::unordered_map<std::string, float>& scalar_inputs,
     const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
     if (!accumulatesIntoGradOutputs(backward_config)) {
-        return bindRootInputs(namedInputs);
+        return bindRootInputs(namedInputs, scalar_inputs);
     }
 
-    std::unordered_map<uint32_t, Tensor> values;
+    std::unordered_map<uint32_t, RuntimeInputValue> values;
     values.reserve(root_inputs.size());
 
     std::unordered_set<std::string> expected_input_set;
     expected_input_set.reserve(root_inputs.size());
+    std::unordered_set<std::string> expected_scalar_input_set;
+    expected_scalar_input_set.reserve(root_inputs.size());
 
     std::unordered_map<std::string, uint32_t> root_slot_by_name;
     root_slot_by_name.reserve(root_inputs.size());
@@ -1622,17 +1692,31 @@ std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputsForCompilation
             continue;
         }
 
-        auto it = namedInputs.find(input.name);
-        if (it == namedInputs.end()) {
-            throw std::runtime_error("Missing required fused equation input: " + input.name);
+        if (input.kind == NamedInput::Kind::Tensor) {
+            auto it = namedInputs.find(input.name);
+            if (it == namedInputs.end()) {
+                throw std::runtime_error("Missing required fused equation input: " + input.name);
+            }
+            values.emplace(input.slot, it->second);
+            expected_input_set.insert(input.name);
+        } else {
+            auto it = scalar_inputs.find(input.name);
+            if (it == scalar_inputs.end()) {
+                throw std::runtime_error("Missing required fused equation runtime scalar input: " + input.name);
+            }
+            values.emplace(input.slot, it->second);
+            expected_scalar_input_set.insert(input.name);
         }
-        values.emplace(input.slot, it->second);
-        expected_input_set.insert(input.name);
     }
 
     for (const auto& [name, _] : namedInputs) {
         if (!expected_input_set.contains(name)) {
             throw std::runtime_error("Unexpected input sent to fused equation: " + name);
+        }
+    }
+    for (const auto& [name, _] : scalar_inputs) {
+        if (!expected_scalar_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected runtime scalar input sent to fused equation: " + name);
         }
     }
 
@@ -1664,7 +1748,7 @@ std::unordered_map<uint32_t, Tensor> FusedEquation::bindRootInputsForCompilation
 }
 
 std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                                                              std::vector<Tensor>& inputs,
+                                                              std::vector<RuntimeInputValue>& inputs,
                                                               std::vector<Tensor>& outputs,
                                                               const Stream& stream) const {
     if (!compiledEquation) {
@@ -1684,14 +1768,27 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
     }
 
     for (uint64_t i = 0; i < inputs.size(); ++i) {
-        if (!inputs[i].isInitialized()) {
-            throw std::runtime_error("Input tensor is not initialized.");
-        }
-        if (inputs[i].getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
-            throw std::runtime_error("Input tensor data type mismatch.");
-        }
-        if (inputs[i].getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
-            throw std::runtime_error("Input tensor GPU mismatch.");
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
+            if (!runtimeInputIsTensor(inputs[i])) {
+                throw std::runtime_error("FusedEquation::stampEquation expected tensor input at slot " + std::to_string(i) + ".");
+            }
+            const Tensor& input = runtimeInputTensor(inputs[i]);
+            if (!input.isInitialized()) {
+                throw std::runtime_error("Input tensor is not initialized.");
+            }
+            if (input.getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
+                throw std::runtime_error("Input tensor data type mismatch.");
+            }
+            if (input.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+                throw std::runtime_error("Input tensor GPU mismatch.");
+            }
+        } else {
+            if (!std::holds_alternative<float>(inputs[i])) {
+                throw std::runtime_error("FusedEquation::stampEquation expected runtime scalar input at slot " + std::to_string(i) + ".");
+            }
+            if (compiledEquation->input_dtypes[i] != DataType::FP32) {
+                throw std::runtime_error("Runtime scalar inputs currently require FP32 compiled input dtype.");
+            }
         }
     }
 
@@ -1847,6 +1944,15 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+    return stamp(inputs, empty_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+}
+
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, float>& scalar_inputs,
+                                          const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+                                          const Stream& stream,
+                                          const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
     if (accumulatesIntoGradOutputs(backward_config) && preallocated_outputs.empty()) {
         throw std::runtime_error(
             "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
@@ -1855,9 +1961,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapesWithOutputs =
         mergeRequestedOutputShapesWithProvidedOutputs(preallocated_outputs, requestedOutputShapes);
 
-    std::unordered_map<uint32_t, Tensor> compile_root_values = accumulatesIntoGradOutputs(backward_config)
-                                                                   ? bindRootInputs(inputs, &preallocated_outputs)
-                                                                   : bindRootInputsForCompilation(inputs, requestedOutputShapesWithOutputs);
+    std::unordered_map<uint32_t, RuntimeInputValue> compile_root_values =
+        accumulatesIntoGradOutputs(backward_config) ? bindRootInputs(inputs, scalar_inputs, &preallocated_outputs)
+                                                    : bindRootInputsForCompilation(inputs, scalar_inputs, requestedOutputShapesWithOutputs);
     const auto effectiveRequestedOutputShapes =
         defaultBackwardRequestedOutputShapes(backward_config, root_inputs, compile_root_values, requestedOutputShapesWithOutputs);
 
@@ -1867,23 +1973,21 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(compile_root_values);
 
-    std::unordered_map<uint32_t, Tensor> values =
-        accumulatesIntoGradOutputs(backward_config) ? compile_root_values : bindRootInputs(inputs);
+    std::unordered_map<uint32_t, RuntimeInputValue> values =
+        accumulatesIntoGradOutputs(backward_config) ? compile_root_values : bindRootInputs(inputs, scalar_inputs);
 
     std::unordered_map<std::string, Tensor> preallocated_final_outputs_by_name = preallocated_outputs;
 
     std::vector<StampedExecutionStage> stampedStages;
     stampedStages.reserve(compiled_outputs->stages.size());
 
-    // Maps each produced value_id to the stamped stage index that materializes it.
     std::unordered_map<uint32_t, uint32_t> producer_stage_by_value_id;
     producer_stage_by_value_id.reserve(compiled_outputs->stages.size() * 2);
 
     for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
-        std::vector<Tensor> stageInputs;
+        std::vector<RuntimeInputValue> stageInputs;
         stageInputs.reserve(stage.input_value_ids.size());
 
-        // Collect dependency stage indices from any inputs produced by prior stages.
         std::vector<uint32_t> dependency_stage_indices;
         dependency_stage_indices.reserve(stage.input_value_ids.size());
 
@@ -1920,56 +2024,28 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
             TensorPlacement outputPlacement = pickStageOutputPlacement(stageInputs, values);
 
-            if (!requiresBroadcast) {
-                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-                    const CompiledStageOutput& produced = stage.outputs[output_idx];
-                    std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                const CompiledStageOutput& produced = stage.outputs[output_idx];
+                std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
 
-                    auto requested_it = effectiveRequestedOutputShapes.find(produced.name);
-                    const std::vector<uint64_t>* requested_shape =
-                        (requested_it != effectiveRequestedOutputShapes.end()) ? &requested_it->second : nullptr;
+                auto requested_it = effectiveRequestedOutputShapes.find(produced.name);
+                const std::vector<uint64_t>* requested_shape =
+                    (requested_it != effectiveRequestedOutputShapes.end()) ? &requested_it->second : nullptr;
 
-                    if (requested_shape && !requested_shape->empty()) {
-                        if (!backward_config.has_value() && !(stageInputs.empty() && resolved_output_dims.empty())) {
-                            verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
-                        }
-                    }
-
-                    const std::vector<uint64_t>& output_dims =
-                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims;
-                    auto preallocated_it = preallocated_final_outputs_by_name.find(produced.name);
-                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                        stageOutputs.push_back(preallocated_it->second);
-                    } else {
-                        TensorDescriptor outputDescriptor(stage.flat->output_dtypes[output_idx], output_dims);
-                        stageOutputs.emplace_back(outputPlacement, outputDescriptor);
+                if (requested_shape && !requested_shape->empty()) {
+                    if (!backward_config.has_value() && !(stageInputs.empty() && resolved_output_dims.empty())) {
+                        verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
                     }
                 }
-            } else {
-                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-                    const CompiledStageOutput& produced = stage.outputs[output_idx];
 
-                    std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
-
-                    auto requested_it = effectiveRequestedOutputShapes.find(produced.name);
-                    const std::vector<uint64_t>* requested_shape =
-                        (requested_it != effectiveRequestedOutputShapes.end()) ? &requested_it->second : nullptr;
-
-                    if (requested_shape && !requested_shape->empty()) {
-                        if (!backward_config.has_value() && !(stageInputs.empty() && resolved_output_dims.empty())) {
-                            verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
-                        }
-                    }
-
-                    const std::vector<uint64_t>& output_dims =
-                        (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims;
-                    auto preallocated_it = preallocated_final_outputs_by_name.find(produced.name);
-                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                        stageOutputs.push_back(preallocated_it->second);
-                    } else {
-                        TensorDescriptor outputDescriptor(stage.flat->output_dtypes[output_idx], output_dims);
-                        stageOutputs.emplace_back(outputPlacement, outputDescriptor);
-                    }
+                const std::vector<uint64_t>& output_dims =
+                    (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims;
+                auto preallocated_it = preallocated_final_outputs_by_name.find(produced.name);
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    stageOutputs.push_back(preallocated_it->second);
+                } else {
+                    TensorDescriptor outputDescriptor(stage.flat->output_dtypes[output_idx], output_dims);
+                    stageOutputs.emplace_back(outputPlacement, outputDescriptor);
                 }
             }
 
@@ -2013,7 +2089,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 throw std::runtime_error("Reduction stage expected exactly one input and one output.");
             }
 
-            Tensor& reductionInput = stageInputs[0];
+            Tensor reductionInput = runtimeInputTensor(stageInputs[0]);
             auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[0].name);
             std::vector<uint64_t> requested_shape;
             if (requested_it != effectiveRequestedOutputShapes.end())
@@ -2034,7 +2110,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
             }
 
-            Tensor& reductionInput = stageInputs[0];
+            Tensor reductionInput = runtimeInputTensor(stageInputs[0]);
             auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[0].name);
             std::vector<uint64_t> requested_shape;
             if (requested_it != effectiveRequestedOutputShapes.end())
@@ -2055,8 +2131,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
             }
 
-            Tensor& reductionInput = stageInputs[0];
-            Tensor& gradOutput = stageInputs[1];
+            Tensor reductionInput = runtimeInputTensor(stageInputs[0]);
+            Tensor gradOutput = runtimeInputTensor(stageInputs[1]);
             std::shared_ptr<StampedReduceMinMaxBackward> stamped =
                 stampReduceMinMaxBackward(stage.reduce_minmax_backward, reductionInput, gradOutput, stream);
 
@@ -2077,7 +2153,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         if (it == values.end()) {
             throw std::runtime_error("Missing final output tensor for output: " + final_output.name);
         }
-        finalOutputsByName.emplace(final_output.name, it->second);
+        finalOutputsByName.emplace(final_output.name, runtimeInputTensor(it->second));
     }
 
     return StampedExecutionPlan(std::move(stampedStages), std::move(finalOutputsByName), stream);
@@ -2086,15 +2162,32 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+    return stamp(inputs, empty_scalar_inputs, stream, requestedOutputShapes);
+}
+
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, float>& scalar_inputs,
+                                          const Stream& stream,
+                                          const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
     if (accumulatesIntoGradOutputs(backward_config)) {
         throw std::runtime_error(
             "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
     }
     static const std::unordered_map<std::string, Tensor> empty_outputs;
-    return stamp(inputs, empty_outputs, stream, requestedOutputShapes);
+    return stamp(inputs, scalar_inputs, empty_outputs, stream, requestedOutputShapes);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, Tensor>& outputs,
+                                          const Stream& stream,
+                                          const std::vector<uint64_t>& requestedOutputShape) const {
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+    return stamp(inputs, empty_scalar_inputs, outputs, stream, requestedOutputShape);
+}
+
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, float>& scalar_inputs,
                                           const std::unordered_map<std::string, Tensor>& outputs,
                                           const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
@@ -2102,17 +2195,25 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     if (!requestedOutputShape.empty()) {
         requested["output"] = requestedOutputShape;
     }
-    return stamp(inputs, outputs, stream, requested);
+    return stamp(inputs, scalar_inputs, outputs, stream, requested);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const Stream& stream,
+                                          const std::vector<uint64_t>& requestedOutputShape) const {
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+    return stamp(inputs, empty_scalar_inputs, stream, requestedOutputShape);
+}
+
+StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const std::unordered_map<std::string, float>& scalar_inputs,
                                           const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
     std::unordered_map<std::string, std::vector<uint64_t>> requested;
     if (!requestedOutputShape.empty()) {
         requested["output"] = requestedOutputShape;
     }
-    return stamp(inputs, stream, requested);
+    return stamp(inputs, scalar_inputs, stream, requested);
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {
@@ -2131,6 +2232,14 @@ void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) con
 }
 
 void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const {
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+    run(inputs, empty_scalar_inputs, output, stream);
+}
+
+void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
+                        const std::unordered_map<std::string, float>& scalar_inputs,
+                        Tensor& output,
+                        Stream& stream) const {
     if (outputs_template.outputs.size() != 1) {
         throw std::runtime_error(
             "FusedEquation::run was only passed a single output, but this equation has multiple named outputs. "
@@ -2139,7 +2248,7 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs, T
 
     const std::string& output_name = outputs_template.outputs[0].name;
     std::unordered_map<std::string, Tensor> output_map = {{output_name, output}};
-    run(inputs, output_map, stream);
+    run(inputs, scalar_inputs, output_map, stream);
 }
 
 void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const {
@@ -2159,7 +2268,15 @@ void FusedEquation::run(const Tensor& input, std::unordered_map<std::string, Ten
 void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
                         std::unordered_map<std::string, Tensor>& outputs,
                         Stream& stream) const {
-    const std::unordered_map<uint32_t, Tensor> root_values = bindRootInputs(inputs, &outputs);
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+    run(inputs, empty_scalar_inputs, outputs, stream);
+}
+
+void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
+                        const std::unordered_map<std::string, float>& scalar_inputs,
+                        std::unordered_map<std::string, Tensor>& outputs,
+                        Stream& stream) const {
+    const std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputs(inputs, scalar_inputs, &outputs);
     const std::shared_ptr<PreparedConvenienceRunPlan> prepared_plan = prepareConvenienceRunPlan(root_values);
     const std::shared_ptr<CompiledOutputs>& compiled_outputs = prepared_plan->compiled_outputs;
 
@@ -2167,7 +2284,6 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         throw std::runtime_error("Expression has no execution stages.");
     }
 
-    // Verify caller provided every expected final output.
     std::unordered_set<std::string> expected_output_names(prepared_plan->expected_output_names_in_order.begin(),
                                                           prepared_plan->expected_output_names_in_order.end());
 
@@ -2178,7 +2294,6 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     }
 
-    // Verify caller did not provide unexpected outputs.
     for (const auto& [name, tensor] : outputs) {
         (void)tensor;
         if (!expected_output_names.contains(name)) {
@@ -2196,13 +2311,29 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     }
 
-    // Infer GPU number for helper-stream selection.
-    const int32_t gpu_num = root_values.begin()->second.getPlacement().getDeviceNum();
-
-    for (const auto& [value_id, tensor] : root_values) {
+    int32_t gpu_num = -1;
+    for (const auto& [value_id, value] : root_values) {
         (void)value_id;
-        if (tensor.getPlacement().getDeviceNum() != gpu_num) {
-            throw std::runtime_error("FusedEquation::run requires all root inputs to be on the same GPU.");
+        Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
+        if (placement.isPresent()) {
+            gpu_num = placement.get().getDeviceNum();
+            break;
+        }
+    }
+    if (gpu_num < 0) {
+        if (outputs.empty()) {
+            throw std::runtime_error("FusedEquation::run requires at least one tensor input or output.");
+        }
+        gpu_num = outputs.begin()->second.getPlacement().getDeviceNum();
+    }
+
+    for (const auto& [value_id, value] : root_values) {
+        (void)value_id;
+        Optional<TensorPlacement> placement = runtimeInputPlacementOrNull(value);
+        if (placement.isPresent()) {
+            if (placement.get().getDeviceNum() != gpu_num) {
+                throw std::runtime_error("FusedEquation::run requires all root tensor inputs to be on the same GPU.");
+            }
         }
     }
     for (const auto& [name, tensor] : outputs) {
@@ -2214,7 +2345,7 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
 
     auto runStageOnStream = [&](const CompiledExecutionStage& stage,
                                 const PreparedConvenienceRunStage& prepared_stage,
-                                const std::vector<Tensor>& orderedInputs,
+                                const std::vector<RuntimeInputValue>& orderedInputs,
                                 const std::vector<Tensor>& orderedOutputs,
                                 Stream& launch_stream) {
         if (orderedOutputs.size() != prepared_stage.expected_output_dims.size()) {
@@ -2228,7 +2359,6 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         EquationRunner::run(prepared_stage.compiled_equation, orderedInputs, orderedOutputs, launch_stream);
     };
 
-    // Track helper streams actually used so the caller's stream can join them at the end.
     std::vector<Stream> helper_streams_used;
     helper_streams_used.reserve(compiled_outputs->stages.size());
 
@@ -2238,16 +2368,12 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     };
 
-    // Execute each fused stage. This overload still only permits stages whose inputs
-    // are all root inputs, so legal stages are independent and can be launched on
-    // helper streams without extra inter-stage waits.
-
     for (uint32_t stage_num = 0; stage_num < compiled_outputs->stages.size(); ++stage_num) {
         bool use_helper_streams = (stage_num != 0);
         const CompiledExecutionStage& stage = compiled_outputs->stages[stage_num];
         const PreparedConvenienceRunStage& prepared_stage = prepared_plan->stages[stage_num];
 
-        std::vector<Tensor> orderedInputs;
+        std::vector<RuntimeInputValue> orderedInputs;
         orderedInputs.reserve(stage.input_value_ids.size());
 
         for (uint32_t value_id : stage.input_value_ids) {
@@ -2255,7 +2381,6 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
             if (it == root_values.end()) {
                 throw std::runtime_error("Missing input value for fused equation run.");
             }
-
             orderedInputs.push_back(it->second);
         }
 
@@ -2279,7 +2404,6 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     }
 
-    // Join all helper streams back into the user-provided stream.
     for (Stream& helper_stream : helper_streams_used) {
         stream.waitEvent(helper_stream.putEvent());
     }

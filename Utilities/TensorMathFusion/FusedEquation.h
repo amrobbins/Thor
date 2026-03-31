@@ -164,6 +164,16 @@ class FusedEquation {
                                              const std::vector<uint64_t>& requestedOutputShape = {}) const;
 
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const std::unordered_map<std::string, float>& scalar_inputs,
+                                             const Stream& stream,
+                                             const std::vector<uint64_t>& requestedOutputShape = {}) const;
+
+    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const Stream& stream,
+                                             const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
+
+    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const std::unordered_map<std::string, float>& scalar_inputs,
                                              const Stream& stream,
                                              const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
 
@@ -173,14 +183,34 @@ class FusedEquation {
                                              const std::vector<uint64_t>& requestedOutputShape = {}) const;
 
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const std::unordered_map<std::string, float>& scalar_inputs,
+                                             const std::unordered_map<std::string, Tensor>& outputs,
+                                             const Stream& stream,
+                                             const std::vector<uint64_t>& requestedOutputShape = {}) const;
+
+    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+                                             const Stream& stream,
+                                             const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
+
+    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                             const std::unordered_map<std::string, float>& scalar_inputs,
                                              const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                              const Stream& stream,
                                              const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
 
     void run(const Tensor& input, Tensor& output, Stream& stream) const;
     void run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const;
+    void run(const std::unordered_map<std::string, Tensor>& inputs,
+             const std::unordered_map<std::string, float>& scalar_inputs,
+             Tensor& output,
+             Stream& stream) const;
     void run(const Tensor& input, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const;
     void run(const std::unordered_map<std::string, Tensor>& inputs, std::unordered_map<std::string, Tensor>& outputs, Stream& stream) const;
+    void run(const std::unordered_map<std::string, Tensor>& inputs,
+             const std::unordered_map<std::string, float>& scalar_inputs,
+             std::unordered_map<std::string, Tensor>& outputs,
+             Stream& stream) const;
 
     std::vector<std::string> getOutputNames() const;
 
@@ -212,7 +242,7 @@ class FusedEquation {
     }
 
     [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                                                                 std::vector<Tensor>& inputs,
+                                                                 std::vector<RuntimeInputValue>& inputs,
                                                                  std::vector<Tensor>& outputs,
                                                                  const Stream& stream) const;
 
@@ -228,19 +258,23 @@ class FusedEquation {
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const;
 
-    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs) const;
-    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(const std::unordered_map<uint32_t, Tensor>& root_values) const;
-    [[nodiscard]] PhysicalOutputs buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, Tensor>& root_values) const;
+    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
+                                                                    const std::unordered_map<std::string, float>& scalarInputs = {}) const;
+    [[nodiscard]] std::shared_ptr<CompiledOutputs> compileForRootValues(
+        const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
+    [[nodiscard]] PhysicalOutputs buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
     [[nodiscard]] std::shared_ptr<PreparedConvenienceRunPlan> prepareConvenienceRunPlan(
-        const std::unordered_map<uint32_t, Tensor>& root_values) const;
+        const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const;
 
     [[nodiscard]] static EquationSignature buildSignature(uint32_t num_inputs, int device_num, bool use_fast_math);
 
-    [[nodiscard]] std::unordered_map<uint32_t, Tensor> bindRootInputs(
+    [[nodiscard]] std::unordered_map<uint32_t, RuntimeInputValue> bindRootInputs(
         const std::unordered_map<std::string, Tensor>& namedInputs,
+        const std::unordered_map<std::string, float>& scalar_inputs = {},
         const std::unordered_map<std::string, Tensor>* namedOutputs = nullptr) const;
-    [[nodiscard]] std::unordered_map<uint32_t, Tensor> bindRootInputsForCompilation(
+    [[nodiscard]] std::unordered_map<uint32_t, RuntimeInputValue> bindRootInputsForCompilation(
         const std::unordered_map<std::string, Tensor>& namedInputs,
+        const std::unordered_map<std::string, float>& scalar_inputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes = {}) const;
 
     const PhysicalOutputs outputs_template;

@@ -44,6 +44,8 @@ std::string opName(ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
             return "IN";
+        case ExprOp::RUNTIME_SCALAR:
+            return "RIN";
         case ExprOp::SCALAR_FP:
             return "F32";
         case ExprOp::ADD:
@@ -164,6 +166,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
     switch (n.op) {
         case ExprOp::INPUT:
             out = "IN" + std::to_string(n.input_slot);
+            break;
+
+        case ExprOp::RUNTIME_SCALAR:
+            out = "RIN" + std::to_string(n.input_slot);
             break;
 
         case ExprOp::SCALAR_FP:
@@ -314,6 +320,7 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
 bool Expression::isLeafOp(const ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
         case ExprOp::SCALAR_FP:
         case ExprOp::FILL:
             return true;
@@ -421,20 +428,27 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     const ExprNode& srcNode = src.nodes.at(srcNodeIndex);
     ExprNode newNode = srcNode;
 
-    if (srcNode.op == ExprOp::INPUT) {
+    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR) {
         if (srcNode.input_slot >= src.inputs.size()) {
             throw std::runtime_error("Input slot out of range while merging expression outputs.");
         }
 
         const std::string& inputName = src.inputs[srcNode.input_slot].name;
+        const NamedInput::Kind inputKind = src.inputs[srcNode.input_slot].kind;
         auto slotIt = dstInputSlotsByName.find(inputName);
         uint32_t mergedSlot;
 
         if (slotIt != dstInputSlotsByName.end()) {
             mergedSlot = slotIt->second;
+            if (mergedSlot >= dst.inputs.size()) {
+                throw std::runtime_error("Merged input slot out of range while merging expression outputs.");
+            }
+            if (dst.inputs[mergedSlot].kind != inputKind) {
+                throw std::runtime_error("Input kind mismatch while merging expression outputs for input: " + inputName);
+            }
         } else {
             mergedSlot = static_cast<uint32_t>(dst.inputs.size());
-            dst.inputs.push_back(NamedInput{inputName, mergedSlot});
+            dst.inputs.push_back(NamedInput{inputName, mergedSlot, inputKind});
             dstInputSlotsByName.emplace(inputName, mergedSlot);
         }
 
@@ -470,10 +484,27 @@ Expression Expression::input(const std::string& name, Optional<DataType> as_type
 
     ExprNode node;
     node.op = ExprOp::INPUT;
-    node.input_slot = out->getOrCreateInputSlot(name);
+    node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::Tensor);
 
     // as_type means the graph value produced by this input defaults to that dtype,
     // even though the actual bound runtime tensor may have a different dtype.
+    if (as_type.isPresent()) {
+        node.output_dtype = as_type.get();
+    }
+
+    out->nodes.push_back(node);
+    out->output_node = 0;
+
+    return Expression(out, 0);
+}
+
+Expression Expression::runtimeScalar(const std::string& name, Optional<DataType> as_type) {
+    auto out = std::make_shared<PhysicalExpression>();
+
+    ExprNode node;
+    node.op = ExprOp::RUNTIME_SCALAR;
+    node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::RuntimeScalarFp32);
+
     if (as_type.isPresent()) {
         node.output_dtype = as_type.get();
     }
@@ -520,25 +551,32 @@ static MergeInputsResult mergeInputsByName(const PhysicalExpression& lhs, const 
     std::unordered_map<std::string, uint32_t> mergedByName;
     mergedByName.reserve(lhs.inputs.size() + rhs.inputs.size());
 
-    auto getOrCreateMergedSlot = [&](const std::string& name) -> uint32_t {
+    auto getOrCreateMergedSlot = [&](const std::string& name, NamedInput::Kind kind) -> uint32_t {
         auto it = mergedByName.find(name);
-        if (it != mergedByName.end())
+        if (it != mergedByName.end()) {
+            if (it->second >= result.mergedInputs.size()) {
+                throw std::runtime_error("Merged input slot out of range while combining expressions.");
+            }
+            if (result.mergedInputs[it->second].kind != kind) {
+                throw std::runtime_error("Input kind mismatch while combining expressions for input: " + name);
+            }
             return it->second;
+        }
 
         const uint32_t slot = static_cast<uint32_t>(result.mergedInputs.size());
         mergedByName.emplace(name, slot);
-        result.mergedInputs.push_back(NamedInput{name, slot});
+        result.mergedInputs.push_back(NamedInput{name, slot, kind});
         return slot;
     };
 
     result.lhsSlotRemap.resize(lhs.inputs.size());
     for (size_t i = 0; i < lhs.inputs.size(); ++i) {
-        result.lhsSlotRemap[i] = getOrCreateMergedSlot(lhs.inputs[i].name);
+        result.lhsSlotRemap[i] = getOrCreateMergedSlot(lhs.inputs[i].name, lhs.inputs[i].kind);
     }
 
     result.rhsSlotRemap.resize(rhs.inputs.size());
     for (size_t i = 0; i < rhs.inputs.size(); ++i) {
-        result.rhsSlotRemap[i] = getOrCreateMergedSlot(rhs.inputs[i].name);
+        result.rhsSlotRemap[i] = getOrCreateMergedSlot(rhs.inputs[i].name, rhs.inputs[i].kind);
     }
 
     return result;
@@ -550,7 +588,7 @@ static void remapClonedInputSlots(const PhysicalExpression& sourceExpr,
                                   PhysicalExpression& outExpr) {
     for (const auto& [oldNodeIndex, newNodeIndex] : oldToNewNodeMap) {
         const ExprNode& oldNode = sourceExpr.nodes.at(oldNodeIndex);
-        if (oldNode.op != ExprOp::INPUT)
+        if (oldNode.op != ExprOp::INPUT && oldNode.op != ExprOp::RUNTIME_SCALAR)
             continue;
 
         if (oldNode.input_slot >= slotRemap.size()) {
@@ -749,14 +787,18 @@ Expression Expression::exp2() const { return unaryOp(*this, ExprOp::EXP2); }
 Expression Expression::exp10() const { return unaryOp(*this, ExprOp::EXP10); }
 // Can also use Expression::scalar(s).pow(x) for s^x_i
 
-uint32_t PhysicalExpression::getOrCreateInputSlot(const std::string& name) {
+uint32_t PhysicalExpression::getOrCreateInputSlot(const std::string& name, NamedInput::Kind kind) {
     for (const NamedInput& input : inputs) {
-        if (input.name == name)
+        if (input.name == name) {
+            if (input.kind != kind) {
+                throw std::runtime_error("Input kind mismatch for input: " + name);
+            }
             return input.slot;
+        }
     }
 
     const uint32_t slot = static_cast<uint32_t>(inputs.size());
-    inputs.push_back(NamedInput{name, slot});
+    inputs.push_back(NamedInput{name, slot, kind});
     return slot;
 }
 

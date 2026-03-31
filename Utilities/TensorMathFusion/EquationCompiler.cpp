@@ -248,7 +248,7 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         }
 
         const ExprNode& parent = expr.nodes[parent_idx];
-        if (parent.op == ExprOp::INPUT) {
+        if (parent.op == ExprOp::INPUT || parent.op == ExprOp::RUNTIME_SCALAR) {
             external_value_ids.insert(parent.input_slot);
             return;
         }
@@ -268,7 +268,7 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
     for (uint32_t node_idx : region_nodes) {
         const ExprNode& node = expr.nodes[node_idx];
 
-        if (node.op == ExprOp::INPUT) {
+        if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
             external_value_ids.insert(node.input_slot);
             continue;
         }
@@ -311,6 +311,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "IN";
         case ExprOp::SCALAR_FP:
             return "F";
+        case ExprOp::RUNTIME_SCALAR:
+            return "RSC";
         case ExprOp::ADD:
             return "ADD";
         case ExprOp::SUB:
@@ -380,7 +382,7 @@ static const char* fusedOpTag(ExprOp op) {
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
         default:
-            throw std::runtime_error("Unsupported op in fusedRegionSignature.");
+            throw std::runtime_error("Unsupported op in fusedRegionSignature, value: " + to_string((int)op));
     }
 }
 
@@ -498,6 +500,7 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
                                                          const vector<string>& input_names,
+                                                         const std::vector<NamedInput::Kind>& input_kinds,
                                                          const std::vector<TensorDescriptor::DataType>& input_dtypes,
                                                          const std::vector<TensorDescriptor::DataType>& output_dtypes,
                                                          int device_num) {
@@ -513,6 +516,7 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     out->kernel = fn;
     out->kernel_name = kernel_name;
     out->input_names = input_names;
+    out->input_kinds = input_kinds;
     out->input_dtypes = input_dtypes;
     out->output_dtypes = output_dtypes;
     out->deviceNum = device_num;
@@ -520,12 +524,44 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     return out;
 }
 
+static std::vector<NamedInput::Kind> collectCompiledInputKinds(const PhysicalExpression& expr) {
+    std::vector<NamedInput::Kind> input_kinds(expr.numInputs(), NamedInput::Kind::Tensor);
+    std::vector<uint8_t> seen(expr.numInputs(), 0);
+
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR) {
+            continue;
+        }
+        if (node.input_slot >= input_kinds.size()) {
+            throw runtime_error("Input slot out of range while collecting compiled input kinds.");
+        }
+
+        const NamedInput::Kind kind = node.op == ExprOp::INPUT ? NamedInput::Kind::Tensor : NamedInput::Kind::RuntimeScalarFp32;
+        if (seen[node.input_slot]) {
+            if (input_kinds[node.input_slot] != kind) {
+                throw runtime_error("Inconsistent fused stage input kind for local input slot.");
+            }
+        } else {
+            input_kinds[node.input_slot] = kind;
+            seen[node.input_slot] = 1;
+        }
+    }
+
+    for (uint32_t slot = 0; slot < input_kinds.size(); ++slot) {
+        if (!seen[slot]) {
+            throw runtime_error("Unused or unresolved fused stage input slot.");
+        }
+    }
+
+    return input_kinds;
+}
+
 static std::vector<DataType> collectCompiledInputDTypes(const PhysicalExpression& expr) {
     std::vector<DataType> input_dtypes(expr.numInputs(), DataType::FP32);
     std::vector<uint8_t> seen(expr.numInputs(), 0);
 
     for (const ExprNode& node : expr.nodes) {
-        if (node.op != ExprOp::INPUT) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR) {
             continue;
         }
         if (!node.input_tensor_dtype.isPresent()) {
@@ -687,16 +723,19 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name, use_uint32_index_math);
 
     vector<string> input_names;
+    std::vector<NamedInput::Kind> input_kinds;
     input_names.reserve(stage.expr.inputs.size());
+    input_kinds.reserve(stage.expr.inputs.size());
     for (const NamedInput& input : stage.expr.inputs) {
         input_names.push_back(input.name);
+        input_kinds.push_back(input.kind);
     }
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
+    auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
     compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
     compiled->uses_uint32_numel_arg = use_uint32_index_math;
 
@@ -927,7 +966,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     std::vector<uint32_t> stage_input_value_ids;
     std::unordered_map<uint32_t, uint32_t> value_id_to_local_input_slot;
 
-    auto getOrCreateLocalInputSlot = [&](uint32_t value_id) -> uint32_t {
+    auto getOrCreateLocalInputSlot = [&](uint32_t value_id, NamedInput::Kind kind) -> uint32_t {
         auto it = value_id_to_local_input_slot.find(value_id);
         if (it != value_id_to_local_input_slot.end()) {
             return it->second;
@@ -940,6 +979,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
         NamedInput input;
         input.name = "arg" + std::to_string(local_slot);
         input.slot = local_slot;
+        input.kind = kind;
         stage_expr.inputs.push_back(std::move(input));
 
         return local_slot;
@@ -948,9 +988,10 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     for (uint32_t old_idx : sorted_nodes) {
         ExprNode new_node = expr.nodes[old_idx];
 
-        if (new_node.op == ExprOp::INPUT) {
+        if (new_node.op == ExprOp::INPUT || new_node.op == ExprOp::RUNTIME_SCALAR) {
             uint32_t value_id = new_node.input_slot;
-            new_node.input_slot = getOrCreateLocalInputSlot(value_id);
+            const NamedInput::Kind input_kind = expr.inputs.at(value_id).kind;
+            new_node.input_slot = getOrCreateLocalInputSlot(value_id, input_kind);
         } else {
             if (!Expression::isLeafOp(new_node.op)) {
                 uint32_t old_parent = new_node.lhs;
@@ -965,7 +1006,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
                     ExprNode input_node;
                     input_node.op = ExprOp::INPUT;
-                    input_node.input_slot = getOrCreateLocalInputSlot(out_it->second);
+                    input_node.input_slot = getOrCreateLocalInputSlot(out_it->second, NamedInput::Kind::Tensor);
 
                     // This local INPUT stands in for the already-materialized parent value
                     // crossing a stage boundary, so it should inherit that value's dtype semantics.
@@ -995,7 +1036,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
                     ExprNode input_node;
                     input_node.op = ExprOp::INPUT;
-                    input_node.input_slot = getOrCreateLocalInputSlot(out_it->second);
+                    input_node.input_slot = getOrCreateLocalInputSlot(out_it->second, NamedInput::Kind::Tensor);
 
                     // This local INPUT stands in for the already-materialized parent value
                     // crossing a stage boundary, so it should inherit that value's dtype semantics.
@@ -1598,9 +1639,12 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     }
 
     std::vector<std::string> input_names;
+    std::vector<NamedInput::Kind> input_kinds;
     input_names.reserve(stage.expr.inputs.size());
+    input_kinds.reserve(stage.expr.inputs.size());
     for (const NamedInput& input : stage.expr.inputs) {
         input_names.push_back(input.name);
+        input_kinds.push_back(input.kind);
     }
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
     std::vector<DataType> output_dtypes;
@@ -1619,8 +1663,14 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     std::vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     std::vector<char> cubin = linkToCubin(ltoir, sig);
 
-    shared_ptr<CompiledEquation> compiled = loadCubin(
-        EquationCacheKey(canonicalize(stage.expr), sig), cubin, kernel_name, input_names, input_dtypes, output_dtypes, sig.device_num);
+    shared_ptr<CompiledEquation> compiled = loadCubin(EquationCacheKey(canonicalize(stage.expr), sig),
+                                                      cubin,
+                                                      kernel_name,
+                                                      input_names,
+                                                      input_kinds,
+                                                      input_dtypes,
+                                                      output_dtypes,
+                                                      sig.device_num);
     const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
 

@@ -4,7 +4,7 @@
 namespace ThorImplementation {
 
 void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                         const std::vector<Tensor>& inputs,
+                         const std::vector<RuntimeInputValue>& inputs,
                          const std::vector<Tensor>& outputs,
                          Stream& stream) {
     if (!compiledEquation) {
@@ -43,29 +43,49 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     }
 
     for (size_t i = 0; i < inputs.size(); ++i) {
-        const Tensor& t = inputs[i];
-        if (!t.isInitialized()) {
-            throw std::runtime_error("All input tensors must be initialized.");
-        }
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
+            if (!std::holds_alternative<Tensor>(inputs[i])) {
+                throw std::runtime_error("Fused equation expected a tensor input at slot " + std::to_string(i) + ".");
+            }
 
-        if (t.getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
-            throw std::runtime_error("Fused equation input dtype mismatch");
-        }
+            const Tensor& t = std::get<Tensor>(inputs[i]);
+            if (!t.isInitialized()) {
+                throw std::runtime_error("All input tensors must be initialized.");
+            }
 
-        if (t.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
-            throw std::runtime_error("Input tensor is not located on a GPU.");
-        }
+            if (t.getDescriptor().getDataType() != compiledEquation->input_dtypes[i]) {
+                throw std::runtime_error("Fused equation input dtype mismatch");
+            }
 
-        if (t.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
-            throw std::runtime_error("Input tensor GPU does not match compiled fused equation device.");
+            if (t.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+                throw std::runtime_error("Input tensor is not located on a GPU.");
+            }
+
+            if (t.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+                throw std::runtime_error("Input tensor GPU does not match compiled fused equation device.");
+            }
+        } else {
+            if (!std::holds_alternative<float>(inputs[i])) {
+                throw std::runtime_error("Fused equation expected a runtime scalar input at slot " + std::to_string(i) + ".");
+            }
+            if (compiledEquation->input_dtypes[i] != TensorDescriptor::DataType::FP32) {
+                throw std::runtime_error("Runtime scalar inputs currently require FP32 compiled input dtype.");
+            }
         }
     }
 
     assert(max_numel != 0);
     std::vector<const void*> input_ptrs;
     input_ptrs.reserve(inputs.size());
-    for (const auto& t : inputs) {
-        input_ptrs.push_back(t.getMemPtr());
+    std::vector<float> scalar_inputs_fp32;
+    scalar_inputs_fp32.reserve(inputs.size());
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
+            input_ptrs.push_back(std::get<Tensor>(inputs[i]).getMemPtr());
+        } else {
+            scalar_inputs_fp32.push_back(std::get<float>(inputs[i]));
+            input_ptrs.push_back(&scalar_inputs_fp32.back());
+        }
     }
 
     std::vector<const void*> output_ptrs;
@@ -77,8 +97,13 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     std::vector<void*> args;
     args.reserve(inputs.size() + outputs.size() + 1);
 
+    size_t next_scalar_index = 0;
     for (size_t i = 0; i < input_ptrs.size(); ++i) {
-        args.push_back((void*)&input_ptrs[i]);
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
+            args.push_back((void*)&input_ptrs[i]);
+        } else {
+            args.push_back((void*)&scalar_inputs_fp32[next_scalar_index++]);
+        }
     }
     for (size_t i = 0; i < output_ptrs.size(); ++i) {
         args.push_back((void*)&output_ptrs[i]);

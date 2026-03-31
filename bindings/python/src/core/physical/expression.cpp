@@ -56,6 +56,34 @@ thor.physical.Expression
 )nbdoc");
 
     expr.def_static(
+        "runtime_scalar",
+        [](const std::string& name, nb::object as_type_obj) {
+            Optional<DataType> as_type = Optional<DataType>::empty();
+            if (!as_type_obj.is_none()) {
+                as_type = nb::cast<DataType>(as_type_obj);
+            }
+            return Expression::runtimeScalar(name, as_type);
+        },
+        "name"_a,
+        "as_type"_a.none() = nb::none(),
+        R"nbdoc(
+Create a runtime-bound scalar input expression.
+
+Parameters
+----------
+name : str
+    Runtime scalar input name.
+as_type : thor.DataType | None
+    Optional dtype cast applied to the runtime scalar as it enters the graph.
+    Currently runtime scalar bindings are passed as fp32 values.
+
+Returns
+-------
+thor.physical.Expression
+    An Expression representing that runtime scalar input.
+)nbdoc");
+
+    expr.def_static(
         "scalar",
         [](double value) { return Expression::scalar(value); },
         "value"_a,
@@ -550,6 +578,32 @@ inputs: dict[str, PhysicalTensor]
 
     fused_equation.def("stamp",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const std::unordered_map<std::string, float>&,
+                                         const Stream&,
+                                         const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
+                       "inputs"_a,
+                       "scalar_inputs"_a,
+                       "stream"_a,
+                       "requestedOutputShape"_a = std::vector<uint64_t>{},
+                       R"nbdoc(
+Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
+)nbdoc");
+
+    fused_equation.def("stamp",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const std::unordered_map<std::string, float>&,
+                                         const Stream&,
+                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
+                       "inputs"_a,
+                       "scalar_inputs"_a,
+                       "stream"_a,
+                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+                       R"nbdoc(
+Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
+)nbdoc");
+
+    fused_equation.def("stamp",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
                                          const Stream&,
                                          const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
                        "inputs"_a,
@@ -560,6 +614,36 @@ Create an executable instance of this fused equation with bound thor.physical.Ph
 
 inputs: dict[str, PhysicalTensor]
     A dict mapping input names to tensors
+)nbdoc");
+
+    fused_equation.def("stamp",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const std::unordered_map<std::string, float>&,
+                                         const std::unordered_map<std::string, Tensor>&,
+                                         const Stream&,
+                                         const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
+                       "inputs"_a,
+                       "scalar_inputs"_a,
+                       "preallocated_outputs"_a,
+                       "stream"_a,
+                       "requestedOutputShape"_a = std::vector<uint64_t>{},
+                       R"nbdoc(
+Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
+)nbdoc");
+
+    fused_equation.def("stamp",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const std::unordered_map<std::string, float>&,
+                                         const std::unordered_map<std::string, Tensor>&,
+                                         const Stream&,
+                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
+                       "inputs"_a,
+                       "scalar_inputs"_a,
+                       "preallocated_outputs"_a,
+                       "stream"_a,
+                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+                       R"nbdoc(
+Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
 )nbdoc");
 
     fused_equation.def("stamp",
@@ -590,6 +674,18 @@ input: PhysicalTensor
 output: PhysicalTensor
 )nbdoc");
 
+    fused_equation.def(
+        "run",
+        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, const std::unordered_map<std::string, float>&, Tensor&, Stream&>(
+            &FusedEquation::run, nb::const_),
+        "inputs"_a,
+        "scalar_inputs"_a,
+        "output"_a,
+        "stream"_a,
+        R"nbdoc(
+Run a fused equation with bound tensor and runtime scalar inputs.
+)nbdoc");
+
     fused_equation.def("run",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
                        "inputs"_a,
@@ -614,6 +710,19 @@ Run a fused equation with the thor.physical.PhysicalTensor's provided.
 input: PhysicalTensor
 outputs: dict[str, PhysicalTensor]
     A dict mapping output names to tensors
+)nbdoc");
+
+    fused_equation.def("run",
+                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
+                                         const std::unordered_map<std::string, float>&,
+                                         std::unordered_map<std::string, Tensor>&,
+                                         Stream&>(&FusedEquation::run, nb::const_),
+                       "inputs"_a,
+                       "scalar_inputs"_a,
+                       "outputs"_a,
+                       "stream"_a,
+                       R"nbdoc(
+Run a fused equation with bound tensor and runtime scalar inputs.
 )nbdoc");
 
     fused_equation.def("run",
@@ -664,27 +773,27 @@ Args:
         "compile_backward",
         [](const FusedEquation& self,
            const std::vector<std::string>& wrt_names,
-           const std::unordered_map<std::string, std::string>& error_output_name_to_error_input_name,
+           const std::unordered_map<std::string, std::string>& feature_output_name_to_error_input_name,
            bool accumulate_grad_outputs) {
-            if (error_output_name_to_error_input_name.size() == 0)
+            if (feature_output_name_to_error_input_name.size() == 0)
                 throw std::runtime_error("Cannot compute backward expression with no error inputs.");
             nb::gil_scoped_release release;
-            return self.compileBackward(wrt_names, error_output_name_to_error_input_name, accumulate_grad_outputs);
+            return self.compileBackward(wrt_names, feature_output_name_to_error_input_name, accumulate_grad_outputs);
         },
         "wrt_names"_a,
-        "error_output_name_to_error_input_name"_a,
+        "feature_output_name_to_error_input_name"_a,
         "accumulate_grad_outputs"_a = false,
         R"nbdoc(
 Compile a backward equation for a multi-output forward equation.
 
 This overload makes the upstream gradient explicit for each named forward
 output. The compiled backward equation will expect one additional input tensor
-per entry in ``error_output_name_to_error_input_name``.
+per entry in ``feature_output_name_to_error_input_name``.
 
 Args:
     wrt_names: list[str]
         Input names to differentiate with respect to.
-    error_output_name_to_error_input_name: dict[str, str]
+    feature_output_name_to_error_input_name: dict[str, str]
         Mapping from forward output name to the input name that should carry the
         corresponding upstream gradient tensor.
 
