@@ -67,6 +67,14 @@ DataType defaultComputeDType(DataType value_dtype) {
     }
 }
 
+DataType defaultComputeDType(DataType input_dtype, DataType output_dtype) {
+    if (!isSupportedFusionFloatingType(input_dtype) || !isSupportedFusionFloatingType(output_dtype)) {
+        throw std::runtime_error("Unsupported dtype in defaultComputeDType(input_dtype, output_dtype).");
+    }
+
+    return promoteTensorValueDTypes(input_dtype, output_dtype);
+}
+
 DataType toSupportedInputDType(ExprOp op, DataType dtype) {
     if (!isSupportedFusionFloatingType(dtype)) {
         throw std::runtime_error("Unsupported dtype in toSupportedInputDType.");
@@ -131,6 +139,44 @@ DataType promoteTensorValueDTypes(const std::vector<DataType>& dtypes) {
         out = promoteTensorValueDTypes(out, dtypes[i]);
     }
     return out;
+}
+
+static DataType resolveNodeLogicalInputDType(const ExprNode& node,
+                                             const std::vector<ExprNode>& nodes,
+                                             const std::vector<DataType>& resolved_output_dtypes,
+                                             const std::vector<DataType>& root_input_dtypes) {
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
+        if (node.input_slot >= root_input_dtypes.size()) {
+            throw std::runtime_error("Input slot out of range in resolveNodeLogicalInputDType.");
+        }
+        return root_input_dtypes[node.input_slot];
+    }
+
+    if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::FILL) {
+        return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::FP32;
+    }
+
+    std::vector<DataType> tensor_parent_dtypes;
+    tensor_parent_dtypes.reserve(2);
+
+    auto add_tensor_parent = [&](uint32_t parent_idx) {
+        if (parent_idx >= nodes.size()) {
+            throw std::runtime_error("Parent node index out of range in resolveNodeLogicalInputDType.");
+        }
+        if (nodes[parent_idx].op == ExprOp::SCALAR_FP || nodes[parent_idx].op == ExprOp::RUNTIME_SCALAR) {
+            return;
+        }
+        tensor_parent_dtypes.push_back(resolved_output_dtypes[parent_idx]);
+    };
+
+    if (!Expression::isLeafOp(node.op)) {
+        add_tensor_parent(node.lhs);
+    }
+    if (Expression::isBinaryOp(node.op)) {
+        add_tensor_parent(node.rhs);
+    }
+
+    return tensor_parent_dtypes.empty() ? DataType::FP32 : promoteTensorValueDTypes(tensor_parent_dtypes);
 }
 
 static DataType resolveNodeOutputDType(const ExprNode& node,
@@ -198,11 +244,10 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
 
             const DataType actual_input_dtype = root_input_dtypes[node.input_slot];
             node.input_tensor_dtype = actual_input_dtype;
-            const bool explicit_output_dtype = node.output_dtype.isPresent();
-            const DataType output_dtype = explicit_output_dtype ? node.output_dtype.get() : actual_input_dtype;
+            const DataType output_dtype = node.output_dtype.isPresent() ? node.output_dtype.get() : actual_input_dtype;
             const DataType requested_compute_dtype = node.compute_dtype.isPresent()
                                                          ? node.compute_dtype.get()
-                                                         : (explicit_output_dtype ? output_dtype : defaultComputeDType(output_dtype));
+                                                         : defaultComputeDType(actual_input_dtype, output_dtype);
             const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
             const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
             const DataType backward_compute_dtype = node.backward_compute_dtype.isPresent()
@@ -219,11 +264,12 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
         }
 
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
+        const DataType logical_input_dtype =
+            resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
-        const bool is_arg_reduction = node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX;
         const DataType requested_compute_dtype = node.compute_dtype.isPresent()
                                                      ? node.compute_dtype.get()
-                                                     : (is_arg_reduction ? DataType::FP32 : defaultComputeDType(output_dtype));
+                                                     : defaultComputeDType(logical_input_dtype, output_dtype);
         const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
 
         const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;

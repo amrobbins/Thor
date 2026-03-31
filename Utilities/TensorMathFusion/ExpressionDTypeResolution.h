@@ -15,6 +15,7 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype);
 DataType toSupportedInputDType(ExprOp op, DataType dtype);
 
 DataType defaultComputeDType(DataType value_dtype);
+DataType defaultComputeDType(DataType input_dtype, DataType output_dtype);
 DataType promoteTensorValueDTypes(DataType a, DataType b);
 DataType promoteTensorValueDTypes(const std::vector<DataType>& dtypes);
 
