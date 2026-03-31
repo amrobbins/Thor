@@ -634,7 +634,7 @@ def test_fused_equation_output_shapes_rejects_missing_required_input():
 
 @pytest.mark.cuda
 def test_fused_equation_output_shape_as_type_single_input_pointwise():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = (x + 1.0) * 2.0
 
     eq = ex.compile(expr, device_num=0, use_fast_math=False)
@@ -649,7 +649,7 @@ def test_fused_equation_output_shape_as_type_single_input_pointwise():
 
 @pytest.mark.cuda
 def test_fused_equation_output_shape_as_type_single_output_broadcast_promoted():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
     expr = x + y
 
@@ -668,7 +668,7 @@ def test_fused_equation_output_shape_as_type_single_output_broadcast_promoted():
 
 @pytest.mark.cuda
 def test_fused_equation_output_shape_as_type_direct_reduction_single_output():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=2, squeeze=False)
 
     eq = ex.compile(expr, device_num=0, use_fast_math=False)
@@ -683,7 +683,7 @@ def test_fused_equation_output_shape_as_type_direct_reduction_single_output():
 
 @pytest.mark.cuda
 def test_fused_equation_output_shape_as_type_direct_reduction_single_output_squeezed():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=[1, 2], squeeze=True)
 
     eq = ex.compile(expr, device_num=0, use_fast_math=False)
@@ -698,7 +698,7 @@ def test_fused_equation_output_shape_as_type_direct_reduction_single_output_sque
 
 @pytest.mark.cuda
 def test_fused_equation_output_shapes_as_type_multi_output_with_broadcast_and_mixed_shapes():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     xy = x + y
@@ -730,7 +730,7 @@ def test_fused_equation_output_shapes_as_type_multi_output_with_broadcast_and_mi
 
 @pytest.mark.cuda
 def test_fused_equation_output_shapes_as_type_multi_output_with_reduction_and_epilogue():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     trunk = (x + 1.0) * (y - 0.5)
@@ -761,7 +761,7 @@ def test_fused_equation_output_shapes_as_type_multi_output_with_reduction_and_ep
 
 @pytest.mark.cuda
 def test_fused_equation_output_shapes_as_type_homogeneous_broadcast_same_runtime_dtype():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     outs = ex.outputs({

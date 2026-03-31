@@ -26,6 +26,20 @@ void launchReadConvertSyncWriteKernel_toPackedBoolean(FROM_TYPE *source_d, uint8
 template <typename TO_TYPE>
 void launchReadConvertSyncWriteKernel_fromPackedBoolean(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream);
 
+template <typename FROM_TYPE, typename TO_TYPE>
+struct Converter {
+    __device__ __forceinline__ TO_TYPE operator()(FROM_TYPE x) const { return static_cast<TO_TYPE>(x); }
+};
+template <>
+struct Converter<__nv_fp8_e4m3, __nv_fp8_e5m2> {
+    __device__ __forceinline__ __nv_fp8_e5m2 operator()(__nv_fp8_e4m3 x) const { return __nv_fp8_e5m2(static_cast<float>(x)); }
+};
+
+template <>
+struct Converter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
+    __device__ __forceinline__ __nv_fp8_e4m3 operator()(__nv_fp8_e5m2 x) const { return __nv_fp8_e4m3(static_cast<float>(x)); }
+};
+
 void TypeConverter::gpuConvertType(void *source_d,
                                    void *dest_d,
                                    TensorDescriptor::DataType sourceDataType,
@@ -33,8 +47,107 @@ void TypeConverter::gpuConvertType(void *source_d,
                                    long numElements,
                                    Stream stream) {
     switch (sourceDataType) {
+        case TensorDescriptor::DataType::BF16:
+            switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    gpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e4m3>(
+                        (__nv_bfloat16 *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    gpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e5m2>(
+                        (__nv_bfloat16 *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    gpuConvertTypeImpl<__nv_bfloat16, __nv_bfloat16>(
+                        (__nv_bfloat16 *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP16:
+                    gpuConvertTypeImpl<__nv_bfloat16, half>((__nv_bfloat16 *)source_d, (half *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP32:
+                    gpuConvertTypeImpl<__nv_bfloat16, float>((__nv_bfloat16 *)source_d, (float *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP64:
+                    gpuConvertTypeImpl<__nv_bfloat16, double>((__nv_bfloat16 *)source_d, (double *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::INT8:
+                    gpuConvertTypeImpl<__nv_bfloat16, int8_t>((__nv_bfloat16 *)source_d, (int8_t *)dest_d, numElements, stream);
+                    break;
+                default:
+                    assert(false);
+            }
+            break;
+        case TensorDescriptor::DataType::FP8_E4M3:
+            switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e4m3>(
+                        (__nv_fp8_e4m3 *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e5m2>(
+                        (__nv_fp8_e4m3 *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, __nv_bfloat16>(
+                        (__nv_fp8_e4m3 *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP16:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, half>((__nv_fp8_e4m3 *)source_d, (half *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP32:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, float>((__nv_fp8_e4m3 *)source_d, (float *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP64:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, double>((__nv_fp8_e4m3 *)source_d, (double *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::INT8:
+                    gpuConvertTypeImpl<__nv_fp8_e4m3, int8_t>((__nv_fp8_e4m3 *)source_d, (int8_t *)dest_d, numElements, stream);
+                    break;
+                default:
+                    assert(false);
+            }
+            break;
+        case TensorDescriptor::DataType::FP8_E5M2:
+            switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e4m3>(
+                        (__nv_fp8_e5m2 *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e5m2>(
+                        (__nv_fp8_e5m2 *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, __nv_bfloat16>(
+                        (__nv_fp8_e5m2 *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP16:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, half>((__nv_fp8_e5m2 *)source_d, (half *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP32:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, float>((__nv_fp8_e5m2 *)source_d, (float *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP64:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, double>((__nv_fp8_e5m2 *)source_d, (double *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::INT8:
+                    gpuConvertTypeImpl<__nv_fp8_e5m2, int8_t>((__nv_fp8_e5m2 *)source_d, (int8_t *)dest_d, numElements, stream);
+                    break;
+                default:
+                    assert(false);
+            }
+            break;
         case TensorDescriptor::DataType::FP16:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    gpuConvertTypeImpl<half, __nv_fp8_e4m3>((half *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    gpuConvertTypeImpl<half, __nv_fp8_e5m2>((half *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    gpuConvertTypeImpl<half, __nv_bfloat16>((half *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     gpuConvertTypeImpl<half, half>((half *)source_d, (half *)dest_d, numElements, stream);
                     break;
@@ -80,6 +193,15 @@ void TypeConverter::gpuConvertType(void *source_d,
             break;
         case TensorDescriptor::DataType::FP32:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    gpuConvertTypeImpl<float, __nv_fp8_e4m3>((float *)source_d, (__nv_fp8_e4m3 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    gpuConvertTypeImpl<float, __nv_fp8_e5m2>((float *)source_d, (__nv_fp8_e5m2 *)dest_d, numElements, stream);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    gpuConvertTypeImpl<float, __nv_bfloat16>((float *)source_d, (__nv_bfloat16 *)dest_d, numElements, stream);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     gpuConvertTypeImpl<float, half>((float *)source_d, (half *)dest_d, numElements, stream);
                     break;
@@ -630,7 +752,7 @@ __global__ void convertOutOfPlaceKernelNoOvershoot(FROM_TYPE *source_d, TO_TYPE 
         long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
         if (index >= numElements)
             return;
-        dest_d[index] = (TO_TYPE)(source_d[index]);
+        dest_d[index] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source_d)[index]);
     }
 }
 
@@ -780,7 +902,7 @@ void TypeConverter::convertToBiggerElementsInPlaceOnGpu_fromPackedBoolean(uint8_
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
     assert(!(is_same<FROM_TYPE, TO_TYPE>::value));
-    assert((is_convertible<FROM_TYPE, TO_TYPE>::value));
+    // assert((is_convertible<FROM_TYPE, TO_TYPE>::value));
 
     assert(numElements >= 0);
     if (numElements == 0)
@@ -814,7 +936,7 @@ void TypeConverter::gpuConvertTypeImpl(FROM_TYPE *source_d, TO_TYPE *dest_d, lon
 
 template <typename FROM_TYPE>
 void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8_t *dest_d, long numElements, Stream stream) {
-    assert((is_convertible<FROM_TYPE, bool>::value));
+    // assert((is_convertible<FROM_TYPE, bool>::value));
 
     assert(numElements >= 0);
     if (numElements == 0)
@@ -845,7 +967,7 @@ void TypeConverter::gpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source_d, uint8
 
 template <typename TO_TYPE>
 void TypeConverter::gpuConvertTypeFromPackedBooleanImpl(uint8_t *source_d, TO_TYPE *dest_d, long numElements, Stream stream) {
-    assert((is_convertible<bool, TO_TYPE>::value));
+    // assert((is_convertible<bool, TO_TYPE>::value));
 
     assert(numElements >= 0);
     if (numElements == 0)
@@ -892,7 +1014,7 @@ __global__ void convertReadWholeChunkThenWriteWholeChunkKernel(FROM_TYPE *source
     for (int i = 0; i < 8; ++i) {
         long index = threadIdx.x + blockIdx.x * 256 * 8 + i * 256;
         if (index < numElements)
-            dest_d[index] = (TO_TYPE)(buffer_shared[i * 256 + threadIdx.x]);
+            dest_d[index] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)buffer_shared)[i * 256 + threadIdx.x]);
     }
 }
 
@@ -1013,22 +1135,22 @@ __global__ void convertOutOfPlaceKernelS1D1(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float4 *)inBuff)[0] = ((float4 *)source_d)[index16Elements];
 
     char outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
-    ((TO_TYPE *)outBuff)[8] = (TO_TYPE)((FROM_TYPE *)inBuff)[8];
-    ((TO_TYPE *)outBuff)[9] = (TO_TYPE)((FROM_TYPE *)inBuff)[9];
-    ((TO_TYPE *)outBuff)[10] = (TO_TYPE)((FROM_TYPE *)inBuff)[10];
-    ((TO_TYPE *)outBuff)[11] = (TO_TYPE)((FROM_TYPE *)inBuff)[11];
-    ((TO_TYPE *)outBuff)[12] = (TO_TYPE)((FROM_TYPE *)inBuff)[12];
-    ((TO_TYPE *)outBuff)[13] = (TO_TYPE)((FROM_TYPE *)inBuff)[13];
-    ((TO_TYPE *)outBuff)[14] = (TO_TYPE)((FROM_TYPE *)inBuff)[14];
-    ((TO_TYPE *)outBuff)[15] = (TO_TYPE)((FROM_TYPE *)inBuff)[15];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
+    ((TO_TYPE *)outBuff)[8] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[8]);
+    ((TO_TYPE *)outBuff)[9] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[9]);
+    ((TO_TYPE *)outBuff)[10] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[10]);
+    ((TO_TYPE *)outBuff)[11] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[11]);
+    ((TO_TYPE *)outBuff)[12] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[12]);
+    ((TO_TYPE *)outBuff)[13] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[13]);
+    ((TO_TYPE *)outBuff)[14] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[14]);
+    ((TO_TYPE *)outBuff)[15] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[15]);
 
     ((float4 *)dest_d)[index16Elements] = ((float4 *)outBuff)[0];
 }
@@ -1045,22 +1167,22 @@ __global__ void convertOutOfPlaceKernelS1D2(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float4 *)inBuff)[0] = ((float4 *)source_d)[index16Elements];
 
     half outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
-    ((TO_TYPE *)outBuff)[8] = (TO_TYPE)((FROM_TYPE *)inBuff)[8];
-    ((TO_TYPE *)outBuff)[9] = (TO_TYPE)((FROM_TYPE *)inBuff)[9];
-    ((TO_TYPE *)outBuff)[10] = (TO_TYPE)((FROM_TYPE *)inBuff)[10];
-    ((TO_TYPE *)outBuff)[11] = (TO_TYPE)((FROM_TYPE *)inBuff)[11];
-    ((TO_TYPE *)outBuff)[12] = (TO_TYPE)((FROM_TYPE *)inBuff)[12];
-    ((TO_TYPE *)outBuff)[13] = (TO_TYPE)((FROM_TYPE *)inBuff)[13];
-    ((TO_TYPE *)outBuff)[14] = (TO_TYPE)((FROM_TYPE *)inBuff)[14];
-    ((TO_TYPE *)outBuff)[15] = (TO_TYPE)((FROM_TYPE *)inBuff)[15];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
+    ((TO_TYPE *)outBuff)[8] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[8]);
+    ((TO_TYPE *)outBuff)[9] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[9]);
+    ((TO_TYPE *)outBuff)[10] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[10]);
+    ((TO_TYPE *)outBuff)[11] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[11]);
+    ((TO_TYPE *)outBuff)[12] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[12]);
+    ((TO_TYPE *)outBuff)[13] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[13]);
+    ((TO_TYPE *)outBuff)[14] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[14]);
+    ((TO_TYPE *)outBuff)[15] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[15]);
 
     ((double4 *)dest_d)[index16Elements] = ((double4 *)outBuff)[0];
 }
@@ -1077,14 +1199,14 @@ __global__ void convertOutOfPlaceKernelS1D4(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float2 *)inBuff)[0] = ((float2 *)source_d)[index8Elements];
 
     float outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
 
     ((double4 *)dest_d)[index8Elements] = ((double4 *)outBuff)[0];
 }
@@ -1101,10 +1223,10 @@ __global__ void convertOutOfPlaceKernelS1D8(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float *)inBuff)[0] = ((float *)source_d)[index4Elements];
 
     double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
 }
@@ -1121,22 +1243,22 @@ __global__ void convertOutOfPlaceKernelS2D1(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index16Elements];
 
     char outBuff[16];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
-    ((TO_TYPE *)outBuff)[8] = (TO_TYPE)((FROM_TYPE *)inBuff)[8];
-    ((TO_TYPE *)outBuff)[9] = (TO_TYPE)((FROM_TYPE *)inBuff)[9];
-    ((TO_TYPE *)outBuff)[10] = (TO_TYPE)((FROM_TYPE *)inBuff)[10];
-    ((TO_TYPE *)outBuff)[11] = (TO_TYPE)((FROM_TYPE *)inBuff)[11];
-    ((TO_TYPE *)outBuff)[12] = (TO_TYPE)((FROM_TYPE *)inBuff)[12];
-    ((TO_TYPE *)outBuff)[13] = (TO_TYPE)((FROM_TYPE *)inBuff)[13];
-    ((TO_TYPE *)outBuff)[14] = (TO_TYPE)((FROM_TYPE *)inBuff)[14];
-    ((TO_TYPE *)outBuff)[15] = (TO_TYPE)((FROM_TYPE *)inBuff)[15];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
+    ((TO_TYPE *)outBuff)[8] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[8]);
+    ((TO_TYPE *)outBuff)[9] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[9]);
+    ((TO_TYPE *)outBuff)[10] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[10]);
+    ((TO_TYPE *)outBuff)[11] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[11]);
+    ((TO_TYPE *)outBuff)[12] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[12]);
+    ((TO_TYPE *)outBuff)[13] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[13]);
+    ((TO_TYPE *)outBuff)[14] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[14]);
+    ((TO_TYPE *)outBuff)[15] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[15]);
 
     ((float4 *)dest_d)[index16Elements] = ((float4 *)outBuff)[0];
 }
@@ -1153,14 +1275,14 @@ __global__ void convertOutOfPlaceKernelS2D2(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
 
     half outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
 
     ((float4 *)dest_d)[index8Elements] = ((float4 *)outBuff)[0];
 }
@@ -1177,14 +1299,14 @@ __global__ void convertOutOfPlaceKernelS2D4(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float4 *)inBuff)[0] = ((float4 *)source_d)[index8Elements];
 
     float outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
 
     ((double4 *)dest_d)[index8Elements] = ((double4 *)outBuff)[0];
 }
@@ -1201,10 +1323,10 @@ __global__ void convertOutOfPlaceKernelS2D8(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float2 *)inBuff)[0] = ((float2 *)source_d)[index4Elements];
 
     double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
 }
@@ -1221,14 +1343,14 @@ __global__ void convertOutOfPlaceKernelS4D1(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index8Elements];
 
     char outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
 
     ((float2 *)dest_d)[index8Elements] = ((float2 *)outBuff)[0];
 }
@@ -1245,14 +1367,14 @@ __global__ void convertOutOfPlaceKernelS4D2(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index8Elements];
 
     half outBuff[8];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
-    ((TO_TYPE *)outBuff)[4] = (TO_TYPE)((FROM_TYPE *)inBuff)[4];
-    ((TO_TYPE *)outBuff)[5] = (TO_TYPE)((FROM_TYPE *)inBuff)[5];
-    ((TO_TYPE *)outBuff)[6] = (TO_TYPE)((FROM_TYPE *)inBuff)[6];
-    ((TO_TYPE *)outBuff)[7] = (TO_TYPE)((FROM_TYPE *)inBuff)[7];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
+    ((TO_TYPE *)outBuff)[4] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[4]);
+    ((TO_TYPE *)outBuff)[5] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[5]);
+    ((TO_TYPE *)outBuff)[6] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[6]);
+    ((TO_TYPE *)outBuff)[7] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[7]);
 
     ((float4 *)dest_d)[index8Elements] = ((float4 *)outBuff)[0];
 }
@@ -1269,10 +1391,10 @@ __global__ void convertOutOfPlaceKernelS4D4(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float4 *)inBuff)[0] = ((float4 *)source_d)[index4Elements];
 
     float outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((float4 *)dest_d)[index4Elements] = ((float4 *)outBuff)[0];
 }
@@ -1289,10 +1411,10 @@ __global__ void convertOutOfPlaceKernelS4D8(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((float4 *)inBuff)[0] = ((float4 *)source_d)[index4Elements];
 
     double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
 }
@@ -1309,10 +1431,10 @@ __global__ void convertOutOfPlaceKernelS8D1(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
 
     char outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((float *)dest_d)[index4Elements] = ((float *)outBuff)[0];
 }
@@ -1329,10 +1451,10 @@ __global__ void convertOutOfPlaceKernelS8D2(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
 
     half outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((float2 *)dest_d)[index4Elements] = ((float2 *)outBuff)[0];
 }
@@ -1349,10 +1471,10 @@ __global__ void convertOutOfPlaceKernelS8D4(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
 
     float outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((float4 *)dest_d)[index4Elements] = ((float4 *)outBuff)[0];
 }
@@ -1369,10 +1491,10 @@ __global__ void convertOutOfPlaceKernelS8D8(FROM_TYPE *source_d, TO_TYPE *dest_d
     ((double4 *)inBuff)[0] = ((double4 *)source_d)[index4Elements];
 
     double outBuff[4];
-    ((TO_TYPE *)outBuff)[0] = (TO_TYPE)((FROM_TYPE *)inBuff)[0];
-    ((TO_TYPE *)outBuff)[1] = (TO_TYPE)((FROM_TYPE *)inBuff)[1];
-    ((TO_TYPE *)outBuff)[2] = (TO_TYPE)((FROM_TYPE *)inBuff)[2];
-    ((TO_TYPE *)outBuff)[3] = (TO_TYPE)((FROM_TYPE *)inBuff)[3];
+    ((TO_TYPE *)outBuff)[0] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[0]);
+    ((TO_TYPE *)outBuff)[1] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[1]);
+    ((TO_TYPE *)outBuff)[2] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[2]);
+    ((TO_TYPE *)outBuff)[3] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)inBuff)[3]);
 
     ((double4 *)dest_d)[index4Elements] = ((double4 *)outBuff)[0];
 }

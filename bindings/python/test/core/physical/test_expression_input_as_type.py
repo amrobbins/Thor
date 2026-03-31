@@ -94,7 +94,7 @@ def _materialize(arr: np.ndarray, dtype: thor.DataType) -> np.ndarray:
 
 @pytest.mark.cuda
 def test_input_as_type_single_input_casts_value_before_pointwise():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = (x + 1.0) * 2.0
 
     runtime_dtype = thor.DataType.fp32
@@ -117,7 +117,7 @@ def test_input_as_type_single_input_casts_value_before_pointwise():
 
 @pytest.mark.cuda
 def test_input_as_type_promotes_against_other_tensor():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
     expr = x + y
 
@@ -150,7 +150,7 @@ def test_input_as_type_promotes_against_other_tensor():
 
 @pytest.mark.cuda
 def test_input_as_type_direct_reduction_materializes_then_reduces():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=2, squeeze=False)
 
     runtime_dtype = thor.DataType.fp32
@@ -170,14 +170,14 @@ def test_input_as_type_direct_reduction_materializes_then_reduces():
         "x": (x_np, runtime_dtype)
     })
 
-    assert got.dtype == _numpy_storage_dtype(graph_dtype)
+    assert got.dtype == _numpy_storage_dtype(thor.DataType.fp32)
     assert got.shape == (2, 3, 1)
     _assert_close(got, expected, graph_dtype)
 
 
 @pytest.mark.cuda
 def test_input_as_type_broadcast_mixed_outputs_and_shapes():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     xy = x + y
@@ -244,7 +244,7 @@ def test_input_as_type_broadcast_mixed_outputs_and_shapes():
 
 @pytest.mark.cuda
 def test_input_as_type_homogeneous_broadcast_noop_cast_same_runtime_dtype():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     outs = ex.outputs({

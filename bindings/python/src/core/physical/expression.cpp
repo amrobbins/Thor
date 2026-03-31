@@ -29,15 +29,20 @@ void bind_physical_expression(nb::module_& physical) {
 
     expr.def_static(
         "input",
-        [](const std::string& name, nb::object as_type_obj) {
-            Optional<DataType> as_type = Optional<DataType>::empty();
-            if (!as_type_obj.is_none()) {
-                as_type = nb::cast<DataType>(as_type_obj);
+        [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
+            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            return Expression::input(name, as_type);
+            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::input(name, compute_dtype, output_dtype);
         },
         "name"_a,
-        "as_type"_a.none() = nb::none(),
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
         R"nbdoc(
 Create an input expression.
 
@@ -45,7 +50,7 @@ Parameters
 ----------
 name : str
     Input name.
-as_type : thor.DataType | None
+output_dtype : thor.DataType | None
     Optional dtype to cast the input value to when it enters the expression graph.
     The actual bound runtime tensor may have a different dtype.
 
@@ -57,15 +62,20 @@ thor.physical.Expression
 
     expr.def_static(
         "runtime_scalar",
-        [](const std::string& name, nb::object as_type_obj) {
-            Optional<DataType> as_type = Optional<DataType>::empty();
-            if (!as_type_obj.is_none()) {
-                as_type = nb::cast<DataType>(as_type_obj);
+        [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
+            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
             }
-            return Expression::runtimeScalar(name, as_type);
+            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::runtimeScalar(name, compute_dtype, output_dtype);
         },
         "name"_a,
-        "as_type"_a.none() = nb::none(),
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
         R"nbdoc(
 Create a runtime-bound scalar input expression.
 
@@ -73,7 +83,7 @@ Parameters
 ----------
 name : str
     Runtime scalar input name.
-as_type : thor.DataType | None
+output_dtype : thor.DataType | None
     Optional dtype cast applied to the runtime scalar as it enters the graph.
     Currently runtime scalar bindings are passed as fp32 values.
 
@@ -217,23 +227,23 @@ thor.physical.Expression
 
     auto parse_reduction_compute_dtype = [](const std::string_view& op_name,
                                             const std::optional<DataType>& compute_dtype) -> Optional<DataType> {
-        if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
-            throw std::runtime_error(std::string(op_name) + ": currently only supports compute_dtype=thor.DataType.fp32");
-        }
+        // if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
+        //     throw std::runtime_error(std::string(op_name) + ": currently only supports compute_dtype=thor.DataType.fp32");
+        // }
         return DataType::FP32;
     };
 
     auto parse_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> compute_dtype) -> Optional<DataType> {
-        if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
-            throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.fp32");
-        }
+        // if (compute_dtype.has_value() && compute_dtype.value() != DataType::FP32) {
+        //     throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.fp32");
+        // }
         return DataType::FP32;
     };
 
     auto parse_arg_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> output_dtype) -> Optional<DataType> {
-        if (output_dtype.has_value() && output_dtype.value() != DataType::UINT32) {
-            throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.uint32");
-        }
+        // if (output_dtype.has_value() && output_dtype.value() != DataType::UINT32) {
+        //     throw std::runtime_error(std::string(op_name) + ": currently only supports output_dtype=thor.DataType.uint32");
+        // }
         return DataType::UINT32;
     };
 

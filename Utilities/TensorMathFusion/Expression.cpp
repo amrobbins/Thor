@@ -1,5 +1,6 @@
 #include "Utilities/TensorMathFusion/Expression.h"
 #include "Utilities/TensorMathFusion/EquationCompiler.h"
+#include "Utilities/TensorMathFusion/ExpressionDTypeResolution.h"
 
 using DataType = ThorImplementation::TensorDescriptor::DataType;
 
@@ -479,17 +480,20 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
 
 }  // namespace
 
-Expression Expression::input(const std::string& name, Optional<DataType> as_type) {
+Expression Expression::input(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
     auto out = std::make_shared<PhysicalExpression>();
 
     ExprNode node;
     node.op = ExprOp::INPUT;
     node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::Tensor);
 
-    // as_type means the graph value produced by this input defaults to that dtype,
+    // output_dtype means the graph value produced by this input defaults to that dtype,
     // even though the actual bound runtime tensor may have a different dtype.
-    if (as_type.isPresent()) {
-        node.output_dtype = as_type.get();
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
     }
 
     out->nodes.push_back(node);
@@ -498,15 +502,18 @@ Expression Expression::input(const std::string& name, Optional<DataType> as_type
     return Expression(out, 0);
 }
 
-Expression Expression::runtimeScalar(const std::string& name, Optional<DataType> as_type) {
+Expression Expression::runtimeScalar(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
     auto out = std::make_shared<PhysicalExpression>();
 
     ExprNode node;
     node.op = ExprOp::RUNTIME_SCALAR;
     node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::RuntimeScalarFp32);
 
-    if (as_type.isPresent()) {
-        node.output_dtype = as_type.get();
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
     }
 
     out->nodes.push_back(node);
@@ -687,11 +694,8 @@ Expression Expression::pow(const Expression& exponent) const { return binaryOp(*
 
 // Reductions
 DataType validate_reduction_compute_type(Optional<DataType> compute_dtype) {
-    if (compute_dtype.isPresent() && compute_dtype.get() != DataType::FP32) {
-        throw std::runtime_error("Reductions currently only support compute_dtype = FP32. Received: " +
-                                 TensorDescriptor::getElementTypeName(compute_dtype.get()));
-    }
-    return DataType::FP32;
+    const DataType requested_compute_dtype = compute_dtype.isPresent() ? compute_dtype.get() : DataType::FP32;
+    return toSupportedComputeDType(ExprOp::REDUCE_SUM, requested_compute_dtype);
 }
 
 static bool isArgReductionOp(ExprOp op) { return op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX; }

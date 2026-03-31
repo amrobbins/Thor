@@ -186,9 +186,11 @@ class Expression {
     static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);
 
     static Expression input(const std::string& name,
-                            Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty());
+                            Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                            Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
     static Expression runtimeScalar(const std::string& name,
-                                    Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty());
+                                    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                                    Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
     static Expression scalar(double value);
 
     [[nodiscard]] PhysicalExpression expression() const;

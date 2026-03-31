@@ -158,7 +158,7 @@ struct CompiledReduceMinMaxBackward {
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : input_dtype) {
+          compute_dtype(compute_dtype.isPresent() ? compute_dtype.get() : TensorDescriptor::DataType::FP32) {
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
 

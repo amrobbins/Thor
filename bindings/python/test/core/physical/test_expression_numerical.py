@@ -457,7 +457,7 @@ def test_nested_expression_numerical_stamped(dtype: thor.DataType):
 
 @pytest.mark.cuda
 def test_fused_equation_stamp_as_type_single_output_requested_shape_accepts_squeezed_layout():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=2, squeeze=False)  # actual logical output [2, 3, 1]
 
     eq = ex.compile(expr, device_num=0, use_fast_math=False)
@@ -479,7 +479,7 @@ def test_fused_equation_stamp_as_type_single_output_requested_shape_accepts_sque
 
 @pytest.mark.cuda
 def test_fused_equation_stamp_as_type_single_output_requested_shape_rejects_incompatible_layout():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     expr = ex.reduce_sum(x, axis=2, squeeze=False)  # actual logical output [2, 3, 1]
 
     eq = ex.compile(expr, device_num=0, use_fast_math=False)
@@ -499,7 +499,7 @@ def test_fused_equation_stamp_as_type_single_output_requested_shape_rejects_inco
 
 @pytest.mark.cuda
 def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadcast_accepts_compatible_layouts():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     xy = x + y
@@ -536,7 +536,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadca
 
 @pytest.mark.cuda
 def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadcast_rejects_incompatible_layout():
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     xy = x + y
@@ -569,7 +569,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadca
 @pytest.mark.cuda
 def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reduction_and_epilogue_accepts_compatible_layouts(
 ):
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     trunk = (x + 1.0) * (y - 0.5)
@@ -606,7 +606,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reducti
 @pytest.mark.cuda
 def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reduction_and_epilogue_rejects_incompatible_layout(
 ):
-    x = ex.input("x", as_type=thor.DataType.fp16)
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")
 
     trunk = (x + 1.0) * (y - 0.5)
