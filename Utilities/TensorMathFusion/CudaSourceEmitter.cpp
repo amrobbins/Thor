@@ -290,11 +290,6 @@ static std::vector<DataType> collectInputSlotDTypes(const PhysicalExpression& ex
     return input_dtypes;
 }
 
-static bool exprHasRuntimeScalarInput(const PhysicalExpression& expr) {
-    return std::any_of(
-        expr.inputs.begin(), expr.inputs.end(), [](const NamedInput& input) { return input.kind == NamedInput::Kind::RuntimeScalarFp32; });
-}
-
 static std::vector<DataType> collectOutputDTypes(const PhysicalExecutionStage& stage) {
     std::vector<DataType> output_dtypes;
     output_dtypes.reserve(stage.outputs.size());
@@ -330,20 +325,28 @@ static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpre
         return Optional<DataType>::empty();
     }
 
-    if (exprHasRuntimeScalarInput(expr)) {
+    Optional<DataType> maybe_stage_dtype = Optional<DataType>::empty();
+    for (uint32_t slot = 0; slot < expr.inputs.size(); ++slot) {
+        if (expr.inputs[slot].kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+
+        const DataType dtype = input_dtypes.at(slot);
+        if (!maybe_stage_dtype.isPresent()) {
+            maybe_stage_dtype = dtype;
+        } else if (maybe_stage_dtype.get() != dtype) {
+            return Optional<DataType>::empty();
+        }
+    }
+
+    if (!maybe_stage_dtype.isPresent()) {
         return Optional<DataType>::empty();
     }
 
-    const DataType stage_dtype = input_dtypes.front();
+    const DataType stage_dtype = maybe_stage_dtype.get();
     if (stage_dtype != DataType::FP16 && stage_dtype != DataType::BF16 && stage_dtype != DataType::FP8_E4M3 &&
         stage_dtype != DataType::FP8_E5M2) {
         return Optional<DataType>::empty();
-    }
-
-    for (DataType dtype : input_dtypes) {
-        if (dtype != stage_dtype) {
-            return Optional<DataType>::empty();
-        }
     }
 
     for (DataType dtype : output_dtypes) {
@@ -355,7 +358,7 @@ static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpre
     const DataType expected_compute_dtype = defaultComputeDType(stage_dtype);
 
     for (const ExprNode& node : expr.nodes) {
-        if (node.op == ExprOp::SCALAR_FP) {
+        if (node.op == ExprOp::SCALAR_FP || node.op == ExprOp::RUNTIME_SCALAR) {
             continue;
         }
 
@@ -1095,6 +1098,40 @@ static std::string emitVector2ScalarLiteral(double x, DataType dtype) {
     throw runtime_error("Unsupported dtype in emitVector2ScalarLiteral.");
 }
 
+static DataType vectorizedComputeScalarDType(DataType dtype) {
+    switch (dtype) {
+        case DataType::BF16:
+            return DataType::BF16;
+        case DataType::FP16:
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            return DataType::FP16;
+        default:
+            throw runtime_error("Unsupported dtype in vectorizedComputeScalarDType.");
+    }
+}
+
+static std::string emitVector2DupScalar(const std::string& expr, DataType scalar_dtype) {
+    switch (scalar_dtype) {
+        case DataType::FP16:
+            return "__halves2half2(" + expr + ", " + expr + ")";
+        case DataType::BF16:
+            return "__halves2bfloat162(" + expr + ", " + expr + ")";
+        default:
+            throw runtime_error("Unsupported scalar dtype in emitVector2DupScalar.");
+    }
+}
+
+static std::string emitVector2RuntimeScalarValue(const ExprNode& node, DataType stage_dtype) {
+    const DataType input_dtype = requireNodeInputTensorDType(node);
+    const DataType output_dtype = requireNodeOutputDType(node);
+    const DataType compute_scalar_dtype = vectorizedComputeScalarDType(stage_dtype);
+
+    std::string scalar_expr = castScalarExpr("in" + std::to_string(node.input_slot), input_dtype, output_dtype);
+    scalar_expr = castScalarExpr(scalar_expr, output_dtype, compute_scalar_dtype);
+    return emitVector2DupScalar(scalar_expr, compute_scalar_dtype);
+}
+
 static std::string emitVector2BroadcastNativeLoad(const std::string& storage_dtype_vector,
                                                   const std::string& base_ptr,
                                                   const std::string& scalar_offset0) {
@@ -1213,13 +1250,19 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
 
     const uint32_t num_inputs = stage.expr.numInputs();
     const std::string index_type = emittedIndexType(use_uint32_index_math);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
 
     ss << "#include <vector_types.h>\n";
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
     for (uint32_t i = 0; i < num_inputs; ++i) {
-        ss << "const float4* in" << i << ", ";
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::Tensor) {
+            ss << "const float4* in" << i;
+        } else {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        }
+        ss << ", ";
     }
 
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
@@ -1234,10 +1277,15 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
        << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
     ss << "  if (packed_base >= packed_numel) return;\n\n";
 
+    bool emitted_any_tensor_chunk = false;
     for (uint32_t i = 0; i < num_inputs; ++i) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+        emitted_any_tensor_chunk = true;
         ss << "  const float4 in" << i << "_chunk = in" << i << "[idx];\n";
     }
-    if (num_inputs > 0) {
+    if (emitted_any_tensor_chunk) {
         ss << "\n";
     }
 
@@ -1261,6 +1309,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                        << vector_compute_conversion(storage_dtype_vector, variable) << ";\n";
                     break;
                 }
+                case ExprOp::RUNTIME_SCALAR:
+                    ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
+                       << emitVector2RuntimeScalarValue(n, dtype) << ";\n";
+                    break;
                 case ExprOp::SCALAR_FP:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2ScalarLiteral(n.scalar_fp, dtype) << ";\n";
@@ -1530,12 +1582,18 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
 
     const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
     const std::string index_type = emittedIndexType(use_uint32_index_math);
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
 
     ss << "extern \"C\" __global__\n";
     ss << "void " << kernel_name << "(";
 
     for (uint32_t i = 0; i < stage.expr.numInputs(); ++i) {
-        ss << "const " << storage_dtype << "* in" << i << ", ";
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::Tensor) {
+            ss << "const " << storage_dtype << "* in" << i;
+        } else {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        }
+        ss << ", ";
     }
     for (uint32_t i = 0; i < stage.outputs.size(); ++i) {
         ss << storage_dtype_vector << "* out" << i;
@@ -1621,6 +1679,9 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     break;
                 }
 
+                case ExprOp::RUNTIME_SCALAR:
+                    ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2RuntimeScalarValue(n, dtype) << ";\n";
+                    break;
                 case ExprOp::SCALAR_FP:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2ScalarLiteral(n.scalar_fp, dtype)
                        << ";\n";

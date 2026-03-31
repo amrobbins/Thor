@@ -2570,3 +2570,255 @@ def test_compile_backward_rejects_runtime_scalar_wrt():
 
     with pytest.raises(RuntimeError, match="compileBackward only supports gradients with respect to tensor inputs"):
         fwd_eq.compile_backward(["x", "step"])
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_runtime_scalar_forward_run_twice_updates_value_large_flat_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    step = ex.runtime_scalar("step")
+
+    out = x + (y * step)
+    eq = ex.compile(out, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    n = 8192
+
+    x_np = np.linspace(-4.0, 4.0, n, dtype=np.float32).astype(storage_dtype)
+    y_np = np.linspace(1.0, 3.0, n, dtype=np.float32).astype(storage_dtype)
+
+    x_ref = x_np.astype(np.float32)
+    y_ref = y_np.astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+    out_gpu = _gpu_tensor([n], dtype, gpu_num=0)
+
+    step_value_1 = 0.25
+    expected_1 = (x_ref + (y_ref * step_value_1)).astype(storage_dtype)
+
+    eq.run(inputs_gpu, {
+        "step": step_value_1
+    }, out_gpu, stream)
+
+    out_host = _cpu_tensor([n], dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got_1 = out_host.numpy().copy()
+
+    assert got_1.shape == expected_1.shape
+    _assert_close(got_1, expected_1, dtype)
+
+    step_value_2 = -1.75
+    expected_2 = (x_ref + (y_ref * step_value_2)).astype(storage_dtype)
+
+    eq.run(inputs_gpu, {
+        "step": step_value_2
+    }, out_gpu, stream)
+
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got_2 = out_host.numpy().copy()
+
+    assert got_2.shape == expected_2.shape
+    _assert_close(got_2, expected_2, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_runtime_scalar_multi_output_large_flat_shared_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    step = ex.runtime_scalar("step")
+
+    outs = ex.outputs({
+        "affine": (x * step) + y,
+        "shifted": y - step,
+        "mixed": (x + y) * step,
+    })
+
+    eq = ex.compile(outs, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    n = 4096
+
+    x_np = np.linspace(-2.0, 2.0, n, dtype=np.float32).astype(storage_dtype)
+    y_np = np.linspace(0.5, 4.5, n, dtype=np.float32).astype(storage_dtype)
+    step_value = 1.25
+
+    x_ref = x_np.astype(np.float32)
+    y_ref = y_np.astype(np.float32)
+
+    expected = {
+        "affine": ((x_ref * step_value) + y_ref).astype(storage_dtype),
+        "shifted": (y_ref - step_value).astype(storage_dtype),
+        "mixed": ((x_ref + y_ref) * step_value).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+    outputs_gpu = {
+        "affine": _gpu_tensor([n], dtype, gpu_num=0),
+        "shifted": _gpu_tensor([n], dtype, gpu_num=0),
+        "mixed": _gpu_tensor([n], dtype, gpu_num=0),
+    }
+
+    eq.run(inputs_gpu, {
+        "step": step_value
+    }, outputs_gpu, stream)
+
+    for name in eq.output_names():
+        out_host = _cpu_tensor([n], dtype)
+        out_host.copy_from_async(outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_runtime_scalar_specialized_broadcast_multi_output_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    step = ex.runtime_scalar("step")
+
+    outs = ex.outputs({
+        "sum_scaled": x + (y * step),
+        "prod_shifted": (x * y) + step,
+    })
+
+    eq = ex.compile(outs, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+
+    x_np = np.arange(32 * 1 * 128, dtype=np.float32).reshape((32, 1, 128))
+    x_np = (x_np / 97.0 - 1.5).astype(storage_dtype)
+
+    y_np = np.arange(1 * 16 * 128, dtype=np.float32).reshape((1, 16, 128))
+    y_np = (y_np / 53.0 + 0.25).astype(storage_dtype)
+
+    step_value = -0.75
+
+    x_ref = x_np.astype(np.float32)
+    y_ref = y_np.astype(np.float32)
+
+    expected = {
+        "sum_scaled": (x_ref + (y_ref * step_value)).astype(storage_dtype),
+        "prod_shifted": ((x_ref * y_ref) + step_value).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+    outputs_gpu = {
+        "sum_scaled": _gpu_tensor([32, 16, 128], dtype, gpu_num=0),
+        "prod_shifted": _gpu_tensor([32, 16, 128], dtype, gpu_num=0),
+    }
+
+    eq.run(inputs_gpu, {
+        "step": step_value
+    }, outputs_gpu, stream)
+
+    for name in eq.output_names():
+        out_host = _cpu_tensor([32, 16, 128], dtype)
+        out_host.copy_from_async(outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+def test_runtime_scalar_as_type_fp16_casts_before_execution_large_flat_numerical():
+    x = ex.input("x", thor.DataType.fp32)
+    step = ex.runtime_scalar("step", thor.DataType.fp16)
+
+    out = (x * ex.scalar(2.0)) + step
+    eq = ex.compile(out, device_num=0)
+
+    n = 4096
+    x_np = np.linspace(-1.0, 1.0, n, dtype=np.float32)
+    step_value = 0.3333
+
+    step_cast = np.float32(np.float16(step_value))
+    expected = ((x_np * 2.0) + step_cast).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, thor.DataType.fp32, stream)
+    out_gpu = _gpu_tensor([n], thor.DataType.fp32, gpu_num=0)
+
+    eq.run({
+        "x": x_gpu
+    }, {
+        "step": step_value
+    }, out_gpu, stream)
+
+    out_host = _cpu_tensor([n], thor.DataType.fp32)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_runtime_scalar_broadcast_unbroadcast_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    step = ex.runtime_scalar("step")
+
+    loss = ex.reduce_sum((x + y) * step, axis=[0, 1, 2], squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x", "y"])
+    assert bwd_eq.output_names() == ["x_grad", "y_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+
+    x_np = np.arange(32 * 1 * 64, dtype=np.float32).reshape((32, 1, 64))
+    x_np = (x_np / 37.0 - 2.0).astype(storage_dtype)
+
+    y_np = np.arange(1 * 16 * 64, dtype=np.float32).reshape((1, 16, 64))
+    y_np = (y_np / 19.0 + 0.5).astype(storage_dtype)
+
+    step_value = 0.75
+
+    expected = {
+        "x_grad": np.full_like(x_np, fill_value=(16.0 * step_value), dtype=storage_dtype),
+        "y_grad": np.full_like(y_np, fill_value=(32.0 * step_value), dtype=storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "y": _host_to_gpu(y_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, {
+        "step": step_value
+    }, stream)
+    stamped.run()
+
+    for name in bwd_eq.output_names():
+        out_gpu = stamped.output(name)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host.copy_from_async(out_gpu, stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
