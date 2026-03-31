@@ -161,6 +161,9 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SCALAR_FP:
                 reaches[i] = false;
                 break;
+            case ExprOp::RUNTIME_SCALAR:
+                reaches[i] = false;
+                break;
             case ExprOp::ADD:
             case ExprOp::SUB:
             case ExprOp::MUL:
@@ -643,7 +646,9 @@ std::vector<std::string> normalizeWrtNames(const PhysicalExpression& forward_exp
         std::vector<std::string> all_names;
         all_names.reserve(forward_expr.inputs.size());
         for (const NamedInput& input : forward_expr.inputs) {
-            all_names.push_back(input.name);
+            if (input.kind == NamedInput::Kind::Tensor) {
+                all_names.push_back(input.name);
+            }
         }
         return all_names;
     }
@@ -659,6 +664,10 @@ std::vector<std::string> normalizeWrtNames(const PhysicalExpression& forward_exp
         bool found = false;
         for (const NamedInput& input : forward_expr.inputs) {
             if (input.name == name) {
+                if (input.kind != NamedInput::Kind::Tensor) {
+                    throw std::runtime_error(
+                        "compileBackward only supports gradients with respect to tensor inputs. Got runtime scalar input: " + name);
+                }
                 found = true;
                 break;
             }
@@ -874,6 +883,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 node_dims[i] = it->second;
                 break;
             }
+            case ExprOp::RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
                 node_dims[i] = {};
                 break;
@@ -1220,6 +1230,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
         switch (node.op) {
             case ExprOp::INPUT:
+            case ExprOp::RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
                 break;
 

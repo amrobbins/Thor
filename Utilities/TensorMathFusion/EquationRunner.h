@@ -12,7 +12,7 @@ namespace ThorImplementation {
 class EquationRunner {
    public:
     static void run(const std::shared_ptr<CompiledEquation>& compiledEquation,
-                    const std::vector<Tensor>& inputs,
+                    const std::vector<RuntimeInputValue>& inputs,
                     const std::vector<Tensor>& outputs,
                     Stream& stream);
 };

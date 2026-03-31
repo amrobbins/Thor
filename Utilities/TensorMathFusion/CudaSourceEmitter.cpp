@@ -262,7 +262,7 @@ static std::vector<DataType> collectInputSlotDTypes(const PhysicalExpression& ex
     std::vector<uint8_t> seen(expr.numInputs(), 0);
 
     for (const ExprNode& node : expr.nodes) {
-        if (node.op != ExprOp::INPUT) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR) {
             continue;
         }
 
@@ -288,6 +288,11 @@ static std::vector<DataType> collectInputSlotDTypes(const PhysicalExpression& ex
     }
 
     return input_dtypes;
+}
+
+static bool exprHasRuntimeScalarInput(const PhysicalExpression& expr) {
+    return std::any_of(
+        expr.inputs.begin(), expr.inputs.end(), [](const NamedInput& input) { return input.kind == NamedInput::Kind::RuntimeScalarFp32; });
 }
 
 static std::vector<DataType> collectOutputDTypes(const PhysicalExecutionStage& stage) {
@@ -322,6 +327,10 @@ static Optional<DataType> getVectorizedStageStorageDTypeImpl(const PhysicalExpre
                                                              const std::vector<DataType>& input_dtypes,
                                                              const std::vector<DataType>& output_dtypes) {
     if (input_dtypes.empty() || output_dtypes.empty()) {
+        return Optional<DataType>::empty();
+    }
+
+    if (exprHasRuntimeScalarInput(expr)) {
         return Optional<DataType>::empty();
     }
 
@@ -783,7 +792,7 @@ static void emitScalarNode(
     const std::string output_type = scalarStorageType(output_dtype);
 
     double folded_constant = 0.0;
-    if (n.op != ExprOp::INPUT && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+    if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
         const std::string literal = emitScalarFpLiteral(folded_constant);
         ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
            << ";\n";
@@ -796,6 +805,13 @@ static void emitScalarNode(
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
             ss << indent << "const " << output_type << " t" << node_idx << " = "
                << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]", input_tensor_dtype, output_dtype) << ";\n";
+            return;
+        }
+
+        case ExprOp::RUNTIME_SCALAR: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            ss << indent << "const " << output_type << " t" << node_idx << " = "
+               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, output_dtype) << ";\n";
             return;
         }
 
@@ -931,7 +947,7 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     const std::string output_type = scalarStorageType(output_dtype);
 
     double folded_constant = 0.0;
-    if (n.op != ExprOp::INPUT && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
+    if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
         const std::string literal = emitScalarFpLiteral(folded_constant);
         ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
            << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
@@ -948,6 +964,13 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                                                   "_chunk)[" + flat_chunk_lane_expr + "]");
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
                << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+            return;
+        }
+
+        case ExprOp::RUNTIME_SCALAR: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, output_dtype) << ";\n";
             return;
         }
 
@@ -1389,7 +1412,11 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
             ss << ", ";
         }
         first_arg = false;
-        ss << "const " << input_chunk_types[i] << "* in" << i;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::Tensor) {
+            ss << "const " << input_chunk_types[i] << "* in" << i;
+        } else {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        }
     }
 
     for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
@@ -1412,10 +1439,15 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
        << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
     ss << "  if (base >= numel) return;\n\n";
 
+    bool emitted_any_tensor_chunk = false;
     for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (stage.expr.inputs[i].kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+        emitted_any_tensor_chunk = true;
         ss << "  const " << input_chunk_types[i] << " in" << i << "_chunk = in" << i << "[idx];\n";
     }
-    if (!input_dtypes.empty()) {
+    if (emitted_any_tensor_chunk) {
         ss << "\n";
     }
 
@@ -1747,7 +1779,11 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
             ss << ", ";
         }
         first_arg = false;
-        ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::Tensor) {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        } else {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        }
     }
 
     for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
@@ -1818,7 +1854,11 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
             ss << ", ";
         }
         first_arg = false;
-        ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::Tensor) {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        } else {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        }
     }
     for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
         if (!first_arg) {

@@ -19,6 +19,7 @@ struct PhysicalExecutionStage;
 
 enum class ExprOp : uint16_t {
     INPUT = 3,
+    RUNTIME_SCALAR,
     SCALAR_FP,
     ADD,
     SUB,
@@ -93,7 +94,7 @@ struct ExprNode {
     uint32_t input_slot = UINT32_MAX;
     double scalar_fp = 0.0;
 
-    // For INPUT nodes only: actual dtype of the bound runtime tensor.
+    // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     Optional<TensorDescriptor::DataType> input_tensor_dtype = Optional<TensorDescriptor::DataType>::empty();
 
     // Value semantics for this node.
@@ -110,8 +111,14 @@ struct ExprNode {
 };
 
 struct NamedInput {
+    enum class Kind : uint8_t {
+        Tensor,
+        RuntimeScalarFp32,
+    };
+
     std::string name;
     uint32_t slot;
+    Kind kind = Kind::Tensor;
 };
 
 struct NamedOutput {
@@ -126,7 +133,7 @@ struct PhysicalExpression {
 
     uint32_t numInputs() const { return static_cast<uint32_t>(inputs.size()); }
 
-    uint32_t getOrCreateInputSlot(const std::string& name);
+    uint32_t getOrCreateInputSlot(const std::string& name, NamedInput::Kind kind = NamedInput::Kind::Tensor);
 
     std::set<std::string> getInputNames() const {
         std::set<std::string> names;
@@ -180,6 +187,8 @@ class Expression {
 
     static Expression input(const std::string& name,
                             Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty());
+    static Expression runtimeScalar(const std::string& name,
+                                    Optional<TensorDescriptor::DataType> as_type = Optional<TensorDescriptor::DataType>::empty());
     static Expression scalar(double value);
 
     [[nodiscard]] PhysicalExpression expression() const;

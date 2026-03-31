@@ -667,7 +667,7 @@ def test_compile_backward_multi_output_explicit_upstreams_numerical(dtype: thor.
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x", "y"],
-        error_output_name_to_error_input_name={
+        feature_output_name_to_error_input_name={
             "prod": "__grad_prod",
             "row_sum": "__grad_row_sum",
         },
@@ -1117,7 +1117,7 @@ def test_compile_backward_multi_output_explicit_upstreams_mixed_constant_and_non
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x"],
-        error_output_name_to_error_input_name={
+        feature_output_name_to_error_input_name={
             "prod": "__grad_prod",
             "total_x": "__grad_total_x",
         },
@@ -1311,7 +1311,7 @@ def test_compile_backward_reduce_min_reduce_max_multi_output_explicit_upstreams_
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x"],
-        error_output_name_to_error_input_name={
+        feature_output_name_to_error_input_name={
             "row_min": "__grad_row_min",
             "row_max": "__grad_row_max",
         },
@@ -1526,7 +1526,7 @@ def test_compile_backward_elementwise_min_max_multi_output_explicit_upstreams_nu
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x", "y"],
-        error_output_name_to_error_input_name={
+        feature_output_name_to_error_input_name={
             "mn": "__grad_mn",
             "mx": "__grad_mx",
         },
@@ -2085,7 +2085,7 @@ def test_compile_backward_multi_output_accumulate_grad_outputs_run_numerical(dty
     fwd_eq = ex.compile(outs, device_num=0)
     bwd_eq = fwd_eq.compile_backward(
         ["x", "y"],
-        error_output_name_to_error_input_name={
+        feature_output_name_to_error_input_name={
             "prod": "__grad_prod",
             "row_sum": "__grad_row_sum",
         },
@@ -2361,3 +2361,212 @@ def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_placement(
 
     msg = str(excinfo.value).lower()
     assert "placement" in msg
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_runtime_scalar_forward_run_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+
+    out = (x * step) + ex.scalar(1.0)
+    eq = ex.compile(out, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, -5.0, 6.5]], dtype=np.float32).astype(storage_dtype)
+    step_value = 0.25
+
+    expected = ((x_np.astype(np.float32) * step_value) + 1.0).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, dtype, stream)
+    out_gpu = _gpu_tensor(list(x_np.shape), dtype, gpu_num=0)
+
+    eq.run({
+        "x": x_gpu
+    }, {
+        "step": step_value
+    }, out_gpu, stream)
+
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+def test_runtime_scalar_as_type_fp16_casts_before_execution_numerical():
+    x = ex.input("x", thor.DataType.fp32)
+    step = ex.runtime_scalar("step", thor.DataType.fp16)
+
+    # If the runtime scalar is cast to fp16 as it enters the graph, the fp32 output
+    # should contain the fp16-rounded value, not the original fp32 host value.
+    out = x + step
+    eq = ex.compile(out, device_num=0)
+
+    x_np = np.zeros((2, 3), dtype=np.float32)
+    step_value = 0.3333
+    expected_scalar = np.float32(np.float16(step_value))
+    expected = np.full_like(x_np, fill_value=expected_scalar, dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, thor.DataType.fp32, stream)
+    out_gpu = _gpu_tensor(list(x_np.shape), thor.DataType.fp32, gpu_num=0)
+
+    eq.run({
+        "x": x_gpu
+    }, {
+        "step": step_value
+    }, out_gpu, stream)
+
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_runtime_scalar_multi_output_run_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+
+    outs = ex.outputs({
+        "scaled": x * step,
+        "shifted": x + step,
+    })
+
+    eq = ex.compile(outs, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.0, -2.0, 3.5], [4.0, 5.0, -6.0]], dtype=np.float32).astype(storage_dtype)
+    step_value = -1.5
+
+    x_ref = x_np.astype(np.float32)
+    expected = {
+        "scaled": (x_ref * step_value).astype(storage_dtype),
+        "shifted": (x_ref + step_value).astype(storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    x_gpu = _host_to_gpu(x_np, dtype, stream)
+    outputs_gpu = {
+        "scaled": _gpu_tensor(list(x_np.shape), dtype, gpu_num=0),
+        "shifted": _gpu_tensor(list(x_np.shape), dtype, gpu_num=0),
+    }
+
+    eq.run({
+        "x": x_gpu
+    }, {
+        "step": step_value
+    }, outputs_gpu, stream)
+
+    for name in eq.output_names():
+        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), dtype)
+        out_host.copy_from_async(outputs_gpu[name], stream)
+        stream.synchronize()
+        got = out_host.numpy().copy()
+
+        assert got.shape == expected[name].shape
+        _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_runtime_scalar_through_reduction_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+
+    loss = ex.reduce_sum(x * step, axis=[0, 1], squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, -5.0, 6.5]], dtype=np.float32).astype(storage_dtype)
+    step_value = -0.75
+
+    expected = {
+        "x_grad": np.full_like(x_np, fill_value=step_value, dtype=storage_dtype),
+    }
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    stamped = bwd_eq.stamp(inputs_gpu, {
+        "step": step_value
+    }, stream)
+    stamped.run()
+
+    out_gpu = stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected["x_grad"].shape
+    _assert_close(got, expected["x_grad"], dtype)
+
+
+@pytest.mark.cuda
+def test_runtime_scalar_missing_input_rejected():
+    dtype = thor.DataType.fp32
+
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+    out = x * step
+    eq = ex.compile(out, device_num=0)
+
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="Missing required fused equation runtime scalar input: step"):
+        eq.stamp(inputs_gpu, stream)
+
+
+@pytest.mark.cuda
+def test_runtime_scalar_unexpected_input_rejected():
+    dtype = thor.DataType.fp32
+
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+    out = x * step
+    eq = ex.compile(out, device_num=0)
+
+    x_np = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="Unexpected runtime scalar input sent to fused equation: extra"):
+        eq.stamp(inputs_gpu, {
+            "step": 2.0,
+            "extra": 7.0
+        }, stream)
+
+
+@pytest.mark.cuda
+def test_compile_backward_rejects_runtime_scalar_wrt():
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+    out = x * step
+
+    fwd_eq = ex.compile(out, device_num=0)
+
+    with pytest.raises(RuntimeError, match="compileBackward only supports gradients with respect to tensor inputs"):
+        fwd_eq.compile_backward(["x", "step"])

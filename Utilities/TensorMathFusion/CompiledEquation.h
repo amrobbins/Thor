@@ -1,11 +1,14 @@
 #pragma once
 
 #include <iostream>
+#include <variant>
 
-#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TensorMathFusion/Expression.h"
 
 namespace ThorImplementation {
+using RuntimeInputValue = std::variant<Tensor, float>;
+
 struct EquationSignature {
     uint32_t num_inputs;
     int sm_major;
@@ -51,6 +54,7 @@ struct CompiledEquation {
 
     int deviceNum = 0;
     std::vector<std::string> input_names;
+    std::vector<NamedInput::Kind> input_kinds;
     std::vector<TensorDescriptor::DataType> input_dtypes;
     std::vector<TensorDescriptor::DataType> output_dtypes;
 
