@@ -11,6 +11,9 @@ using DataType = TensorDescriptor::DataType;
 bool isSupportedFusionFloatingType(DataType dtype);
 bool isFp8Type(DataType dtype);
 
+DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype);
+DataType toSupportedInputDType(ExprOp op, DataType dtype);
+
 DataType defaultComputeDType(DataType value_dtype);
 DataType promoteTensorValueDTypes(DataType a, DataType b);
 DataType promoteTensorValueDTypes(const std::vector<DataType>& dtypes);

@@ -777,8 +777,10 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
         throw std::runtime_error("Reduction node missing resolved output_dtype.");
     }
 
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.get());
+
     return make_shared<CompiledReduction>(
-        node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
 }
 
 shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalExpression& expr) {
@@ -815,8 +817,10 @@ shared_ptr<CompiledArgMinMax> EquationCompiler::compileArgMinMax(const PhysicalE
         throw std::runtime_error("ArgMinMax node missing resolved output_dtype.");
     }
 
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.get());
+
     return make_shared<CompiledArgMinMax>(
-        node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
 }
 
 shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBackward(const PhysicalExpression& expr) {
@@ -853,8 +857,11 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
         throw std::runtime_error("ReduceMinMaxBackward node missing resolved output_dtype.");
     }
 
+    const ExprOp reduce_op = node.op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
+    const DataType supported_input_dtype = toSupportedInputDType(reduce_op, input_node.input_tensor_dtype.get());
+
     return make_shared<CompiledReduceMinMaxBackward>(
-        node.op, node.reduction_axes, node.squeeze_axes, input_node.input_tensor_dtype.get(), node.output_dtype.get(), node.compute_dtype);
+        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
 }
 
 static bool inputRequiresMaterialization(const ExprNode& node) {
@@ -1135,18 +1142,22 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
         throw std::runtime_error("Reduction parent node is missing resolved actual input dtype.");
     }
 
+    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.get());
+
     ExprNode input_node;
     input_node.op = ExprOp::INPUT;
     input_node.input_slot = 0;
 
     // This local INPUT node represents the already-materialized value produced by
-    // the parent expression feeding the reduction. It should inherit the parent's
-    // value dtype semantics.
-    input_node.input_tensor_dtype = actual_input_dtype.get();
-    input_node.output_dtype = parent.output_dtype;
-    input_node.compute_dtype = parent.compute_dtype;
-    input_node.backward_output_dtype = parent.backward_output_dtype;
-    input_node.backward_compute_dtype = parent.backward_compute_dtype;
+    // the parent expression feeding the reduction. Reductions may need a narrower
+    // supported library input dtype than the logical parent value dtype, so record
+    // the normalized input dtype here and let stamp-time adapt the concrete tensor
+    // if needed.
+    input_node.input_tensor_dtype = supported_input_dtype;
+    input_node.output_dtype = supported_input_dtype;
+    input_node.compute_dtype = defaultComputeDType(supported_input_dtype);
+    input_node.backward_output_dtype = supported_input_dtype;
+    input_node.backward_compute_dtype = defaultComputeDType(supported_input_dtype);
 
     stage_expr.nodes.push_back(std::move(input_node));
 

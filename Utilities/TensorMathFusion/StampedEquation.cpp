@@ -86,6 +86,13 @@ StampedArgMinMax::StampedArgMinMax(std::shared_ptr<BuiltReduction> built,
 void StampedArgMinMax::run() { runOn(stream); }
 
 void StampedArgMinMax::runOn(Stream& run_stream) const {
+    // std::cerr << "[REDUCE_MINMAX_BW] input dtype=" << TensorDescriptor::getElementTypeName(input.getDataType())
+    //           << " built.input_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.input_dtype)
+    //           << " built.output_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.output_dtype)
+    //           << " built.compute_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.compute_dtype)
+    //           << " reduction_value_output dtype=" << TensorDescriptor::getElementTypeName(reduction_value_output.getDataType())
+    //           << std::endl;
+
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         assert(workspace.isPresent());
@@ -134,6 +141,14 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
 
 void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
+    // std::cerr << "[REDUCE_MINMAX_BW] input dtype=" << TensorDescriptor::getElementTypeName(input.getDataType())
+    //           << " built.input_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.input_dtype)
+    //           << " built.output_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.output_dtype)
+    //           << " built.compute_dtype=" << TensorDescriptor::getElementTypeName(built_reduction->key.compute_dtype)
+    //           << " indices dtype=" << TensorDescriptor::getElementTypeName(indices.getDataType())
+    //           << " reduction_value_output dtype=" << TensorDescriptor::getElementTypeName(reduction_value_output.getDataType())
+    //           << std::endl;
+
     void* workspace_ptr = nullptr;
     if (built_reduction->workspace_bytes > 0) {
         assert(workspace.isPresent());

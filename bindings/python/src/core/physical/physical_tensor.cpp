@@ -200,7 +200,8 @@ int
     // Copy support (nanobind can usually do this implicitly, but being explicit is fine)
     physical_tensor.def("__copy__", [](const PhysicalTensor &self) { return PhysicalTensor(self); });
     physical_tensor.def("__deepcopy__", [](const PhysicalTensor &self, nb::handle /*memo*/) { return PhysicalTensor(self); }, "memo"_a);
-
+    physical_tensor.def("__str__",
+                        [](const PhysicalTensor &self) { return self.getDescriptor().toString() + self.getPlacement().toString(); });
     physical_tensor.def("__repr__", [](const PhysicalTensor & /*self*/) { return string("<thor.physical.PhysicalTensor>"); });
 
     physical_tensor.def("get_descriptor", &PhysicalTensor::getDescriptor);

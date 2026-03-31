@@ -19,6 +19,40 @@ bool isSupportedFusionFloatingType(DataType dtype) {
 
 bool isFp8Type(DataType dtype) { return dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2; }
 
+static bool isReductionComputeOp(ExprOp op) { return isCudnnReduceOp(op); }
+
+DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
+    if (!isSupportedFusionFloatingType(requested_compute_dtype)) {
+        throw std::runtime_error("Unsupported dtype in toSupportedComputeDType.");
+    }
+
+    if (isReductionComputeOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+                return DataType::FP32;
+            default:
+                throw std::runtime_error("Unhandled reduction dtype in toSupportedComputeDType.");
+        }
+    }
+
+    switch (requested_compute_dtype) {
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::FP16:
+            return DataType::FP16;
+        case DataType::BF16:
+            return DataType::BF16;
+        case DataType::FP32:
+            return DataType::FP32;
+        default:
+            throw std::runtime_error("Unhandled pointwise dtype in toSupportedComputeDType.");
+    }
+}
+
 DataType defaultComputeDType(DataType value_dtype) {
     switch (value_dtype) {
         case DataType::FP8_E4M3:
@@ -30,6 +64,28 @@ DataType defaultComputeDType(DataType value_dtype) {
             return value_dtype;
         default:
             throw std::runtime_error("Unsupported dtype in defaultComputeDType.");
+    }
+}
+
+DataType toSupportedInputDType(ExprOp op, DataType dtype) {
+    if (!isSupportedFusionFloatingType(dtype)) {
+        throw std::runtime_error("Unsupported dtype in toSupportedInputDType.");
+    }
+
+    if (isReductionComputeOp(op)) {
+        switch (dtype) {
+            case DataType::FP16:
+            case DataType::FP32:
+                return dtype;
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::BF16:
+                return DataType::FP16;
+            default:
+                throw std::runtime_error("Unhandled reduction dtype conversion, from: " + TensorDescriptor::getElementTypeName(dtype));
+        }
+    } else {
+        return dtype;
     }
 }
 
@@ -94,6 +150,12 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.isPresent() ? node.output_dtype.get() : DataType::FP32;
     }
 
+    if (isCudnnReduceOp(node.op)) {
+        if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX)
+            return DataType::UINT32;
+        return DataType::FP32;
+    }
+
     std::vector<DataType> tensor_parent_dtypes;
     tensor_parent_dtypes.reserve(2);
 
@@ -136,11 +198,16 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
 
             const DataType actual_input_dtype = root_input_dtypes[node.input_slot];
             node.input_tensor_dtype = actual_input_dtype;
-            const DataType output_dtype = node.output_dtype.isPresent() ? node.output_dtype.get() : actual_input_dtype;
-            const DataType compute_dtype = node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(output_dtype);
+            const bool explicit_output_dtype = node.output_dtype.isPresent();
+            const DataType output_dtype = explicit_output_dtype ? node.output_dtype.get() : actual_input_dtype;
+            const DataType requested_compute_dtype = node.compute_dtype.isPresent()
+                                                         ? node.compute_dtype.get()
+                                                         : (explicit_output_dtype ? output_dtype : defaultComputeDType(output_dtype));
+            const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
             const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
-            const DataType backward_compute_dtype =
-                node.backward_compute_dtype.isPresent() ? node.backward_compute_dtype.get() : compute_dtype;
+            const DataType backward_compute_dtype = node.backward_compute_dtype.isPresent()
+                                                        ? toSupportedComputeDType(node.op, node.backward_compute_dtype.get())
+                                                        : compute_dtype;
 
             node.output_dtype = output_dtype;
             node.compute_dtype = compute_dtype;
@@ -154,13 +221,15 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
         const bool is_arg_reduction = node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX;
-        const DataType compute_dtype = node.compute_dtype.isPresent()
-                                           ? node.compute_dtype.get()
-                                           : (is_arg_reduction ? DataType::FP32 : defaultComputeDType(output_dtype));
+        const DataType requested_compute_dtype = node.compute_dtype.isPresent()
+                                                     ? node.compute_dtype.get()
+                                                     : (is_arg_reduction ? DataType::FP32 : defaultComputeDType(output_dtype));
+        const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
 
         const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
 
-        const DataType backward_compute_dtype = node.backward_compute_dtype.isPresent() ? node.backward_compute_dtype.get() : compute_dtype;
+        const DataType backward_compute_dtype =
+            node.backward_compute_dtype.isPresent() ? toSupportedComputeDType(node.op, node.backward_compute_dtype.get()) : compute_dtype;
 
         node.output_dtype = output_dtype;
         node.compute_dtype = compute_dtype;

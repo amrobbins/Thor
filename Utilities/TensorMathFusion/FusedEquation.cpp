@@ -47,6 +47,24 @@ static const Optional<TensorPlacement> runtimeInputPlacementOrNull(const Runtime
     return Optional<TensorPlacement>::empty();
 }
 
+static Tensor adaptReductionInputDTypeIfNeeded(const Tensor& input,
+                                               DataType expected_input_dtype,
+                                               ExprOp reduction_op,
+                                               const Stream& stream) {
+    if (input.getDataType() == expected_input_dtype) {
+        return input;
+    }
+
+    if (toSupportedInputDType(reduction_op, input.getDataType()) != expected_input_dtype) {
+        throw std::runtime_error("Input dtype does not match compiled reduction input dtype.");
+    }
+
+    TensorDescriptor castDescriptor(expected_input_dtype, input.getDimensions());
+    Tensor castInput(input.getPlacement(), castDescriptor);
+    castInput.copyFromAsync(input, stream);
+    return castInput;
+}
+
 static RuntimeDTypeKey makeRuntimeDTypeKey(const std::vector<NamedInput>& root_inputs,
                                            const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
     RuntimeDTypeKey key;
@@ -1815,20 +1833,18 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     if (!compiledReduction)
         throw std::runtime_error("Tried to stamp reduction on a non-reduction FusedEquation.");
 
-    if (input.getDataType() != compiledReduction->input_dtype) {
-        throw std::runtime_error("Input dtype does not match compiled reduction input dtype.");
-    }
+    Tensor adaptedInput = adaptReductionInputDTypeIfNeeded(input, compiledReduction->input_dtype, compiledReduction->op, stream);
 
-    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiledReduction, input, stream.getGpuNum());
+    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiledReduction, adaptedInput, stream.getGpuNum());
 
     Optional<Tensor> workspace = Optional<Tensor>::empty();
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(input.getPlacement(), workspaceDescriptor);
+        workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
     vector<uint64_t> resolved_output_dimensions =
-        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
+        StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
 
     std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
     if (!requested_output_shape.empty()) {
@@ -1837,9 +1853,9 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
     }
 
     TensorDescriptor outputDescriptor(compiledReduction->output_dtype, output_dimensions);
-    Tensor output = Tensor(input.getPlacement(), outputDescriptor);
+    Tensor output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
 
-    return make_shared<StampedReduction>(std::move(built), input, output, stream, workspace);
+    return make_shared<StampedReduction>(std::move(built), adaptedInput, output, stream, workspace);
 }
 
 std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
@@ -1849,29 +1865,27 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     if (!compiledStage) {
         throw std::runtime_error("stampArgMinMax requires non-null compiled stage.");
     }
-    if (input.getDataType() != compiledStage->input_dtype) {
-        throw std::runtime_error("Input dtype does not match compiled arg-min/max input dtype.");
-    }
+    Tensor adaptedInput = adaptReductionInputDTypeIfNeeded(input, compiledStage->input_dtype, compiledStage->op, stream);
 
     const ExprOp reduce_op = compiledStage->op == ExprOp::REDUCE_ARGMIN ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
     std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(reduce_op,
                                                                             compiledStage->reduction_axes,
                                                                             compiledStage->squeeze_axes,
                                                                             compiledStage->input_dtype,
-                                                                            compiledStage->input_dtype,
+                                                                            DataType::FP32,
                                                                             compiledStage->compute_dtype,
                                                                             /*output_indices=*/true,
-                                                                            input,
+                                                                            adaptedInput,
                                                                             stream.getGpuNum());
 
     Optional<Tensor> workspace = Optional<Tensor>::empty();
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(input.getPlacement(), workspaceDescriptor);
+        workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
     std::vector<uint64_t> resolved_output_dimensions =
-        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
+        StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
     std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
     if (!requested_output_shape.empty()) {
         verifyRequestedOutputLayout(requested_output_shape, resolved_output_dimensions);
@@ -1879,14 +1893,14 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
     }
 
     TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dimensions);
-    Tensor output(input.getPlacement(), outputDescriptor);
+    Tensor output(adaptedInput.getPlacement(), outputDescriptor);
 
     const std::vector<uint64_t> unsqueezed_output_dims =
-        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, {});
-    TensorDescriptor reductionValueDescriptor(compiledStage->input_dtype, unsqueezed_output_dims);
-    Tensor reductionValueOutput(input.getPlacement(), reductionValueDescriptor);
+        StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, {});
+    TensorDescriptor reductionValueDescriptor(built->key.output_dtype, unsqueezed_output_dims);
+    Tensor reductionValueOutput(adaptedInput.getPlacement(), reductionValueDescriptor);
 
-    return make_shared<StampedArgMinMax>(std::move(built), input, output, reductionValueOutput, stream, workspace);
+    return make_shared<StampedArgMinMax>(std::move(built), adaptedInput, output, reductionValueOutput, stream, workspace);
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
@@ -1894,15 +1908,17 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
     if (!compiledStage) {
         throw std::runtime_error("stampReduceMinMaxBackward requires non-null compiled stage.");
     }
-    if (input.getDataType() != compiledStage->input_dtype) {
-        throw std::runtime_error("Input dtype does not match compiled reduce-min/max-backward input dtype.");
-    }
+    Tensor adaptedInput =
+        adaptReductionInputDTypeIfNeeded(input,
+                                         compiledStage->input_dtype,
+                                         compiledStage->op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX,
+                                         stream);
     if (grad_output.getDataType() != compiledStage->output_dtype) {
         throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward output dtype.");
     }
 
-    const std::vector<uint64_t> expected_grad_dims =
-        StampedEquation::computeReductionOutputDims(input.getDimensions(), compiledStage->reduction_axes, compiledStage->squeeze_axes);
+    const std::vector<uint64_t> expected_grad_dims = StampedEquation::computeReductionOutputDims(
+        adaptedInput.getDimensions(), compiledStage->reduction_axes, compiledStage->squeeze_axes);
     if (!outputDimensionsMatchIgnoringSingletons(grad_output.getDimensions(), expected_grad_dims)) {
         throw std::runtime_error("Grad-output tensor dimensions are incompatible with reduce-min/max-backward stage.");
     }
@@ -1912,32 +1928,32 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
                                                                             compiledStage->reduction_axes,
                                                                             compiledStage->squeeze_axes,
                                                                             compiledStage->input_dtype,
-                                                                            compiledStage->input_dtype,
+                                                                            DataType::FP32,
                                                                             compiledStage->compute_dtype,
                                                                             /*output_indices=*/true,
-                                                                            input,
+                                                                            adaptedInput,
                                                                             stream.getGpuNum());
 
     Optional<Tensor> workspace = Optional<Tensor>::empty();
     if (built->workspace_bytes > 0) {
         TensorDescriptor workspaceDescriptor(TensorDescriptor::DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(input.getPlacement(), workspaceDescriptor);
+        workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
     const std::vector<uint64_t> unsqueezed_output_dims =
-        StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, {});
+        StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, {});
 
     TensorDescriptor indicesDescriptor(TensorDescriptor::DataType::UINT32, unsqueezed_output_dims);
-    Tensor indices(input.getPlacement(), indicesDescriptor);
+    Tensor indices(adaptedInput.getPlacement(), indicesDescriptor);
 
-    TensorDescriptor reductionValueDescriptor(compiledStage->input_dtype, unsqueezed_output_dims);
-    Tensor reductionValueOutput(input.getPlacement(), reductionValueDescriptor);
+    TensorDescriptor reductionValueDescriptor(built->key.output_dtype, unsqueezed_output_dims);
+    Tensor reductionValueOutput(adaptedInput.getPlacement(), reductionValueDescriptor);
 
     TensorDescriptor outputDescriptor(compiledStage->output_dtype, input.getDimensions());
-    Tensor output(input.getPlacement(), outputDescriptor);
+    Tensor output(adaptedInput.getPlacement(), outputDescriptor);
 
     return make_shared<StampedReduceMinMaxBackward>(
-        std::move(built), input, grad_output, output, indices, reductionValueOutput, stream, workspace);
+        std::move(built), adaptedInput, grad_output, output, indices, reductionValueOutput, stream, workspace);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
