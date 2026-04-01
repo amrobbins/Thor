@@ -93,6 +93,57 @@ thor.physical.Expression
     An Expression representing that runtime scalar input.
 )nbdoc");
 
+    expr.def(
+        "with_dtypes",
+        [](const Expression& self, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
+            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
+            }
+            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return self.withDTypes(compute_dtype, output_dtype);
+        },
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Return a new expression whose result node has local dtype overrides.
+
+This only annotates the current expression result node. It does not recursively
+rewrite the dtypes of ancestor nodes in the subexpression.
+
+Parameters
+----------
+output_dtype : thor.DataType | None
+    Optional output dtype override for this expression node.
+compute_dtype : thor.DataType | None
+    Optional compute dtype override for this expression node.
+
+Returns
+-------
+thor.physical.Expression
+    A new Expression with the requested local dtype overrides applied to its
+    result node.
+)nbdoc");
+
+    expr.def(
+        "with_output_dtype",
+        [](const Expression& self, DataType output_dtype) { return self.withOutputDType(output_dtype); },
+        "output_dtype"_a,
+        R"nbdoc(
+Return a new expression whose result node uses the requested output dtype.
+)nbdoc");
+
+    expr.def(
+        "with_compute_dtype",
+        [](const Expression& self, DataType compute_dtype) { return self.withComputeDType(compute_dtype); },
+        "compute_dtype"_a,
+        R"nbdoc(
+Return a new expression whose result node uses the requested compute dtype.
+)nbdoc");
+
     expr.def_static(
         "constant_scalar",
         [](double value) { return Expression::constant_scalar(value); },

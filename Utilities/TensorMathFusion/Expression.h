@@ -259,6 +259,12 @@ class Expression {
     [[nodiscard]] Expression min(const Expression& other) const;
     [[nodiscard]] Expression max(const Expression& other) const;
 
+    [[nodiscard]] Expression withDTypes(
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty()) const;
+    [[nodiscard]] Expression withComputeDType(TensorDescriptor::DataType compute_dtype) const;
+    [[nodiscard]] Expression withOutputDType(TensorDescriptor::DataType output_dtype) const;
+
     static bool isLeafOp(ExprOp op);
     static bool isUnaryOp(ExprOp op);
     static bool isBinaryOp(ExprOp op);

@@ -3086,3 +3086,73 @@ def test_reduce_argmin_bf16_input_adapts_and_runs_numerical():
 
     assert got.shape == expected.shape
     np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+def test_with_output_dtype_overrides_only_result_node_numerical():
+    input_dtype = thor.DataType.fp32
+    output_dtype = thor.DataType.fp16
+
+    x = ex.input("x")
+    y = ex.input("y")
+    out = (x + y).with_output_dtype(output_dtype)
+
+    eq = ex.compile(out, device_num=0)
+
+    x_np = np.array([[1.125, -2.25, 3.5], [4.75, 5.125, -6.375]], dtype=np.float32)
+    y_np = np.array([[0.5, 1.75, -2.125], [2.0, -1.0, 0.25]], dtype=np.float32)
+    expected = (x_np + y_np).astype(np.float16)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, input_dtype, stream),
+        "y": _host_to_gpu(y_np, input_dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output(eq.output_names()[0])
+    out_host = _cpu_tensor(list(out_gpu.dimensions), output_dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+def test_with_compute_dtype_and_output_dtype_on_result_node_numerical():
+    input_dtype = thor.DataType.fp16
+    output_dtype = thor.DataType.fp16
+    compute_dtype = thor.DataType.fp32
+
+    x = ex.input("x")
+    y = ex.input("y")
+    out = (x * y).with_dtypes(output_dtype=output_dtype, compute_dtype=compute_dtype)
+
+    eq = ex.compile(out, device_num=0)
+
+    x_np = np.array([[1.1, -2.2, 3.3], [4.4, -5.5, 6.6]], dtype=np.float16)
+    y_np = np.array([[0.5, 1.5, -2.0], [2.0, -1.0, 0.25]], dtype=np.float16)
+
+    expected = (x_np.astype(np.float32) * y_np.astype(np.float32)).astype(np.float16)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, input_dtype, stream),
+        "y": _host_to_gpu(y_np, input_dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    out_gpu = stamped.output(eq.output_names()[0])
+    out_host = _cpu_tensor(list(out_gpu.dimensions), output_dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
