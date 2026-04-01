@@ -287,7 +287,7 @@ def test_log_default_base_matches_explicit_e_construction():
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_compile_scalar_only_expression(dtype: thor.DataType):
-    expr = ex.exp(ex.scalar(2.0)) + ex.log2(ex.scalar(8.0)) - ex.sqrt(ex.scalar(9.0))
+    expr = ex.exp(ex.constant_scalar(2.0)) + ex.log2(ex.constant_scalar(8.0)) - ex.sqrt(ex.constant_scalar(9.0))
     fused = ex.compile(
         expr,
         device_num=0,
@@ -300,7 +300,8 @@ def test_compile_scalar_only_expression(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_compile_min_max_scalar_only_expression(dtype: thor.DataType):
-    expr = ex.max(ex.scalar(2.0), ex.scalar(5.0)) + ex.min(ex.scalar(10.0), ex.scalar(3.0))
+    expr = ex.max(ex.constant_scalar(2.0), ex.constant_scalar(5.0)) + ex.min(
+        ex.constant_scalar(10.0), ex.constant_scalar(3.0))
     fused = ex.compile(
         expr,
         device_num=0,

@@ -245,9 +245,8 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
             const DataType actual_input_dtype = root_input_dtypes[node.input_slot];
             node.input_tensor_dtype = actual_input_dtype;
             const DataType output_dtype = node.output_dtype.isPresent() ? node.output_dtype.get() : actual_input_dtype;
-            const DataType requested_compute_dtype = node.compute_dtype.isPresent()
-                                                         ? node.compute_dtype.get()
-                                                         : defaultComputeDType(actual_input_dtype, output_dtype);
+            const DataType requested_compute_dtype =
+                node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(actual_input_dtype, output_dtype);
             const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
             const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
             const DataType backward_compute_dtype = node.backward_compute_dtype.isPresent()
@@ -264,12 +263,10 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
         }
 
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
-        const DataType logical_input_dtype =
-            resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
+        const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
-        const DataType requested_compute_dtype = node.compute_dtype.isPresent()
-                                                     ? node.compute_dtype.get()
-                                                     : defaultComputeDType(logical_input_dtype, output_dtype);
+        const DataType requested_compute_dtype =
+            node.compute_dtype.isPresent() ? node.compute_dtype.get() : defaultComputeDType(logical_input_dtype, output_dtype);
         const DataType compute_dtype = toSupportedComputeDType(node.op, requested_compute_dtype);
 
         const DataType backward_output_dtype = node.backward_output_dtype.isPresent() ? node.backward_output_dtype.get() : output_dtype;
