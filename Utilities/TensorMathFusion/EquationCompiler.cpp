@@ -1271,6 +1271,24 @@ struct PlannedExecution {
     std::vector<CompiledStageOutput> final_outputs;
 };
 
+static void forceReductionProducerOutputDTypeIfNeeded(PhysicalExpression& expr, uint32_t producer_idx) {
+    if (producer_idx >= expr.nodes.size()) {
+        throw std::runtime_error("forceReductionProducerOutputDTypeIfNeeded producer_idx out of range.");
+    }
+
+    ExprNode& producer = expr.nodes[producer_idx];
+    if (!producer.output_dtype.isPresent()) {
+        throw std::runtime_error("Reduction producer missing resolved output_dtype.");
+    }
+
+    const DataType output_dtype = producer.output_dtype.get();
+    if (output_dtype == DataType::FP16 || output_dtype == DataType::FP32) {
+        return;
+    }
+
+    producer.output_dtype = DataType::FP16;
+}
+
 static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     if (!outputs.expr) {
         throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
@@ -1279,7 +1297,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         throw std::runtime_error("Cannot split empty PhysicalOutputs.");
     }
 
-    const PhysicalExpression& expr = *outputs.expr;
+    PhysicalExpression expr = *outputs.expr;
     if (expr.nodes.empty()) {
         throw std::runtime_error("Cannot split empty PhysicalExpression.");
     }
@@ -1340,19 +1358,22 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         const ExprNode& root = expr.nodes[root_idx];
         if (isStageBoundaryOp(root.op)) {
-            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
+            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label, bool force_supported_reduction_input_dtype) {
                 if (parent_idx >= expr.nodes.size()) {
                     throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
                 }
                 const ExprNode& parent = expr.nodes[parent_idx];
                 if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
+                    if (force_supported_reduction_input_dtype) {
+                        forceReductionProducerOutputDTypeIfNeeded(expr, parent_idx);
+                    }
                     emitForDependency(parent_idx);
                 }
             };
 
-            ensureBoundaryParentEmitted(root.lhs, "lhs");
+            ensureBoundaryParentEmitted(root.lhs, "lhs", true);
             if (isReduceMinMaxBackwardOp(root.op)) {
-                ensureBoundaryParentEmitted(root.rhs, "rhs");
+                ensureBoundaryParentEmitted(root.rhs, "rhs", false);
             }
 
             uint32_t stage_out_id = next_value_id++;
@@ -1469,19 +1490,22 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
 
         if (isStageBoundaryOp(root.op)) {
-            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label) {
+            auto ensureBoundaryParentEmitted = [&](uint32_t parent_idx, const char* label, bool force_supported_reduction_input_dtype) {
                 if (parent_idx >= expr.nodes.size()) {
                     throw std::runtime_error(std::string("Stage-boundary ") + label + " out of range.");
                 }
                 const ExprNode& parent = expr.nodes[parent_idx];
                 if (parent.op != ExprOp::INPUT || inputRequiresMaterialization(parent)) {
+                    if (force_supported_reduction_input_dtype) {
+                        forceReductionProducerOutputDTypeIfNeeded(expr, parent_idx);
+                    }
                     emitForDependency(parent_idx);
                 }
             };
 
-            ensureBoundaryParentEmitted(root.lhs, "lhs");
+            ensureBoundaryParentEmitted(root.lhs, "lhs", true);
             if (isReduceMinMaxBackwardOp(root.op)) {
-                ensureBoundaryParentEmitted(root.rhs, "rhs");
+                ensureBoundaryParentEmitted(root.rhs, "rhs", false);
             }
 
             uint32_t stage_out_id = next_value_id++;
