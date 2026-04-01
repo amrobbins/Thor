@@ -771,6 +771,34 @@ Expression Expression::reduce_norm2(const std::vector<uint64_t>& reduction_axes,
     return reduction(ExprOp::REDUCE_NORM2, reduction_axes, squeeze_axes, compute_dtype);
 }
 
+Expression Expression::withDTypes(Optional<DataType> compute_dtype, Optional<DataType> output_dtype) const {
+    if (!expr)
+        throw std::runtime_error("Cannot override dtypes on an empty expression");
+    if (nodeIndex >= expr->nodes.size())
+        throw std::runtime_error("Cannot override dtypes on an invalid expression node");
+
+    auto out = std::make_shared<PhysicalExpression>();
+    out->inputs = expr->inputs;
+
+    std::unordered_map<uint32_t, uint32_t> oldToNew;
+    uint32_t newRootIndex = cloneSubtree(*expr, nodeIndex, *out, oldToNew);
+    out->output_node = newRootIndex;
+
+    ExprNode& root = out->nodes[newRootIndex];
+    if (compute_dtype.isPresent()) {
+        root.compute_dtype = compute_dtype.get();
+    }
+    if (output_dtype.isPresent()) {
+        root.output_dtype = output_dtype.get();
+    }
+
+    return Expression(out, newRootIndex);
+}
+
+Expression Expression::withComputeDType(DataType compute_dtype) const { return withDTypes(compute_dtype, Optional<DataType>::empty()); }
+
+Expression Expression::withOutputDType(DataType output_dtype) const { return withDTypes(Optional<DataType>::empty(), output_dtype); }
+
 Expression Expression::ln() const { return unaryOp(*this, ExprOp::LN); }
 Expression Expression::log2() const { return unaryOp(*this, ExprOp::LOG2); }
 Expression Expression::log10() const { return unaryOp(*this, ExprOp::LOG10); }
