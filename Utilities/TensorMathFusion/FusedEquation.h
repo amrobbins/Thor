@@ -234,12 +234,12 @@ class FusedEquation {
           base_signature(std::move(base_signature)),
           backward_config(std::move(backward_config)),
           compiled_outputs_runtime_cache(
-              std::make_shared<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>(64)),
+              std::make_shared<LruCacheThreadSafe<RuntimeDTypeKey, std::shared_ptr<CompiledOutputs>, RuntimeDTypeKeyHash>>(128)),
           compiled_outputs_shape_cache(
-              std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<CompiledOutputs>, RuntimeShapeKeyHash>>(64)),
+              std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<CompiledOutputs>, RuntimeShapeKeyHash>>(128)),
           convenience_run_plan_cache(
-              std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>(64)) {
-    }
+              std::make_shared<LruCacheThreadSafe<RuntimeShapeKey, std::shared_ptr<PreparedConvenienceRunPlan>, RuntimeShapeKeyHash>>(
+                  128)) {}
 
     [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
                                                                  std::vector<RuntimeInputValue>& inputs,

@@ -3,6 +3,20 @@
 using namespace ThorImplementation;
 using namespace std;
 
+template <typename FROM_TYPE, typename TO_TYPE>
+struct Converter {
+    inline TO_TYPE operator()(FROM_TYPE x) const { return static_cast<TO_TYPE>(x); }
+};
+template <>
+struct Converter<__nv_fp8_e4m3, __nv_fp8_e5m2> {
+    inline __nv_fp8_e5m2 operator()(__nv_fp8_e4m3 x) const { return __nv_fp8_e5m2(static_cast<float>(x)); }
+};
+
+template <>
+struct Converter<__nv_fp8_e5m2, __nv_fp8_e4m3> {
+    inline __nv_fp8_e4m3 operator()(__nv_fp8_e5m2 x) const { return __nv_fp8_e4m3(static_cast<float>(x)); }
+};
+
 void TypeConverter::convertType(void *source,
                                 void *dest,
                                 TensorDescriptor::DataType sourceDataType,
@@ -46,8 +60,188 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
     TensorDescriptor::DataType destDataType = args->destDataType;
 
     switch (sourceDataType) {
+        case TensorDescriptor::DataType::FP8_E4M3:
+            switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e4m3>(
+                        (__nv_fp8_e4m3 *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, __nv_fp8_e5m2>(
+                        (__nv_fp8_e4m3 *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, __nv_bfloat16>(
+                        (__nv_fp8_e4m3 *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP16:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, half>((__nv_fp8_e4m3 *)args->source, (half *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP32:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, float>((__nv_fp8_e4m3 *)args->source, (float *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP64:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, double>((__nv_fp8_e4m3 *)args->source, (double *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT8:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, int8_t>((__nv_fp8_e4m3 *)args->source, (int8_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT16:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, int16_t>((__nv_fp8_e4m3 *)args->source, (int16_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT32:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, int32_t>((__nv_fp8_e4m3 *)args->source, (int32_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT64:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, int64_t>((__nv_fp8_e4m3 *)args->source, (int64_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT8:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, uint8_t>((__nv_fp8_e4m3 *)args->source, (uint8_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT16:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, uint16_t>((__nv_fp8_e4m3 *)args->source, (uint16_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT32:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, uint32_t>((__nv_fp8_e4m3 *)args->source, (uint32_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT64:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, uint64_t>((__nv_fp8_e4m3 *)args->source, (uint64_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BOOLEAN:
+                    cpuConvertTypeImpl<__nv_fp8_e4m3, bool>((__nv_fp8_e4m3 *)args->source, (bool *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                    cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e4m3>((__nv_fp8_e4m3 *)args->source, args->dest, numElements);
+                    break;
+                default:
+                    assert(false);
+            }
+            break;
+        case TensorDescriptor::DataType::FP8_E5M2:
+            switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e4m3>(
+                        (__nv_fp8_e5m2 *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, __nv_fp8_e5m2>(
+                        (__nv_fp8_e5m2 *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, __nv_bfloat16>(
+                        (__nv_fp8_e5m2 *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP16:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, half>((__nv_fp8_e5m2 *)args->source, (half *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP32:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, float>((__nv_fp8_e5m2 *)args->source, (float *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP64:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, double>((__nv_fp8_e5m2 *)args->source, (double *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT8:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, int8_t>((__nv_fp8_e5m2 *)args->source, (int8_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT16:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, int16_t>((__nv_fp8_e5m2 *)args->source, (int16_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT32:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, int32_t>((__nv_fp8_e5m2 *)args->source, (int32_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT64:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, int64_t>((__nv_fp8_e5m2 *)args->source, (int64_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT8:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, uint8_t>((__nv_fp8_e5m2 *)args->source, (uint8_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT16:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, uint16_t>((__nv_fp8_e5m2 *)args->source, (uint16_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT32:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, uint32_t>((__nv_fp8_e5m2 *)args->source, (uint32_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT64:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, uint64_t>((__nv_fp8_e5m2 *)args->source, (uint64_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BOOLEAN:
+                    cpuConvertTypeImpl<__nv_fp8_e5m2, bool>((__nv_fp8_e5m2 *)args->source, (bool *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                    cpuConvertTypeToPackedBooleanImpl<__nv_fp8_e5m2>((__nv_fp8_e5m2 *)args->source, args->dest, numElements);
+                    break;
+                default:
+                    assert(false);
+            }
+            break;
+        case TensorDescriptor::DataType::BF16:
+            switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e4m3>(
+                        (__nv_bfloat16 *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<__nv_bfloat16, __nv_fp8_e5m2>(
+                        (__nv_bfloat16 *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<__nv_bfloat16, __nv_bfloat16>(
+                        (__nv_bfloat16 *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP16:
+                    cpuConvertTypeImpl<__nv_bfloat16, half>((__nv_bfloat16 *)args->source, (half *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP32:
+                    cpuConvertTypeImpl<__nv_bfloat16, float>((__nv_bfloat16 *)args->source, (float *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP64:
+                    cpuConvertTypeImpl<__nv_bfloat16, double>((__nv_bfloat16 *)args->source, (double *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT8:
+                    cpuConvertTypeImpl<__nv_bfloat16, int8_t>((__nv_bfloat16 *)args->source, (int8_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT16:
+                    cpuConvertTypeImpl<__nv_bfloat16, int16_t>((__nv_bfloat16 *)args->source, (int16_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT32:
+                    cpuConvertTypeImpl<__nv_bfloat16, int32_t>((__nv_bfloat16 *)args->source, (int32_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::INT64:
+                    cpuConvertTypeImpl<__nv_bfloat16, int64_t>((__nv_bfloat16 *)args->source, (int64_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT8:
+                    cpuConvertTypeImpl<__nv_bfloat16, uint8_t>((__nv_bfloat16 *)args->source, (uint8_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT16:
+                    cpuConvertTypeImpl<__nv_bfloat16, uint16_t>((__nv_bfloat16 *)args->source, (uint16_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT32:
+                    cpuConvertTypeImpl<__nv_bfloat16, uint32_t>((__nv_bfloat16 *)args->source, (uint32_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::UINT64:
+                    cpuConvertTypeImpl<__nv_bfloat16, uint64_t>((__nv_bfloat16 *)args->source, (uint64_t *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BOOLEAN:
+                    cpuConvertTypeImpl<__nv_bfloat16, bool>((__nv_bfloat16 *)args->source, (bool *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::PACKED_BOOLEAN:
+                    cpuConvertTypeToPackedBooleanImpl<__nv_bfloat16>((__nv_bfloat16 *)args->source, args->dest, numElements);
+                    break;
+                default:
+                    assert(false);
+            }
+            break;
         case TensorDescriptor::DataType::FP16:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<half, __nv_fp8_e4m3>((half *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<half, __nv_fp8_e5m2>((half *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<half, __nv_bfloat16>((half *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<half, half>((half *)args->source, (half *)args->dest, numElements);
                     break;
@@ -93,6 +287,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::FP32:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<float, __nv_fp8_e4m3>((float *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<float, __nv_fp8_e5m2>((float *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<float, __nv_bfloat16>((float *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<float, half>((float *)args->source, (half *)args->dest, numElements);
                     break;
@@ -138,6 +341,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::FP64:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<double, __nv_fp8_e4m3>((double *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<double, __nv_fp8_e5m2>((double *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<double, __nv_bfloat16>((double *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<double, half>((double *)args->source, (half *)args->dest, numElements);
                     break;
@@ -183,6 +395,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::INT8:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<int8_t, __nv_fp8_e4m3>((int8_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<int8_t, __nv_fp8_e5m2>((int8_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<int8_t, __nv_bfloat16>((int8_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<int8_t, half>((int8_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -228,6 +449,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::INT16:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<int16_t, __nv_fp8_e4m3>((int16_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<int16_t, __nv_fp8_e5m2>((int16_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<int16_t, __nv_bfloat16>((int16_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<int16_t, half>((int16_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -273,6 +503,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::INT32:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<int32_t, __nv_fp8_e4m3>((int32_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<int32_t, __nv_fp8_e5m2>((int32_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<int32_t, __nv_bfloat16>((int32_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<int32_t, half>((int32_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -318,6 +557,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::INT64:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<int64_t, __nv_fp8_e4m3>((int64_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<int64_t, __nv_fp8_e5m2>((int64_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<int64_t, __nv_bfloat16>((int64_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<int64_t, half>((int64_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -363,6 +611,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::UINT8:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<uint8_t, __nv_fp8_e4m3>((uint8_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<uint8_t, __nv_fp8_e5m2>((uint8_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<uint8_t, __nv_bfloat16>((uint8_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<uint8_t, half>((uint8_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -408,6 +665,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::UINT16:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<uint16_t, __nv_fp8_e4m3>((uint16_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<uint16_t, __nv_fp8_e5m2>((uint16_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<uint16_t, __nv_bfloat16>((uint16_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<uint16_t, half>((uint16_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -453,6 +719,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::UINT32:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<uint32_t, __nv_fp8_e4m3>((uint32_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<uint32_t, __nv_fp8_e5m2>((uint32_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<uint32_t, __nv_bfloat16>((uint32_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<uint32_t, half>((uint32_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -498,6 +773,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::UINT64:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<uint64_t, __nv_fp8_e4m3>((uint64_t *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<uint64_t, __nv_fp8_e5m2>((uint64_t *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<uint64_t, __nv_bfloat16>((uint64_t *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<uint64_t, half>((uint64_t *)args->source, (half *)args->dest, numElements);
                     break;
@@ -543,6 +827,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::BOOLEAN:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeImpl<bool, __nv_fp8_e4m3>((bool *)args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeImpl<bool, __nv_fp8_e5m2>((bool *)args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeImpl<bool, __nv_bfloat16>((bool *)args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeImpl<bool, half>((bool *)args->source, (half *)args->dest, numElements);
                     break;
@@ -588,6 +881,15 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             break;
         case TensorDescriptor::DataType::PACKED_BOOLEAN:
             switch (destDataType) {
+                case TensorDescriptor::DataType::FP8_E4M3:
+                    cpuConvertTypeFromPackedBooleanImpl<__nv_fp8_e4m3>(args->source, (__nv_fp8_e4m3 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::FP8_E5M2:
+                    cpuConvertTypeFromPackedBooleanImpl<__nv_fp8_e5m2>(args->source, (__nv_fp8_e5m2 *)args->dest, numElements);
+                    break;
+                case TensorDescriptor::DataType::BF16:
+                    cpuConvertTypeFromPackedBooleanImpl<__nv_bfloat16>(args->source, (__nv_bfloat16 *)args->dest, numElements);
+                    break;
                 case TensorDescriptor::DataType::FP16:
                     cpuConvertTypeFromPackedBooleanImpl<half>(args->source, (half *)args->dest, numElements);
                     break;
@@ -640,7 +942,7 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
 template <typename FROM_TYPE, typename TO_TYPE>
 void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long numElements) {
     assert(!(is_same<FROM_TYPE, TO_TYPE>::value));
-    assert((is_convertible<FROM_TYPE, TO_TYPE>::value));
+    // assert((is_convertible<FROM_TYPE, TO_TYPE>::value));
 
     assert(numElements >= 0);
     if (numElements == 0)
@@ -664,29 +966,29 @@ void TypeConverter::cpuConvertTypeImpl(FROM_TYPE *source, TO_TYPE *dest, long nu
             const uint64_t elementsPerThread = (numElements + (numProcs - 1)) / numProcs;
 #pragma omp parallel for schedule(static, elementsPerThread) shared(dest, source, elementsPerThread, numElements) default(none)
             for (long i = 0; i < numElements; ++i) {
-                dest[i] = (TO_TYPE)(source[i]);
+                dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
             }
         } else {
             for (long i = 0; i < numElements; ++i) {
-                dest[i] = (TO_TYPE)(source[i]);
+                dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
             }
         }
     } else if (sizeof(TO_TYPE) < sizeof(FROM_TYPE)) {
         // In place and converting to a smaller type
         for (long i = 0; i < numElements; ++i) {
-            dest[i] = (TO_TYPE)(source[i]);
+            dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
         }
     } else {
         // In place and converting to a larger type
         for (long i = numElements - 1; i >= 0; --i) {
-            dest[i] = (TO_TYPE)(source[i]);
+            dest[i] = Converter<FROM_TYPE, TO_TYPE>{}(((FROM_TYPE *)source)[i]);
         }
     }
 }
 
 template <typename TO_TYPE>
 void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *dest, long numElements) {
-    assert((is_convertible<bool, TO_TYPE>::value));
+    // assert((is_convertible<bool, TO_TYPE>::value));
 
     if (numElements == 0)
         return;
@@ -726,7 +1028,7 @@ void TypeConverter::cpuConvertTypeFromPackedBooleanImpl(void *source, TO_TYPE *d
 
 template <typename FROM_TYPE>
 void TypeConverter::cpuConvertTypeToPackedBooleanImpl(FROM_TYPE *source, void *dest, long numElements) {
-    assert((is_convertible<FROM_TYPE, bool>::value));
+    // assert((is_convertible<FROM_TYPE, bool>::value));
 
     if (numElements == 0)
         return;

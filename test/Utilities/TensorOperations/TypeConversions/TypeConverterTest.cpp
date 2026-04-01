@@ -14,11 +14,9 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
 
     Stream stream(0);
 
-    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16;
-         sourceDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16; sourceDataType <= TensorDescriptor::DataType::BF16;
          sourceDataType = (TensorDescriptor::DataType)((int)sourceDataType + 1)) {
-        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16;
-             destDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16; destDataType <= TensorDescriptor::DataType::BF16;
              destDataType = (TensorDescriptor::DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
@@ -26,6 +24,12 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             int NUM_ELEMENTS = 1 + (rand() % 2000);
             if (rand() % 20 == 0)
                 NUM_ELEMENTS = 1000000 + rand() % 1000000;
+
+            // printf("%s -> %s\n",
+            //        TensorDescriptor::getElementTypeName(sourceDataType).c_str(),
+            //        TensorDescriptor::getElementTypeName(destDataType).c_str());
+            //
+            // printf("source data type %d dest data type %d numElements %d\n", (int)sourceDataType, (int)destDataType, NUM_ELEMENTS);
 
             void *source;
             void *dest;
@@ -37,36 +41,66 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             assert(cudaStatus == cudaSuccess);
 
             bool destDataTypeIsSigned = TensorDescriptor::isSignedType(destDataType);
-            if (sourceDataType == TensorDescriptor::DataType::FP16) {
+            if (sourceDataType == TensorDescriptor::DataType::FP8_E4M3) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((4 - (rand() % 8)) * 0.25);
                     }
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (rand() % 100) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP8_E5M2) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::BF16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((rand() % 100) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (4 - (rand() % 8)) * 0.25;
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (rand() % 8) * 0.25;
                     }
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::FP32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((float *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (rand() % 100) * 0.1;
+                        ((float *)source)[i] = (rand() % 8) * 0.25;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::FP64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((double *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (rand() % 100) * 0.1;
+                        ((double *)source)[i] = (rand() % 8) * 0.25;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::INT8) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int8_t *)source)[i] = 50 - (rand() % 100);
+                        ((int8_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int8_t *)source)[i] = rand() % 100;
@@ -74,7 +108,7 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT16) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int16_t *)source)[i] = 50 - (rand() % 100);
+                        ((int16_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int16_t *)source)[i] = rand() % 100;
@@ -82,7 +116,7 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int32_t *)source)[i] = 50 - (rand() % 100);
+                        ((int32_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int32_t *)source)[i] = rand() % 100;
@@ -90,23 +124,23 @@ TEST(RandomTestConversions, CpuAllConversionsOutOfPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int64_t *)source)[i] = 50 - (rand() % 100);
+                        ((int64_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int64_t *)source)[i] = rand() % 100;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::UINT8) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint8_t *)source)[i] = (rand() % 100);
+                    ((uint8_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT16) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint16_t *)source)[i] = (rand() % 100);
+                    ((uint16_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT32) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint32_t *)source)[i] = (rand() % 100);
+                    ((uint32_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT64) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint64_t *)source)[i] = (rand() % 100);
+                    ((uint64_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
@@ -161,11 +195,9 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
 
     Stream stream(0);
 
-    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16;
-         sourceDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16; sourceDataType <= TensorDescriptor::DataType::BF16;
          sourceDataType = (TensorDescriptor::DataType)((int)sourceDataType + 1)) {
-        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16;
-             destDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16; destDataType <= TensorDescriptor::DataType::BF16;
              destDataType = (TensorDescriptor::DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
@@ -185,36 +217,66 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
             assert(cudaStatus == cudaSuccess);
 
             bool destDataTypeIsSigned = TensorDescriptor::isSignedType(destDataType);
-            if (sourceDataType == TensorDescriptor::DataType::FP16) {
+            if (sourceDataType == TensorDescriptor::DataType::FP8_E4M3) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((4 - (rand() % 8)) * 0.25);
                     }
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (rand() % 100) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP8_E5M2) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::BF16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((rand() % 100) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (4 - (rand() % 8)) * 0.25;
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (rand() % 8) * 0.25;
                     }
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::FP32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((float *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (rand() % 100) * 0.1;
+                        ((float *)source)[i] = (rand() % 8) * 0.25;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::FP64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((double *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (rand() % 100) * 0.1;
+                        ((double *)source)[i] = (rand() % 8) * 0.25;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::INT8) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int8_t *)source)[i] = 50 - (rand() % 100);
+                        ((int8_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int8_t *)source)[i] = rand() % 100;
@@ -222,7 +284,7 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT16) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int16_t *)source)[i] = 50 - (rand() % 100);
+                        ((int16_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int16_t *)source)[i] = rand() % 100;
@@ -230,7 +292,7 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int32_t *)source)[i] = 50 - (rand() % 100);
+                        ((int32_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int32_t *)source)[i] = rand() % 100;
@@ -238,23 +300,23 @@ TEST(RandomTestConversions, CpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int64_t *)source)[i] = 50 - (rand() % 100);
+                        ((int64_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int64_t *)source)[i] = rand() % 100;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::UINT8) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint8_t *)source)[i] = (rand() % 100);
+                    ((uint8_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT16) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint16_t *)source)[i] = (rand() % 100);
+                    ((uint16_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT32) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint32_t *)source)[i] = (rand() % 100);
+                    ((uint32_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT64) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint64_t *)source)[i] = (rand() % 100);
+                    ((uint64_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
@@ -312,18 +374,16 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
 
     Stream stream(0);
 
-    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16;
-         sourceDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16; sourceDataType <= TensorDescriptor::DataType::BF16;
          sourceDataType = (TensorDescriptor::DataType)((int)sourceDataType + 1)) {
-        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16;
-             destDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16; destDataType <= TensorDescriptor::DataType::BF16;
              destDataType = (TensorDescriptor::DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
 
-            // printf("%s <- %s\n",
-            //       TensorDescriptor::getElementTypeName(destDataType).c_str(),
-            //       TensorDescriptor::getElementTypeName(sourceDataType).c_str());
+            // printf("%s -> %s\n",
+            //        TensorDescriptor::getElementTypeName(sourceDataType).c_str(),
+            //        TensorDescriptor::getElementTypeName(destDataType).c_str());
 
             const int NUM_ELEMENTS = 1 + (rand() % 25000);
 
@@ -339,76 +399,106 @@ TEST(RandomTestConversions, GpuAllConversionsOutOfPlace) {
             assert(cudaStatus == cudaSuccess);
 
             bool destDataTypeIsSigned = TensorDescriptor::isSignedType(destDataType);
-            if (sourceDataType == TensorDescriptor::DataType::FP16) {
+            if (sourceDataType == TensorDescriptor::DataType::FP8_E4M3) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((4 - (rand() % 8)) * 0.25);
                     }
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (rand() % 100) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP8_E5M2) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::BF16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((rand() % 100) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (4 - (rand() % 8)) * 0.25;
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (rand() % 10) * 0.25;
                     }
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::FP32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((float *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (rand() % 100) * 0.1;
+                        ((float *)source)[i] = (rand() % 10) * 0.25;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::FP64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((double *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (rand() % 100) * 0.1;
+                        ((double *)source)[i] = (rand() % 10) * 0.25;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::INT8) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int8_t *)source)[i] = 50 - (rand() % 100);
+                        ((int8_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int8_t *)source)[i] = rand() % 100;
+                        ((int8_t *)source)[i] = rand() % 10;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::INT16) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int16_t *)source)[i] = 50 - (rand() % 100);
+                        ((int16_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int16_t *)source)[i] = rand() % 100;
+                        ((int16_t *)source)[i] = rand() % 10;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::INT32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int32_t *)source)[i] = 50 - (rand() % 100);
+                        ((int32_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int32_t *)source)[i] = rand() % 100;
+                        ((int32_t *)source)[i] = rand() % 10;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::INT64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int64_t *)source)[i] = 50 - (rand() % 100);
+                        ((int64_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int64_t *)source)[i] = rand() % 100;
+                        ((int64_t *)source)[i] = rand() % 10;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::UINT8) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint8_t *)source)[i] = (rand() % 100);
+                    ((uint8_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT16) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint16_t *)source)[i] = (rand() % 100);
+                    ((uint16_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT32) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint32_t *)source)[i] = (rand() % 100);
+                    ((uint32_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT64) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint64_t *)source)[i] = (rand() % 100);
+                    ((uint64_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
@@ -500,11 +590,9 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
 
     Stream stream(0);
 
-    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16;
-         sourceDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+    for (TensorDescriptor::DataType sourceDataType = TensorDescriptor::DataType::FP16; sourceDataType <= TensorDescriptor::DataType::BF16;
          sourceDataType = (TensorDescriptor::DataType)((int)sourceDataType + 1)) {
-        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16;
-             destDataType <= TensorDescriptor::DataType::PACKED_BOOLEAN;
+        for (TensorDescriptor::DataType destDataType = TensorDescriptor::DataType::FP16; destDataType <= TensorDescriptor::DataType::BF16;
              destDataType = (TensorDescriptor::DataType)((int)destDataType + 1)) {
             if (sourceDataType == destDataType)
                 continue;
@@ -526,10 +614,40 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             assert(cudaStatus == cudaSuccess);
 
             bool destDataTypeIsSigned = TensorDescriptor::isSignedType(destDataType);
-            if (sourceDataType == TensorDescriptor::DataType::FP16) {
+            if (sourceDataType == TensorDescriptor::DataType::FP8_E4M3) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
-                        ((half *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e4m3 *)source)[i] = __nv_fp8_e4m3((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP8_E5M2) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_fp8_e5m2 *)source)[i] = __nv_fp8_e5m2((rand() % 10) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::BF16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((4 - (rand() % 8)) * 0.25);
+                    }
+                } else {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((__nv_bfloat16 *)source)[i] = __nv_bfloat16((rand() % 100) * 0.25);
+                    }
+                }
+            } else if (sourceDataType == TensorDescriptor::DataType::FP16) {
+                if (destDataTypeIsSigned) {
+                    for (int i = 0; i < NUM_ELEMENTS; ++i) {
+                        ((half *)source)[i] = (4 - (rand() % 8)) * 0.25;
                     }
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i) {
@@ -539,7 +657,7 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::FP32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((float *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((float *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((float *)source)[i] = (rand() % 100) * 0.1;
@@ -547,7 +665,7 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::FP64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((double *)source)[i] = (50 - (rand() % 100)) * 0.1;
+                        ((double *)source)[i] = (4 - (rand() % 8)) * 0.25;
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((double *)source)[i] = (rand() % 100) * 0.1;
@@ -555,7 +673,7 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT8) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int8_t *)source)[i] = 50 - (rand() % 100);
+                        ((int8_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int8_t *)source)[i] = rand() % 100;
@@ -563,7 +681,7 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT16) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int16_t *)source)[i] = 50 - (rand() % 100);
+                        ((int16_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int16_t *)source)[i] = rand() % 100;
@@ -571,7 +689,7 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT32) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int32_t *)source)[i] = 50 - (rand() % 100);
+                        ((int32_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
                         ((int32_t *)source)[i] = rand() % 100;
@@ -579,23 +697,23 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             } else if (sourceDataType == TensorDescriptor::DataType::INT64) {
                 if (destDataTypeIsSigned) {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int64_t *)source)[i] = 50 - (rand() % 100);
+                        ((int64_t *)source)[i] = 4 - (rand() % 8);
                 } else {
                     for (int i = 0; i < NUM_ELEMENTS; ++i)
-                        ((int64_t *)source)[i] = rand() % 100;
+                        ((int64_t *)source)[i] = rand() % 8;
                 }
             } else if (sourceDataType == TensorDescriptor::DataType::UINT8) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint8_t *)source)[i] = (rand() % 100);
+                    ((uint8_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT16) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint16_t *)source)[i] = (rand() % 100);
+                    ((uint16_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT32) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint32_t *)source)[i] = (rand() % 100);
+                    ((uint32_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::UINT64) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
-                    ((uint64_t *)source)[i] = (rand() % 100);
+                    ((uint64_t *)source)[i] = (rand() % 8);
             } else if (sourceDataType == TensorDescriptor::DataType::BOOLEAN) {
                 for (int i = 0; i < NUM_ELEMENTS; ++i)
                     ((bool *)source)[i] = rand() % 2 ? true : false;
