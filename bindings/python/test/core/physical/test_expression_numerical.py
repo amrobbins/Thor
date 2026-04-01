@@ -298,7 +298,7 @@ def test_sqrt_numerical(dtype: thor.DataType):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
 def test_scalar_only_expression_numerical(dtype: thor.DataType):
-    expr = ex.exp(ex.scalar(2.0)) + ex.log2(ex.scalar(8.0)) - ex.sqrt(ex.scalar(9.0))
+    expr = ex.exp(ex.constant_scalar(2.0)) + ex.log2(ex.constant_scalar(8.0)) - ex.sqrt(ex.constant_scalar(9.0))
 
     # Need a tensor shape for execution. Use a dummy input expression plus a zero multiplier
     # so the result stays scalar-valued elementwise.

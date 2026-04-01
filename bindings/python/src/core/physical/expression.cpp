@@ -94,8 +94,8 @@ thor.physical.Expression
 )nbdoc");
 
     expr.def_static(
-        "scalar",
-        [](double value) { return Expression::scalar(value); },
+        "constant_scalar",
+        [](double value) { return Expression::constant_scalar(value); },
         "value"_a,
         R"nbdoc(
 Create a floating-point scalar constant expression.

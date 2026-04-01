@@ -534,7 +534,7 @@ Expression::Expression(double value) {
     expr->output_node = nodeIndex;
 }
 
-Expression Expression::scalar(double value) { return Expression(value); }
+Expression Expression::constant_scalar(double value) { return Expression(value); }
 // Expression Expression::scalar(int64_t value) { return Expression(value); }
 
 PhysicalExpression Expression::expression() const {
@@ -778,7 +778,7 @@ Expression Expression::log(double base) const {
     if (base <= 0.0f || base == 1.0f) {
         throw std::runtime_error("log base must be positive and not equal to 1, received base = " + std::to_string(base));
     }
-    return this->ln() / Expression::scalar(std::log(base));
+    return this->ln() / Expression::constant_scalar(std::log(base));
 }
 
 Expression Expression::min(const Expression& other) const { return binaryOp(*this, other, ExprOp::MIN); }

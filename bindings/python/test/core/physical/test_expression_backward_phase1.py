@@ -793,7 +793,7 @@ def test_compile_backward_repeated_shape_path_accumulates_numerical(dtype: thor.
     path1 = ex.reduce_sum(ex.unsqueeze(x, axis=[0, 2]), axis=[0, 1, 2, 3], squeeze=False)
 
     # Break shape-path CSE intentionally while preserving the same math.
-    x2 = x + ex.scalar(0.0)
+    x2 = x + ex.constant_scalar(0.0)
     path2 = ex.reduce_sum(ex.squeeze(ex.unsqueeze(x2, axis=[0, 2]), axis=[0, 2]), axis=[0, 1], squeeze=False)
 
     loss = path1 + path2
@@ -920,8 +920,8 @@ def test_compile_backward_scalar_constant_through_shape_paths_additive_numerical
     # Path 2: shape-heavy branch with scalar constants intentionally threaded through it.
     # This keeps the math identical to sum(x), but forces scalar leaves to coexist with
     # squeeze/unsqueeze structure in the staged backward graph.
-    scalar_zero = ex.scalar(0.0)
-    scalar_one = ex.scalar(1.0)
+    scalar_zero = ex.constant_scalar(0.0)
+    scalar_one = ex.constant_scalar(1.0)
 
     x2 = (x + scalar_zero) * scalar_one
     path2 = ex.reduce_sum(
@@ -967,9 +967,9 @@ def test_compile_backward_scalar_constant_through_shape_paths_multiplicative_num
 
     # Force scalar constants into multiple shape-heavy branches that should still
     # reduce to a simple multiple of x in backward.
-    scalar_zero = ex.scalar(0.0)
-    scalar_one = ex.scalar(1.0)
-    scalar_two = ex.scalar(2.0)
+    scalar_zero = ex.constant_scalar(0.0)
+    scalar_one = ex.constant_scalar(1.0)
+    scalar_two = ex.constant_scalar(2.0)
 
     branch1 = ex.reduce_sum(
         ex.unsqueeze((x * scalar_one) + scalar_zero, axis=[0, 2]),
@@ -2369,7 +2369,7 @@ def test_runtime_scalar_forward_run_numerical(dtype: thor.DataType):
     x = ex.input("x")
     step = ex.runtime_scalar("step")
 
-    out = (x * step) + ex.scalar(1.0)
+    out = (x * step) + ex.constant_scalar(1.0)
     eq = ex.compile(out, device_num=0)
 
     storage_dtype = _numpy_storage_dtype(dtype)
@@ -2745,7 +2745,7 @@ def test_runtime_scalar_as_type_fp16_casts_before_execution_large_flat_numerical
     x = ex.input("x", thor.DataType.fp32)
     step = ex.runtime_scalar("step", thor.DataType.fp16)
 
-    out = (x * ex.scalar(2.0)) + step
+    out = (x * ex.constant_scalar(2.0)) + step
     eq = ex.compile(out, device_num=0)
 
     n = 4096
