@@ -973,7 +973,8 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     std::vector<uint32_t> stage_input_value_ids;
     std::unordered_map<uint32_t, uint32_t> value_id_to_local_input_slot;
 
-    auto getOrCreateLocalInputSlot = [&](uint32_t value_id, NamedInput::Kind kind) -> uint32_t {
+    auto getOrCreateLocalInputSlot =
+        [&](uint32_t value_id, NamedInput::Kind kind, const std::optional<std::string>& preferred_name = std::nullopt) -> uint32_t {
         auto it = value_id_to_local_input_slot.find(value_id);
         if (it != value_id_to_local_input_slot.end()) {
             return it->second;
@@ -984,7 +985,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
         value_id_to_local_input_slot.emplace(value_id, local_slot);
 
         NamedInput input;
-        input.name = "arg" + std::to_string(local_slot);
+        input.name = preferred_name.has_value() ? *preferred_name : ("__arg" + std::to_string(local_slot));
         input.slot = local_slot;
         input.kind = kind;
         stage_expr.inputs.push_back(std::move(input));
@@ -997,8 +998,8 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
         if (new_node.op == ExprOp::INPUT || new_node.op == ExprOp::RUNTIME_SCALAR) {
             uint32_t value_id = new_node.input_slot;
-            const NamedInput::Kind input_kind = expr.inputs.at(value_id).kind;
-            new_node.input_slot = getOrCreateLocalInputSlot(value_id, input_kind);
+            const NamedInput& root_input = expr.inputs.at(value_id);
+            new_node.input_slot = getOrCreateLocalInputSlot(value_id, root_input.kind, root_input.name);
         } else {
             if (!Expression::isLeafOp(new_node.op)) {
                 uint32_t old_parent = new_node.lhs;
@@ -1111,7 +1112,7 @@ static PhysicalExecutionStage buildReductionStage(const PhysicalExpression& expr
     }
 
     PhysicalExpression stage_expr;
-    stage_expr.inputs.push_back(NamedInput{"arg0", 0});
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
 
     ExprNode reduction = node;
     std::vector<uint32_t> input_value_ids;
@@ -1199,8 +1200,8 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
     }
 
     PhysicalExpression stage_expr;
-    stage_expr.inputs.push_back(NamedInput{"arg0", 0});
-    stage_expr.inputs.push_back(NamedInput{"arg1", 1});
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
 
     std::vector<uint32_t> input_value_ids;
     input_value_ids.reserve(2);

@@ -2224,7 +2224,7 @@ def test_compile_backward_accumulate_grad_outputs_stamp_uses_provided_accumulato
         "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, outputs_gpu, stream)
+    stamped = bwd_eq.stamp(inputs_gpu, preallocated_outputs=outputs_gpu, stream=stream)
     stamped.run()
 
     for name in bwd_eq.output_names():
@@ -2475,6 +2475,52 @@ def test_runtime_scalar_multi_output_run_numerical(dtype: thor.DataType):
 
         assert got.shape == expected[name].shape
         _assert_close(got, expected[name], dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_runtime_scalar_stamped_run_override_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+    step = ex.runtime_scalar("step")
+
+    out = (x * step) + ex.constant_scalar(1.0)
+    eq = ex.compile(out, device_num=0)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array([[1.0, 2.0, 3.0], [4.0, -5.0, 6.5]], dtype=np.float32).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    stamped = eq.stamp(inputs_gpu, {
+        "step": 0.0
+    }, stream)
+
+    stamped.run({
+        "step": 0.25
+    })
+    out_gpu = stamped.output()
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    expected = ((x_np.astype(np.float32) * 0.25) + 1.0).astype(storage_dtype)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+    stamped.run({
+        "step": -1.5
+    })
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    expected = ((x_np.astype(np.float32) * -1.5) + 1.0).astype(storage_dtype)
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
 
 
 @pytest.mark.cuda

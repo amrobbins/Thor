@@ -6,6 +6,12 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 
 namespace ThorImplementation {
 
+static void validateUserInputName(const std::string& name) {
+    if (name.rfind("__arg", 0) == 0) {
+        throw std::runtime_error("Input names may not start with reserved prefix '__arg'.");
+    }
+}
+
 Stream& Expression::getNextHelperStream(uint32_t gpu_num) {
     static std::vector<std::vector<Stream>> runnerHelperStreams;
     static std::vector<uint32_t> nextHelperStreamIndex;
@@ -481,6 +487,7 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
 }  // namespace
 
 Expression Expression::input(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
+    validateUserInputName(name);
     auto out = std::make_shared<PhysicalExpression>();
 
     ExprNode node;
@@ -503,6 +510,7 @@ Expression Expression::input(const std::string& name, Optional<DataType> compute
 }
 
 Expression Expression::runtimeScalar(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
+    validateUserInputName(name);
     auto out = std::make_shared<PhysicalExpression>();
 
     ExprNode node;
@@ -534,7 +542,7 @@ Expression::Expression(double value) {
     expr->output_node = nodeIndex;
 }
 
-Expression Expression::constant_scalar(double value) { return Expression(value); }
+Expression Expression::constantScalar(double value) { return Expression(value); }
 // Expression Expression::scalar(int64_t value) { return Expression(value); }
 
 PhysicalExpression Expression::expression() const {
@@ -806,7 +814,7 @@ Expression Expression::log(double base) const {
     if (base <= 0.0f || base == 1.0f) {
         throw std::runtime_error("log base must be positive and not equal to 1, received base = " + std::to_string(base));
     }
-    return this->ln() / Expression::constant_scalar(std::log(base));
+    return this->ln() / Expression::constantScalar(std::log(base));
 }
 
 Expression Expression::min(const Expression& other) const { return binaryOp(*this, other, ExprOp::MIN); }
