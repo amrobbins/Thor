@@ -191,7 +191,7 @@ class Expression {
     static Expression runtimeScalar(const std::string& name,
                                     Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
                                     Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
-    static Expression constant_scalar(double value);
+    static Expression constantScalar(double value);
 
     [[nodiscard]] PhysicalExpression expression() const;
 

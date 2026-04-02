@@ -146,7 +146,7 @@ Return a new expression whose result node uses the requested compute dtype.
 
     expr.def_static(
         "constant_scalar",
-        [](double value) { return Expression::constant_scalar(value); },
+        [](double value) { return Expression::constantScalar(value); },
         "value"_a,
         R"nbdoc(
 Create a floating-point scalar constant expression.
@@ -967,9 +967,15 @@ void bind_stamped_equation(nb::module_& physical) {
     stamped_equation.attr("__module__") = "thor.physical";
 
     stamped_equation.def("run",
-                         &StampedExecutionPlan::run,
+                         nb::overload_cast<>(&StampedExecutionPlan::run),
                          R"nbdoc(
 Execute the stamped fused equation on the bound tensors.
+        )nbdoc");
+    stamped_equation.def("run",
+                         nb::overload_cast<const std::unordered_map<std::string, float>&>(&StampedExecutionPlan::run),
+                         "runtime_scalars"_a,
+                         R"nbdoc(
+Execute the stamped fused equation on the bound tensors, overriding any bound runtime scalar values for this run.
         )nbdoc");
 
     stamped_equation.def(

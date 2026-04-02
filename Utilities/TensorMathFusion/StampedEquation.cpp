@@ -28,6 +28,50 @@ void StampedEquation::runOn(Stream& run_stream) const {
     EquationRunner::run(compiledEquation, inputs, outputs, run_stream);
 }
 
+void StampedEquation::run(const std::unordered_map<std::string, float>& runtime_scalars) { runOn(stream, runtime_scalars); }
+
+void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
+    if (!compiledEquation) {
+        throw std::runtime_error("StampedEquation::runOn called with null compiled equation.");
+    }
+
+    if (outputs.empty()) {
+        throw std::runtime_error("StampedEquation::runOn called with no output tensors.");
+    }
+
+    if (runtime_scalars.empty()) {
+        EquationRunner::run(compiledEquation, inputs, outputs, run_stream);
+        return;
+    }
+
+    std::vector<RuntimeInputValue> overridden_inputs = inputs;
+    std::unordered_set<std::string> consumed_names;
+
+    for (size_t i = 0; i < compiledEquation->input_names.size(); ++i) {
+        if (compiledEquation->input_kinds[i] != NamedInput::Kind::RuntimeScalarFp32) {
+            continue;
+        }
+
+        const std::string& name = compiledEquation->input_names[i];
+        auto it = runtime_scalars.find(name);
+        if (it == runtime_scalars.end()) {
+            throw std::runtime_error("Missing value for runtime scalar: " + name +
+                                     "  - if it was meant to be constant, use a constant scalar instead.");
+        }
+
+        overridden_inputs[i] = it->second;
+        consumed_names.insert(name);
+    }
+
+    for (const auto& [name, _] : runtime_scalars) {
+        if (!consumed_names.contains(name)) {
+            throw std::runtime_error("Unexpected runtime scalar override for stamped equation: " + name);
+        }
+    }
+
+    EquationRunner::run(compiledEquation, overridden_inputs, outputs, run_stream);
+}
+
 StampedReduction::StampedReduction(
     std::shared_ptr<BuiltReduction> built, const Tensor& input, const Tensor& output, const Stream& stream, Optional<Tensor> workspace)
     : built_reduction(built), input(input), output(output), workspace(workspace), stream(stream) {
@@ -180,7 +224,9 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
                                       run_stream);
 }
 
-void StampedExecutionPlan::run() {
+void StampedExecutionPlan::run() { run({}); }
+
+void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& runtime_scalars) {
     if (steps.empty()) {
         return;
     }
@@ -231,7 +277,10 @@ void StampedExecutionPlan::run() {
             }
         }
 
-        stage.runOn(launch_stream_ref);
+        if (runtime_scalars.empty())
+            stage.runOn(launch_stream_ref);
+        else
+            stage.runOn(launch_stream_ref, runtime_scalars);
 
         completion_events[stage_idx] = launch_stream_ref.putEvent();
         launch_streams.push_back(launch_stream_ref);

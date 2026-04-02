@@ -95,7 +95,9 @@ class StampedEquation {
         : compiledEquation(std::move(compiledEquation)), inputs(inputs), outputs(outputs), stream(stream) {}
 
     void run();
+    void run(const std::unordered_map<std::string, float>& runtime_scalars);
     void runOn(Stream& run_stream) const;
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
 
     uint32_t gpuNum() const {
         if (!outputs.empty()) {
@@ -266,10 +268,15 @@ struct StampedExecutionStage {
           gpu_num(reduce_minmax_backward->gpuNum()),
           reduce_minmax_backward(reduce_minmax_backward) {}
 
-    void runOn(Stream& run_stream) const {
+    void runOn(Stream& run_stream) const { runOn(run_stream, {}); }
+
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
         if (kind == Kind::FusedKernel) {
             assert(kernel != nullptr);
-            kernel->runOn(run_stream);
+            if (runtime_scalars.empty())
+                kernel->runOn(run_stream);
+            else
+                kernel->runOn(run_stream, runtime_scalars);
         } else if (kind == Kind::Reduction) {
             assert(reduction != nullptr);
             reduction->runOn(run_stream);
@@ -293,6 +300,7 @@ class StampedExecutionPlan {
         : steps(std::move(steps)), final_outputs(std::move(final_outputs)), stream(stream) {}
 
     void run();
+    void run(const std::unordered_map<std::string, float>& runtime_scalars);
 
     Tensor output(const std::string& name) const {
         auto it = final_outputs.find(name);
