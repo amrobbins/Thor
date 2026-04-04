@@ -1005,9 +1005,13 @@ def _run_staged_expr_with_preallocated(
     out_desc = PhysicalTensor.Descriptor(output_dtype, list(output_shape))
     out_gpu = PhysicalTensor(gpu_placement, out_desc)
 
-    stamped = eq.stamp(input_tensors_gpu, {
-        output_name: out_gpu
-    }, stream)
+    stamped = eq.stamp(
+        input_tensors_gpu,
+        stream,
+        preallocated_outputs={
+            output_name: out_gpu
+        },
+    )
     stamped.run()
 
     out_host = PhysicalTensor(cpu_placement, out_desc)
@@ -1072,11 +1076,15 @@ def test_reduce_sum_preallocated_output_wrong_shape_raises(dtype: thor.DataType)
     wrong_out = PhysicalTensor(gpu_placement, PhysicalTensor.Descriptor(dtype, [2, 1, 1]))
 
     with pytest.raises(RuntimeError, match="incompatible|requested output|Output tensor dimensions"):
-        eq.stamp({
-            "x": x_gpu
-        }, {
-            output_name: wrong_out
-        }, stream)
+        eq.stamp(
+            {
+                "x": x_gpu
+            },
+            stream,
+            preallocated_outputs={
+                output_name: wrong_out
+            },
+        )
 
 
 @pytest.mark.cuda
@@ -1226,9 +1234,13 @@ def test_compile_backward_reduce_min_preallocated_output_numerical(dtype: thor.D
     out_name = bwd_eq.output_names()[0]
     out_gpu = _gpu_tensor(list(x_np.shape), dtype, gpu_num=0)
 
-    stamped = bwd_eq.stamp(inputs_gpu, {
-        out_name: out_gpu
-    }, stream)
+    stamped = bwd_eq.stamp(
+        inputs_gpu,
+        stream,
+        preallocated_outputs={
+            out_name: out_gpu
+        },
+    )
     stamped.run()
 
     out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
@@ -1270,9 +1282,13 @@ def test_compile_backward_reduce_max_preallocated_output_numerical(dtype: thor.D
     out_name = bwd_eq.output_names()[0]
     out_gpu = _gpu_tensor(list(x_np.shape), dtype, gpu_num=0)
 
-    stamped = bwd_eq.stamp(inputs_gpu, {
-        out_name: out_gpu
-    }, stream)
+    stamped = bwd_eq.stamp(
+        inputs_gpu,
+        stream,
+        preallocated_outputs={
+            out_name: out_gpu
+        },
+    )
     stamped.run()
 
     out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
@@ -1309,6 +1325,10 @@ def test_compile_backward_reduce_min_preallocated_output_wrong_shape_raises(dtyp
     wrong_out = _gpu_tensor([2, 1], dtype, gpu_num=0)
 
     with pytest.raises(RuntimeError, match="dimensions|shape|incompatible"):
-        bwd_eq.stamp(inputs_gpu, {
-            out_name: wrong_out
-        }, stream)
+        bwd_eq.stamp(
+            inputs_gpu,
+            stream,
+            preallocated_outputs={
+                out_name: wrong_out
+            },
+        )

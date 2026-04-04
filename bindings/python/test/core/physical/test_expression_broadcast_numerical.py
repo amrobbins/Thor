@@ -313,7 +313,7 @@ def test_broadcast_requested_output_shape_add_singletons(dtype: thor.DataType):
     stamped_equation = fused_equation.stamp({
         'x': x_gpu,
         'y': y_gpu
-    }, stream, requestedOutputShape=[1, 1, 3])
+    }, stream, requested_output_shape=[1, 1, 3])
     stamped_equation.run()
 
     out_gpu = stamped_equation.output()

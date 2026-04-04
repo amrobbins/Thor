@@ -357,7 +357,7 @@ def test_outputs_grouped_broadcast_requested_shapes_match(dtype: thor.DataType):
             "z": _clone_to_gpu(z_cpu, stream),
         },
         stream,
-        {
+        requested_output_shapes={
             "xy_sum": [2, 3, 4],
             "xz_prod": [2, 1, 4],
         },
@@ -426,7 +426,7 @@ def test_outputs_grouped_broadcast_requested_shape_mismatch_raises(dtype: thor.D
                 "z": _clone_to_gpu(z_cpu, stream),
             },
             stream,
-            {
+            requested_output_shapes={
                 "xy_sum": [2, 3, 4],
                 "xz_prod": [2, 3, 4],  # intentionally wrong
             },
