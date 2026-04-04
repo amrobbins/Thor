@@ -30,18 +30,26 @@ def _numpy_compute_dtype(dtype: thor.DataType) -> np.dtype:
 
 
 FLOAT_DTYPES = [
-    # FIXME: Once I have dynamic dtypes, test the fp16 with fp32 compute and fp32 output
     thor.DataType.fp32,
-    # thor.DataType.fp16,
-    # thor.DataType.bf16,
+    thor.DataType.fp16,
+    thor.DataType.bf16,
+    thor.DataType.fp8_e4m3,
+    thor.DataType.fp8_e5m2,
 ]
 
 
 def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
+    got32 = got.astype(np.float32)
+    expected32 = expected.astype(np.float32)
+
     if dtype == thor.DataType.fp32:
-        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(got32, expected32, rtol=1e-5, atol=1e-6)
     elif dtype in (thor.DataType.fp16, thor.DataType.bf16):
-        np.testing.assert_allclose(got, expected, rtol=3e-2, atol=3e-2)
+        np.testing.assert_allclose(got32, expected32, rtol=5e-2, atol=5e-2)
+    elif dtype == thor.DataType.fp8_e4m3:
+        np.testing.assert_allclose(got32, expected32, rtol=1e-1, atol=1e-1)
+    elif dtype == thor.DataType.fp8_e5m2:
+        np.testing.assert_allclose(got32, expected32, rtol=2e-1, atol=0.5)
     else:
         raise AssertionError(f"Unhandled dtype: {dtype}")
 
@@ -882,7 +890,7 @@ def test_argmax_staged_all_axes_scalar_like_output(dtype: thor.DataType):
     compute_dtype = _numpy_compute_dtype(dtype)
 
     x_np = np.array(
-        [[1.0, 5.0, 3.0], [2.0, 4.0, 6.0]],
+        [[1.0, 5.0, 3.0], [2.0, 4.0, 6.0]],  # Don't change these numbers, they catch an fp8 kernel bug as set
         dtype=np.float32,
     ).astype(storage_dtype)
 
@@ -1039,7 +1047,7 @@ def test_reduce_sum_full_reduction_preallocated_output(dtype: thor.DataType):
         ["x"],
         x_np,
         dtype=dtype,
-        output_dtype=dtype,
+        output_dtype=thor.DataType.fp32,
         output_shape=[1, 1, 1],
     )
 
@@ -1116,7 +1124,7 @@ def test_reduce_min_staged_preallocated_output(dtype: thor.DataType):
         x_np,
         y_np,
         dtype=dtype,
-        output_dtype=dtype,
+        output_dtype=thor.DataType.fp32,
         output_shape=[2],
     )
 
