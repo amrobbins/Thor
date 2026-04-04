@@ -2225,11 +2225,11 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
         std::move(built), adaptedInput, grad_output, output, indices, reductionValueOutput, stream, workspace);
 }
 
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
-                                          const std::optional<Tensor>& preallocated_output,
-                                          const Stream& stream,
-                                          const std::vector<uint64_t>& requestedOutputShape) const {
+StampedExecutionPlan FusedEquation::stampSingleOutput(const std::unordered_map<std::string, Tensor>& inputs,
+                                                      const Stream& stream,
+                                                      const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+                                                      const std::optional<Tensor>& preallocated_output,
+                                                      const std::vector<uint64_t>& requestedOutputShape) const {
     std::unordered_map<std::string, Tensor> preallocated_outputs{};
 
     const auto outputNames = getOutputNames();
@@ -2246,13 +2246,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         preallocated_outputs["output"] = preallocated_output.value();
     }
 
-    return stamp(inputs, tensor_scalar_inputs, preallocated_outputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
+    return stamp(inputs, stream, tensor_scalar_inputs, preallocated_outputs, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
+                                          const Stream& stream,
                                           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
-                                          const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
     if (accumulatesIntoGradOutputs(backward_config) && preallocated_outputs.empty()) {
         throw std::runtime_error(

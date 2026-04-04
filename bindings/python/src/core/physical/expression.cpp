@@ -669,9 +669,9 @@ void bind_fused_equation(nb::module_& physical) {
                 // Support either single output or multi output when no distinction can be made
                 const std::unordered_map<std::string, Tensor> preallocated_outputs{};
                 const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapes{};
-                return self.stamp(inputs, tensor_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+                return self.stamp(inputs, stream, tensor_scalar_inputs, preallocated_outputs, requestedOutputShapes);
             } else {
-                return self.stamp(inputs, tensor_scalar_inputs, preallocated_output, stream, requestedOutputShape);
+                return self.stampSingleOutput(inputs, stream, tensor_scalar_inputs, preallocated_output, requestedOutputShape);
             }
         },
         "inputs"_a,
@@ -710,7 +710,7 @@ thor.physical.Equation
            const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
            const std::unordered_map<std::string, Tensor>& preallocated_outputs,
            const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) {
-            return self.stamp(inputs, tensor_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+            return self.stamp(inputs, stream, tensor_scalar_inputs, preallocated_outputs, requestedOutputShapes);
         },
         "inputs"_a,
         "stream"_a,
