@@ -747,6 +747,13 @@ static bool tryGetEmitterAliasSource(const PhysicalExpression& expr, uint32_t no
     }
 }
 
+static DataType emittedScalarNodeValueDType(const ExprNode& node) {
+    if (Expression::isLeafOp(node.op)) {
+        return requireNodeOutputDType(node);
+    }
+    return requireNodeComputeDType(node);
+}
+
 static std::string emitResolvedScalarValueExpr(const PhysicalExpression& expr, uint32_t node_idx, DataType target_dtype) {
     if (node_idx >= expr.nodes.size()) {
         throw runtime_error("Node index out of range in resolved scalar emitter query.");
@@ -762,7 +769,7 @@ static std::string emitResolvedScalarValueExpr(const PhysicalExpression& expr, u
         return emitResolvedScalarValueExpr(expr, source_idx, target_dtype);
     }
 
-    const DataType source_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
+    const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes[node_idx]);
     return castScalarExpr(CudaSourceEmitter::ref(node_idx), source_dtype, target_dtype);
 }
 
@@ -782,23 +789,23 @@ static bool shouldEmitScalarNodeDefinition(const PhysicalExpression& expr, uint3
 
 static void emitScalarAliasNode(
     std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, uint32_t source_node_idx, const std::string& indent) {
-    const DataType output_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
-    const std::string output_type = scalarStorageType(output_dtype);
-    ss << indent << "const " << output_type << " t" << node_idx << " = " << emitResolvedScalarValueExpr(expr, source_node_idx, output_dtype)
-       << ";\n";
+    const DataType emitted_dtype = emittedScalarNodeValueDType(expr.nodes[node_idx]);
+    const std::string output_type = scalarStorageType(emitted_dtype);
+    ss << indent << "const " << output_type << " t" << node_idx << " = "
+       << emitResolvedScalarValueExpr(expr, source_node_idx, emitted_dtype) << ";\n";
 }
 
 static void emitScalarNode(
     std::ostringstream& ss, const PhysicalExpression& expr, uint32_t node_idx, bool broadcast_support, const std::string& indent) {
     const ExprNode& n = expr.nodes[node_idx];
-    const DataType output_dtype = requireNodeOutputDType(n);
-    const std::string output_type = scalarStorageType(output_dtype);
+    const DataType emitted_dtype = emittedScalarNodeValueDType(n);
+    const std::string output_type = scalarStorageType(emitted_dtype);
 
     double folded_constant = 0.0;
     if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && n.op != ExprOp::TENSOR_RUNTIME_SCALAR &&
         tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
         const std::string literal = emitScalarFpLiteral(folded_constant);
-        ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
+        ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, emitted_dtype)
            << ";\n";
         return;
     }
@@ -808,14 +815,14 @@ static void emitScalarNode(
             const std::string idx_expr = broadcast_support ? ("in" + std::to_string(n.input_slot) + "_offset") : "idx";
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
             ss << indent << "const " << output_type << " t" << node_idx << " = "
-               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]", input_tensor_dtype, output_dtype) << ";\n";
+               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]", input_tensor_dtype, emitted_dtype) << ";\n";
             return;
         }
 
         case ExprOp::RUNTIME_SCALAR: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
             ss << indent << "const " << output_type << " t" << node_idx << " = "
-               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, output_dtype) << ";\n";
+               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, emitted_dtype) << ";\n";
             return;
         }
 
@@ -824,20 +831,20 @@ static void emitScalarNode(
             const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
             const std::string input_expr = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(n.input_slot) + ")[0]";
             ss << indent << "const " << output_type << " t" << node_idx << " = "
-               << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+               << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
             return;
         }
 
         case ExprOp::SCALAR_FP: {
             const std::string literal = emitScalarFpLiteral(n.scalar_fp);
-            ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
+            ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, emitted_dtype)
                << ";\n";
             return;
         }
 
         case ExprOp::FILL: {
             const std::string literal = emitScalarFpLiteral(n.scalar_fp);
-            ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
+            ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, emitted_dtype)
                << ";\n";
             return;
         }
@@ -908,7 +915,7 @@ static void emitScalarNode(
         throw runtime_error("Unsupported op in fused stage emitter.");
     }
 
-    ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(compute_expr, compute_dtype, output_dtype)
+    ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(compute_expr, compute_dtype, emitted_dtype)
        << ";\n";
 }
 
@@ -932,7 +939,7 @@ static std::string emitResolvedScalarValueExprSuffixed(const PhysicalExpression&
         return emitResolvedScalarValueExprSuffixed(expr, source_idx, target_dtype, suffix);
     }
 
-    const DataType source_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
+    const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes[node_idx]);
     return castScalarExpr(refWithSuffix(node_idx, suffix), source_dtype, target_dtype);
 }
 
@@ -942,10 +949,10 @@ static void emitScalarAliasNodeSuffixed(std::ostringstream& ss,
                                         uint32_t source_node_idx,
                                         const std::string& suffix,
                                         const std::string& indent) {
-    const DataType output_dtype = requireNodeOutputDType(expr.nodes[node_idx]);
-    const std::string output_type = scalarStorageType(output_dtype);
+    const DataType emitted_dtype = emittedScalarNodeValueDType(expr.nodes[node_idx]);
+    const std::string output_type = scalarStorageType(emitted_dtype);
     ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-       << emitResolvedScalarValueExprSuffixed(expr, source_node_idx, output_dtype, suffix) << ";\n";
+       << emitResolvedScalarValueExprSuffixed(expr, source_node_idx, emitted_dtype, suffix) << ";\n";
 }
 
 static void emitScalarNodeSuffixed(std::ostringstream& ss,
@@ -956,15 +963,15 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                                    const std::string& indent,
                                    const std::string& flat_chunk_lane_expr = "") {
     const ExprNode& n = expr.nodes[node_idx];
-    const DataType output_dtype = requireNodeOutputDType(n);
-    const std::string output_type = scalarStorageType(output_dtype);
+    const DataType emitted_dtype = emittedScalarNodeValueDType(n);
+    const std::string output_type = scalarStorageType(emitted_dtype);
 
     double folded_constant = 0.0;
     if (n.op != ExprOp::INPUT && n.op != ExprOp::RUNTIME_SCALAR && n.op != ExprOp::TENSOR_RUNTIME_SCALAR &&
         tryGetEmitterConstantValue(expr, node_idx, folded_constant)) {
         const std::string literal = emitScalarFpLiteral(folded_constant);
         ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-           << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
+           << castScalarExpr(literal, DataType::FP32, emitted_dtype) << ";\n";
         return;
     }
 
@@ -977,14 +984,14 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                                                : ("reinterpret_cast<const " + input_storage_type + "*>(&in" + std::to_string(n.input_slot) +
                                                   "_chunk)[" + flat_chunk_lane_expr + "]");
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-               << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+               << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
             return;
         }
 
         case ExprOp::RUNTIME_SCALAR: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, output_dtype) << ";\n";
+               << castScalarExpr("in" + std::to_string(n.input_slot), input_tensor_dtype, emitted_dtype) << ";\n";
             return;
         }
 
@@ -993,21 +1000,21 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
             const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
             const std::string input_expr = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(n.input_slot) + ")[0]";
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-               << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+               << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
             return;
         }
 
         case ExprOp::SCALAR_FP: {
             const std::string literal = emitScalarFpLiteral(n.scalar_fp);
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-               << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
+               << castScalarExpr(literal, DataType::FP32, emitted_dtype) << ";\n";
             return;
         }
 
         case ExprOp::FILL: {
             const std::string literal = emitScalarFpLiteral(n.scalar_fp);
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-               << castScalarExpr(literal, DataType::FP32, output_dtype) << ";\n";
+               << castScalarExpr(literal, DataType::FP32, emitted_dtype) << ";\n";
             return;
         }
 
@@ -1078,7 +1085,7 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     }
 
     ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
-       << castScalarExpr(compute_expr, compute_dtype, output_dtype) << ";\n";
+       << castScalarExpr(compute_expr, compute_dtype, emitted_dtype) << ";\n";
 }
 
 static std::string vector_compute_conversion(const std::string& storage_dtype_vector, const std::string& variable) {
