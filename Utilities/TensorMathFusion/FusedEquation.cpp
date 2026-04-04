@@ -2199,11 +2199,27 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+                                          const std::optional<Tensor>& preallocated_output,
                                           const Stream& stream,
-                                          const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    static const std::unordered_map<std::string, TensorScalarBinding> empty_tensor_scalar_inputs;
-    return stamp(inputs, empty_tensor_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+                                          const std::vector<uint64_t>& requestedOutputShape) const {
+    std::unordered_map<std::string, Tensor> preallocated_outputs{};
+
+    const auto outputNames = getOutputNames();
+    if (outputNames.size() != 1) {
+        throw std::runtime_error("Single-output stamp overload called on an equation that does not have exactly one output.");
+    }
+    if (outputNames.front() != "output") {
+        throw std::runtime_error(
+            "Single-output stamp overload requires the sole named output to be \"output\" when a preallocated "
+            "output tensor is provided.");
+    }
+
+    if (preallocated_output.has_value()) {
+        preallocated_outputs["output"] = preallocated_output.value();
+    }
+
+    return stamp(inputs, tensor_scalar_inputs, preallocated_outputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
@@ -2465,57 +2481,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
     }
 
     return StampedExecutionPlan(std::move(stampedStages), std::move(finalOutputsByName), stream);
-}
-
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const Stream& stream,
-                                          const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    static const std::unordered_map<std::string, TensorScalarBinding> empty_tensor_scalar_inputs;
-    static const std::unordered_map<std::string, Tensor> empty_outputs;
-    return stamp(inputs, empty_tensor_scalar_inputs, empty_outputs, stream, requestedOutputShapes);
-}
-
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
-                                          const Stream& stream,
-                                          const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    static const std::unordered_map<std::string, Tensor> empty_outputs;
-    return stamp(inputs, tensor_scalar_inputs, empty_outputs, stream, requestedOutputShapes);
-}
-
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, Tensor>& outputs,
-                                          const Stream& stream,
-                                          const std::vector<uint64_t>& requestedOutputShape) const {
-    static const std::unordered_map<std::string, TensorScalarBinding> emptyTensorScalarInputs;
-
-    return stamp(inputs, emptyTensorScalarInputs, outputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
-}
-
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
-                                          const std::unordered_map<std::string, Tensor>& outputs,
-                                          const Stream& stream,
-                                          const std::vector<uint64_t>& requestedOutputShape) const {
-    return stamp(inputs, tensor_scalar_inputs, outputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
-}
-
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const Stream& stream,
-                                          const std::vector<uint64_t>& requestedOutputShape) const {
-    static const std::unordered_map<std::string, TensorScalarBinding> emptyTensorScalarInputs;
-    static const std::unordered_map<std::string, Tensor> emptyOutputs;
-
-    return stamp(inputs, emptyTensorScalarInputs, emptyOutputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
-}
-
-StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
-                                          const Stream& stream,
-                                          const std::vector<uint64_t>& requestedOutputShape) const {
-    static const std::unordered_map<std::string, Tensor> emptyOutputs;
-
-    return stamp(inputs, tensor_scalar_inputs, emptyOutputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {

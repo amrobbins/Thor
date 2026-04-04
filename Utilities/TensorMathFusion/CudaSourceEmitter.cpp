@@ -819,6 +819,15 @@ static void emitScalarNode(
             return;
         }
 
+        case ExprOp::TENSOR_RUNTIME_SCALAR: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
+            const std::string input_expr = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(n.input_slot) + ")[0]";
+            ss << indent << "const " << output_type << " t" << node_idx << " = "
+               << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+            return;
+        }
+
         case ExprOp::SCALAR_FP: {
             const std::string literal = emitScalarFpLiteral(n.scalar_fp);
             ss << indent << "const " << output_type << " t" << node_idx << " = " << castScalarExpr(literal, DataType::FP32, output_dtype)
@@ -979,6 +988,15 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
             return;
         }
 
+        case ExprOp::TENSOR_RUNTIME_SCALAR: {
+            const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
+            const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
+            const std::string input_expr = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(n.input_slot) + ")[0]";
+            ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
+               << castScalarExpr(input_expr, input_tensor_dtype, output_dtype) << ";\n";
+            return;
+        }
+
         case ExprOp::SCALAR_FP: {
             const std::string literal = emitScalarFpLiteral(n.scalar_fp);
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -1056,7 +1074,7 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     } else if (Expression::isUnaryOp(n.op)) {
         compute_expr = emitUnaryComputeExpr(n.op, child_value(n.lhs), compute_dtype);
     } else {
-        throw runtime_error("Unsupported op in suffixed fused stage emitter.");
+        throw runtime_error("Unsupported op in suffixed fused stage emitter. " + to_string((int)n.op));
     }
 
     ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
@@ -1129,9 +1147,14 @@ static std::string emitVector2RuntimeScalarValue(const PhysicalExpression& expr,
     const DataType output_dtype = requireNodeOutputDType(node);
     const DataType compute_scalar_dtype = vectorizedComputeScalarDType(stage_dtype);
 
-    std::string scalar_source = expr.inputs.at(node.input_slot).kind == NamedInput::Kind::TensorRuntimeScalar
-                                    ? ("in" + std::to_string(node.input_slot) + "[0]")
-                                    : ("in" + std::to_string(node.input_slot));
+    std::string scalar_source;
+    if (expr.inputs.at(node.input_slot).kind == NamedInput::Kind::TensorRuntimeScalar) {
+        const std::string input_storage_type = scalarStorageType(input_dtype);
+        scalar_source = "reinterpret_cast<const " + input_storage_type + "*>(in" + std::to_string(node.input_slot) + ")[0]";
+    } else {
+        scalar_source = "in" + std::to_string(node.input_slot);
+    }
+
     std::string scalar_expr = castScalarExpr(scalar_source, input_dtype, output_dtype);
     scalar_expr = castScalarExpr(scalar_expr, output_dtype, compute_scalar_dtype);
     return emitVector2DupScalar(scalar_expr, compute_scalar_dtype);
@@ -1315,6 +1338,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     break;
                 }
                 case ExprOp::RUNTIME_SCALAR:
+                case ExprOp::TENSOR_RUNTIME_SCALAR:
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2RuntimeScalarValue(stage.expr, n, dtype) << ";\n";
                     break;
@@ -1685,6 +1709,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                 }
 
                 case ExprOp::RUNTIME_SCALAR:
+                case ExprOp::TENSOR_RUNTIME_SCALAR:
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = " << emitVector2RuntimeScalarValue(stage.expr, n, dtype)
                        << ";\n";
                     break;

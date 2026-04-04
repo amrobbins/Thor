@@ -471,7 +471,7 @@ def test_fused_equation_stamp_as_type_single_output_requested_shape_accepts_sque
             "x": x_gpu,
         },
         stream,
-        [2, 3],
+        requested_output_shape=[2, 3],
     )
 
     assert stamped is not None
@@ -493,7 +493,7 @@ def test_fused_equation_stamp_as_type_single_output_requested_shape_rejects_inco
                 "x": x_gpu,
             },
             stream,
-            [2, 4],
+            requested_output_shape=[2, 4],
         )
 
 
@@ -524,7 +524,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadca
             "y": y_gpu,
         },
         stream,
-        {
+        requested_output_shapes={
             "wide_sum": [17, 3],
             "wide_mix": [17, 3],
             "narrow_shift": [17],  # compatible with logical [17, 1]
@@ -549,7 +549,7 @@ def test_fused_equation_stamp_as_type_single_output_requested_shape_accepts_comp
             "x": x_gpu,
         },
         stream,
-        [2, 3, 1],
+        requested_output_shape=[2, 3, 1],
     )
 
     assert list(stamped.output().dimensions) == [2, 3, 1]
@@ -580,7 +580,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadca
                 "y": y_gpu,
             },
             stream,
-            {
+            requested_output_shapes={
                 "wide_sum": [17, 4],  # incompatible
                 "narrow_shift": [17],
             },
@@ -614,7 +614,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reducti
             "y": y_gpu,
         },
         stream,
-        {
+        requested_output_shapes={
             "reduced": [2, 3],
             "final": [2, 3],
             "pointwise": [2, 3, 4],
@@ -652,7 +652,7 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_reducti
                 "y": y_gpu,
             },
             stream,
-            {
+            requested_output_shapes={
                 "reduced": [2, 4],  # incompatible with logical [2, 3, 1]
                 "final": [2, 3],
                 "pointwise": [2, 3, 4],

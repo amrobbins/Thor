@@ -3,6 +3,14 @@ import pytest
 import thor
 from thor.physical import DeviceType, Expression as ex, PhysicalTensor, Placement, Stream, numpy_dtypes
 
+FLOAT_DTYPES = [
+    # thor.DataType.fp16,
+    # thor.DataType.bf16,
+    # thor.DataType.fp8_e4m3,
+    # thor.DataType.fp8_e5m2,
+    thor.DataType.fp32,
+]
+
 
 def _cpu_tensor(shape: list[int], dtype: thor.DataType) -> thor.physical.PhysicalTensor:
     placement = Placement(DeviceType.cpu, 0)
@@ -20,12 +28,16 @@ def _numpy_storage_dtype(dtype: thor.DataType) -> np.dtype:
     return numpy_dtypes.from_thor(dtype)
 
 
-FLOAT_DTYPES = [thor.DataType.fp32]
-
-
 def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
+    got32 = got.astype(np.float32)
+    expected32 = expected.astype(np.float32)
+
     if dtype == thor.DataType.fp32:
-        np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(got32, expected32, rtol=1e-5, atol=1e-6)
+    elif dtype in (thor.DataType.fp16, thor.DataType.bf16):
+        np.testing.assert_allclose(got32, expected32, rtol=5e-3, atol=5e-3)
+    elif dtype in (thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2):
+        np.testing.assert_allclose(got32, expected32, rtol=1e-1, atol=1e-1)
     else:
         raise AssertionError(f"Unhandled dtype: {dtype}")
 
@@ -97,7 +109,7 @@ def test_compile_backward_supported_subset_numerical(dtype: thor.DataType):
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -162,7 +174,7 @@ def test_compile_backward_more_pointwise_ops_numerical(dtype: thor.DataType):
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -210,7 +222,7 @@ def test_compile_backward_explicit_upstream_numerical(dtype: thor.DataType):
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -258,7 +270,7 @@ def test_compile_backward_reduce_mean_numerical(dtype: thor.DataType):
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -298,7 +310,7 @@ def test_compile_backward_reduce_mean_explicit_upstream_numerical(dtype: thor.Da
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -341,7 +353,7 @@ def test_compile_backward_broadcast_unbroadcast_same_rank_numerical(dtype: thor.
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -381,7 +393,7 @@ def test_compile_backward_broadcast_unbroadcast_leading_axis_squeeze_numerical(d
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -412,7 +424,7 @@ def test_unsqueeze_forward_and_output_shape(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output(eq.output_names()[0])
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -445,7 +457,7 @@ def test_squeeze_forward_and_output_shape(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output(eq.output_names()[0])
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -479,7 +491,7 @@ def test_compile_backward_unsqueeze_identity_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -514,7 +526,7 @@ def test_compile_backward_squeeze_identity_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -553,7 +565,7 @@ def test_compile_backward_reduce_sum_with_squeeze_numerical(dtype: thor.DataType
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -592,7 +604,7 @@ def test_compile_backward_reduce_mean_with_squeeze_numerical(dtype: thor.DataTyp
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -630,7 +642,7 @@ def test_compile_backward_reduce_norm2_with_squeeze_numerical(dtype: thor.DataTy
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -703,7 +715,7 @@ def test_compile_backward_multi_output_explicit_upstreams_numerical(dtype: thor.
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -742,7 +754,7 @@ def test_squeeze_forward_all_singletons_output_shape(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output(eq.output_names()[0])
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -776,7 +788,7 @@ def test_compile_backward_squeeze_all_singletons_identity_numerical(dtype: thor.
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -817,7 +829,7 @@ def test_compile_backward_repeated_shape_path_accumulates_numerical(dtype: thor.
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -854,7 +866,7 @@ def test_compile_backward_repeated_shape_path_accumulates_numerical_2(dtype: tho
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -900,7 +912,7 @@ def test_compile_backward_reduce_sum_with_squeeze_and_broadcast_operand_y_grad_n
     stamped.run()
 
     out_gpu = stamped.output("y_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -951,7 +963,7 @@ def test_compile_backward_scalar_constant_through_shape_paths_additive_numerical
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1011,7 +1023,7 @@ def test_compile_backward_scalar_constant_through_shape_paths_multiplicative_num
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1048,7 +1060,7 @@ def test_compile_backward_reused_primal_accumulates_nontrivial_branches_numerica
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1093,7 +1105,7 @@ def test_compile_backward_reduce_sum_with_squeeze_explicit_upstream_broadcast_nu
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1152,7 +1164,7 @@ def test_compile_backward_multi_output_explicit_upstreams_mixed_constant_and_non
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1194,7 +1206,7 @@ def test_compile_backward_reduce_min_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1244,7 +1256,7 @@ def test_compile_backward_reduce_min_explicit_upstream_numerical(dtype: thor.Dat
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1288,7 +1300,7 @@ def test_compile_backward_reduce_max_with_squeeze_numerical(dtype: thor.DataType
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1342,7 +1354,7 @@ def test_compile_backward_reduce_min_reduce_max_multi_output_explicit_upstreams_
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1383,7 +1395,7 @@ def test_compile_backward_reduce_max_all_axes_scalar_output_numerical(dtype: tho
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1444,7 +1456,7 @@ def test_compile_backward_elementwise_min_explicit_upstream_numerical(dtype: tho
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -1504,7 +1516,7 @@ def test_compile_backward_elementwise_max_explicit_upstream_numerical(dtype: tho
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -1580,7 +1592,7 @@ def test_compile_backward_elementwise_min_max_multi_output_explicit_upstreams_nu
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -1620,7 +1632,7 @@ def test_compile_backward_reduce_prod_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1668,7 +1680,7 @@ def test_compile_backward_reduce_prod_explicit_upstream_numerical(dtype: thor.Da
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1708,7 +1720,7 @@ def test_compile_backward_reduce_norm1_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1755,7 +1767,7 @@ def test_compile_backward_reduce_norm1_explicit_upstream_numerical(dtype: thor.D
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1788,7 +1800,7 @@ def test_abs_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output()
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1826,7 +1838,7 @@ def test_compile_backward_abs_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1871,7 +1883,7 @@ def test_compile_backward_abs_explicit_upstream_numerical(dtype: thor.DataType):
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1921,7 +1933,7 @@ def test_compile_backward_abs_zero_rule_explicit_upstream_numerical(dtype: thor.
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -1971,7 +1983,7 @@ def test_compile_backward_reduce_norm1_zero_rule_explicit_upstream_numerical(dty
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -2055,7 +2067,7 @@ def test_compile_backward_accumulate_grad_outputs_run_distinguishes_overwrite_an
     bwd_eq_accumulate.run(inputs_gpu, accumulate_outputs_gpu, stream)
 
     for name in bwd_eq_overwrite.output_names():
-        out_host = _cpu_tensor(list(overwrite_outputs_gpu[name].dimensions), dtype)
+        out_host = _cpu_tensor(list(overwrite_outputs_gpu[name].dimensions), thor.DataType.fp32)
         out_host.copy_from_async(overwrite_outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2063,7 +2075,7 @@ def test_compile_backward_accumulate_grad_outputs_run_distinguishes_overwrite_an
         _assert_close(got, expected_overwrite[name], dtype)
 
     for name in bwd_eq_accumulate.output_names():
-        out_host = _cpu_tensor(list(accumulate_outputs_gpu[name].dimensions), dtype)
+        out_host = _cpu_tensor(list(accumulate_outputs_gpu[name].dimensions), thor.DataType.fp32)
         out_host.copy_from_async(accumulate_outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2135,7 +2147,7 @@ def test_compile_backward_multi_output_accumulate_grad_outputs_run_numerical(dty
     bwd_eq.run(inputs_gpu, outputs_gpu, stream)
 
     for name in bwd_eq.output_names():
-        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), dtype)
+        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), thor.DataType.fp32)
         out_host.copy_from_async(outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2228,7 +2240,7 @@ def test_compile_backward_accumulate_grad_outputs_stamp_uses_provided_accumulato
     stamped.run()
 
     for name in bwd_eq.output_names():
-        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), dtype)
+        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), thor.DataType.fp32)
         out_host.copy_from_async(outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2272,7 +2284,7 @@ def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_shape():
     }
 
     with pytest.raises(RuntimeError) as excinfo:
-        bwd_eq.stamp(inputs_gpu, outputs_gpu, stream)
+        bwd_eq.stamp(inputs_gpu, stream, preallocated_outputs=outputs_gpu)
 
     msg = str(excinfo.value).lower()
     assert "dimension" in msg or "incompatible" in msg or "shape" in msg
@@ -2315,7 +2327,7 @@ def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_dtype():
     }
 
     with pytest.raises(RuntimeError) as excinfo:
-        bwd_eq.stamp(inputs_gpu, outputs_gpu, stream)
+        bwd_eq.stamp(inputs_gpu, stream, preallocated_outputs=outputs_gpu)
 
     msg = str(excinfo.value).lower()
     assert "dtype" in msg
@@ -2347,7 +2359,7 @@ def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_placement(
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    cpu_x_grad = _cpu_tensor(list(x_np.shape), dtype)
+    cpu_x_grad = _cpu_tensor(list(x_np.shape), thor.DataType.fp32)
     cpu_x_grad.numpy()[...] = 0
     gpu_y_grad = _host_to_gpu(np.zeros_like(y_np, dtype=np.float32), dtype, stream)
 
@@ -2357,7 +2369,7 @@ def test_compile_backward_accumulate_grad_outputs_stamp_rejects_wrong_placement(
     }
 
     with pytest.raises(RuntimeError) as excinfo:
-        bwd_eq.stamp(inputs_gpu, outputs, stream)
+        bwd_eq.stamp(inputs_gpu, stream, preallocated_outputs=outputs)
 
     msg = str(excinfo.value).lower()
     assert "placement" in msg
@@ -2388,7 +2400,7 @@ def test_runtime_scalar_forward_run_numerical(dtype: thor.DataType):
         "step": step_value
     }, out_gpu, stream)
 
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -2468,7 +2480,7 @@ def test_runtime_scalar_multi_output_run_numerical(dtype: thor.DataType):
     }, outputs_gpu, stream)
 
     for name in eq.output_names():
-        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), dtype)
+        out_host = _cpu_tensor(list(outputs_gpu[name].dimensions), thor.DataType.fp32)
         out_host.copy_from_async(outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2500,7 +2512,7 @@ def test_runtime_scalar_stamped_run_override_numerical(dtype: thor.DataType):
         "step": 0.25
     })
     out_gpu = stamped.output()
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -2552,7 +2564,7 @@ def test_compile_backward_runtime_scalar_through_reduction_numerical(dtype: thor
     })
 
     out_gpu = stamped.output("x_grad")
-    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -2651,7 +2663,7 @@ def test_runtime_scalar_forward_run_twice_updates_value_large_flat_numerical(dty
         "step": step_value_1
     }, out_gpu, stream)
 
-    out_host = _cpu_tensor([n], dtype)
+    out_host = _cpu_tensor([n], thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got_1 = out_host.numpy().copy()
@@ -2721,7 +2733,7 @@ def test_runtime_scalar_multi_output_large_flat_shared_numerical(dtype: thor.Dat
     }, outputs_gpu, stream)
 
     for name in eq.output_names():
-        out_host = _cpu_tensor([n], dtype)
+        out_host = _cpu_tensor([n], thor.DataType.fp32)
         out_host.copy_from_async(outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2777,7 +2789,7 @@ def test_runtime_scalar_specialized_broadcast_multi_output_numerical(dtype: thor
     }, outputs_gpu, stream)
 
     for name in eq.output_names():
-        out_host = _cpu_tensor([32, 16, 128], dtype)
+        out_host = _cpu_tensor([32, 16, 128], thor.DataType.fp32)
         out_host.copy_from_async(outputs_gpu[name], stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -2861,7 +2873,7 @@ def test_compile_backward_runtime_scalar_broadcast_unbroadcast_numerical(dtype: 
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)
-        out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+        out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
         out_host.copy_from_async(out_gpu, stream)
         stream.synchronize()
         got = out_host.numpy().copy()
@@ -3125,7 +3137,7 @@ def test_reduce_argmin_bf16_input_adapts_and_runs_numerical():
     stamped.run()
 
     out_gpu = stamped.output(eq.output_names()[0])
-    out_host = _cpu_tensor(list(out_gpu.dimensions), output_dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -3159,7 +3171,7 @@ def test_with_output_dtype_overrides_only_result_node_numerical():
     stamped.run()
 
     out_gpu = stamped.output(eq.output_names()[0])
-    out_host = _cpu_tensor(list(out_gpu.dimensions), output_dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()
@@ -3195,7 +3207,7 @@ def test_with_compute_dtype_and_output_dtype_on_result_node_numerical():
     stamped.run()
 
     out_gpu = stamped.output(eq.output_names()[0])
-    out_host = _cpu_tensor(list(out_gpu.dimensions), output_dtype)
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
     out_host.copy_from_async(out_gpu, stream)
     stream.synchronize()
     got = out_host.numpy().copy()

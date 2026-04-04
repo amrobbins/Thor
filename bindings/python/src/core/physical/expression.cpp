@@ -657,60 +657,87 @@ void bind_fused_equation(nb::module_& physical) {
     auto fused_equation = nb::class_<FusedEquation>(physical, "FusedEquation");
     fused_equation.attr("__module__") = "thor.physical";
 
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&, const Stream&, const std::vector<uint64_t>&>(
-                           &FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "stream"_a,
-                       "requestedOutputShape"_a = std::vector<uint64_t>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
+    fused_equation.def(
+        "stamp",
+        [](const FusedEquation& self,
+           const std::unordered_map<std::string, Tensor>& inputs,
+           const Stream& stream,
+           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+           const std::optional<Tensor>& preallocated_output,
+           const std::vector<uint64_t>& requestedOutputShape) {
+            if (tensor_scalar_inputs.empty() && !preallocated_output.has_value() && requestedOutputShape.empty()) {
+                // Support either single output or multi output when no distinction can be made
+                const std::unordered_map<std::string, Tensor> preallocated_outputs{};
+                const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapes{};
+                return self.stamp(inputs, tensor_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+            } else {
+                return self.stamp(inputs, tensor_scalar_inputs, preallocated_output, stream, requestedOutputShape);
+            }
+        },
+        "inputs"_a,
+        "stream"_a,
+        nb::kw_only(),
+        "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{},
+        "preallocated_output"_a.none() = nb::none(),
+        "requested_output_shape"_a = std::vector<uint64_t>{},
+        R"nbdoc(
+Create an executable instance of a single-output fused equation.
 
-inputs: dict[str, PhysicalTensor]
-    A dict mapping input names to tensors
+Parameters
+----------
+inputs : dict[str, PhysicalTensor]
+    Mapping from input names to tensors.
+stream : thor.Stream
+    Stream on which to stamp the equation.
+tensor_scalar_inputs : dict[str, TensorScalarBinding], optional
+    GPU-backed runtime scalar bindings.
+preallocated_output : PhysicalTensor | None, optional
+    Preallocated output tensor for the single output.
+requested_output_shape : list[int], optional
+    Requested output shape for the single output.
+
+Returns
+-------
+thor.physical.Equation
+    A stamped execution plan.
 )nbdoc");
 
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const std::unordered_map<std::string, TensorScalarBinding>&,
-                                         const Stream&,
-                                         const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "tensor_scalar_inputs"_a,
-                       "stream"_a,
-                       "requestedOutputShape"_a = std::vector<uint64_t>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound tensor inputs and GPU tensor-backed runtime scalars.
-)nbdoc");
+    fused_equation.def(
+        "stamp",
+        [](const FusedEquation& self,
+           const std::unordered_map<std::string, Tensor>& inputs,
+           const Stream& stream,
+           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) {
+            return self.stamp(inputs, tensor_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+        },
+        "inputs"_a,
+        "stream"_a,
+        nb::kw_only(),
+        "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{},
+        "preallocated_outputs"_a = std::unordered_map<std::string, Tensor>{},
+        "requested_output_shapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+        R"nbdoc(
+Create an executable instance of a multi-output fused equation.
 
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const Stream&,
-                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "stream"_a,
-                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
+Parameters
+----------
+inputs : dict[str, PhysicalTensor]
+    Mapping from input names to tensors.
+stream : thor.Stream
+    Stream on which to stamp the equation.
+tensor_scalar_inputs : dict[str, TensorScalarBinding], optional
+    GPU-backed runtime scalar bindings.
+preallocated_outputs : dict[str, PhysicalTensor], optional
+    Mapping from output names to preallocated output tensors.
+requested_output_shapes : dict[str, list[int]], optional
+    Mapping from output names to requested output shapes.
 
-inputs: dict[str, PhysicalTensor]
-    A dict mapping input names to tensors
-)nbdoc");
-
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const std::unordered_map<std::string, Tensor>&,
-                                         const Stream&,
-                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "preallocated_outputs"_a,
-                       "stream"_a,
-                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound thor.physical.PhysicalTensor's.
-
-inputs: dict[str, PhysicalTensor]
-    A dict mapping input names to tensors
+Returns
+-------
+thor.physical.Equation
+    A stamped execution plan.
 )nbdoc");
 
     fused_equation.def("run",

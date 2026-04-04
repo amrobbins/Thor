@@ -672,7 +672,7 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
-constexpr bool PRINT_KERNELS = false;
+constexpr bool PRINT_KERNELS = true;
 
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
     if (PRINT_KERNELS) {

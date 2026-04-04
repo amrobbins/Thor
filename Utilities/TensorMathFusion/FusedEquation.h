@@ -160,35 +160,10 @@ class FusedEquation {
                                                 bool accumulate_grad_outputs = false) const;
 
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const Stream& stream,
-                                             const std::vector<uint64_t>& requestedOutputShape = {}) const;
-    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                              const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+                                             const std::optional<Tensor>& preallocated_output,
                                              const Stream& stream,
-                                             const std::vector<uint64_t>& requestedOutputShape = {}) const;
-
-    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const Stream& stream,
-                                             const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
-    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
-                                             const Stream& stream,
-                                             const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
-
-    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const std::unordered_map<std::string, Tensor>& outputs,
-                                             const Stream& stream,
-                                             const std::vector<uint64_t>& requestedOutputShape = {}) const;
-    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
-                                             const std::unordered_map<std::string, Tensor>& outputs,
-                                             const Stream& stream,
-                                             const std::vector<uint64_t>& requestedOutputShape = {}) const;
-
-    [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                             const std::unordered_map<std::string, Tensor>& preallocated_outputs,
-                                             const Stream& stream,
-                                             const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const;
+                                             const std::vector<uint64_t>& requestedOutputShape) const;
     [[nodiscard]] StampedExecutionPlan stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                              const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                              const std::unordered_map<std::string, Tensor>& preallocated_outputs,
