@@ -138,6 +138,9 @@ class StampedEquation {
                                                           const Tensor& input,
                                                           int device_num);
 
+    [[nodiscard]] bool requiresRuntimeScalars() const;
+    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
+
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
     std::vector<RuntimeInputValue> inputs;

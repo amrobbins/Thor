@@ -672,7 +672,7 @@ vector<char> EquationCompiler::linkToCubin(const vector<char>& ltoir, const Equa
     return cubin;
 }
 
-constexpr bool PRINT_KERNELS = true;
+constexpr bool PRINT_KERNELS = false;
 
 vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& kernel_name, const EquationSignature& sig) {
     if (PRINT_KERNELS) {
@@ -858,6 +858,9 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
     if (!input_node.input_tensor_dtype.isPresent()) {
         throw std::runtime_error("ReduceMinMaxBackward input node missing resolved input_tensor_dtype.");
     }
+    if (!grad_node.input_tensor_dtype.isPresent()) {
+        throw std::runtime_error("ReduceMinMaxBackward grad input node missing resolved input_tensor_dtype.");
+    }
     if (!node.output_dtype.isPresent()) {
         throw std::runtime_error("ReduceMinMaxBackward node missing resolved output_dtype.");
     }
@@ -865,8 +868,13 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
     const ExprOp reduce_op = node.op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX;
     const DataType supported_input_dtype = toSupportedInputDType(reduce_op, input_node.input_tensor_dtype.get());
 
-    return make_shared<CompiledReduceMinMaxBackward>(
-        node.op, node.reduction_axes, node.squeeze_axes, supported_input_dtype, node.output_dtype.get(), node.compute_dtype);
+    return make_shared<CompiledReduceMinMaxBackward>(node.op,
+                                                     node.reduction_axes,
+                                                     node.squeeze_axes,
+                                                     supported_input_dtype,
+                                                     grad_node.input_tensor_dtype.get(),
+                                                     node.output_dtype.get(),
+                                                     node.compute_dtype);
 }
 
 static bool inputRequiresMaterialization(const ExprNode& node) {

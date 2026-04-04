@@ -30,6 +30,62 @@ static std::vector<uint64_t> normalizeAxes(std::vector<uint64_t> axes) {
     return axes;
 }
 
+template <typename T>
+__device__ inline float reduceBwToFloat(T v);
+
+template <>
+__device__ inline float reduceBwToFloat<float>(float v) {
+    return v;
+}
+
+template <>
+__device__ inline float reduceBwToFloat<__half>(__half v) {
+    return __half2float(v);
+}
+
+template <>
+__device__ inline float reduceBwToFloat<__nv_bfloat16>(__nv_bfloat16 v) {
+    return __bfloat162float(v);
+}
+
+template <>
+__device__ inline float reduceBwToFloat<__nv_fp8_e4m3>(__nv_fp8_e4m3 v) {
+    return __half2float(__half(v));
+}
+
+template <>
+__device__ inline float reduceBwToFloat<__nv_fp8_e5m2>(__nv_fp8_e5m2 v) {
+    return __half2float(__half(v));
+}
+
+template <typename T>
+__device__ inline T reduceBwFromFloat(float v);
+
+template <>
+__device__ inline float reduceBwFromFloat<float>(float v) {
+    return v;
+}
+
+template <>
+__device__ inline __half reduceBwFromFloat<__half>(float v) {
+    return __float2half_rn(v);
+}
+
+template <>
+__device__ inline __nv_bfloat16 reduceBwFromFloat<__nv_bfloat16>(float v) {
+    return __float2bfloat16(v);
+}
+
+template <>
+__device__ inline __nv_fp8_e4m3 reduceBwFromFloat<__nv_fp8_e4m3>(float v) {
+    return __nv_fp8_e4m3(__float2half_rn(v));
+}
+
+template <>
+__device__ inline __nv_fp8_e5m2 reduceBwFromFloat<__nv_fp8_e5m2>(float v) {
+    return __nv_fp8_e5m2(__float2half_rn(v));
+}
+
 static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t>& input_dims,
                                                       const std::vector<uint64_t>& reduction_axes,
                                                       const std::vector<uint64_t>& squeeze_axes,
@@ -85,9 +141,9 @@ static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t
     return visible;
 }
 
-template <typename T>
+template <typename GradT, typename OutT>
 __global__ void reduceMinMaxBackwardScatterKernel(
-    const T* grad_output, const uint32_t* arg_indices, T* grad_input, ReduceMinMaxBackwardMeta meta, uint64_t output_numel) {
+    const GradT* grad_output, const uint32_t* arg_indices, OutT* grad_input, ReduceMinMaxBackwardMeta meta, uint64_t output_numel) {
     const uint64_t idx = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= output_numel) {
         return;
@@ -124,10 +180,11 @@ __global__ void reduceMinMaxBackwardScatterKernel(
         winner_offset += coord * meta.input_strides[axis];
     }
 
-    grad_input[winner_offset] = grad_output[grad_output_offset];
+    const float grad_value = reduceBwToFloat<GradT>(grad_output[grad_output_offset]);
+    grad_input[winner_offset] = reduceBwFromFloat<OutT>(grad_value);
 }
 
-template <typename T>
+template <typename GradT, typename OutT>
 void launchTypedReduceMinMaxBackwardScatter(const void* grad_output,
                                             const uint32_t* arg_indices,
                                             void* grad_input,
@@ -140,8 +197,37 @@ void launchTypedReduceMinMaxBackwardScatter(const void* grad_output,
 
     constexpr uint32_t threads_per_block = 256;
     const uint32_t blocks = static_cast<uint32_t>((output_numel + threads_per_block - 1) / threads_per_block);
-    reduceMinMaxBackwardScatterKernel<T><<<blocks, threads_per_block, 0, stream>>>(
-        static_cast<const T*>(grad_output), arg_indices, static_cast<T*>(grad_input), meta, output_numel);
+    reduceMinMaxBackwardScatterKernel<GradT, OutT><<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const GradT*>(grad_output), arg_indices, static_cast<OutT*>(grad_input), meta, output_numel);
+}
+
+template <typename GradT>
+void dispatchReduceMinMaxBackwardScatterOutput(const void* grad_output,
+                                               const uint32_t* arg_indices,
+                                               void* grad_input,
+                                               const ReduceMinMaxBackwardMeta& meta,
+                                               uint64_t output_numel,
+                                               TensorDescriptor::DataType grad_input_dtype,
+                                               cudaStream_t stream) {
+    switch (grad_input_dtype) {
+        case TensorDescriptor::DataType::FP32:
+            launchTypedReduceMinMaxBackwardScatter<GradT, float>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            break;
+        case TensorDescriptor::DataType::FP16:
+            launchTypedReduceMinMaxBackwardScatter<GradT, __half>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            break;
+        case TensorDescriptor::DataType::BF16:
+            launchTypedReduceMinMaxBackwardScatter<GradT, __nv_bfloat16>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            break;
+        case TensorDescriptor::DataType::FP8_E4M3:
+            launchTypedReduceMinMaxBackwardScatter<GradT, __nv_fp8_e4m3>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            break;
+        case TensorDescriptor::DataType::FP8_E5M2:
+            launchTypedReduceMinMaxBackwardScatter<GradT, __nv_fp8_e5m2>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            break;
+        default:
+            throw std::runtime_error("launchReduceMinMaxBackwardScatter received unsupported grad-input dtype.");
+    }
 }
 
 }  // namespace
@@ -152,7 +238,8 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
                                        const std::vector<uint64_t>& input_dims,
                                        const std::vector<uint64_t>& reduction_axes,
                                        const std::vector<uint64_t>& squeeze_axes,
-                                       TensorDescriptor::DataType grad_dtype,
+                                       TensorDescriptor::DataType grad_output_dtype,
+                                       TensorDescriptor::DataType grad_input_dtype,
                                        cudaStream_t stream) {
     if (input_dims.size() > MAX_REDUCE_BACKWARD_RANK) {
         throw std::runtime_error("launchReduceMinMaxBackwardScatter supports rank <= 8.");
@@ -210,24 +297,29 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
         output_numel *= is_reduced ? 1ULL : meta.input_dims[axis];
     }
 
-    switch (grad_dtype) {
+    switch (grad_output_dtype) {
         case TensorDescriptor::DataType::FP32:
-            launchTypedReduceMinMaxBackwardScatter<float>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            dispatchReduceMinMaxBackwardScatterOutput<float>(
+                grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
         case TensorDescriptor::DataType::FP16:
-            launchTypedReduceMinMaxBackwardScatter<__half>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            dispatchReduceMinMaxBackwardScatterOutput<__half>(
+                grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
         case TensorDescriptor::DataType::BF16:
-            launchTypedReduceMinMaxBackwardScatter<__nv_bfloat16>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            dispatchReduceMinMaxBackwardScatterOutput<__nv_bfloat16>(
+                grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
         case TensorDescriptor::DataType::FP8_E4M3:
-            launchTypedReduceMinMaxBackwardScatter<__nv_fp8_e4m3>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            dispatchReduceMinMaxBackwardScatterOutput<__nv_fp8_e4m3>(
+                grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
         case TensorDescriptor::DataType::FP8_E5M2:
-            launchTypedReduceMinMaxBackwardScatter<__nv_fp8_e5m2>(grad_output, arg_indices, grad_input, meta, output_numel, stream);
+            dispatchReduceMinMaxBackwardScatterOutput<__nv_fp8_e5m2>(
+                grad_output, arg_indices, grad_input, meta, output_numel, grad_input_dtype, stream);
             break;
         default:
-            throw std::runtime_error("launchReduceMinMaxBackwardScatter received unsupported gradient dtype.");
+            throw std::runtime_error("launchReduceMinMaxBackwardScatter received unsupported grad-output dtype.");
     }
 }
 
