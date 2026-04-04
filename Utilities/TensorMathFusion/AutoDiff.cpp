@@ -564,6 +564,23 @@ class BackwardGraphBuilder {
     uint32_t mul(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::MUL, lhs, rhs); }
     uint32_t div(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::DIV, lhs, rhs); }
 
+    uint32_t addNoFold(uint32_t lhs,
+                       uint32_t rhs,
+                       Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty(),
+                       Optional<TensorDescriptor::DataType> backward_output_dtype = Optional<TensorDescriptor::DataType>::empty()) {
+        ExprNode node{};
+        node.op = ExprOp::ADD;
+        node.lhs = lhs;
+        node.rhs = rhs;
+        if (output_dtype.isPresent()) {
+            node.output_dtype = output_dtype.get();
+        }
+        if (backward_output_dtype.isPresent()) {
+            node.backward_output_dtype = backward_output_dtype.get();
+        }
+        return push(std::move(node));
+    }
+
     uint32_t unsqueeze(uint32_t value, const std::vector<uint64_t>& unsqueeze_axes) {
         const std::vector<uint64_t> normalized_axes = normalizeAxes(unsqueeze_axes);
         if (normalized_axes.empty()) {
@@ -1648,6 +1665,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     struct PendingBackwardOutput {
         std::string name;
         uint32_t node_idx;
+        Optional<TensorDescriptor::DataType> target_output_dtype;
     };
 
     std::vector<PendingBackwardOutput> pending_outputs;
@@ -1703,9 +1721,25 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
             total_grad = builder.add(builder.input(grad_output_name, grad_dtype), total_grad.value());
         }
 
+        // Create a dedicated terminal output node so we can force only the final
+        // written grad dtype, while leaving internal promoted compute untouched.
+        uint32_t terminal_grad = total_grad.value();
+        if (grad_dtype.isPresent()) {
+            uint32_t zero_like;
+            if (has_forward_dims) {
+                zero_like = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);
+            } else {
+                const uint32_t input_clone = builder.cloneForward(first_it->second);
+                zero_like = builder.mul(input_clone, builder.scalar(0.0));
+            }
+
+            terminal_grad = builder.addNoFold(total_grad.value(), zero_like, grad_dtype, grad_dtype);
+        }
+
         pending_outputs.push_back(PendingBackwardOutput{
             .name = grad_output_name,
-            .node_idx = total_grad.value(),
+            .node_idx = terminal_grad,
+            .target_output_dtype = grad_dtype,
         });
     }
 
@@ -1713,7 +1747,10 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     backward_outputs.expr = std::make_shared<PhysicalExpression>(builder.takeExpression());
     backward_outputs.outputs.reserve(pending_outputs.size());
     for (const PendingBackwardOutput& output : pending_outputs) {
-        backward_outputs.outputs.push_back(NamedOutput{.name = output.name, .node_idx = output.node_idx});
+        backward_outputs.outputs.push_back(NamedOutput{
+            .name = output.name,
+            .node_idx = output.node_idx,
+        });
     }
 
     return backward_outputs;

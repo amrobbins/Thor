@@ -227,6 +227,7 @@ void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
                                       built_reduction->key.reduction_axes,
                                       built_reduction->key.squeeze_axes,
                                       grad_output.getDataType(),
+                                      output.getDataType(),
                                       run_stream);
 }
 
@@ -247,13 +248,14 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
     std::vector<Stream> helper_streams_used;
     helper_streams_used.reserve(steps.size());
 
+    std::unordered_set<std::string> consumed_runtime_scalar_names;
+
     auto rememberHelperStream = [&](Stream& helper_stream) {
         if (std::find(helper_streams_used.begin(), helper_streams_used.end(), helper_stream) == helper_streams_used.end()) {
             helper_streams_used.push_back(helper_stream);
         }
     };
 
-    // Barrier representing all prior work already queued on the user stream.
     StreamEvent user_stream_ready;
     if (steps.size() > 1)
         user_stream_ready = stream.putEvent();
@@ -283,13 +285,36 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
             }
         }
 
-        if (runtime_scalars.empty())
+        std::unordered_map<std::string, float> stage_runtime_scalars;
+        if (!runtime_scalars.empty() && stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr &&
+            stage.kernel->requiresRuntimeScalars()) {
+            const std::unordered_set<std::string> needed_names = stage.kernel->runtimeScalarNames();
+            stage_runtime_scalars.reserve(needed_names.size());
+
+            for (const std::string& name : needed_names) {
+                auto it = runtime_scalars.find(name);
+                if (it == runtime_scalars.end()) {
+                    throw std::runtime_error("Missing value for runtime scalar: " + name +
+                                             "  - if it was meant to be constant, use a constant scalar instead.");
+                }
+                stage_runtime_scalars.emplace(name, it->second);
+                consumed_runtime_scalar_names.insert(name);
+            }
+        }
+
+        if (stage_runtime_scalars.empty())
             stage.runOn(launch_stream_ref);
         else
-            stage.runOn(launch_stream_ref, runtime_scalars);
+            stage.runOn(launch_stream_ref, stage_runtime_scalars);
 
         completion_events[stage_idx] = launch_stream_ref.putEvent();
         launch_streams.push_back(launch_stream_ref);
+    }
+
+    for (const auto& [name, _] : runtime_scalars) {
+        if (!consumed_runtime_scalar_names.contains(name)) {
+            throw std::runtime_error("Unexpected runtime scalar override for stamped execution plan: " + name);
+        }
     }
 
     for (Stream& helper_stream : helper_streams_used) {
@@ -512,6 +537,33 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
 
     builtReductionCache.put(key, built);
     return built;
+}
+
+bool StampedEquation::requiresRuntimeScalars() const {
+    if (!compiledEquation) {
+        return false;
+    }
+
+    for (size_t i = 0; i < compiledEquation->input_kinds.size(); ++i) {
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::unordered_set<std::string> StampedEquation::runtimeScalarNames() const {
+    std::unordered_set<std::string> names;
+    if (!compiledEquation) {
+        return names;
+    }
+
+    for (size_t i = 0; i < compiledEquation->input_names.size(); ++i) {
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
+            names.insert(compiledEquation->input_names[i]);
+        }
+    }
+    return names;
 }
 
 }  // namespace ThorImplementation

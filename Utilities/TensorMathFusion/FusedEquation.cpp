@@ -1362,43 +1362,70 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
         return outputs_template;
     }
 
-    std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims;
-    forward_input_dims.reserve(
-        backward_config->forward_outputs_template.expr ? backward_config->forward_outputs_template.expr->inputs.size() : 0);
+    // Resolve the forward template dtypes against the actual runtime forward-input dtypes
+    // before rebuilding the backward graph. Otherwise preferredGradValueDType(...) sees
+    // unresolved INPUT nodes and returns empty, so terminal grad outputs can stay promoted.
+    PhysicalOutputs resolved_forward_outputs = backward_config->forward_outputs_template;
+    if (!resolved_forward_outputs.expr) {
+        throw std::runtime_error("Backward shape specialization requires non-null forward expr.");
+    }
+    resolved_forward_outputs.expr = std::make_shared<PhysicalExpression>(*backward_config->forward_outputs_template.expr);
 
-    for (const NamedInput& forward_input : backward_config->forward_outputs_template.expr->inputs) {
+    std::vector<DataType> forward_root_input_dtypes(resolved_forward_outputs.expr->numInputs(), DataType::FP32);
+    std::vector<bool> have_forward_root_input_dtype(resolved_forward_outputs.expr->numInputs(), false);
+
+    std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims;
+    forward_input_dims.reserve(resolved_forward_outputs.expr->inputs.size());
+
+    for (const NamedInput& forward_input : resolved_forward_outputs.expr->inputs) {
         bool found_name = false;
         for (const NamedInput& root_input : root_inputs) {
             if (root_input.name != forward_input.name) {
                 continue;
             }
+
             auto it = root_values.find(root_input.slot);
             if (it == root_values.end()) {
                 throw std::runtime_error("Missing bound runtime input for backward forward-input shape specialization input: " +
                                          forward_input.name);
             }
+
             forward_input_dims.emplace(forward_input.name, runtimeInputDims(it->second));
+
+            if (forward_input.slot >= forward_root_input_dtypes.size()) {
+                throw std::runtime_error("Forward input slot out of range while resolving backward shape-specialized dtypes.");
+            }
+            forward_root_input_dtypes[forward_input.slot] = runtimeInputDType(it->second);
+            have_forward_root_input_dtype[forward_input.slot] = true;
+
             found_name = true;
             break;
         }
+
         if (!found_name) {
             throw std::runtime_error("Backward equation root inputs do not contain required forward input: " + forward_input.name);
         }
     }
 
+    for (size_t slot = 0; slot < have_forward_root_input_dtype.size(); ++slot) {
+        if (!have_forward_root_input_dtype[slot]) {
+            throw std::runtime_error("Missing runtime dtype for forward input slot " + std::to_string(slot) +
+                                     " during backward shape specialization.");
+        }
+    }
+
+    resolveOutputsDTypesInPlace(resolved_forward_outputs, forward_root_input_dtypes);
+
     if (backward_config->upstream_input_names_by_output.has_value()) {
-        return buildBackwardOutputs(backward_config->forward_outputs_template,
+        return buildBackwardOutputs(resolved_forward_outputs,
                                     backward_config->wrt_names,
                                     backward_config->upstream_input_names_by_output.value(),
                                     forward_input_dims,
                                     backward_config->accumulate_grad_outputs);
     }
 
-    return buildBackwardOutputs(backward_config->forward_outputs_template,
-                                backward_config->wrt_names,
-                                std::nullopt,
-                                forward_input_dims,
-                                backward_config->accumulate_grad_outputs);
+    return buildBackwardOutputs(
+        resolved_forward_outputs, backward_config->wrt_names, std::nullopt, forward_input_dims, backward_config->accumulate_grad_outputs);
 }
 
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(const std::unordered_map<std::string, Tensor>& namedInputs,
@@ -1507,7 +1534,7 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                 std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, ordered_inputs);
                 auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
                 if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
-                    if (!backward_config.has_value() && !(ordered_inputs.empty() && output_dims.empty())) {
+                    if (!(ordered_inputs.empty() && output_dims.empty())) {
                         verifyRequestedOutputLayout(requested_it->second, output_dims);
                     }
                     output_dims = requested_it->second;
@@ -1538,7 +1565,7 @@ std::shared_ptr<PreparedConvenienceRunPlan> FusedEquation::prepareConvenienceRun
                     std::vector<uint64_t> output_dims = group.specialized.output_dims;
                     auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
                     if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
-                        if (!backward_config.has_value() && !(ordered_inputs.empty() && output_dims.empty())) {
+                        if (!(ordered_inputs.empty() && output_dims.empty())) {
                             verifyRequestedOutputLayout(requested_it->second, output_dims);
                         }
                         output_dims = requested_it->second;
@@ -2140,8 +2167,8 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
                                          compiledStage->op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX,
                                          stream);
 
-    if (grad_output.getDataType() != compiledStage->output_dtype) {
-        throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward output dtype.");
+    if (grad_output.getDataType() != compiledStage->grad_output_dtype) {
+        throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward grad-output dtype.");
     }
 
     const std::vector<uint64_t> expected_grad_dims = StampedEquation::computeReductionOutputDims(
@@ -2305,7 +2332,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
                         auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
                         if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
-                            if (!backward_config.has_value() && !(stageInputs.empty() && output_dims.empty())) {
+                            if (!(stageInputs.empty() && output_dims.empty())) {
                                 verifyRequestedOutputLayout(requested_it->second, output_dims);
                             }
                             output_dims = requested_it->second;
@@ -2330,7 +2357,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                             std::vector<uint64_t> output_dims = group.specialized.output_dims;
                             auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
                             if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
-                                if (!backward_config.has_value() && !(stageInputs.empty() && output_dims.empty())) {
+                                if (!(stageInputs.empty() && output_dims.empty())) {
                                     verifyRequestedOutputLayout(requested_it->second, output_dims);
                                 }
                                 output_dims = requested_it->second;
@@ -2349,8 +2376,26 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
                     auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
                     if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                        stageOutputs.push_back(preallocated_it->second);
-                        values[stageOutput.value_id] = preallocated_it->second;
+                        const Tensor& outputTensor = preallocated_it->second;
+
+                        if (!outputTensor.isInitialized()) {
+                            throw std::runtime_error("Preallocated fused-stage output tensor is not initialized.");
+                        }
+                        if (outputTensor.getPlacement() != outputPlacement) {
+                            throw std::runtime_error(
+                                "Preallocated fused-stage output tensor placement does not match the expected output placement.");
+                        }
+                        if (outputTensor.getDescriptor().getDataType() != compiledEq->output_dtypes.at(output_idx)) {
+                            throw std::runtime_error(
+                                "Preallocated fused-stage output tensor dtype does not match the compiled output dtype.");
+                        }
+                        if (outputTensor.getDimensions() != expected_output_dims[output_idx]) {
+                            throw std::runtime_error(
+                                "Preallocated fused-stage output tensor dimensions are incompatible with the staged output shape.");
+                        }
+
+                        stageOutputs.push_back(outputTensor);
+                        values[stageOutput.value_id] = outputTensor;
                     } else {
                         TensorDescriptor outputDescriptor(compiledEq->output_dtypes.at(output_idx), expected_output_dims[output_idx]);
                         Tensor outputTensor(outputPlacement, outputDescriptor);
