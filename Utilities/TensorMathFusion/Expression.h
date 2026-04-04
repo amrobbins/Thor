@@ -176,31 +176,33 @@ class Outputs {
 
 class Expression {
    public:
-    static Stream& getNextHelperStream(uint32_t gpu_num);
+    [[nodiscard]] static Stream& getNextHelperStream(uint32_t gpu_num);
 
-    Expression(double value);
+    [[nodiscard]] Expression(double value);
 
-    std::set<std::string> getInputNames() const;
+    [[nodiscard]] std::set<std::string> getInputNames() const;
 
-    static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
-    static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);
+    [[nodiscard]] static Outputs outputs(const std::vector<std::pair<std::string, Expression>>& named_exprs);
+    [[nodiscard]] static Outputs outputs(std::initializer_list<std::pair<std::string, Expression>> named_exprs);
 
-    static Expression input(const std::string& name,
-                            Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                            Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
-    static Expression runtimeScalar(const std::string& name,
-                                    Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
-                                    Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
-    static Expression constantScalar(double value);
+    [[nodiscard]] static Expression input(
+        const std::string& name,
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression runtimeScalar(
+        const std::string& name,
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression constantScalar(double value);
 
     [[nodiscard]] PhysicalExpression expression() const;
 
-    Expression operator+(const Expression& other) const;
-    Expression operator-(const Expression& other) const;
-    Expression operator*(const Expression& other) const;
-    Expression operator/(const Expression& other) const;
+    [[nodiscard]] Expression operator+(const Expression& other) const;
+    [[nodiscard]] Expression operator-(const Expression& other) const;
+    [[nodiscard]] Expression operator*(const Expression& other) const;
+    [[nodiscard]] Expression operator/(const Expression& other) const;
 
-    Expression operator-() const;
+    [[nodiscard]] Expression operator-() const;
 
     [[nodiscard]] Expression abs() const;
     [[nodiscard]] Expression ln() const;
@@ -211,6 +213,7 @@ class Expression {
     [[nodiscard]] Expression exp2() const;
     [[nodiscard]] Expression exp10() const;
     [[nodiscard]] Expression sqrt() const;
+    [[nodiscard]] static Expression sqrt(const Expression& expr);
     [[nodiscard]] Expression unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const;
     [[nodiscard]] Expression squeeze(const std::vector<uint64_t>& squeeze_axes) const;
     [[nodiscard]] Expression pow(const Expression& exponent) const;
@@ -265,18 +268,18 @@ class Expression {
     [[nodiscard]] Expression withComputeDType(TensorDescriptor::DataType compute_dtype) const;
     [[nodiscard]] Expression withOutputDType(TensorDescriptor::DataType output_dtype) const;
 
-    static bool isLeafOp(ExprOp op);
-    static bool isUnaryOp(ExprOp op);
-    static bool isBinaryOp(ExprOp op);
+    [[nodiscard]] static bool isLeafOp(ExprOp op);
+    [[nodiscard]] static bool isUnaryOp(ExprOp op);
+    [[nodiscard]] static bool isBinaryOp(ExprOp op);
 
    private:
     std::shared_ptr<PhysicalExpression> expr;
     uint32_t nodeIndex = UINT32_MAX;
 
-    Expression(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) : expr(std::move(expr)), nodeIndex(nodeIndex) {}
+    [[nodiscard]] Expression(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) : expr(std::move(expr)), nodeIndex(nodeIndex) {}
 
-    static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
-    static Expression unaryOp(const Expression& inputExpr, ExprOp op);
+    [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
+    [[nodiscard]] static Expression unaryOp(const Expression& inputExpr, ExprOp op);
 };
 
 std::string formatFloatCanonical(double x);
