@@ -1,10 +1,12 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/function.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
+#include "Utilities/TensorMathFusion/DynamicExpression.h"
 #include "Utilities/TensorMathFusion/FusedEquation.h"
 #include "Utilities/TensorMathFusion/StampedEquation.h"
 
@@ -19,6 +21,7 @@ using Tensor = ThorImplementation::Tensor;
 using StampedExecutionPlan = ThorImplementation::StampedExecutionPlan;
 using Outputs = ThorImplementation::Outputs;
 using NamedOutput = ThorImplementation::NamedOutput;
+using DynamicExpression = ThorImplementation::DynamicExpression;
 
 void bind_physical_expression(nb::module_& physical) {
     auto expr = nb::class_<Expression>(physical, "Expression");
@@ -637,6 +640,9 @@ inputs: dict[str, PhysicalTensor]
     A dict mapping input names to tensors
 )nbdoc");
 
+    // FIXME: Cleanup:
+    //      cpu_runtime_scalar_inputs are sent as arguments to run and not bound here.
+    //      gpu_runtime_scalar_inputs are gpu memory, passed as TensorScalarBinding's, with offset and dtype, and bound here.
     fused_equation.def("stamp",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
                                          const std::unordered_map<std::string, float>&,
@@ -1001,4 +1007,45 @@ Return a dict of named output tensor from a stamped multi-output execution plan.
 )nbdoc");
 
     stamped_equation.def("output_names", [](const StampedExecutionPlan& self) { return self.outputNames(); });
+}
+
+void bind_dynamic_expression(nb::module_& physical) {
+    auto dynamic_expression = nb::class_<DynamicExpression>(physical, "DynamicExpression");
+    dynamic_expression.attr("__module__") = "thor.physical";
+
+    dynamic_expression.def(nb::init<DynamicExpression::BuilderFn>(),
+                           "builder"_a,
+                           R"nbdoc(
+Create a dynamic expression from a Python callable.
+
+Parameters
+----------
+builder : Callable[[dict[str, PhysicalTensor], thor.Stream], thor.physical.Equation]
+    A callable that receives a dict of bound input tensors and a stream, then
+    returns a stamped execution plan.
+
+Notes
+-----
+The callable is invoked from C++ when ``stamp(...)`` is called.
+)nbdoc");
+
+    dynamic_expression.def("stamp",
+                           &DynamicExpression::stamp,
+                           "inputs"_a,
+                           "stream"_a,
+                           R"nbdoc(
+Validate the provided tensors and stream, then invoke the stored builder.
+
+Parameters
+----------
+inputs : dict[str, PhysicalTensor]
+    Bound input tensors for the dynamic expression.
+stream : thor.Stream
+    Stream on which the returned stamped plan will execute.
+
+Returns
+-------
+thor.physical.Equation
+    A stamped execution plan ready to run.
+)nbdoc");
 }

@@ -11,6 +11,7 @@ void bind_scoped_gpu(nb::module_ &physical);
 void bind_physical_expression(nb::module_ &physical);
 void bind_fused_equation(nb::module_ &physical);
 void bind_stamped_equation(nb::module_ &physical);
+void bind_dynamic_expression(nb::module_ &physical);
 
 void bind_physical(nb::module_ &physical) {
     physical.doc() = "Thor physical layer";
@@ -24,4 +25,5 @@ void bind_physical(nb::module_ &physical) {
     bind_physical_expression(physical);
     bind_fused_equation(physical);
     bind_stamped_equation(physical);
+    bind_dynamic_expression(physical);
 }
