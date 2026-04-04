@@ -673,6 +673,7 @@ Expression Expression::operator/(const Expression& other) const { return binaryO
 Expression Expression::operator-() const { return unaryOp(*this, ExprOp::NEG); }
 Expression Expression::abs() const { return unaryOp(*this, ExprOp::ABS); }
 Expression Expression::sqrt() const { return unaryOp(*this, ExprOp::SQRT); }
+Expression Expression::sqrt(const Expression& expr) { return unaryOp(expr, ExprOp::SQRT); }
 
 Expression Expression::unsqueeze(const std::vector<uint64_t>& unsqueeze_axes) const {
     if (!expr)
