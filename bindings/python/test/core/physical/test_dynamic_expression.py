@@ -152,9 +152,7 @@ def test_dynamic_expression_runtime_scalar_override_numerical(dtype: thor.DataTy
         scale = ex.runtime_scalar("scale")
         expr = x + scale * y
         fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
-        return fused_equation.stamp(inputs, {
-            "scale": 1.0
-        }, stream)
+        return fused_equation.stamp(inputs, stream)
 
     dyn = DynamicExpression(builder)
     stamped = dyn.stamp({

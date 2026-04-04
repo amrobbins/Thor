@@ -535,6 +535,27 @@ def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadca
 
 
 @pytest.mark.cuda
+def test_fused_equation_stamp_as_type_single_output_requested_shape_accepts_compatible_layout():
+    x = ex.input("x", output_dtype=thor.DataType.fp16)
+    expr = ex.reduce_sum(x, axis=2, squeeze=False)  # logical output [2, 3, 1]
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+
+    x_gpu = _gpu_tensor([2, 3, 4], thor.DataType.fp32)
+    stream = thor.physical.Stream(gpu_num=0)
+
+    stamped = eq.stamp(
+        {
+            "x": x_gpu,
+        },
+        stream,
+        [2, 3, 1],
+    )
+
+    assert list(stamped.output().dimensions) == [2, 3, 1]
+
+
+@pytest.mark.cuda
 def test_fused_equation_stamp_as_type_multi_output_requested_shapes_with_broadcast_rejects_incompatible_layout():
     x = ex.input("x", output_dtype=thor.DataType.fp16)
     y = ex.input("y")

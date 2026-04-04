@@ -7,7 +7,14 @@
 #include "Utilities/TensorMathFusion/Expression.h"
 
 namespace ThorImplementation {
-using RuntimeInputValue = std::variant<Tensor, float>;
+
+struct TensorScalarBinding {
+    Tensor buffer;
+    uint64_t byteOffset = 0;
+    TensorDescriptor::DataType sourceDType = TensorDescriptor::DataType::FP32;
+};
+
+using RuntimeInputValue = std::variant<Tensor, float, TensorScalarBinding>;
 
 struct EquationSignature {
     uint32_t num_inputs;

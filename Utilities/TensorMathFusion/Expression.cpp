@@ -53,6 +53,8 @@ std::string opName(ExprOp op) {
             return "IN";
         case ExprOp::RUNTIME_SCALAR:
             return "RIN";
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+            return "TRIN";
         case ExprOp::SCALAR_FP:
             return "F32";
         case ExprOp::ADD:
@@ -177,6 +179,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
 
         case ExprOp::RUNTIME_SCALAR:
             out = "RIN" + std::to_string(n.input_slot);
+            break;
+
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+            out = "TRIN" + std::to_string(n.input_slot);
             break;
 
         case ExprOp::SCALAR_FP:
@@ -328,6 +334,7 @@ bool Expression::isLeafOp(const ExprOp op) {
     switch (op) {
         case ExprOp::INPUT:
         case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
         case ExprOp::SCALAR_FP:
         case ExprOp::FILL:
             return true;
@@ -435,7 +442,7 @@ uint32_t cloneSubtreeWithMergedInputs(const PhysicalExpression& src,
     const ExprNode& srcNode = src.nodes.at(srcNodeIndex);
     ExprNode newNode = srcNode;
 
-    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR) {
+    if (srcNode.op == ExprOp::INPUT || srcNode.op == ExprOp::RUNTIME_SCALAR || srcNode.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
         if (srcNode.input_slot >= src.inputs.size()) {
             throw std::runtime_error("Input slot out of range while merging expression outputs.");
         }
@@ -530,6 +537,27 @@ Expression Expression::runtimeScalar(const std::string& name, Optional<DataType>
     return Expression(out, 0);
 }
 
+Expression Expression::tensorRuntimeScalar(const std::string& name, Optional<DataType> compute_dtype, Optional<DataType> output_dtype) {
+    validateUserInputName(name);
+    auto out = std::make_shared<PhysicalExpression>();
+
+    ExprNode node;
+    node.op = ExprOp::TENSOR_RUNTIME_SCALAR;
+    node.input_slot = out->getOrCreateInputSlot(name, NamedInput::Kind::TensorRuntimeScalar);
+
+    if (output_dtype.isPresent()) {
+        node.output_dtype = output_dtype.get();
+    }
+    if (compute_dtype.isPresent()) {
+        node.compute_dtype = compute_dtype.get();
+    }
+
+    out->nodes.push_back(node);
+    out->output_node = 0;
+
+    return Expression(out, 0);
+}
+
 Expression::Expression(double value) {
     expr = std::make_shared<PhysicalExpression>();
 
@@ -603,7 +631,7 @@ static void remapClonedInputSlots(const PhysicalExpression& sourceExpr,
                                   PhysicalExpression& outExpr) {
     for (const auto& [oldNodeIndex, newNodeIndex] : oldToNewNodeMap) {
         const ExprNode& oldNode = sourceExpr.nodes.at(oldNodeIndex);
-        if (oldNode.op != ExprOp::INPUT && oldNode.op != ExprOp::RUNTIME_SCALAR)
+        if (oldNode.op != ExprOp::INPUT && oldNode.op != ExprOp::RUNTIME_SCALAR && oldNode.op != ExprOp::TENSOR_RUNTIME_SCALAR)
             continue;
 
         if (oldNode.input_slot >= slotRemap.size()) {

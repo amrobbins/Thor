@@ -248,7 +248,7 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         }
 
         const ExprNode& parent = expr.nodes[parent_idx];
-        if (parent.op == ExprOp::INPUT || parent.op == ExprOp::RUNTIME_SCALAR) {
+        if (parent.op == ExprOp::INPUT || parent.op == ExprOp::RUNTIME_SCALAR || parent.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
             external_value_ids.insert(parent.input_slot);
             return;
         }
@@ -268,7 +268,7 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
     for (uint32_t node_idx : region_nodes) {
         const ExprNode& node = expr.nodes[node_idx];
 
-        if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
+        if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
             external_value_ids.insert(node.input_slot);
             continue;
         }
@@ -313,6 +313,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "F";
         case ExprOp::RUNTIME_SCALAR:
             return "RSC";
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+            return "TRSC";
         case ExprOp::ADD:
             return "ADD";
         case ExprOp::SUB:
@@ -529,14 +531,17 @@ static std::vector<NamedInput::Kind> collectCompiledInputKinds(const PhysicalExp
     std::vector<uint8_t> seen(expr.numInputs(), 0);
 
     for (const ExprNode& node : expr.nodes) {
-        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR && node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
             continue;
         }
         if (node.input_slot >= input_kinds.size()) {
             throw runtime_error("Input slot out of range while collecting compiled input kinds.");
         }
 
-        const NamedInput::Kind kind = node.op == ExprOp::INPUT ? NamedInput::Kind::Tensor : NamedInput::Kind::RuntimeScalarFp32;
+        const NamedInput::Kind kind =
+            node.op == ExprOp::INPUT
+                ? NamedInput::Kind::Tensor
+                : (node.op == ExprOp::RUNTIME_SCALAR ? NamedInput::Kind::RuntimeScalarFp32 : NamedInput::Kind::TensorRuntimeScalar);
         if (seen[node.input_slot]) {
             if (input_kinds[node.input_slot] != kind) {
                 throw runtime_error("Inconsistent fused stage input kind for local input slot.");
@@ -561,7 +566,7 @@ static std::vector<DataType> collectCompiledInputDTypes(const PhysicalExpression
     std::vector<uint8_t> seen(expr.numInputs(), 0);
 
     for (const ExprNode& node : expr.nodes) {
-        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR) {
+        if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR && node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
             continue;
         }
         if (!node.input_tensor_dtype.isPresent()) {
@@ -996,7 +1001,7 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
     for (uint32_t old_idx : sorted_nodes) {
         ExprNode new_node = expr.nodes[old_idx];
 
-        if (new_node.op == ExprOp::INPUT || new_node.op == ExprOp::RUNTIME_SCALAR) {
+        if (new_node.op == ExprOp::INPUT || new_node.op == ExprOp::RUNTIME_SCALAR || new_node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
             uint32_t value_id = new_node.input_slot;
             const NamedInput& root_input = expr.inputs.at(value_id);
             new_node.input_slot = getOrCreateLocalInputSlot(value_id, root_input.kind, root_input.name);

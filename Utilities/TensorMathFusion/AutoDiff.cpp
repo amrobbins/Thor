@@ -162,6 +162,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 reaches[i] = false;
                 break;
             case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
                 reaches[i] = false;
                 break;
             case ExprOp::ADD:
@@ -884,6 +885,7 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 break;
             }
             case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
                 node_dims[i] = {};
                 break;
@@ -1231,6 +1233,7 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
         switch (node.op) {
             case ExprOp::INPUT:
             case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
                 break;
 

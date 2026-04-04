@@ -18,6 +18,39 @@ using DataType = ThorImplementation::TensorDescriptor::DataType;
 namespace ThorImplementation {
 
 static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
+static bool runtimeInputIsTensorScalarBinding(const RuntimeInputValue& value) { return std::holds_alternative<TensorScalarBinding>(value); }
+
+static const TensorScalarBinding& runtimeInputTensorScalarBinding(const RuntimeInputValue& value) {
+    if (!std::holds_alternative<TensorScalarBinding>(value)) {
+        throw std::runtime_error("Expected tensor scalar runtime input.");
+    }
+    return std::get<TensorScalarBinding>(value);
+}
+
+static size_t dataTypeSizeBytes(DataType dtype) {
+    switch (dtype) {
+        case DataType::FP32:
+            return 4;
+        case DataType::FP16:
+            return 2;
+        case DataType::BF16:
+            return 2;
+        case DataType::FP8_E4M3:
+            return 1;
+        case DataType::FP8_E5M2:
+            return 1;
+        case DataType::UINT8:
+            return 1;
+        case DataType::UINT16:
+            return 2;
+        case DataType::UINT32:
+            return 4;
+        case DataType::INT32:
+            return 4;
+        default:
+            throw std::runtime_error("Unsupported dtype in dataTypeSizeBytes.");
+    }
+}
 
 static const Tensor& runtimeInputTensor(const RuntimeInputValue& value) {
     if (!std::holds_alternative<Tensor>(value)) {
@@ -37,6 +70,9 @@ static DataType runtimeInputDType(const RuntimeInputValue& value) {
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getDataType();
     }
+    if (std::holds_alternative<TensorScalarBinding>(value)) {
+        return std::get<TensorScalarBinding>(value).sourceDType;
+    }
     return DataType::FP32;
 }
 
@@ -44,7 +80,28 @@ static const Optional<TensorPlacement> runtimeInputPlacementOrNull(const Runtime
     if (std::holds_alternative<Tensor>(value)) {
         return std::get<Tensor>(value).getPlacement();
     }
+    if (std::holds_alternative<TensorScalarBinding>(value)) {
+        return std::get<TensorScalarBinding>(value).buffer.getPlacement();
+    }
     return Optional<TensorPlacement>::empty();
+}
+
+std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::makeSingleOutputRequestedShapeMap(
+    const std::vector<uint64_t>& requestedOutputShape) const {
+    std::unordered_map<std::string, std::vector<uint64_t>> requested;
+
+    if (requestedOutputShape.empty()) {
+        return requested;
+    }
+
+    const auto outputNames = getOutputNames();
+    if (outputNames.size() != 1) {
+        throw std::runtime_error(
+            "Single-output requested-shape stamp overload called on an equation that does not have exactly one output.");
+    }
+
+    requested.emplace(outputNames[0], requestedOutputShape);
+    return requested;
 }
 
 static Tensor adaptReductionInputDTypeIfNeeded(const Tensor& input,
@@ -159,7 +216,8 @@ static Optional<DataType> preferredBackwardGradBufferDType(const BackwardEquatio
     }
 
     for (const ExprNode& node : backward_config.forward_outputs_template.expr->nodes) {
-        if ((node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) && node.input_slot == slot) {
+        if ((node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) &&
+            node.input_slot == slot) {
             if (node.backward_output_dtype.isPresent()) {
                 return node.backward_output_dtype;
             }
@@ -377,7 +435,7 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
 
     const ExprNode& node = expr.nodes[node_idx];
 
-    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
         slots.insert(node.input_slot);
         return;
     }
@@ -553,6 +611,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 break;
             }
             case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
             case ExprOp::SCALAR_FP:
                 node_dims[i] = {};
                 break;
@@ -659,6 +718,17 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
     return node_dims;
 }
 
+static std::vector<uint64_t> resolveReductionAxesForInputRank(const std::vector<uint64_t>& reduction_axes, size_t input_rank) {
+    if (reduction_axes.empty()) {
+        std::vector<uint64_t> axes(input_rank);
+        for (size_t i = 0; i < input_rank; ++i) {
+            axes[i] = static_cast<uint64_t>(i);
+        }
+        return axes;
+    }
+    return reduction_axes;
+}
+
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
                                                              size_t output_idx,
                                                              const std::vector<std::vector<uint64_t>>& stage_input_dims) {
@@ -666,11 +736,43 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
         throw std::runtime_error("resolveOutputDimsForStageOutput output_idx out of range.");
     }
 
-    if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
-        if (stage_input_dims.empty()) {
-            throw std::runtime_error("resolveOutputDimsForStageOutput reduce-min/max-backward stage expected at least one input shape.");
+    switch (stage.kind) {
+        case CompiledExecutionStage::Kind::Reduction: {
+            if (!stage.reduction) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput reduction stage missing payload.");
+            }
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput reduction stage expected at least one input shape.");
+            }
+
+            const auto reduction_axes = resolveReductionAxesForInputRank(stage.reduction->reduction_axes, stage_input_dims[0].size());
+
+            return StampedEquation::computeReductionOutputDims(stage_input_dims[0], reduction_axes, stage.reduction->squeeze_axes);
         }
-        return stage_input_dims[0];
+
+        case CompiledExecutionStage::Kind::ArgMinMax: {
+            if (!stage.arg_minmax) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput argmin/argmax stage missing payload.");
+            }
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput argmin/argmax stage expected at least one input shape.");
+            }
+
+            const auto reduction_axes = resolveReductionAxesForInputRank(stage.arg_minmax->reduction_axes, stage_input_dims[0].size());
+
+            return StampedEquation::computeReductionOutputDims(stage_input_dims[0], reduction_axes, stage.arg_minmax->squeeze_axes);
+        }
+
+        case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
+            if (stage_input_dims.empty()) {
+                throw std::runtime_error(
+                    "resolveOutputDimsForStageOutput reduce-min/max-backward stage expected at least one input shape.");
+            }
+            return stage_input_dims[0];
+        }
+
+        case CompiledExecutionStage::Kind::FusedKernel:
+            break;
     }
 
     const auto node_dims = inferFusedStageNodeDims(stage.expr, stage_input_dims);
@@ -841,6 +943,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             return {{node.input_slot, {node_dims[node_idx]}}};
         }
         case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
         case ExprOp::SCALAR_FP:
             return {};
         case ExprOp::FILL:
@@ -1628,6 +1731,7 @@ bool FusedEquation::resolveLayout(std::vector<Tensor>& inputs, std::vector<uint6
 std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
     const std::unordered_map<std::string, Tensor>& namedInputs,
     const std::unordered_map<std::string, float>& scalar_inputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
     const std::unordered_map<std::string, Tensor>* namedOutputs) const {
     std::unordered_map<uint32_t, RuntimeInputValue> values;
     values.reserve(root_inputs.size());
@@ -1638,6 +1742,8 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
     expected_input_set.reserve(root_inputs.size());
     std::unordered_set<std::string> expected_scalar_input_set;
     expected_scalar_input_set.reserve(root_inputs.size());
+    std::unordered_set<std::string> expected_tensor_scalar_input_set;
+    expected_tensor_scalar_input_set.reserve(root_inputs.size());
 
     for (const NamedInput& input : root_inputs) {
         const bool bind_from_outputs = namedOutputs != nullptr && accumulation_output_names.contains(input.name);
@@ -1657,13 +1763,20 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
             }
             values.emplace(input.slot, input_it->second);
             expected_input_set.insert(input.name);
-        } else {
+        } else if (input.kind == NamedInput::Kind::RuntimeScalarFp32) {
             auto scalar_it = scalar_inputs.find(input.name);
-            if (scalar_it == scalar_inputs.end()) {
-                throw std::runtime_error("Missing required fused equation runtime scalar input: " + input.name);
+            const float scalar_value = scalar_it == scalar_inputs.end() ? 0.0f : scalar_it->second;
+            values.emplace(input.slot, scalar_value);
+            if (scalar_it != scalar_inputs.end()) {
+                expected_scalar_input_set.insert(input.name);
+            }
+        } else {
+            auto scalar_it = tensor_scalar_inputs.find(input.name);
+            if (scalar_it == tensor_scalar_inputs.end()) {
+                throw std::runtime_error("Missing required fused equation tensor runtime scalar input: " + input.name);
             }
             values.emplace(input.slot, scalar_it->second);
-            expected_scalar_input_set.insert(input.name);
+            expected_tensor_scalar_input_set.insert(input.name);
         }
     }
 
@@ -1677,6 +1790,16 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
             throw std::runtime_error("Unexpected runtime scalar input sent to fused equation: " + name);
         }
     }
+    for (const auto& [name, _] : tensor_scalar_inputs) {
+        if (!expected_tensor_scalar_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected tensor runtime scalar input sent to fused equation: " + name);
+        }
+    }
+    for (const auto& [name, _] : tensor_scalar_inputs) {
+        if (!expected_tensor_scalar_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected tensor runtime scalar input sent to fused equation: " + name);
+        }
+    }
 
     return values;
 }
@@ -1684,9 +1807,10 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
 std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsForCompilation(
     const std::unordered_map<std::string, Tensor>& namedInputs,
     const std::unordered_map<std::string, float>& scalar_inputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
     const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
     if (!accumulatesIntoGradOutputs(backward_config)) {
-        return bindRootInputs(namedInputs, scalar_inputs);
+        return bindRootInputs(namedInputs, scalar_inputs, tensor_scalar_inputs);
     }
 
     std::unordered_map<uint32_t, RuntimeInputValue> values;
@@ -1696,6 +1820,8 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsFor
     expected_input_set.reserve(root_inputs.size());
     std::unordered_set<std::string> expected_scalar_input_set;
     expected_scalar_input_set.reserve(root_inputs.size());
+    std::unordered_set<std::string> expected_tensor_scalar_input_set;
+    expected_tensor_scalar_input_set.reserve(root_inputs.size());
 
     std::unordered_map<std::string, uint32_t> root_slot_by_name;
     root_slot_by_name.reserve(root_inputs.size());
@@ -1717,13 +1843,20 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsFor
             }
             values.emplace(input.slot, it->second);
             expected_input_set.insert(input.name);
-        } else {
+        } else if (input.kind == NamedInput::Kind::RuntimeScalarFp32) {
             auto it = scalar_inputs.find(input.name);
-            if (it == scalar_inputs.end()) {
-                throw std::runtime_error("Missing required fused equation runtime scalar input: " + input.name);
+            const float scalar_value = it == scalar_inputs.end() ? 0.0f : it->second;
+            values.emplace(input.slot, scalar_value);
+            if (it != scalar_inputs.end()) {
+                expected_scalar_input_set.insert(input.name);
+            }
+        } else {
+            auto it = tensor_scalar_inputs.find(input.name);
+            if (it == tensor_scalar_inputs.end()) {
+                throw std::runtime_error("Missing required fused equation tensor runtime scalar input: " + input.name);
             }
             values.emplace(input.slot, it->second);
-            expected_scalar_input_set.insert(input.name);
+            expected_tensor_scalar_input_set.insert(input.name);
         }
     }
 
@@ -1735,6 +1868,11 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsFor
     for (const auto& [name, _] : scalar_inputs) {
         if (!expected_scalar_input_set.contains(name)) {
             throw std::runtime_error("Unexpected runtime scalar input sent to fused equation: " + name);
+        }
+    }
+    for (const auto& [name, _] : tensor_scalar_inputs) {
+        if (!expected_tensor_scalar_input_set.contains(name)) {
+            throw std::runtime_error("Unexpected tensor runtime scalar input sent to fused equation: " + name);
         }
     }
 
@@ -1800,12 +1938,34 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
             if (input.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
                 throw std::runtime_error("Input tensor GPU mismatch.");
             }
-        } else {
+        } else if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
             if (!std::holds_alternative<float>(inputs[i])) {
                 throw std::runtime_error("FusedEquation::stampEquation expected runtime scalar input at slot " + std::to_string(i) + ".");
             }
             if (compiledEquation->input_dtypes[i] != DataType::FP32) {
                 throw std::runtime_error("Runtime scalar inputs currently require FP32 compiled input dtype.");
+            }
+        } else {
+            if (!runtimeInputIsTensorScalarBinding(inputs[i])) {
+                throw std::runtime_error("FusedEquation::stampEquation expected tensor runtime scalar input at slot " + std::to_string(i) +
+                                         ".");
+            }
+            const TensorScalarBinding& binding = runtimeInputTensorScalarBinding(inputs[i]);
+            if (!binding.buffer.isInitialized()) {
+                throw std::runtime_error("Tensor runtime scalar buffer is not initialized.");
+            }
+            if (binding.buffer.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+                throw std::runtime_error("Tensor runtime scalar buffer must be on GPU.");
+            }
+            if (binding.buffer.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+                throw std::runtime_error("Tensor runtime scalar buffer GPU mismatch.");
+            }
+            if (binding.sourceDType != compiledEquation->input_dtypes[i]) {
+                throw std::runtime_error("Tensor runtime scalar source dtype mismatch.");
+            }
+            const size_t bytes_needed = binding.byteOffset + dataTypeSizeBytes(binding.sourceDType);
+            if (bytes_needed > binding.buffer.getArraySizeInBytes()) {
+                throw std::runtime_error("Tensor runtime scalar binding exceeds backing buffer size.");
             }
         }
     }
@@ -1830,6 +1990,14 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
                                                                 Tensor& input,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
+    return stampReduction(compiledReduction, input, Optional<Tensor>::empty(), stream, requested_output_shape);
+}
+
+std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
+                                                                Tensor& input,
+                                                                const Optional<Tensor>& preallocatedOutput,
+                                                                const Stream& stream,
+                                                                const std::vector<uint64_t>& requested_output_shape) const {
     if (!compiledReduction)
         throw std::runtime_error("Tried to stamp reduction on a non-reduction FusedEquation.");
 
@@ -1843,7 +2011,7 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
         workspace = Tensor(adaptedInput.getPlacement(), workspaceDescriptor);
     }
 
-    vector<uint64_t> resolved_output_dimensions =
+    std::vector<uint64_t> resolved_output_dimensions =
         StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, built->key.squeeze_axes);
 
     std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
@@ -1852,14 +2020,41 @@ std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::share
         output_dimensions = requested_output_shape;
     }
 
-    TensorDescriptor outputDescriptor(compiledReduction->output_dtype, output_dimensions);
-    Tensor output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error("Preallocated reduction output tensor placement does not match the reduction input placement.");
+        }
+
+        if (output.getDescriptor().getDataType() != compiledReduction->output_dtype) {
+            throw std::runtime_error("Preallocated reduction output tensor dtype does not match the compiled reduction output dtype.");
+        }
+
+        verifyRequestedOutputLayout(output.getDimensions(), resolved_output_dimensions);
+
+        if (!requested_output_shape.empty() && output.getDimensions() != output_dimensions) {
+            throw std::runtime_error("Preallocated reduction output tensor shape does not match the requested output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledReduction->output_dtype, output_dimensions);
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
 
     return make_shared<StampedReduction>(std::move(built), adaptedInput, output, stream, workspace);
 }
 
 std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
                                                                 Tensor& input,
+                                                                const Stream& stream,
+                                                                const std::vector<uint64_t>& requested_output_shape) const {
+    return stampArgMinMax(compiledStage, input, Optional<Tensor>::empty(), stream, requested_output_shape);
+}
+
+std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::shared_ptr<CompiledArgMinMax>& compiledStage,
+                                                                Tensor& input,
+                                                                const Optional<Tensor>& preallocatedOutput,
                                                                 const Stream& stream,
                                                                 const std::vector<uint64_t>& requested_output_shape) const {
     if (!compiledStage) {
@@ -1892,8 +2087,29 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
         output_dimensions = requested_output_shape;
     }
 
-    TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dimensions);
-    Tensor output(adaptedInput.getPlacement(), outputDescriptor);
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error(
+                "Preallocated argmin/argmax output tensor placement does not match the argmin/argmax input placement.");
+        }
+
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error(
+                "Preallocated argmin/argmax output tensor dtype does not match the compiled argmin/argmax output dtype.");
+        }
+
+        verifyRequestedOutputLayout(output.getDimensions(), resolved_output_dimensions);
+
+        if (!requested_output_shape.empty() && output.getDimensions() != output_dimensions) {
+            throw std::runtime_error("Preallocated argmin/argmax output tensor shape does not match the requested output shape.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dimensions);
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
 
     const std::vector<uint64_t> unsqueezed_output_dims =
         StampedEquation::computeReductionOutputDims(adaptedInput.getDimensions(), built->key.reduction_axes, {});
@@ -1905,14 +2121,25 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
+    return stampReduceMinMaxBackward(compiledStage, input, grad_output, Optional<Tensor>::empty(), stream);
+}
+
+std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
+    const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
+    Tensor& input,
+    Tensor& grad_output,
+    const Optional<Tensor>& preallocatedOutput,
+    const Stream& stream) const {
     if (!compiledStage) {
         throw std::runtime_error("stampReduceMinMaxBackward requires non-null compiled stage.");
     }
+
     Tensor adaptedInput =
         adaptReductionInputDTypeIfNeeded(input,
                                          compiledStage->input_dtype,
                                          compiledStage->op == ExprOp::REDUCE_MIN_BACKWARD ? ExprOp::REDUCE_MIN : ExprOp::REDUCE_MAX,
                                          stream);
+
     if (grad_output.getDataType() != compiledStage->output_dtype) {
         throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward output dtype.");
     }
@@ -1949,8 +2176,23 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
     TensorDescriptor reductionValueDescriptor(built->key.output_dtype, unsqueezed_output_dims);
     Tensor reductionValueOutput(adaptedInput.getPlacement(), reductionValueDescriptor);
 
-    TensorDescriptor outputDescriptor(compiledStage->output_dtype, input.getDimensions());
-    Tensor output(adaptedInput.getPlacement(), outputDescriptor);
+    Tensor output;
+    if (preallocatedOutput.isPresent()) {
+        output = preallocatedOutput.get();
+
+        if (output.getPlacement() != adaptedInput.getPlacement()) {
+            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor placement does not match the input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor dtype does not match the compiled output dtype.");
+        }
+        if (output.getDimensions() != input.getDimensions()) {
+            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor dimensions do not match the input dimensions.");
+        }
+    } else {
+        TensorDescriptor outputDescriptor(compiledStage->output_dtype, input.getDimensions());
+        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+    }
 
     return make_shared<StampedReduceMinMaxBackward>(
         std::move(built), adaptedInput, grad_output, output, indices, reductionValueOutput, stream, workspace);
@@ -1960,12 +2202,12 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    static const std::unordered_map<std::string, float> empty_scalar_inputs;
-    return stamp(inputs, empty_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
+    static const std::unordered_map<std::string, TensorScalarBinding> empty_tensor_scalar_inputs;
+    return stamp(inputs, empty_tensor_scalar_inputs, preallocated_outputs, stream, requestedOutputShapes);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, float>& scalar_inputs,
+                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
@@ -1974,12 +2216,15 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
     }
 
+    static const std::unordered_map<std::string, float> empty_scalar_inputs;
+
     const std::unordered_map<std::string, std::vector<uint64_t>> requestedOutputShapesWithOutputs =
         mergeRequestedOutputShapesWithProvidedOutputs(preallocated_outputs, requestedOutputShapes);
 
     std::unordered_map<uint32_t, RuntimeInputValue> compile_root_values =
-        accumulatesIntoGradOutputs(backward_config) ? bindRootInputs(inputs, scalar_inputs, &preallocated_outputs)
-                                                    : bindRootInputsForCompilation(inputs, scalar_inputs, requestedOutputShapesWithOutputs);
+        accumulatesIntoGradOutputs(backward_config)
+            ? bindRootInputs(inputs, empty_scalar_inputs, tensor_scalar_inputs, &preallocated_outputs)
+            : bindRootInputsForCompilation(inputs, empty_scalar_inputs, tensor_scalar_inputs, requestedOutputShapesWithOutputs);
     const auto effectiveRequestedOutputShapes =
         defaultBackwardRequestedOutputShapes(backward_config, root_inputs, compile_root_values, requestedOutputShapesWithOutputs);
 
@@ -1989,8 +2234,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(compile_root_values);
 
-    std::unordered_map<uint32_t, RuntimeInputValue> values =
-        accumulatesIntoGradOutputs(backward_config) ? compile_root_values : bindRootInputs(inputs, scalar_inputs);
+    std::unordered_map<uint32_t, RuntimeInputValue> values = accumulatesIntoGradOutputs(backward_config)
+                                                                 ? compile_root_values
+                                                                 : bindRootInputs(inputs, empty_scalar_inputs, tensor_scalar_inputs, {});
 
     std::unordered_map<std::string, Tensor> preallocated_final_outputs_by_name = preallocated_outputs;
 
@@ -2012,153 +2258,199 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             if (it == values.end()) {
                 throw std::runtime_error("Missing input value for staged execution plan.");
             }
+
             stageInputs.push_back(it->second);
 
             auto producer_it = producer_stage_by_value_id.find(value_id);
             if (producer_it != producer_stage_by_value_id.end()) {
-                dependency_stage_indices.push_back(producer_it->second);
+                const uint32_t dep_stage_idx = producer_it->second;
+                if (std::find(dependency_stage_indices.begin(), dependency_stage_indices.end(), dep_stage_idx) ==
+                    dependency_stage_indices.end()) {
+                    dependency_stage_indices.push_back(dep_stage_idx);
+                }
             }
         }
 
-        std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
-        dependency_stage_indices.erase(std::unique(dependency_stage_indices.begin(), dependency_stage_indices.end()),
-                                       dependency_stage_indices.end());
+        switch (stage.kind) {
+            case CompiledExecutionStage::Kind::FusedKernel: {
+                if (stage.outputs.empty()) {
+                    throw std::runtime_error("Fused stage requires at least one output.");
+                }
 
-        const uint32_t this_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                std::vector<std::vector<uint64_t>> expected_output_dims(stage.outputs.size());
+                std::shared_ptr<CompiledEquation> compiledEq;
 
-        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
-            if (!stage.flat) {
-                throw std::runtime_error("Missing compiled fused kernel stage.");
-            }
+                std::vector<uint64_t> resolved_output_dims;
+                const bool requires_broadcast = fusedStageRequiresBroadcastLaunch(
+                    stage, stageInputs, effectiveRequestedOutputShapes, backward_config.has_value(), resolved_output_dims);
 
-            std::vector<uint64_t> resolvedOutputDims;
-            const bool requiresBroadcast = fusedStageRequiresBroadcastLaunch(
-                stage, stageInputs, effectiveRequestedOutputShapes, backward_config.has_value(), resolvedOutputDims);
-
-            std::vector<Tensor> stageOutputs;
-            stageOutputs.reserve(stage.outputs.size());
-
-            TensorPlacement outputPlacement = pickStageOutputPlacement(stageInputs, values);
-
-            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
-                const CompiledStageOutput& produced = stage.outputs[output_idx];
-                std::vector<uint64_t> resolved_output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
-
-                auto requested_it = effectiveRequestedOutputShapes.find(produced.name);
-                const std::vector<uint64_t>* requested_shape =
-                    (requested_it != effectiveRequestedOutputShapes.end()) ? &requested_it->second : nullptr;
-
-                if (requested_shape && !requested_shape->empty()) {
-                    if (!backward_config.has_value() && !(stageInputs.empty() && resolved_output_dims.empty())) {
-                        verifyRequestedOutputLayout(*requested_shape, resolved_output_dims);
+                if (!requires_broadcast) {
+                    for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                        std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
+                        auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
+                        if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                            if (!backward_config.has_value() && !(stageInputs.empty() && output_dims.empty())) {
+                                verifyRequestedOutputLayout(requested_it->second, output_dims);
+                            }
+                            output_dims = requested_it->second;
+                        }
+                        expected_output_dims[output_idx] = std::move(output_dims);
                     }
-                }
-
-                const std::vector<uint64_t>& output_dims =
-                    (requested_shape && !requested_shape->empty()) ? *requested_shape : resolved_output_dims;
-                auto preallocated_it = preallocated_final_outputs_by_name.find(produced.name);
-                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                    stageOutputs.push_back(preallocated_it->second);
+                    compiledEq = selectFlatCompiledEquation(stage, compiled_outputs->signature, maxNumel(expected_output_dims));
                 } else {
-                    TensorDescriptor outputDescriptor(stage.flat->output_dtypes[output_idx], output_dims);
-                    stageOutputs.emplace_back(outputPlacement, outputDescriptor);
+                    std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, stageInputs);
+                    if (groups.empty()) {
+                        throw std::runtime_error("Fused stage expected at least one broadcast group.");
+                    }
+
+                    std::vector<SpecializedBroadcastGroup> specialized_groups;
+                    specialized_groups.reserve(groups.size());
+                    for (const ResolvedBroadcastGroup& group : groups) {
+                        specialized_groups.push_back(group.specialized);
+                        for (uint32_t output_idx : group.specialized.output_indices) {
+                            if (output_idx >= expected_output_dims.size()) {
+                                throw std::runtime_error("Broadcast group output index out of range.");
+                            }
+                            std::vector<uint64_t> output_dims = group.specialized.output_dims;
+                            auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[output_idx].name);
+                            if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                                if (!backward_config.has_value() && !(stageInputs.empty() && output_dims.empty())) {
+                                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                                }
+                                output_dims = requested_it->second;
+                            }
+                            expected_output_dims[output_idx] = std::move(output_dims);
+                        }
+                    }
+
+                    compiledEq = EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
                 }
-            }
 
-            std::shared_ptr<StampedEquation> stamped;
-            if (requiresBroadcast) {
-                std::vector<ResolvedBroadcastGroup> groups = buildResolvedBroadcastGroups(stage, stageInputs);
-
-                std::vector<SpecializedBroadcastGroup> specialized_groups;
-                specialized_groups.reserve(groups.size());
-                for (const ResolvedBroadcastGroup& group : groups) {
-                    specialized_groups.push_back(group.specialized);
+                std::vector<Tensor> stageOutputs;
+                stageOutputs.reserve(stage.outputs.size());
+                const TensorPlacement outputPlacement = pickStageOutputPlacement(stageInputs, values);
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
+                    auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                        stageOutputs.push_back(preallocated_it->second);
+                        values[stageOutput.value_id] = preallocated_it->second;
+                    } else {
+                        TensorDescriptor outputDescriptor(compiledEq->output_dtypes.at(output_idx), expected_output_dims[output_idx]);
+                        Tensor outputTensor(outputPlacement, outputDescriptor);
+                        stageOutputs.push_back(outputTensor);
+                        values[stageOutput.value_id] = outputTensor;
+                    }
+                    producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 }
 
-                std::shared_ptr<CompiledEquation> specialized_broadcast =
-                    EquationCompiler::compileSpecializedBroadcastStage(stage, compiled_outputs->signature, specialized_groups);
+                std::shared_ptr<StampedEquation> stampedKernel = stampEquation(compiledEq, stageInputs, stageOutputs, stream);
+                stampedStages.emplace_back(stampedKernel, std::move(dependency_stage_indices));
+                break;
+            }
+            case CompiledExecutionStage::Kind::Reduction: {
+                if (!stage.reduction) {
+                    throw std::runtime_error("Reduction stage missing compiled reduction payload.");
+                }
+                if (stageInputs.size() != 1) {
+                    throw std::runtime_error("Reduction stage expects exactly one input.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Reduction stage expects exactly one output.");
+                }
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
 
-                stamped = stampEquation(specialized_broadcast, stageInputs, stageOutputs, stream);
-            } else {
-                uint64_t max_output_numel = 0;
-                for (const Tensor& output : stageOutputs) {
-                    max_output_numel = std::max<uint64_t>(max_output_numel, output.getTotalNumElements());
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    output_dims = requested_it->second;
                 }
 
-                stamped = stampEquation(
-                    selectFlatCompiledEquation(stage, compiled_outputs->signature, max_output_numel), stageInputs, stageOutputs, stream);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.reduction->output_dtype, output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+
+                std::shared_ptr<StampedReduction> stampedReduction =
+                    stampReduction(stage.reduction, inputTensor, outputTensor, stream, output_dims);
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedReduction, std::move(dependency_stage_indices));
+                break;
             }
+            case CompiledExecutionStage::Kind::ArgMinMax: {
+                if (!stage.arg_minmax) {
+                    throw std::runtime_error("Argmin/argmax stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 1) {
+                    throw std::runtime_error("Argmin/argmax stage expects exactly one input.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Argmin/argmax stage expects exactly one output.");
+                }
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
 
-            for (size_t i = 0; i < stage.outputs.size(); ++i) {
-                const uint32_t produced_value_id = stage.outputs[i].value_id;
-                values[produced_value_id] = stageOutputs[i];
-                producer_stage_by_value_id[produced_value_id] = this_stage_idx;
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    output_dims = requested_it->second;
+                }
+
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.arg_minmax->output_dtype, output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+
+                std::shared_ptr<StampedArgMinMax> stampedArgMinMax =
+                    stampArgMinMax(stage.arg_minmax, inputTensor, outputTensor, stream, output_dims);
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedArgMinMax, std::move(dependency_stage_indices));
+                break;
             }
-
-            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
-        } else if (stage.kind == CompiledExecutionStage::Kind::Reduction) {
-            if (!stage.reduction) {
-                throw std::runtime_error("Missing compiled reduction stage.");
+            case CompiledExecutionStage::Kind::ReduceMinMaxBackward: {
+                if (!stage.reduce_minmax_backward) {
+                    throw std::runtime_error("Reduce-min/max-backward stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2) {
+                    throw std::runtime_error("Reduce-min/max-backward stage expects exactly two inputs.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor gradOutputTensor = runtimeInputTensor(stageInputs[1]);
+                if (stage.outputs.size() != 1) {
+                    throw std::runtime_error("Reduce-min/max-backward stage expects exactly one output.");
+                }
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+                const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.reduce_minmax_backward->output_dtype, output_dims);
+                    outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
+                }
+                std::shared_ptr<StampedReduceMinMaxBackward> stampedReduceMinMaxBackward =
+                    stampReduceMinMaxBackward(stage.reduce_minmax_backward, inputTensor, gradOutputTensor, outputTensor, stream);
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices));
+                break;
             }
-
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Reduction stage expected exactly one input and one output.");
-            }
-
-            Tensor reductionInput = runtimeInputTensor(stageInputs[0]);
-            auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[0].name);
-            std::vector<uint64_t> requested_shape;
-            if (requested_it != effectiveRequestedOutputShapes.end())
-                requested_shape = requested_it->second;
-            std::shared_ptr<StampedReduction> stamped = stampReduction(stage.reduction, reductionInput, stream, requested_shape);
-
-            const uint32_t produced_value_id = stage.outputs[0].value_id;
-            values[produced_value_id] = stamped->getOutputTensor();
-            producer_stage_by_value_id[produced_value_id] = this_stage_idx;
-
-            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
-        } else if (stage.kind == CompiledExecutionStage::Kind::ArgMinMax) {
-            if (!stage.arg_minmax) {
-                throw std::runtime_error("Missing compiled arg-min/max stage.");
-            }
-
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
-            }
-
-            Tensor reductionInput = runtimeInputTensor(stageInputs[0]);
-            auto requested_it = effectiveRequestedOutputShapes.find(stage.outputs[0].name);
-            std::vector<uint64_t> requested_shape;
-            if (requested_it != effectiveRequestedOutputShapes.end())
-                requested_shape = requested_it->second;
-            std::shared_ptr<StampedArgMinMax> stamped = stampArgMinMax(stage.arg_minmax, reductionInput, stream, requested_shape);
-
-            const uint32_t produced_value_id = stage.outputs[0].value_id;
-            values[produced_value_id] = stamped->getOutputTensor();
-            producer_stage_by_value_id[produced_value_id] = this_stage_idx;
-
-            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
-        } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
-            if (!stage.reduce_minmax_backward) {
-                throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
-            }
-
-            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
-            }
-
-            Tensor reductionInput = runtimeInputTensor(stageInputs[0]);
-            Tensor gradOutput = runtimeInputTensor(stageInputs[1]);
-            std::shared_ptr<StampedReduceMinMaxBackward> stamped =
-                stampReduceMinMaxBackward(stage.reduce_minmax_backward, reductionInput, gradOutput, stream);
-
-            const uint32_t produced_value_id = stage.outputs[0].value_id;
-            values[produced_value_id] = stamped->getOutputTensor();
-            producer_stage_by_value_id[produced_value_id] = this_stage_idx;
-
-            stampedStages.emplace_back(stamped, std::move(dependency_stage_indices));
-        } else {
-            throw std::runtime_error("Unknown compiled execution stage kind in FusedEquation::stamp.");
         }
     }
 
@@ -2178,58 +2470,52 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    static const std::unordered_map<std::string, float> empty_scalar_inputs;
-    return stamp(inputs, empty_scalar_inputs, stream, requestedOutputShapes);
+    static const std::unordered_map<std::string, TensorScalarBinding> empty_tensor_scalar_inputs;
+    static const std::unordered_map<std::string, Tensor> empty_outputs;
+    return stamp(inputs, empty_tensor_scalar_inputs, empty_outputs, stream, requestedOutputShapes);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, float>& scalar_inputs,
+                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const Stream& stream,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
-    if (accumulatesIntoGradOutputs(backward_config)) {
-        throw std::runtime_error(
-            "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
-    }
     static const std::unordered_map<std::string, Tensor> empty_outputs;
-    return stamp(inputs, scalar_inputs, empty_outputs, stream, requestedOutputShapes);
+    return stamp(inputs, tensor_scalar_inputs, empty_outputs, stream, requestedOutputShapes);
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const std::unordered_map<std::string, Tensor>& outputs,
                                           const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
-    static const std::unordered_map<std::string, float> empty_scalar_inputs;
-    return stamp(inputs, empty_scalar_inputs, outputs, stream, requestedOutputShape);
+    static const std::unordered_map<std::string, TensorScalarBinding> emptyTensorScalarInputs;
+
+    return stamp(inputs, emptyTensorScalarInputs, outputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, float>& scalar_inputs,
+                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const std::unordered_map<std::string, Tensor>& outputs,
                                           const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
-    std::unordered_map<std::string, std::vector<uint64_t>> requested;
-    if (!requestedOutputShape.empty()) {
-        requested["output"] = requestedOutputShape;
-    }
-    return stamp(inputs, scalar_inputs, outputs, stream, requested);
+    return stamp(inputs, tensor_scalar_inputs, outputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
                                           const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
-    static const std::unordered_map<std::string, float> empty_scalar_inputs;
-    return stamp(inputs, empty_scalar_inputs, stream, requestedOutputShape);
+    static const std::unordered_map<std::string, TensorScalarBinding> emptyTensorScalarInputs;
+    static const std::unordered_map<std::string, Tensor> emptyOutputs;
+
+    return stamp(inputs, emptyTensorScalarInputs, emptyOutputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, Tensor>& inputs,
-                                          const std::unordered_map<std::string, float>& scalar_inputs,
+                                          const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const Stream& stream,
                                           const std::vector<uint64_t>& requestedOutputShape) const {
-    std::unordered_map<std::string, std::vector<uint64_t>> requested;
-    if (!requestedOutputShape.empty()) {
-        requested["output"] = requestedOutputShape;
-    }
-    return stamp(inputs, scalar_inputs, stream, requested);
+    static const std::unordered_map<std::string, Tensor> emptyOutputs;
+
+    return stamp(inputs, tensor_scalar_inputs, emptyOutputs, stream, makeSingleOutputRequestedShapeMap(requestedOutputShape));
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {
@@ -2292,7 +2578,7 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
                         const std::unordered_map<std::string, float>& scalar_inputs,
                         std::unordered_map<std::string, Tensor>& outputs,
                         Stream& stream) const {
-    const std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputs(inputs, scalar_inputs, &outputs);
+    const std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputs(inputs, scalar_inputs, {}, &outputs);
     const std::shared_ptr<PreparedConvenienceRunPlan> prepared_plan = prepareConvenienceRunPlan(root_values);
     const std::shared_ptr<CompiledOutputs>& compiled_outputs = prepared_plan->compiled_outputs;
 

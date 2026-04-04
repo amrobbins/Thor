@@ -947,3 +947,368 @@ def test_argmax_staged_multi_axis_squeeze_specific_axes_list(dtype: thor.DataTyp
 
     assert got.shape == expected.shape
     np.testing.assert_array_equal(got, expected)
+
+
+def _host_to_gpu(arr: np.ndarray, dtype: thor.DataType, stream: Stream, gpu_num: int = 0) -> PhysicalTensor:
+    cpu = Placement(DeviceType.cpu, 0)
+    gpu = Placement(DeviceType.gpu, gpu_num)
+    desc = PhysicalTensor.Descriptor(dtype, list(arr.shape))
+    host = PhysicalTensor(cpu, desc)
+    host.numpy()[...] = arr
+    device = PhysicalTensor(gpu, desc)
+    device.copy_from_async(host, stream)
+    return device
+
+
+def _run_staged_expr_with_preallocated(
+    expr,
+    input_names: list[str],
+    *inputs: np.ndarray,
+    dtype: thor.DataType,
+    output_dtype: thor.DataType | None = None,
+    output_shape: list[int] | None = None,
+    gpu_num: int = 0,
+    use_fast_math: bool = False,
+):
+    assert len(inputs) >= 1
+    assert len(inputs) == len(input_names)
+
+    stream = Stream(gpu_num=gpu_num)
+    gpu_placement = Placement(DeviceType.gpu, gpu_num)
+    cpu_placement = Placement(DeviceType.cpu, 0)
+
+    input_tensors_gpu: dict[str, PhysicalTensor] = {}
+
+    for name, arr in zip(input_names, inputs):
+        host_desc = PhysicalTensor.Descriptor(dtype, list(arr.shape))
+        host_tensor = PhysicalTensor(cpu_placement, host_desc)
+        host_tensor.numpy()[...] = arr
+
+        gpu_tensor = PhysicalTensor(gpu_placement, host_desc)
+        gpu_tensor.copy_from_async(host_tensor, stream)
+        input_tensors_gpu[name] = gpu_tensor
+
+    eq = ex.compile(
+        expr,
+        device_num=gpu_num,
+        use_fast_math=use_fast_math,
+    )
+
+    output_name = eq.output_names()[0]
+
+    if output_shape is None:
+        output_shape = list(eq.output_shape(input_tensors_gpu))
+    if output_dtype is None:
+        # For reductions this is the storage dtype; argmin/argmax callers should pass uint32 explicitly.
+        output_dtype = dtype
+
+    out_desc = PhysicalTensor.Descriptor(output_dtype, list(output_shape))
+    out_gpu = PhysicalTensor(gpu_placement, out_desc)
+
+    stamped = eq.stamp(input_tensors_gpu, {
+        output_name: out_gpu
+    }, stream)
+    stamped.run()
+
+    out_host = PhysicalTensor(cpu_placement, out_desc)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+
+    return out_host.numpy().copy(), out_gpu, stamped, eq, input_tensors_gpu
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_reduce_sum_full_reduction_preallocated_output(dtype: thor.DataType):
+    x = ex.input("x")
+    expr = ex.reduce_sum((x + 1.0), axis=None, squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.arange(1, 25, dtype=np.float32).reshape(2, 3, 4).astype(storage_dtype)
+
+    expected = np.sum(x_np.astype(compute_dtype) + 1.0, axis=(0, 1, 2), keepdims=True).astype(storage_dtype)
+
+    got, out_gpu, stamped, _, _ = _run_staged_expr_with_preallocated(
+        expr,
+        ["x"],
+        x_np,
+        dtype=dtype,
+        output_dtype=dtype,
+        output_shape=[1, 1, 1],
+    )
+
+    assert got.shape == (1, 1, 1)
+    assert list(out_gpu.dimensions) == [1, 1, 1]
+    assert list(stamped.output().dimensions) == [1, 1, 1]
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_reduce_sum_preallocated_output_wrong_shape_raises(dtype: thor.DataType):
+    x = ex.input("x")
+    expr = ex.reduce_sum((x + 1.0), axis=None, squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+
+    x_np = np.arange(1, 25, dtype=np.float32).reshape(2, 3, 4).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    gpu_placement = Placement(DeviceType.gpu, 0)
+    cpu_placement = Placement(DeviceType.cpu, 0)
+
+    host_desc = PhysicalTensor.Descriptor(dtype, list(x_np.shape))
+    x_host = PhysicalTensor(cpu_placement, host_desc)
+    x_host.numpy()[...] = x_np
+
+    x_gpu = PhysicalTensor(gpu_placement, host_desc)
+    x_gpu.copy_from_async(x_host, stream)
+
+    eq = ex.compile(expr, device_num=0, use_fast_math=False)
+    output_name = eq.output_names()[0]
+
+    wrong_out = PhysicalTensor(gpu_placement, PhysicalTensor.Descriptor(dtype, [2, 1, 1]))
+
+    with pytest.raises(RuntimeError, match="incompatible|requested output|Output tensor dimensions"):
+        eq.stamp({
+            "x": x_gpu
+        }, {
+            output_name: wrong_out
+        }, stream)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_reduce_min_staged_preallocated_output(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    expr = ex.reduce_min(((x * 2.0) - y), axis=1, squeeze=True)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [[3.0, 4.0, 5.0], [1.0, 2.0, 3.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    y_np = np.array(
+        [[1.0, 6.0, 2.0], [0.0, 1.0, 5.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = (x_np.astype(compute_dtype) * 2.0) - y_np.astype(compute_dtype)
+    expected = np.min(ref, axis=1, keepdims=True).squeeze(1).astype(storage_dtype)
+
+    got, _, _, _, _ = _run_staged_expr_with_preallocated(
+        expr,
+        ["x", "y"],
+        x_np,
+        y_np,
+        dtype=dtype,
+        output_dtype=dtype,
+        output_shape=[2],
+    )
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmax_all_axes_preallocated_output(dtype: thor.DataType):
+    x = ex.input("x")
+    expr = ex.argmax((x * 1.5) - 2.0, axis=None, squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [[1.0, 5.0, 3.0], [2.0, 4.0, 6.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = (x_np.astype(compute_dtype) * 1.5) - 2.0
+    expected = np.array([[np.argmax(ref.reshape(-1))]], dtype=np.uint32)
+
+    got, out_gpu, stamped, _, _ = _run_staged_expr_with_preallocated(
+        expr,
+        ["x"],
+        x_np,
+        dtype=dtype,
+        output_dtype=thor.DataType.uint32,
+        output_shape=[1, 1],
+    )
+
+    assert got.shape == expected.shape
+    assert list(out_gpu.dimensions) == [1, 1]
+    assert list(stamped.output().dimensions) == [1, 1]
+    np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_argmin_multi_axis_preallocated_output(dtype: thor.DataType):
+    x = ex.input("x")
+    y = ex.input("y")
+    expr = ex.argmin(((x + 1.0) * 0.5) - y, axis=[1, 2], squeeze=False)
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    compute_dtype = _numpy_compute_dtype(dtype)
+
+    x_np = np.array(
+        [
+            [[4.0, 8.0], [2.0, 7.0], [5.0, 9.0]],
+            [[6.0, 3.0], [1.0, 4.0], [8.0, 2.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    y_np = np.array(
+        [
+            [[0.0, 1.0], [3.0, 0.0], [1.0, 2.0]],
+            [[2.0, 0.0], [0.0, 1.0], [3.0, 0.0]],
+        ],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    ref = ((x_np.astype(compute_dtype) + 1.0) * 0.5) - y_np.astype(compute_dtype)
+    expected = np.argmin(ref.reshape(ref.shape[0], -1), axis=1).astype(np.uint32).reshape(ref.shape[0], 1, 1)
+
+    got, _, _, _, _ = _run_staged_expr_with_preallocated(
+        expr,
+        ["x", "y"],
+        x_np,
+        y_np,
+        dtype=dtype,
+        output_dtype=thor.DataType.uint32,
+        output_shape=[2, 1, 1],
+    )
+
+    assert got.shape == expected.shape
+    np.testing.assert_array_equal(got, expected)
+
+
+# ---------------------------------------------------------------------------
+# Add to: bindings/python/test/core/physical/test_expression_backward_phase1.py
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_min_preallocated_output_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+
+    loss = ex.reduce_min(x, axis=1, squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[3.0, 1.0, 4.0], [2.0, -5.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    expected = np.array(
+        [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    out_name = bwd_eq.output_names()[0]
+    out_gpu = _gpu_tensor(list(x_np.shape), dtype, gpu_num=0)
+
+    stamped = bwd_eq.stamp(inputs_gpu, {
+        out_name: out_gpu
+    }, stream)
+    stamped.run()
+
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_max_preallocated_output_numerical(dtype: thor.DataType):
+    x = ex.input("x")
+
+    loss = ex.reduce_max(x, axis=1, squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+    assert bwd_eq.output_names() == ["x_grad"]
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[3.0, 1.0, 4.0], [2.0, -5.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    expected = np.array(
+        [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    out_name = bwd_eq.output_names()[0]
+    out_gpu = _gpu_tensor(list(x_np.shape), dtype, gpu_num=0)
+
+    stamped = bwd_eq.stamp(inputs_gpu, {
+        out_name: out_gpu
+    }, stream)
+    stamped.run()
+
+    out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    got = out_host.numpy().copy()
+
+    assert got.shape == expected.shape
+    _assert_close(got, expected, dtype)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", FLOAT_DTYPES)
+def test_compile_backward_reduce_min_preallocated_output_wrong_shape_raises(dtype: thor.DataType):
+    x = ex.input("x")
+
+    loss = ex.reduce_min(x, axis=1, squeeze=False)
+
+    fwd_eq = ex.compile(loss, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"])
+
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.array(
+        [[3.0, 1.0, 4.0], [2.0, -5.0, 0.0]],
+        dtype=np.float32,
+    ).astype(storage_dtype)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+    }
+
+    out_name = bwd_eq.output_names()[0]
+    wrong_out = _gpu_tensor([2, 1], dtype, gpu_num=0)
+
+    with pytest.raises(RuntimeError, match="dimensions|shape|incompatible"):
+        bwd_eq.stamp(inputs_gpu, {
+            out_name: wrong_out
+        }, stream)
