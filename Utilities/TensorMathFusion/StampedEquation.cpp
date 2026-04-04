@@ -25,6 +25,12 @@ void StampedEquation::runOn(Stream& run_stream) const {
         throw std::runtime_error("StampedEquation::runOn called with no output tensors.");
     }
 
+    for (size_t i = 0; i < compiledEquation->input_kinds.size(); ++i) {
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
+            throw std::runtime_error("StampedEquation::runOn requires runtime scalar values. Call run(runtime_scalars).");
+        }
+    }
+
     EquationRunner::run(compiledEquation, inputs, outputs, run_stream);
 }
 
@@ -40,7 +46,7 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
     }
 
     if (runtime_scalars.empty()) {
-        EquationRunner::run(compiledEquation, inputs, outputs, run_stream);
+        runOn(run_stream);
         return;
     }
 

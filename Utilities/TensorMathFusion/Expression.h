@@ -20,6 +20,7 @@ struct PhysicalExecutionStage;
 enum class ExprOp : uint16_t {
     INPUT = 3,
     RUNTIME_SCALAR,
+    TENSOR_RUNTIME_SCALAR,
     SCALAR_FP,
     ADD,
     SUB,
@@ -114,6 +115,7 @@ struct NamedInput {
     enum class Kind : uint8_t {
         Tensor,
         RuntimeScalarFp32,
+        TensorRuntimeScalar,
     };
 
     std::string name;
@@ -190,6 +192,10 @@ class Expression {
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
     [[nodiscard]] static Expression runtimeScalar(
+        const std::string& name,
+        Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
+        Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());
+    [[nodiscard]] static Expression tensorRuntimeScalar(
         const std::string& name,
         Optional<TensorDescriptor::DataType> compute_dtype = Optional<TensorDescriptor::DataType>::empty(),
         Optional<TensorDescriptor::DataType> output_dtype = Optional<TensorDescriptor::DataType>::empty());

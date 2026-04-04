@@ -22,6 +22,7 @@ using StampedExecutionPlan = ThorImplementation::StampedExecutionPlan;
 using Outputs = ThorImplementation::Outputs;
 using NamedOutput = ThorImplementation::NamedOutput;
 using DynamicExpression = ThorImplementation::DynamicExpression;
+using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
 
 void bind_physical_expression(nb::module_& physical) {
     auto expr = nb::class_<Expression>(physical, "Expression");
@@ -63,6 +64,12 @@ thor.physical.Expression
     An Expression representing that input.
 )nbdoc");
 
+    nb::class_<TensorScalarBinding>(physical, "TensorScalarBinding")
+        .def(nb::init<>())
+        .def_rw("buffer", &TensorScalarBinding::buffer)
+        .def_rw("byte_offset", &TensorScalarBinding::byteOffset)
+        .def_rw("source_dtype", &TensorScalarBinding::sourceDType);
+
     expr.def_static(
         "runtime_scalar",
         [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
@@ -94,6 +101,29 @@ Returns
 -------
 thor.physical.Expression
     An Expression representing that runtime scalar input.
+)nbdoc");
+
+    expr.def_static(
+        "tensor_runtime_scalar",
+        [](const std::string& name, nb::object output_dtype_obj, nb::object compute_dtype_obj) {
+            Optional<DataType> output_dtype = Optional<DataType>::empty();
+            if (!output_dtype_obj.is_none()) {
+                output_dtype = nb::cast<DataType>(output_dtype_obj);
+            }
+            Optional<DataType> compute_dtype = Optional<DataType>::empty();
+            if (!compute_dtype_obj.is_none()) {
+                compute_dtype = nb::cast<DataType>(compute_dtype_obj);
+            }
+            return Expression::tensorRuntimeScalar(name, compute_dtype, output_dtype);
+        },
+        "name"_a,
+        "output_dtype"_a.none() = nb::none(),
+        "compute_dtype"_a.none() = nb::none(),
+        R"nbdoc(
+Create a GPU tensor-backed runtime scalar input expression.
+
+The scalar is loaded from a bound GPU buffer at stamp time using a
+TensorScalarBinding (buffer, byte_offset, source_dtype).
 )nbdoc");
 
     expr.def(
@@ -640,33 +670,17 @@ inputs: dict[str, PhysicalTensor]
     A dict mapping input names to tensors
 )nbdoc");
 
-    // FIXME: Cleanup:
-    //      cpu_runtime_scalar_inputs are sent as arguments to run and not bound here.
-    //      gpu_runtime_scalar_inputs are gpu memory, passed as TensorScalarBinding's, with offset and dtype, and bound here.
     fused_equation.def("stamp",
                        nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const std::unordered_map<std::string, float>&,
+                                         const std::unordered_map<std::string, TensorScalarBinding>&,
                                          const Stream&,
                                          const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
                        "inputs"_a,
-                       "scalar_inputs"_a,
+                       "tensor_scalar_inputs"_a,
                        "stream"_a,
                        "requestedOutputShape"_a = std::vector<uint64_t>{},
                        R"nbdoc(
-Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
-)nbdoc");
-
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const std::unordered_map<std::string, float>&,
-                                         const Stream&,
-                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "scalar_inputs"_a,
-                       "stream"_a,
-                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
+Create an executable instance of this fused equation with bound tensor inputs and GPU tensor-backed runtime scalars.
 )nbdoc");
 
     fused_equation.def("stamp",
@@ -681,36 +695,6 @@ Create an executable instance of this fused equation with bound thor.physical.Ph
 
 inputs: dict[str, PhysicalTensor]
     A dict mapping input names to tensors
-)nbdoc");
-
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const std::unordered_map<std::string, float>&,
-                                         const std::unordered_map<std::string, Tensor>&,
-                                         const Stream&,
-                                         const std::vector<uint64_t>&>(&FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "scalar_inputs"_a,
-                       "preallocated_outputs"_a,
-                       "stream"_a,
-                       "requestedOutputShape"_a = std::vector<uint64_t>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
-)nbdoc");
-
-    fused_equation.def("stamp",
-                       nb::overload_cast<const std::unordered_map<std::string, Tensor>&,
-                                         const std::unordered_map<std::string, float>&,
-                                         const std::unordered_map<std::string, Tensor>&,
-                                         const Stream&,
-                                         const std::unordered_map<std::string, std::vector<uint64_t>>&>(&FusedEquation::stamp, nb::const_),
-                       "inputs"_a,
-                       "scalar_inputs"_a,
-                       "preallocated_outputs"_a,
-                       "stream"_a,
-                       "requestedOutputShapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
-                       R"nbdoc(
-Create an executable instance of this fused equation with bound tensor and runtime scalar inputs.
 )nbdoc");
 
     fused_equation.def("stamp",

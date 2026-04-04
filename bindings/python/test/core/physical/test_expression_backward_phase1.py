@@ -2494,9 +2494,7 @@ def test_runtime_scalar_stamped_run_override_numerical(dtype: thor.DataType):
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    stamped = eq.stamp(inputs_gpu, {
-        "step": 0.0
-    }, stream)
+    stamped = eq.stamp(inputs_gpu, stream)
 
     stamped.run({
         "step": 0.25
@@ -2548,10 +2546,10 @@ def test_compile_backward_runtime_scalar_through_reduction_numerical(dtype: thor
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, {
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run({
         "step": step_value
-    }, stream)
-    stamped.run()
+    })
 
     out_gpu = stamped.output("x_grad")
     out_host = _cpu_tensor(list(out_gpu.dimensions), dtype)
@@ -2579,8 +2577,9 @@ def test_runtime_scalar_missing_input_rejected():
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    with pytest.raises(RuntimeError, match="Missing required fused equation runtime scalar input: step"):
-        eq.stamp(inputs_gpu, stream)
+    stamped = eq.stamp(inputs_gpu, stream)
+    with pytest.raises(RuntimeError, match="StampedEquation::runOn requires runtime scalar values"):
+        stamped.run()
 
 
 @pytest.mark.cuda
@@ -2599,11 +2598,12 @@ def test_runtime_scalar_unexpected_input_rejected():
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    with pytest.raises(RuntimeError, match="Unexpected runtime scalar input sent to fused equation: extra"):
-        eq.stamp(inputs_gpu, {
+    stamped = eq.stamp(inputs_gpu, stream)
+    with pytest.raises(RuntimeError, match="Unexpected runtime scalar override"):
+        stamped.run({
             "step": 2.0,
-            "extra": 7.0
-        }, stream)
+            "extra": 7.0,
+        })
 
 
 @pytest.mark.cuda
@@ -2854,10 +2854,10 @@ def test_compile_backward_runtime_scalar_broadcast_unbroadcast_numerical(dtype: 
         "y": _host_to_gpu(y_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, {
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run({
         "step": step_value
-    }, stream)
-    stamped.run()
+    })
 
     for name in bwd_eq.output_names():
         out_gpu = stamped.output(name)

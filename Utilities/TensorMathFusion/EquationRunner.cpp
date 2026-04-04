@@ -3,6 +3,31 @@
 
 namespace ThorImplementation {
 
+static size_t runtimeInputScalarSizeBytes(TensorDescriptor::DataType dtype) {
+    switch (dtype) {
+        case TensorDescriptor::DataType::FP32:
+            return 4;
+        case TensorDescriptor::DataType::FP16:
+            return 2;
+        case TensorDescriptor::DataType::BF16:
+            return 2;
+        case TensorDescriptor::DataType::FP8_E4M3:
+            return 1;
+        case TensorDescriptor::DataType::FP8_E5M2:
+            return 1;
+        case TensorDescriptor::DataType::UINT8:
+            return 1;
+        case TensorDescriptor::DataType::UINT16:
+            return 2;
+        case TensorDescriptor::DataType::UINT32:
+            return 4;
+        case TensorDescriptor::DataType::INT32:
+            return 4;
+        default:
+            throw std::runtime_error("Unsupported dtype in runtimeInputScalarSizeBytes.");
+    }
+}
+
 void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquation,
                          const std::vector<RuntimeInputValue>& inputs,
                          const std::vector<Tensor>& outputs,
@@ -64,12 +89,32 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
             if (t.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
                 throw std::runtime_error("Input tensor GPU does not match compiled fused equation device.");
             }
-        } else {
+        } else if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
             if (!std::holds_alternative<float>(inputs[i])) {
                 throw std::runtime_error("Fused equation expected a runtime scalar input at slot " + std::to_string(i) + ".");
             }
             if (compiledEquation->input_dtypes[i] != TensorDescriptor::DataType::FP32) {
                 throw std::runtime_error("Runtime scalar inputs currently require FP32 compiled input dtype.");
+            }
+        } else {
+            if (!std::holds_alternative<TensorScalarBinding>(inputs[i])) {
+                throw std::runtime_error("Fused equation expected a tensor-backed runtime scalar input at slot " + std::to_string(i) + ".");
+            }
+            const TensorScalarBinding& binding = std::get<TensorScalarBinding>(inputs[i]);
+            if (!binding.buffer.isInitialized()) {
+                throw std::runtime_error("Tensor-backed runtime scalar buffer is not initialized.");
+            }
+            if (binding.buffer.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU) {
+                throw std::runtime_error("Tensor-backed runtime scalar buffer is not located on a GPU.");
+            }
+            if (binding.buffer.getPlacement().getDeviceNum() != compiledEquation->deviceNum) {
+                throw std::runtime_error("Tensor-backed runtime scalar GPU does not match compiled fused equation device.");
+            }
+            if (binding.sourceDType != compiledEquation->input_dtypes[i]) {
+                throw std::runtime_error("Tensor-backed runtime scalar dtype mismatch.");
+            }
+            if (binding.byteOffset + runtimeInputScalarSizeBytes(binding.sourceDType) > binding.buffer.getArraySizeInBytes()) {
+                throw std::runtime_error("Tensor-backed runtime scalar binding exceeds backing buffer size.");
             }
         }
     }
@@ -82,9 +127,13 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     for (size_t i = 0; i < inputs.size(); ++i) {
         if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
             input_ptrs.push_back(std::get<Tensor>(inputs[i]).getMemPtr());
-        } else {
+        } else if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
             scalar_inputs_fp32.push_back(std::get<float>(inputs[i]));
             input_ptrs.push_back(&scalar_inputs_fp32.back());
+        } else {
+            const TensorScalarBinding& binding = std::get<TensorScalarBinding>(inputs[i]);
+            const uint8_t* base = static_cast<const uint8_t*>(binding.buffer.getMemPtr());
+            input_ptrs.push_back(base + binding.byteOffset);
         }
     }
 
@@ -99,10 +148,10 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
 
     size_t next_scalar_index = 0;
     for (size_t i = 0; i < input_ptrs.size(); ++i) {
-        if (compiledEquation->input_kinds[i] == NamedInput::Kind::Tensor) {
-            args.push_back((void*)&input_ptrs[i]);
-        } else {
+        if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
             args.push_back((void*)&scalar_inputs_fp32[next_scalar_index++]);
+        } else {
+            args.push_back((void*)&input_ptrs[i]);
         }
     }
     for (size_t i = 0; i < output_ptrs.size(); ++i) {

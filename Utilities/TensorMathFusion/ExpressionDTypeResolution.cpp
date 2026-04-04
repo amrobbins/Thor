@@ -145,7 +145,7 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
                                              const std::vector<ExprNode>& nodes,
                                              const std::vector<DataType>& resolved_output_dtypes,
                                              const std::vector<DataType>& root_input_dtypes) {
-    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
         if (node.input_slot >= root_input_dtypes.size()) {
             throw std::runtime_error("Input slot out of range in resolveNodeLogicalInputDType.");
         }
@@ -163,7 +163,8 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         if (parent_idx >= nodes.size()) {
             throw std::runtime_error("Parent node index out of range in resolveNodeLogicalInputDType.");
         }
-        if (nodes[parent_idx].op == ExprOp::SCALAR_FP || nodes[parent_idx].op == ExprOp::RUNTIME_SCALAR) {
+        if (nodes[parent_idx].op == ExprOp::SCALAR_FP || nodes[parent_idx].op == ExprOp::RUNTIME_SCALAR ||
+            nodes[parent_idx].op == ExprOp::TENSOR_RUNTIME_SCALAR) {
             return;
         }
         tensor_parent_dtypes.push_back(resolved_output_dtypes[parent_idx]);
@@ -183,7 +184,7 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                                        const std::vector<ExprNode>& nodes,
                                        const std::vector<DataType>& resolved_output_dtypes,
                                        const std::vector<DataType>& root_input_dtypes) {
-    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
+    if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
         if (node.input_slot >= root_input_dtypes.size()) {
             throw std::runtime_error("Input slot out of range in resolveNodeOutputDType.");
         }
@@ -209,7 +210,8 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         if (parent_idx >= nodes.size()) {
             throw std::runtime_error("Parent node index out of range in resolveNodeOutputDType.");
         }
-        if (nodes[parent_idx].op == ExprOp::SCALAR_FP || nodes[parent_idx].op == ExprOp::RUNTIME_SCALAR) {
+        if (nodes[parent_idx].op == ExprOp::SCALAR_FP || nodes[parent_idx].op == ExprOp::RUNTIME_SCALAR ||
+            nodes[parent_idx].op == ExprOp::TENSOR_RUNTIME_SCALAR) {
             return;
         }
         tensor_parent_dtypes.push_back(resolved_output_dtypes[parent_idx]);
@@ -237,7 +239,7 @@ void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         ExprNode& node = expr.nodes[node_idx];
 
-        if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR) {
+        if (node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) {
             if (node.input_slot >= root_input_dtypes.size()) {
                 throw std::runtime_error("Input slot out of range in resolveExpressionDTypesInPlace.");
             }
