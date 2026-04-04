@@ -49,6 +49,56 @@ static bool fitsInUInt32(uint64_t x) { return x <= std::numeric_limits<uint32_t>
 
 static std::string emittedIndexType(bool use_uint32_index_math) { return use_uint32_index_math ? "unsigned int" : "unsigned long long"; }
 
+static std::string scalarStorageType(DataType dtype);
+static std::string chunkScalarTypeForBytes(uint32_t bytes);
+
+static std::string emitFlatThreadIndexExpr(bool use_uint32_index_math) {
+    if (use_uint32_index_math) {
+        return "blockIdx.x * blockDim.x + threadIdx.x";
+    }
+    return "static_cast<unsigned long long>(blockIdx.x) * static_cast<unsigned long long>(blockDim.x) + "
+           "static_cast<unsigned long long>(threadIdx.x)";
+}
+
+static std::string float4LaneComponent(uint32_t lane) {
+    switch (lane) {
+        case 0:
+            return "x";
+        case 1:
+            return "y";
+        case 2:
+            return "z";
+        case 3:
+            return "w";
+        default:
+            throw runtime_error("float4 lane out of range.");
+    }
+}
+
+static std::string emitChunkLaneReadExpr(const std::string& chunk_expr,
+                                         const std::string& chunk_type,
+                                         DataType scalar_dtype,
+                                         const std::string& lane_expr) {
+    if (chunk_type == "float4" && scalar_dtype == DataType::FP32) {
+        const uint32_t lane = static_cast<uint32_t>(std::stoul(lane_expr));
+        return chunk_expr + "." + float4LaneComponent(lane);
+    }
+    return "reinterpret_cast<const " + scalarStorageType(scalar_dtype) + "*>(&" + chunk_expr + ")[" + lane_expr + "]";
+}
+
+static std::string emitChunkLaneWriteStmt(const std::string& chunk_expr,
+                                          const std::string& chunk_type,
+                                          DataType scalar_dtype,
+                                          uint32_t lane,
+                                          const std::string& value_expr,
+                                          const std::string& indent) {
+    if (chunk_type == "float4" && scalar_dtype == DataType::FP32) {
+        return indent + chunk_expr + "." + float4LaneComponent(lane) + " = " + value_expr + ";\n";
+    }
+    return indent + "reinterpret_cast<" + scalarStorageType(scalar_dtype) + "*>(&" + chunk_expr + ")[" + std::to_string(lane) +
+           "] = " + value_expr + ";\n";
+}
+
 static std::string emitUnsignedLiteral(uint64_t value, bool use_uint32_index_math) {
     if (use_uint32_index_math && fitsInUInt32(value)) {
         return std::to_string(static_cast<uint32_t>(value)) + "U";
@@ -961,7 +1011,8 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                                    const std::string& idx_expr,
                                    const std::string& suffix,
                                    const std::string& indent,
-                                   const std::string& flat_chunk_lane_expr = "") {
+                                   const std::string& flat_chunk_lane_expr = "",
+                                   uint32_t flat_elements_per_thread = 0) {
     const ExprNode& n = expr.nodes[node_idx];
     const DataType emitted_dtype = emittedScalarNodeValueDType(n);
     const std::string output_type = scalarStorageType(emitted_dtype);
@@ -978,11 +1029,13 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     switch (n.op) {
         case ExprOp::INPUT: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
-            const std::string input_storage_type = scalarStorageType(input_tensor_dtype);
-            const std::string input_expr = flat_chunk_lane_expr.empty()
-                                               ? ("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]")
-                                               : ("reinterpret_cast<const " + input_storage_type + "*>(&in" + std::to_string(n.input_slot) +
-                                                  "_chunk)[" + flat_chunk_lane_expr + "]");
+            const std::string input_expr =
+                flat_chunk_lane_expr.empty()
+                    ? ("in" + std::to_string(n.input_slot) + "[" + idx_expr + "]")
+                    : emitChunkLaneReadExpr("in" + std::to_string(n.input_slot) + "_chunk",
+                                            chunkScalarTypeForBytes(dataTypeStorageBytes(input_tensor_dtype) * flat_elements_per_thread),
+                                            input_tensor_dtype,
+                                            flat_chunk_lane_expr);
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
                << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
             return;
@@ -1305,8 +1358,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     }
 
     ss << index_type << " numel) {\n";
-    ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
-       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
     ss << "  const " << index_type << " packed_numel = (numel + " << emitUnsignedLiteral(1, use_uint32_index_math) << ") >> 1;\n";
     ss << "  const " << index_type << " packed_base = idx * "
        << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
@@ -1521,8 +1573,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {\n";
 
-    ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
-       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
     ss << "  const " << index_type << " base = idx * "
        << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
     ss << "  if (base >= numel) return;\n\n";
@@ -1554,15 +1605,19 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
             if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
-            emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, "  ", std::to_string(lane));
+            emitScalarNodeSuffixed(ss, stage.expr, node_idx, lane_idx_expr, suffix, "  ", std::to_string(lane), elements_per_thread);
         }
 
         ss << "\n";
         for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
             const CompiledStageOutput& output = stage.outputs[out_idx];
             const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-            ss << "  reinterpret_cast<" << scalarStorageType(output_dtype) << "*>(&out" << out_idx << "_chunk)[" << lane
-               << "] = " << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix) << ";\n";
+            ss << emitChunkLaneWriteStmt("out" + std::to_string(out_idx) + "_chunk",
+                                         output_chunk_types[out_idx],
+                                         output_dtype,
+                                         lane,
+                                         emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix),
+                                         "  ");
         }
         ss << "\n";
     }
@@ -1639,8 +1694,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
     }
 
     ss << ") {\n";
-    ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
-       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
@@ -1899,8 +1953,7 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {";
 
-    ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
-       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";";
     ss << "  if (idx >= numel) return;";
 
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
@@ -1971,8 +2024,7 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     const std::string index_type = emittedIndexType(use_uint32_index_math);
 
     ss << ") {\n";
-    ss << "  " << index_type << " idx = static_cast<" << index_type << ">(blockIdx.x) * static_cast<" << index_type
-       << ">(blockDim.x) + static_cast<" << index_type << ">(threadIdx.x);\n\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
