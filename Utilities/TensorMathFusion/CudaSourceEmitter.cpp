@@ -548,7 +548,7 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
 
     switch (op) {
         case ExprOp::NEG:
-            if (compute_dtype == DataType::FP32) {
+            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
                 return "(-" + x + ")";
             }
             return castScalarExpr("(-" + x_f + ")", DataType::FP32, compute_dtype);
@@ -585,25 +585,25 @@ static std::string emitBinaryComputeExpr(ExprOp op, const std::string& a, const 
 
     switch (op) {
         case ExprOp::ADD:
-            if (compute_dtype == DataType::FP32) {
+            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
                 return "(" + a + " + " + b + ")";
             }
             return castScalarExpr("(" + a_f + " + " + b_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::SUB:
-            if (compute_dtype == DataType::FP32) {
+            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
                 return "(" + a + " - " + b + ")";
             }
             return castScalarExpr("(" + a_f + " - " + b_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::MUL:
-            if (compute_dtype == DataType::FP32) {
+            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
                 return "(" + a + " * " + b + ")";
             }
             return castScalarExpr("(" + a_f + " * " + b_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::DIV:
-            if (compute_dtype == DataType::FP32) {
+            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
                 return "(" + a + " / " + b + ")";
             }
             return castScalarExpr("(" + a_f + " / " + b_f + ")", DataType::FP32, compute_dtype);
