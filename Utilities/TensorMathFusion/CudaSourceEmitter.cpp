@@ -78,10 +78,14 @@ static std::string float4LaneComponent(uint32_t lane) {
 static std::string emitChunkLaneReadExpr(const std::string& chunk_expr,
                                          const std::string& chunk_type,
                                          DataType scalar_dtype,
-                                         const std::string& lane_expr) {
+                                         const std::string& lane_expr,
+                                         const std::string& chunk_data_expr = "") {
     if (chunk_type == "float4" && scalar_dtype == DataType::FP32) {
         const uint32_t lane = static_cast<uint32_t>(std::stoul(lane_expr));
         return chunk_expr + "." + float4LaneComponent(lane);
+    }
+    if (!chunk_data_expr.empty()) {
+        return chunk_data_expr + "[" + lane_expr + "]";
     }
     return "reinterpret_cast<const " + scalarStorageType(scalar_dtype) + "*>(&" + chunk_expr + ")[" + lane_expr + "]";
 }
@@ -91,9 +95,13 @@ static std::string emitChunkLaneWriteStmt(const std::string& chunk_expr,
                                           DataType scalar_dtype,
                                           uint32_t lane,
                                           const std::string& value_expr,
-                                          const std::string& indent) {
+                                          const std::string& indent,
+                                          const std::string& chunk_data_expr = "") {
     if (chunk_type == "float4" && scalar_dtype == DataType::FP32) {
         return indent + chunk_expr + "." + float4LaneComponent(lane) + " = " + value_expr + ";\n";
+    }
+    if (!chunk_data_expr.empty()) {
+        return indent + chunk_data_expr + "[" + std::to_string(lane) + "] = " + value_expr + ";\n";
     }
     return indent + "reinterpret_cast<" + scalarStorageType(scalar_dtype) + "*>(&" + chunk_expr + ")[" + std::to_string(lane) +
            "] = " + value_expr + ";\n";
@@ -1035,7 +1043,8 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
                     : emitChunkLaneReadExpr("in" + std::to_string(n.input_slot) + "_chunk",
                                             chunkScalarTypeForBytes(dataTypeStorageBytes(input_tensor_dtype) * flat_elements_per_thread),
                                             input_tensor_dtype,
-                                            flat_chunk_lane_expr);
+                                            flat_chunk_lane_expr,
+                                            "in" + std::to_string(n.input_slot) + "_chunk_data");
             ss << indent << "const " << output_type << " " << refWithSuffix(node_idx, suffix) << " = "
                << castScalarExpr(input_expr, input_tensor_dtype, emitted_dtype) << ";\n";
             return;
@@ -1371,6 +1380,8 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         }
         emitted_any_tensor_chunk = true;
         ss << "  const float4 in" << i << "_chunk = in" << i << "[idx];\n";
+        ss << "  const " << storage_dtype_vector << "* in" << i << "_chunk_data = reinterpret_cast<const " << storage_dtype_vector
+           << "*>(&in" << i << "_chunk);\n";
     }
     if (emitted_any_tensor_chunk) {
         ss << "\n";
@@ -1378,6 +1389,8 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
 
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
         ss << "  float4 out" << out_idx << "_chunk;\n";
+        ss << "  " << storage_dtype_vector << "* out" << out_idx << "_chunk_data = reinterpret_cast<" << storage_dtype_vector << "*>(&out"
+           << out_idx << "_chunk);\n";
     }
     if (!stage.outputs.empty()) {
         ss << "\n";
@@ -1390,8 +1403,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
             const auto& n = stage.expr.nodes[node_idx];
             switch (n.op) {
                 case ExprOp::INPUT: {
-                    const std::string variable = "reinterpret_cast<const " + storage_dtype_vector + "*>(&in" + to_string(n.input_slot) +
-                                                 "_chunk)[" + std::to_string(pack) + "]";
+                    const std::string variable = "in" + to_string(n.input_slot) + "_chunk_data[" + std::to_string(pack) + "]";
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << vector_compute_conversion(storage_dtype_vector, variable) << ";\n";
                     break;
@@ -1493,7 +1505,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
         ss << "\n";
         for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
             const CompiledStageOutput& output = stage.outputs[out_idx];
-            ss << "  reinterpret_cast<" << storage_dtype_vector << "*>(&out" << out_idx << "_chunk)[" << pack
+            ss << "  out" << out_idx << "_chunk_data[" << pack
                << "] = " << vector_storage_conversion(storage_dtype_vector, refWithSuffix(output.local_node_idx, suffix)) << ";\n";
         }
         ss << "\n";
@@ -1585,6 +1597,10 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
         }
         emitted_any_tensor_chunk = true;
         ss << "  const " << input_chunk_types[i] << " in" << i << "_chunk = in" << i << "[idx];\n";
+        if (!(input_chunk_types[i] == "float4" && input_dtypes[i] == DataType::FP32)) {
+            ss << "  const " << scalarStorageType(input_dtypes[i]) << "* in" << i << "_chunk_data = reinterpret_cast<const "
+               << scalarStorageType(input_dtypes[i]) << "*>(&in" << i << "_chunk);\n";
+        }
     }
     if (emitted_any_tensor_chunk) {
         ss << "\n";
@@ -1592,6 +1608,10 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
 
     for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
         ss << "  " << output_chunk_types[out_idx] << " out" << out_idx << "_chunk;\n";
+        if (!(output_chunk_types[out_idx] == "float4" && output_dtypes[out_idx] == DataType::FP32)) {
+            ss << "  " << scalarStorageType(output_dtypes[out_idx]) << "* out" << out_idx << "_chunk_data = reinterpret_cast<"
+               << scalarStorageType(output_dtypes[out_idx]) << "*>(&out" << out_idx << "_chunk);\n";
+        }
     }
     if (!stage.outputs.empty()) {
         ss << "\n";
@@ -1617,7 +1637,8 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
                                          output_dtype,
                                          lane,
                                          emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, suffix),
-                                         "  ");
+                                         "  ",
+                                         "out" + std::to_string(out_idx) + "_chunk_data");
         }
         ss << "\n";
     }
