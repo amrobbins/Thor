@@ -7,22 +7,21 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <limits>
 #include <stdexcept>
 #include <vector>
 
 namespace ThorImplementation {
 namespace {
 
-constexpr int32_t MAX_REDUCE_BACKWARD_RANK = 8;
+constexpr uint32_t MAX_REDUCE_BACKWARD_RANK = 8;
 
 struct ReduceMinMaxBackwardMeta {
-    int32_t input_rank = 0;
-    int32_t reduction_rank = 0;
-    int64_t input_dims[MAX_REDUCE_BACKWARD_RANK]{};
-    int64_t input_strides[MAX_REDUCE_BACKWARD_RANK]{};
-    int32_t reduced_axes[MAX_REDUCE_BACKWARD_RANK]{};
-    int64_t visible_strides_by_full_axis[MAX_REDUCE_BACKWARD_RANK]{};
+    uint32_t input_rank = 0;
+    uint32_t reduction_rank = 0;
+    uint64_t input_dims[MAX_REDUCE_BACKWARD_RANK]{};
+    uint64_t input_strides[MAX_REDUCE_BACKWARD_RANK]{};
+    uint32_t reduced_axes[MAX_REDUCE_BACKWARD_RANK]{};
+    uint64_t visible_strides_by_full_axis[MAX_REDUCE_BACKWARD_RANK]{};
 };
 
 static std::vector<uint64_t> normalizeAxes(std::vector<uint64_t> axes) {
@@ -90,7 +89,7 @@ __device__ inline __nv_fp8_e5m2 reduceBwFromFloat<__nv_fp8_e5m2>(float v) {
 static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t>& input_dims,
                                                       const std::vector<uint64_t>& reduction_axes,
                                                       const std::vector<uint64_t>& squeeze_axes,
-                                                      std::array<int32_t, MAX_REDUCE_BACKWARD_RANK>& full_to_visible_axis) {
+                                                      std::array<uint32_t, MAX_REDUCE_BACKWARD_RANK>& full_to_visible_axis) {
     std::vector<uint64_t> unsqueezed = input_dims;
     for (uint64_t axis : reduction_axes) {
         if (axis >= unsqueezed.size()) {
@@ -99,11 +98,11 @@ static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t
         unsqueezed[axis] = 1;
     }
 
-    full_to_visible_axis.fill(-1);
+    full_to_visible_axis.fill(UINT32_MAX);
 
     if (squeeze_axes.empty()) {
         std::vector<uint64_t> visible = unsqueezed;
-        for (int32_t axis = 0, vis = 0; axis < static_cast<int32_t>(unsqueezed.size()); ++axis, ++vis) {
+        for (uint32_t axis = 0, vis = 0; axis < unsqueezed.size(); ++axis, ++vis) {
             full_to_visible_axis[axis] = vis;
         }
         return visible;
@@ -115,18 +114,17 @@ static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t
     std::vector<uint64_t> visible;
     visible.reserve(unsqueezed.size());
 
-    int32_t vis_axis = 0;
+    uint32_t vis_axis = 0;
     size_t squeeze_i = 0;
-    for (int32_t axis = 0; axis < static_cast<int32_t>(unsqueezed.size()); ++axis) {
-        const bool should_squeeze = squeeze_all_singletons ? (unsqueezed[axis] == 1)
-                                                           : (squeeze_i < normalized_squeeze.size() &&
-                                                              normalized_squeeze[squeeze_i] == static_cast<uint32_t>(axis));
+    for (uint32_t axis = 0; axis < unsqueezed.size(); ++axis) {
+        const bool should_squeeze = squeeze_all_singletons
+                                        ? (unsqueezed[axis] == 1)
+                                        : (squeeze_i < normalized_squeeze.size() && normalized_squeeze[squeeze_i] == axis);
         if (should_squeeze) {
             if (unsqueezed[axis] != 1) {
                 throw std::runtime_error("Squeezed axis must be singleton in computeVisibleOutputDims.");
             }
-            if (!squeeze_all_singletons && squeeze_i < normalized_squeeze.size() &&
-                normalized_squeeze[squeeze_i] == static_cast<uint32_t>(axis)) {
+            if (!squeeze_all_singletons && squeeze_i < normalized_squeeze.size() && normalized_squeeze[squeeze_i] == axis) {
                 ++squeeze_i;
             }
             continue;
@@ -145,27 +143,27 @@ static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t
 
 template <typename GradT, typename OutT>
 __global__ void reduceMinMaxBackwardScatterKernel(
-    const GradT* grad_output, const uint32_t* arg_indices, OutT* grad_input, ReduceMinMaxBackwardMeta meta, int64_t output_numel) {
-    const int64_t idx = static_cast<int64_t>(blockIdx.x) * static_cast<int64_t>(blockDim.x) + static_cast<int64_t>(threadIdx.x);
+    const GradT* grad_output, const uint32_t* arg_indices, OutT* grad_input, ReduceMinMaxBackwardMeta meta, uint64_t output_numel) {
+    const uint64_t idx = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx >= output_numel) {
         return;
     }
 
-    int64_t tmp = idx;
-    int64_t base_input_offset = 0;
-    int64_t grad_output_offset = 0;
+    uint64_t tmp = idx;
+    uint64_t base_input_offset = 0;
+    uint64_t grad_output_offset = 0;
 
     for (int32_t axis = static_cast<int32_t>(meta.input_rank) - 1; axis >= 0; --axis) {
         bool is_reduced = false;
-        for (int32_t i = 0; i < meta.reduction_rank; ++i) {
-            if (meta.reduced_axes[i] == axis) {
+        for (uint32_t i = 0; i < meta.reduction_rank; ++i) {
+            if (meta.reduced_axes[i] == static_cast<uint32_t>(axis)) {
                 is_reduced = true;
                 break;
             }
         }
 
-        const int64_t output_dim = is_reduced ? 1LL : meta.input_dims[axis];
-        const int64_t coord = tmp % output_dim;
+        const uint64_t output_dim = is_reduced ? 1ULL : meta.input_dims[axis];
+        const uint64_t coord = tmp % output_dim;
         tmp /= output_dim;
 
         base_input_offset += coord * meta.input_strides[axis];
@@ -173,11 +171,11 @@ __global__ void reduceMinMaxBackwardScatterKernel(
     }
 
     uint32_t local_index = arg_indices[idx];
-    int64_t winner_offset = base_input_offset;
+    uint64_t winner_offset = base_input_offset;
     for (int32_t red_i = static_cast<int32_t>(meta.reduction_rank) - 1; red_i >= 0; --red_i) {
-        const int32_t axis = meta.reduced_axes[red_i];
-        const int64_t dim = meta.input_dims[axis];
-        const int64_t coord = local_index % static_cast<uint32_t>(dim);
+        const uint32_t axis = meta.reduced_axes[red_i];
+        const uint64_t dim = meta.input_dims[axis];
+        const uint64_t coord = local_index % static_cast<uint32_t>(dim);
         local_index /= static_cast<uint32_t>(dim);
         winner_offset += coord * meta.input_strides[axis];
     }
@@ -191,14 +189,14 @@ void launchTypedReduceMinMaxBackwardScatter(const void* grad_output,
                                             const uint32_t* arg_indices,
                                             void* grad_input,
                                             const ReduceMinMaxBackwardMeta& meta,
-                                            int64_t output_numel,
+                                            uint64_t output_numel,
                                             cudaStream_t stream) {
     if (output_numel == 0) {
         return;
     }
 
-    constexpr int32_t threads_per_block = 256;
-    const int32_t blocks = static_cast<int32_t>((output_numel + threads_per_block - 1) / threads_per_block);
+    constexpr uint32_t threads_per_block = 256;
+    const uint32_t blocks = static_cast<uint32_t>((output_numel + threads_per_block - 1) / threads_per_block);
     reduceMinMaxBackwardScatterKernel<GradT, OutT><<<blocks, threads_per_block, 0, stream>>>(
         static_cast<const GradT*>(grad_output), arg_indices, static_cast<OutT*>(grad_input), meta, output_numel);
 }
@@ -208,7 +206,7 @@ void dispatchReduceMinMaxBackwardScatterOutput(const void* grad_output,
                                                const uint32_t* arg_indices,
                                                void* grad_input,
                                                const ReduceMinMaxBackwardMeta& meta,
-                                               int64_t output_numel,
+                                               uint64_t output_numel,
                                                TensorDescriptor::DataType grad_input_dtype,
                                                cudaStream_t stream) {
     switch (grad_input_dtype) {
@@ -249,14 +247,11 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
 
     const std::vector<uint64_t> normalized_reduction_axes = normalizeAxes(reduction_axes);
     ReduceMinMaxBackwardMeta meta{};
-    meta.input_rank = static_cast<int32_t>(input_dims.size());
-    meta.reduction_rank = static_cast<int32_t>(normalized_reduction_axes.size());
+    meta.input_rank = static_cast<uint32_t>(input_dims.size());
+    meta.reduction_rank = static_cast<uint32_t>(normalized_reduction_axes.size());
 
-    for (int32_t axis = 0; axis < meta.input_rank; ++axis) {
-        if (input_dims[axis] > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-            throw std::runtime_error("launchReduceMinMaxBackwardScatter requires int64_t-compatible input dims.");
-        }
-        meta.input_dims[axis] = static_cast<int64_t>(input_dims[axis]);
+    for (uint32_t axis = 0; axis < meta.input_rank; ++axis) {
+        meta.input_dims[axis] = input_dims[axis];
     }
 
     if (meta.input_rank > 0) {
@@ -266,40 +261,40 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
         }
     }
 
-    for (int32_t i = 0; i < meta.reduction_rank; ++i) {
-        if (normalized_reduction_axes[static_cast<size_t>(i)] >= static_cast<uint64_t>(meta.input_rank)) {
+    for (uint32_t i = 0; i < meta.reduction_rank; ++i) {
+        if (normalized_reduction_axes[i] >= meta.input_rank) {
             throw std::runtime_error("Reduction axis out of range in launchReduceMinMaxBackwardScatter.");
         }
-        meta.reduced_axes[i] = static_cast<int32_t>(normalized_reduction_axes[static_cast<size_t>(i)]);
+        meta.reduced_axes[i] = static_cast<uint32_t>(normalized_reduction_axes[i]);
     }
 
-    std::array<int32_t, MAX_REDUCE_BACKWARD_RANK> full_to_visible_axis{};
+    std::array<uint32_t, MAX_REDUCE_BACKWARD_RANK> full_to_visible_axis{};
     const std::vector<uint64_t> visible_dims =
         computeVisibleOutputDims(input_dims, normalized_reduction_axes, squeeze_axes, full_to_visible_axis);
 
-    std::vector<int64_t> visible_strides(visible_dims.size(), 1LL);
+    std::vector<uint64_t> visible_strides(visible_dims.size(), 1ULL);
     if (!visible_dims.empty()) {
-        visible_strides.back() = 1LL;
+        visible_strides.back() = 1ULL;
         for (int32_t axis = static_cast<int32_t>(visible_dims.size()) - 2; axis >= 0; --axis) {
             visible_strides[axis] = visible_strides[axis + 1] * visible_dims[static_cast<size_t>(axis) + 1];
         }
     }
 
-    for (int32_t axis = 0; axis < meta.input_rank; ++axis) {
-        const int32_t vis_axis = full_to_visible_axis[axis];
-        meta.visible_strides_by_full_axis[axis] = (vis_axis < 0) ? 0LL : visible_strides[vis_axis];
+    for (uint32_t axis = 0; axis < meta.input_rank; ++axis) {
+        const uint32_t vis_axis = full_to_visible_axis[axis];
+        meta.visible_strides_by_full_axis[axis] = (vis_axis == UINT32_MAX) ? 0ULL : visible_strides[vis_axis];
     }
 
-    int64_t output_numel = 1;
-    for (int32_t axis = 0; axis < meta.input_rank; ++axis) {
+    uint64_t output_numel = 1;
+    for (uint32_t axis = 0; axis < meta.input_rank; ++axis) {
         bool is_reduced = false;
-        for (int32_t i = 0; i < meta.reduction_rank; ++i) {
+        for (uint32_t i = 0; i < meta.reduction_rank; ++i) {
             if (meta.reduced_axes[i] == axis) {
                 is_reduced = true;
                 break;
             }
         }
-        output_numel *= is_reduced ? 1LL : meta.input_dims[axis];
+        output_numel *= is_reduced ? 1ULL : meta.input_dims[axis];
     }
 
     switch (grad_output_dtype) {
