@@ -158,15 +158,20 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         args.push_back((void*)&output_ptrs[i]);
     }
 
-    uint32_t max_numel_u32 = 0;
-    if (compiledEquation->uses_uint32_numel_arg) {
-        if (max_numel > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-            throw std::runtime_error("Flat kernel compiled for uint32_t numel was launched with numel exceeding uint32_t.");
+    int32_t max_numel_i32 = 0;
+    int64_t max_numel_i64 = 0;
+    if (compiledEquation->uses_int32_numel_arg) {
+        if (max_numel > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+            throw std::runtime_error("Flat kernel compiled for int32_t numel was launched with numel exceeding int32_t.");
         }
-        max_numel_u32 = static_cast<uint32_t>(max_numel);
-        args.push_back((void*)&max_numel_u32);
+        max_numel_i32 = static_cast<int32_t>(max_numel);
+        args.push_back((void*)&max_numel_i32);
     } else {
-        args.push_back((void*)&max_numel);
+        if (max_numel > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            throw std::runtime_error("Flat kernel compiled for int64_t numel was launched with numel exceeding int64_t.");
+        }
+        max_numel_i64 = static_cast<int64_t>(max_numel);
+        args.push_back((void*)&max_numel_i64);
     }
 
     const uint64_t launch_numel = (max_numel + static_cast<uint64_t>(compiledEquation->elements_per_thread) - 1ULL) /

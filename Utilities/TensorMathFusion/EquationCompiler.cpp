@@ -712,20 +712,20 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
 
 shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage,
                                                                  const EquationSignature& sig,
-                                                                 bool use_uint32_index_math) {
+                                                                 bool use_int32_index_math) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         throw runtime_error("compileFusedStage called on non-fused stage.");
     }
 
     ensureCudaContextCurrent(sig.device_num);
 
-    EquationCacheKey key(canonicalize(stage), sig, use_uint32_index_math);
+    EquationCacheKey key(canonicalize(stage), sig, use_int32_index_math);
     shared_ptr<CompiledEquation> hit = cacheLookup(key);
     if (hit)
         return hit;
 
     string kernel_name = "fused_kernel";
-    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name, use_uint32_index_math);
+    const std::string cuda_src = CudaSourceEmitter::emitFlat(stage, kernel_name, use_int32_index_math);
 
     vector<string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
@@ -742,7 +742,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     vector<char> cubin = linkToCubin(ltoir, sig);
     auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
     compiled->elements_per_thread = CudaSourceEmitter::flatElementsPerThread(stage);
-    compiled->uses_uint32_numel_arg = use_uint32_index_math;
+    compiled->uses_int32_numel_arg = use_int32_index_math;
 
     cacheInsert(key, compiled);
     return compiled;
@@ -1723,7 +1723,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     const Optional<DataType> vectorized_dtype = CudaSourceEmitter::getVectorizedStageStorageDType(stage);
     compiled->elements_per_thread = vectorized_dtype.isPresent() ? 2u : 1u;
 
-    compiled->uses_uint32_numel_arg = false;
+    compiled->uses_int32_numel_arg = false;
 
     if (groups.size() > 1) {
         compiled->launch_kind = CompiledEquation::LaunchKind::BroadcastGrouped;

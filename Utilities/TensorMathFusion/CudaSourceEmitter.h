@@ -16,8 +16,8 @@ namespace ThorImplementation {
 
 class CudaSourceEmitter {
    public:
-    static std::string emitFlat(const PhysicalExpression& expr, const std::string& kernel_name, bool use_uint32_index_math = true);
-    static std::string emitFlat(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_uint32_index_math = true);
+    static std::string emitFlat(const PhysicalExpression& expr, const std::string& kernel_name, bool use_int32_index_math = true);
+    static std::string emitFlat(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_int32_index_math = true);
 
     static std::string emitSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                 const std::vector<SpecializedBroadcastGroup>& groups,

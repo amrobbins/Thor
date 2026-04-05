@@ -47,7 +47,7 @@ class EquationCompiler {
 
     static std::shared_ptr<CompiledEquation> compileFusedStage(const PhysicalExecutionStage& stage,
                                                                const EquationSignature& sig,
-                                                               bool use_uint32_index_math = true);
+                                                               bool use_int32_index_math = true);
     static std::vector<PhysicalExecutionStage> splitAtReductionBoundaries(const PhysicalOutputs& outputs);
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
