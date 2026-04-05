@@ -29,15 +29,15 @@ struct EquationSignature {
 struct EquationCacheKey {
     EquationCacheKey() = default;
 
-    EquationCacheKey(const std::string& canonical_expr, const EquationSignature& sig, bool use_uint32_flat_index_math = false) {
+    EquationCacheKey(const std::string& canonical_expr, const EquationSignature& sig, bool use_int32_flat_index_math = false) {
         this->canonical_expr = canonical_expr;
         this->sig = sig;
         this->sig.device_num = 0;  // Device num is not part of the kernel signature in terms of compiling, instead uses sm_major/minor
-        this->use_uint32_flat_index_math = use_uint32_flat_index_math;
+        this->use_int32_flat_index_math = use_int32_flat_index_math;
     }
     std::string canonical_expr;
     EquationSignature sig;
-    bool use_uint32_flat_index_math = false;
+    bool use_int32_flat_index_math = false;
 
     bool operator==(const EquationCacheKey& other) const = default;
 };
@@ -57,7 +57,7 @@ struct CompiledEquation {
     LaunchKind launch_kind = LaunchKind::Flat;
     uint32_t num_broadcast_groups = 0;
     uint32_t elements_per_thread = 1;
-    bool uses_uint32_numel_arg = false;
+    bool uses_int32_numel_arg = false;
 
     int deviceNum = 0;
     std::vector<std::string> input_names;
@@ -199,7 +199,7 @@ struct hash<ThorImplementation::EquationCacheKey> {
     std::size_t operator()(const ThorImplementation::EquationCacheKey& k) const noexcept {
         std::size_t h = std::hash<std::string>{}(k.canonical_expr);
         hashCombine(h, std::hash<ThorImplementation::EquationSignature>{}(k.sig));
-        hashCombine(h, std::hash<bool>{}(k.use_uint32_flat_index_math));
+        hashCombine(h, std::hash<bool>{}(k.use_int32_flat_index_math));
         return h;
     }
 };
