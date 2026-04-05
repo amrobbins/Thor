@@ -410,7 +410,7 @@ static std::shared_ptr<CompiledEquation> selectFlatCompiledEquation(const Compil
         return stage.flat;
     }
 
-    return EquationCompiler::compileFusedStage(toPhysicalFusedStage(stage), sig, /*use_int32_index_math=*/false);
+    return EquationCompiler::compileFusedStage(toPhysicalFusedStage(stage), sig, /*use_uint32_index_math=*/false);
 }
 
 static std::vector<uint64_t> computePackedOutputStrides(const std::vector<uint64_t>& outputDimensions) {

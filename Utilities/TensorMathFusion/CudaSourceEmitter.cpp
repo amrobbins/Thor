@@ -45,21 +45,19 @@ static uint32_t log2Exact(uint64_t x) {
     return s;
 }
 
-static bool fitsInInt32(uint64_t x) { return x <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()); }
+static bool fitsInUInt32(uint64_t x) { return x <= std::numeric_limits<uint32_t>::max(); }
 
-static bool fitsInInt64(uint64_t x) { return x <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()); }
-
-static std::string emittedIndexType(bool use_int32_index_math) { return use_int32_index_math ? "int" : "long long"; }
+static std::string emittedIndexType(bool use_uint32_index_math) { return use_uint32_index_math ? "unsigned int" : "unsigned long long"; }
 
 static std::string scalarStorageType(DataType dtype);
 static std::string chunkScalarTypeForBytes(uint32_t bytes);
 
-static std::string emitFlatThreadIndexExpr(bool use_int32_index_math) {
-    if (use_int32_index_math) {
-        return "static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x)";
+static std::string emitFlatThreadIndexExpr(bool use_uint32_index_math) {
+    if (use_uint32_index_math) {
+        return "blockIdx.x * blockDim.x + threadIdx.x";
     }
-    return "static_cast<long long>(blockIdx.x) * static_cast<long long>(blockDim.x) + "
-           "static_cast<long long>(threadIdx.x)";
+    return "static_cast<unsigned long long>(blockIdx.x) * static_cast<unsigned long long>(blockDim.x) + "
+           "static_cast<unsigned long long>(threadIdx.x)";
 }
 
 static std::string float4LaneComponent(uint32_t lane) {
@@ -109,30 +107,24 @@ static std::string emitChunkLaneWriteStmt(const std::string& chunk_expr,
            "] = " + value_expr + ";\n";
 }
 
-static std::string emitIndexLiteral(uint64_t value, bool use_int32_index_math) {
-    if (use_int32_index_math) {
-        if (!fitsInInt32(value)) {
-            throw std::runtime_error("32-bit signed index literal out of range.");
-        }
-        return std::to_string(static_cast<int32_t>(value));
+static std::string emitUnsignedLiteral(uint64_t value, bool use_uint32_index_math) {
+    if (use_uint32_index_math && fitsInUInt32(value)) {
+        return std::to_string(static_cast<uint32_t>(value)) + "U";
     }
-    if (!fitsInInt64(value)) {
-        throw std::runtime_error("64-bit signed index literal out of range.");
-    }
-    return std::to_string(static_cast<int64_t>(value)) + "LL";
+    return std::to_string(value) + "ULL";
 }
 
-static bool groupSupportsInt32IndexMath(const SpecializedBroadcastGroup& group) {
-    if (!fitsInInt32(group.numel) || !fitsInInt32((group.numel + 1ULL) >> 1)) {
+static bool groupSupportsUInt32IndexMath(const SpecializedBroadcastGroup& group) {
+    if (!fitsInUInt32(group.numel) || !fitsInUInt32((group.numel + 1ULL) >> 1)) {
         return false;
     }
 
     for (const SpecializedBroadcastAxis& axis : group.active_axes) {
-        if (!fitsInInt32(axis.dim) || !fitsInInt32(axis.output_stride)) {
+        if (!fitsInUInt32(axis.dim) || !fitsInUInt32(axis.output_stride)) {
             return false;
         }
         for (uint64_t stride : axis.input_strides) {
-            if (!fitsInInt32(stride)) {
+            if (!fitsInUInt32(stride)) {
                 return false;
             }
         }
@@ -141,9 +133,9 @@ static bool groupSupportsInt32IndexMath(const SpecializedBroadcastGroup& group) 
     return true;
 }
 
-static bool groupsSupportInt32IndexMath(const std::vector<SpecializedBroadcastGroup>& groups) {
+static bool groupsSupportUInt32IndexMath(const std::vector<SpecializedBroadcastGroup>& groups) {
     return std::all_of(
-        groups.begin(), groups.end(), [](const SpecializedBroadcastGroup& group) { return groupSupportsInt32IndexMath(group); });
+        groups.begin(), groups.end(), [](const SpecializedBroadcastGroup& group) { return groupSupportsUInt32IndexMath(group); });
 }
 
 static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
@@ -152,7 +144,7 @@ static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
                                                const std::string& idx_expr,
                                                const std::string& offset_suffix,
                                                const std::string& indent,
-                                               bool use_int32_index_math) {
+                                               bool use_uint32_index_math) {
     if (used_input_indices.empty()) {
         return;
     }
@@ -168,19 +160,19 @@ static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
         } else if (isPowerOfTwo(axis.output_stride)) {
             base_expr = "(" + idx_expr + " >> " + std::to_string(log2Exact(axis.output_stride)) + ")";
         } else {
-            base_expr = "(" + idx_expr + " / " + emitIndexLiteral(axis.output_stride, use_int32_index_math) + ")";
+            base_expr = "(" + idx_expr + " / " + emitUnsignedLiteral(axis.output_stride, use_uint32_index_math) + ")";
         }
 
         std::string coord_expr;
         if (axis.dim == 1) {
-            coord_expr = emitIndexLiteral(0, use_int32_index_math);
+            coord_expr = emitUnsignedLiteral(0, use_uint32_index_math);
         } else if (isPowerOfTwo(axis.dim)) {
-            coord_expr = "(" + base_expr + " & " + emitIndexLiteral(axis.dim - 1, use_int32_index_math) + ")";
+            coord_expr = "(" + base_expr + " & " + emitUnsignedLiteral(axis.dim - 1, use_uint32_index_math) + ")";
         } else {
-            coord_expr = "(" + base_expr + " % " + emitIndexLiteral(axis.dim, use_int32_index_math) + ")";
+            coord_expr = "(" + base_expr + " % " + emitUnsignedLiteral(axis.dim, use_uint32_index_math) + ")";
         }
 
-        ss << indent << "const " << emittedIndexType(use_int32_index_math) << " " << coord << " = " << coord_expr << ";\n";
+        ss << indent << "const " << emittedIndexType(use_uint32_index_math) << " " << coord << " = " << coord_expr << ";\n";
 
         for (size_t used_i : used_input_indices) {
             const uint64_t stride = axis.input_strides[used_i];
@@ -197,7 +189,7 @@ static void emitSpecializedBroadcastOffsetMath(std::ostringstream& ss,
                    << std::to_string(log2Exact(stride)) << ");\n";
             } else {
                 ss << indent << "in" << input_slot << "_offset" << offset_suffix << " += " << coord << " * "
-                   << emitIndexLiteral(stride, use_int32_index_math) << ";\n";
+                   << emitUnsignedLiteral(stride, use_uint32_index_math) << ";\n";
             }
         }
     }
@@ -1315,7 +1307,7 @@ static std::string emitVector2BroadcastPackLoad(const std::string& storage_dtype
 static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                                    DataType dtype,
                                    const std::string& kernel_name,
-                                   bool use_int32_index_math) {
+                                   bool use_uint32_index_math) {
     std::ostringstream ss;
 
     std::string compute_dtype;
@@ -1354,7 +1346,7 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     }
 
     const uint32_t num_inputs = stage.expr.numInputs();
-    const std::string index_type = emittedIndexType(use_int32_index_math);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
 
     ss << "#include <vector_types.h>\n";
@@ -1375,10 +1367,10 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
     }
 
     ss << index_type << " numel) {\n";
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_int32_index_math) << ";\n";
-    ss << "  const " << index_type << " packed_numel = (numel + " << emitIndexLiteral(1, use_int32_index_math) << ") >> 1;\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+    ss << "  const " << index_type << " packed_numel = (numel + " << emitUnsignedLiteral(1, use_uint32_index_math) << ") >> 1;\n";
     ss << "  const " << index_type << " packed_base = idx * "
-       << emitIndexLiteral(static_cast<uint64_t>(packs_per_thread), use_int32_index_math) << ";\n";
+       << emitUnsignedLiteral(static_cast<uint64_t>(packs_per_thread), use_uint32_index_math) << ";\n";
     ss << "  if (packed_base >= packed_numel) return;\n\n";
 
     bool emitted_any_tensor_chunk = false;
@@ -1542,7 +1534,7 @@ static std::string chunkScalarTypeForBytes(uint32_t bytes) {
 
 static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
                                       const std::string& kernel_name,
-                                      bool use_int32_index_math,
+                                      bool use_uint32_index_math,
                                       uint32_t elements_per_thread) {
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
@@ -1590,12 +1582,12 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
     if (!first_arg) {
         ss << ", ";
     }
-    const std::string index_type = emittedIndexType(use_int32_index_math);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {\n";
 
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_int32_index_math) << ";\n";
-    ss << "  const " << index_type << " base = idx * " << emitIndexLiteral(static_cast<uint64_t>(elements_per_thread), use_int32_index_math)
-       << ";\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+    ss << "  const " << index_type << " base = idx * "
+       << emitUnsignedLiteral(static_cast<uint64_t>(elements_per_thread), use_uint32_index_math) << ";\n";
     ss << "  if (base >= numel) return;\n\n";
 
     bool emitted_any_tensor_chunk = false;
@@ -1627,7 +1619,7 @@ static std::string emitWideScalarFlat(const PhysicalExecutionStage& stage,
 
     for (uint32_t lane = 0; lane < elements_per_thread; ++lane) {
         const std::string suffix = "_l" + std::to_string(lane);
-        const std::string lane_idx_expr = "base + " + emitIndexLiteral(static_cast<uint64_t>(lane), use_int32_index_math);
+        const std::string lane_idx_expr = "base + " + emitUnsignedLiteral(static_cast<uint64_t>(lane), use_uint32_index_math);
 
         for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
             if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
@@ -1700,8 +1692,8 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
         throw runtime_error("emitVector2SpecializedBroadcast called with non-vectorizable dtype.");
     }
 
-    const bool use_int32_index_math = groupsSupportInt32IndexMath(groups);
-    const std::string index_type = emittedIndexType(use_int32_index_math);
+    const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
 
     ss << "extern \"C\" __global__\n";
@@ -1723,7 +1715,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
     }
 
     ss << ") {\n";
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_int32_index_math) << ";\n\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
@@ -1748,28 +1740,28 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
 
         const bool any_scalar_pack = !scalar_pack_indices.empty();
 
-        ss << "  if (idx < " << emitIndexLiteral(packed_numel, use_int32_index_math) << ") {\n";
+        ss << "  if (idx < " << emitUnsignedLiteral(packed_numel, use_uint32_index_math) << ") {\n";
         ss << "    const " << index_type << " idx0 = idx << 1;\n";
 
         if (any_scalar_pack) {
-            ss << "    const " << index_type << " idx1 = idx0 + " << emitIndexLiteral(1, use_int32_index_math) << ";\n";
+            ss << "    const " << index_type << " idx1 = idx0 + " << emitUnsignedLiteral(1, use_uint32_index_math) << ";\n";
         }
 
         for (uint32_t input_slot : group.used_input_slots) {
-            ss << "    " << index_type << " in" << input_slot << "_offset0 = " << emitIndexLiteral(0, use_int32_index_math) << ";\n";
+            ss << "    " << index_type << " in" << input_slot << "_offset0 = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
         }
         for (size_t used_i : scalar_pack_indices) {
             const uint32_t input_slot = group.used_input_slots[used_i];
-            ss << "    " << index_type << " in" << input_slot << "_offset1 = " << emitIndexLiteral(0, use_int32_index_math) << ";\n";
+            ss << "    " << index_type << " in" << input_slot << "_offset1 = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
         }
 
         ss << "\n";
         if (!group.active_axes.empty()) {
-            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx0", "0", "    ", use_int32_index_math);
+            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx0", "0", "    ", use_uint32_index_math);
             ss << "\n";
 
             if (any_scalar_pack) {
-                emitSpecializedBroadcastOffsetMath(ss, group, scalar_pack_indices, "idx1", "1", "    ", use_int32_index_math);
+                emitSpecializedBroadcastOffsetMath(ss, group, scalar_pack_indices, "idx1", "1", "    ", use_uint32_index_math);
                 ss << "\n";
             }
         }
@@ -1905,7 +1897,7 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
     return ss.str();
 }
 
-std::string CudaSourceEmitter::emitFlat(const PhysicalExpression& expr, const std::string& kernel_name, bool use_int32_index_math) {
+std::string CudaSourceEmitter::emitFlat(const PhysicalExpression& expr, const std::string& kernel_name, bool use_uint32_index_math) {
     if (expr.output_node >= expr.nodes.size()) {
         throw runtime_error("CudaSourceEmitter::emitFlat(expr, ...) output_node out of range.");
     }
@@ -1924,10 +1916,10 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExpression& expr, const st
             },
     };
 
-    return emitFlat(stage, kernel_name, use_int32_index_math);
+    return emitFlat(stage, kernel_name, use_uint32_index_math);
 }
 
-std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_int32_index_math) {
+std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_uint32_index_math) {
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         throw runtime_error("CudaSourceEmitter::emitFlat(stage, ...) called on non-fused stage.");
     }
@@ -1938,12 +1930,12 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
 
     Optional<DataType> vectorized_dtype = getVectorizedStageStorageDType(stage);
     if (vectorized_dtype.isPresent()) {
-        return emitVector2Flat(stage, vectorized_dtype.get(), kernel_name, use_int32_index_math);
+        return emitVector2Flat(stage, vectorized_dtype.get(), kernel_name, use_uint32_index_math);
     }
 
     const uint32_t elements_per_thread = flatElementsPerThread(stage);
     if (elements_per_thread > 1) {
-        return emitWideScalarFlat(stage, kernel_name, use_int32_index_math, elements_per_thread);
+        return emitWideScalarFlat(stage, kernel_name, use_uint32_index_math, elements_per_thread);
     }
 
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
@@ -1979,10 +1971,10 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     if (!first_arg) {
         ss << ", ";
     }
-    const std::string index_type = emittedIndexType(use_int32_index_math);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
     ss << index_type << " numel) {";
 
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_int32_index_math) << ";";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";";
     ss << "  if (idx >= numel) return;";
 
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
@@ -2049,11 +2041,11 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         ss << scalarStorageType(output_dtypes[i]) << "* out" << i;
     }
 
-    const bool use_int32_index_math = groupsSupportInt32IndexMath(groups);
-    const std::string index_type = emittedIndexType(use_int32_index_math);
+    const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
+    const std::string index_type = emittedIndexType(use_uint32_index_math);
 
     ss << ") {\n";
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_int32_index_math) << ";\n\n";
+    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
@@ -2062,15 +2054,15 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         std::vector<size_t> all_used_indices(group.used_input_slots.size());
         std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
 
-        ss << "  if (idx < " << emitIndexLiteral(group.numel, use_int32_index_math) << ") {\n";
+        ss << "  if (idx < " << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
 
         for (uint32_t input_slot : group.used_input_slots) {
-            ss << "    " << index_type << " in" << input_slot << "_offset = " << emitIndexLiteral(0, use_int32_index_math) << ";\n";
+            ss << "    " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
         }
 
         if (!group.active_axes.empty()) {
             ss << "\n";
-            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx", "", "    ", use_int32_index_math);
+            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx", "", "    ", use_uint32_index_math);
             ss << "\n";
         }
 
