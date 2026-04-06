@@ -90,6 +90,13 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         assert(!featureOutputs.empty());
         assert(featureInputs.size() == featureOutputs.size());
 
+        if (resultRunningMeanInitializer != nullptr) {
+            resultRunningMeanInitializer->compile(resultRunningMean, Optional<Stream>::empty(), getFanIn(), getFanOut());
+        }
+        if (resultRunningVarianceInitializer != nullptr) {
+            resultRunningVarianceInitializer->compile(resultRunningVariance, Optional<Stream>::empty(), getFanIn(), getFanOut());
+        }
+
         std::vector<uint64_t> inputDimensions = featureInputs.front().get().getDescriptor().getDimensions();
         assert(inputDimensions.size() == 2 || inputDimensions.size() == 4);
         batchSize = inputDimensions[0];
@@ -170,9 +177,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
 
     virtual Event initializeTensor(Tensor target) {
         if (target == resultRunningMean)
-            return resultRunningMeanInitializer->initialize(this, resultRunningMean);
+            return resultRunningMeanInitializer->initialize();
         else if (target == resultRunningVariance)
-            return resultRunningVarianceInitializer->initialize(this, resultRunningVariance);
+            return resultRunningVarianceInitializer->initialize();
         else
             return TrainableWeightsBiasesLayer::initializeTensor(target);
     }
@@ -271,31 +278,32 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
         if (optimizer.isEmpty()) {
             throw std::runtime_error("BatchNormalization: compiled but optimizer is not present, and not in inference only mode.");
         }
-        Tensor weightsGradient = optimizer.get()->getWeightsGradient();
-        Optional<Tensor> biasesGradient = optimizer.get()->getBiasesGradient();
-        assert(biasesGradient.isPresent());
-
-        cudnnStatus_t cudnnStatus;
-        cudnnStatus = cudnnBatchNormalizationBackward(dataStream.getCudnnHandle(),
-                                                      height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
-                                                      &ALPHA_NO_SCALE,
-                                                      &BETA_CLEAR,
-                                                      &ALPHA_NO_SCALE,
-                                                      accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
-                                                      featureInputDescriptor,
-                                                      dataIn.get().getMemPtr(),
-                                                      featureOutputDescriptor,
-                                                      errorIn.get().getMemPtr(),
-                                                      featureInputDescriptor,
-                                                      errorOut.get().getMemPtr(),
-                                                      derivedBnDescriptor,
-                                                      weights.getMemPtr(),
-                                                      weightsGradient.getMemPtr(),
-                                                      biasesGradient.get().getMemPtr(),
-                                                      epsilon,
-                                                      resultSaveMean[connectionNumber].getMemPtr(),
-                                                      resultSaveInvVariance[connectionNumber].getMemPtr());
-        assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        // FIXME: Commented while API updates
+        // Tensor weightsGradient = optimizer.get()->getWeightsGradient();
+        // Optional<Tensor> biasesGradient = optimizer.get()->getBiasesGradient();
+        // assert(biasesGradient.isPresent());
+        //
+        // cudnnStatus_t cudnnStatus;
+        // cudnnStatus = cudnnBatchNormalizationBackward(dataStream.getCudnnHandle(),
+        //                                               height > 1 || width > 1 ? CUDNN_BATCHNORM_SPATIAL : CUDNN_BATCHNORM_PER_ACTIVATION,
+        //                                               &ALPHA_NO_SCALE,
+        //                                               &BETA_CLEAR,
+        //                                               &ALPHA_NO_SCALE,
+        //                                               accumulateGradient ? &BETA_ACCUMULATE : &BETA_CLEAR,
+        //                                               featureInputDescriptor,
+        //                                               dataIn.get().getMemPtr(),
+        //                                               featureOutputDescriptor,
+        //                                               errorIn.get().getMemPtr(),
+        //                                               featureInputDescriptor,
+        //                                               errorOut.get().getMemPtr(),
+        //                                               derivedBnDescriptor,
+        //                                               weights.getMemPtr(),
+        //                                               weightsGradient.getMemPtr(),
+        //                                               biasesGradient.get().getMemPtr(),
+        //                                               epsilon,
+        //                                               resultSaveMean[connectionNumber].getMemPtr(),
+        //                                               resultSaveInvVariance[connectionNumber].getMemPtr());
+        // assert(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         if (!isInferenceOnly()) {
             assert(optimizer.isPresent());
@@ -305,8 +313,9 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             Stream gradientUpdateStream = optimizer.get()->getGradientUpdateStream();
             gradientUpdateStream.waitEvent(dataStream.putEvent());
 
+            // FIXME: Commented while API updates
             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
-            optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+            // optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
 
             // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
             // so to enforce this gradientStream says that gradient is not ready to be applied until both errorOut and gradient are computed
@@ -315,10 +324,11 @@ class BatchNormalization : public TrainableWeightsBiasesLayer {
             // gradientUpdateStream.waitEvent(dataStream.putEvent());
             // Now at the end of gradientStream errorOut and gradients are ready from the updates for this connection.
 
+            // FIXME: Commented while API updates
             // Upon processing the last connection, schedule the update to the weights memory.
-            if (stillWaitingForErrorInputTensors.empty()) {
-                optimizer.get()->updateWeights(weights, biases, batchSize);
-            }
+            // if (stillWaitingForErrorInputTensors.empty()) {
+            //     optimizer.get()->updateWeights(weights, biases, batchSize);
+            // }
 
             // weights will be updated at the current end of the gradientStream
             // so Forward() must wait until gradientStream is finished.

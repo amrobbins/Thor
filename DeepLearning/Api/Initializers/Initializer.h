@@ -1,6 +1,5 @@
 #pragma once
 
-#include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
@@ -28,13 +27,7 @@ class Initializer {
     // Referring to the initializer object, not the tensor that gets initialized:
     bool isInitialized() { return initialized; }
 
-    virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) = 0;
-
-    virtual Event initialize(ThorImplementation::Tensor tensorToInitialize, ThorImplementation::Layer *layerThatOwnsTensor) {
-        stamp(layerThatOwnsTensor, tensorToInitialize);
-        initDoneEvent = layerThatOwnsTensor->initializeTensor(tensorToInitialize);
-        return initDoneEvent;
-    }
+    virtual std::shared_ptr<ThorImplementation::Initializer> stamp() = 0;
 
     virtual nlohmann::json architectureJson() const = 0;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);

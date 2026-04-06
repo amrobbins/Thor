@@ -6,17 +6,15 @@ namespace ThorImplementation {
 
 class UniformRandom : public Initializer {
    public:
-    UniformRandom(double maxValue, double minValue);
+    UniformRandom(float maxValue, float minValue);
 
-    virtual Event initialize(Layer *layer, Tensor tensorToInitialize);
+    Event initialize() override;
 
-    virtual std::shared_ptr<Initializer> clone();
+    std::shared_ptr<Initializer> clone() override;
 
    protected:
-    const double maxValue;
-    const double minValue;
-
-    virtual Event initialize(Layer *layer, Tensor tensorToInitialize, std::vector<Stream> streams);
+    const float maxValue;
+    const float minValue;
 };
 
 }  // namespace ThorImplementation

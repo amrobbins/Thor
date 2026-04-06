@@ -6,29 +6,29 @@ namespace ThorImplementation {
 
 Glorot::Glorot(Mode mode) : mode(mode) { assert(mode == Mode::UNIFORM || mode == Mode::NORMAL); }
 
-Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
-
-Event Glorot::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
+Event Glorot::initialize() {
     if (mode == Mode::UNIFORM) {
-        return initializeUniform(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
+        return initializeUniform();
     } else {
-        return initializeNormal(layer->getFanIn(), layer->getFanOut(), tensorToInitialize, streams);
+        return initializeNormal();
     }
 }
 
-Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
+Event Glorot::initializeUniform() {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Tensor buffer = tensorToInitialize.clone(cpuPlacement);
+    const uint32_t weightsGpuNum = weights.getPlacement().getDeviceNum();
+    Tensor buffer = weights.clone(cpuPlacement);
+ Stream initStream = stream.isPresent() ? stream.get() : Stream::getNextGradientUpdateStream(weightsGpuNum);
 
-    uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
-    int numProcessors = omp_get_num_procs();
+    uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
+    uint64_t numProcessors = omp_get_num_procs();
     if (numProcessors > 1)
         numProcessors -= 1;
-    int maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
+    uint64_t maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
     if (numProcessors > maxDesiredProcessors)
         numProcessors = maxDesiredProcessors;
     assert(numProcessors >= 1);
-    omp_set_num_threads(numProcessors);
+    omp_set_num_threads(static_cast<int>(numProcessors));
     const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
     omp_set_dynamic(0);
 #pragma omp parallel num_threads(numProcessors)
@@ -40,17 +40,18 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
         using clock = chrono::high_resolution_clock;
         const uint64_t nanoseconds = chrono::duration_cast<chrono::nanoseconds>(clock::now().time_since_epoch()).count();
         mt19937 generator(Tensor::getThreadIdHash64(nanoseconds));
+        const float fanInOutTerm = static_cast<float>(sqrt(6.0 / static_cast<double>(layerFanIn + layerFanOut)));
         if (buffer.getDataType() == TensorDescriptor::DataType::FP16) {
             half *bufferMem = (half *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
                 float d = distribution(generator);
-                float value = d * sqrt(6.0 / (fanIn + fanOut));
+                float value = d * fanInOutTerm;
                 bufferMem[i] = (half)value;
             }
         } else if (buffer.getDataType() == TensorDescriptor::DataType::FP32) {
             float *bufferMem = (float *)buffer.getMemPtr();
             for (uint64_t i = start; i < end; ++i) {
-                float value = distribution(generator) * sqrt(6.0 / (fanIn + fanOut));
+                float value = distribution(generator) * fanInOutTerm;
                 bufferMem[i] = value;
             }
         } else {
@@ -58,23 +59,27 @@ Event Glorot::initializeUniform(uint64_t fanIn, uint64_t fanOut, Tensor tensorTo
         }
     }
 
-    Event tensorInitializedEvent = performCopy(buffer, tensorToInitialize, streams);
+    weights.copyFromAsync(buffer, initStream);
+    Event tensorInitializedEvent = initStream.putEvent();
     return tensorInitializedEvent;
 }
 
-Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToInitialize, vector<Stream> streams) {
+Event Glorot::initializeNormal() {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Tensor buffer = tensorToInitialize.clone(cpuPlacement);
+    const uint32_t weightsGpuNum = weights.getPlacement().getDeviceNum();
+    Tensor buffer = weights.clone(cpuPlacement);
+
+    Stream initStream = stream.isPresent() ? stream.get() : Stream::getNextGradientUpdateStream(weightsGpuNum);
 
     float mean = 0.0;
-    double variance = 2.0 / (fanIn + fanOut);
-    float standardDeviation = sqrt(variance);
+    double variance = 2.0 / static_cast<double>(layerFanIn + layerFanOut);
+    float standardDeviation = static_cast<float>(sqrt(variance));
 
-    uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
-    int numProcessors = omp_get_num_procs();
+    uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
+    uint64_t numProcessors = omp_get_num_procs();
     if (numProcessors > 1)
         numProcessors -= 1;
-    int maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
+    uint64_t maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
     if (numProcessors > maxDesiredProcessors)
         numProcessors = maxDesiredProcessors;
     assert(numProcessors >= 1);
@@ -103,7 +108,8 @@ Event Glorot::initializeNormal(uint64_t fanIn, uint64_t fanOut, Tensor tensorToI
             assert(false);
         }
     }
-    Event tensorInitializedEvent = performCopy(buffer, tensorToInitialize, streams);
+    weights.copyFromAsync(buffer, initStream);
+    Event tensorInitializedEvent = initStream.putEvent();
     return tensorInitializedEvent;
 }
 

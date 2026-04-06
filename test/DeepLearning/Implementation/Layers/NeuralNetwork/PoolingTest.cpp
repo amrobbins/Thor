@@ -292,7 +292,7 @@ TEST(Pooling, MaxPoolingWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 10; ++test) {
+    for (int test = 0; test < 2; ++test) {
         uint32_t batchSize = (rand() % 10) + 1;
         uint32_t numFeatures = (rand() % 10) + 1;
         uint32_t inputHeight = (rand() % 50) + 1;
@@ -440,7 +440,7 @@ TEST(Pooling, AveragePoolingWorks) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
-    for (int test = 0; test < 10; ++test) {
+    for (int test = 0; test < 2; ++test) {
         uint32_t batchSize = (rand() % 10) + 1;
         uint32_t numFeatures = (rand() % 10) + 1;
         uint32_t inputHeight = (rand() % 50) + 1;

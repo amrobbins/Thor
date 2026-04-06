@@ -2,7 +2,7 @@
 
 using namespace std;
 
-__global__ void adamStep_fp16_moments_fp32(half *__restrict__ weightUpdate,    // FP16 output update (same shape as weights)
+__global__ void adamStep_fp16_moments_fp32(half *__restrict__ weights,         // FP16 output
                                            const half *__restrict__ gradient,  // FP16 gradients
                                            float *__restrict__ m,              // FP32 first moment
                                            float *__restrict__ v,              // FP32 second moment
@@ -10,12 +10,13 @@ __global__ void adamStep_fp16_moments_fp32(half *__restrict__ weightUpdate,    /
                                            const float beta1,
                                            const float beta2,
                                            const float epsilon,
-                                           const uint32_t length) {
+                                           const uint32_t length,
+                                           const float inverseBatchSizeTimesInverseLossScale) {
     uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= length)
         return;
 
-    float gradBuff = __half2float(gradient[index]);
+    float gradBuff = __half2float(gradient[index]) * inverseBatchSizeTimesInverseLossScale;
     float mBuf = m[index];
     float vBuf = v[index];
     // printf("m[%d] = %f ", index, mBuf);
@@ -29,10 +30,11 @@ __global__ void adamStep_fp16_moments_fp32(half *__restrict__ weightUpdate,    /
     float upd = -alphaT * mBuf / (sqrtf(fmaxf(vBuf, 0.0f)) + epsilon);
     upd = fminf(fmaxf(upd, -65504.0f), 65504.0f);
 
-    weightUpdate[index] = __float2half_rn(upd);
+    float weightUpdate = upd;
+    weights[index] = __float2half_rn(__half2float(weights[index]) + weightUpdate);
 }
 
-__global__ void adamStep_fp32(float *__restrict__ weightUpdate,
+__global__ void adamStep_fp32(float *__restrict__ weights,
                               const float *__restrict__ gradient,
                               float *__restrict__ m,
                               float *__restrict__ v,
@@ -40,19 +42,21 @@ __global__ void adamStep_fp32(float *__restrict__ weightUpdate,
                               const float beta1,
                               const float beta2,
                               const float epsilon,
-                              const uint32_t length) {
+                              const uint32_t length,
+                              const float inverseBatchSizeTimesInverseLossScale) {
     uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= length)
         return;
 
-    float gradBuff = gradient[index];
+    float gradBuff = gradient[index] * inverseBatchSizeTimesInverseLossScale;
     float mBuf = m[index];
     float vBuf = v[index];
     mBuf = beta1 * mBuf + (1.0f - beta1) * gradBuff;
     m[index] = mBuf;
     vBuf = beta2 * vBuf + (1.0f - beta2) * (gradBuff * gradBuff);
     v[index] = vBuf;
-    weightUpdate[index] = -alphaT * mBuf / (sqrtf(vBuf) + epsilon);
+    float weightUpdate = -alphaT * mBuf / (sqrtf(vBuf) + epsilon);
+    weights[index] += weightUpdate;
 }
 
 // Note that the t that is passed to launch adam step is the t that should be used in the computation, it is not meant to
@@ -69,8 +73,11 @@ void launchAdamStep(T *weightUpdate_d,
                     float beta2,
                     float epsilon,
                     uint32_t length,
+                    float inverseBatchSizeTimesInverseLossScale,
                     Stream stream) {
-    float alphaT = alpha * sqrtf(1.0f - powf(beta2, t)) / (1.0f - powf(beta1, t));
+    double alphaT64 =
+        static_cast<double>(alpha) * sqrt(1.0 - pow(static_cast<double>(beta2), t)) / (1.0 - pow(static_cast<double>(beta1), t));
+    float alphaT = static_cast<float>(alphaT64);
 
     ScopedGpu scopedGpu(stream.getGpuNum());
 
@@ -79,9 +86,10 @@ void launchAdamStep(T *weightUpdate_d,
 
     if constexpr (is_same_v<T, half>) {
         adamStep_fp16_moments_fp32<<<gridSize, blockSize, 0, stream>>>(
-            weightUpdate_d, gradient_d, m_d, v_d, alphaT, beta1, beta2, epsilon, length);
+            weightUpdate_d, gradient_d, m_d, v_d, alphaT, beta1, beta2, epsilon, length, inverseBatchSizeTimesInverseLossScale);
     } else if constexpr (is_same_v<T, float>) {
-        adamStep_fp32<<<gridSize, blockSize, 0, stream>>>(weightUpdate_d, gradient_d, m_d, v_d, alphaT, beta1, beta2, epsilon, length);
+        adamStep_fp32<<<gridSize, blockSize, 0, stream>>>(
+            weightUpdate_d, gradient_d, m_d, v_d, alphaT, beta1, beta2, epsilon, length, inverseBatchSizeTimesInverseLossScale);
     } else {
         static_assert(is_same_v<T, half> || is_same_v<T, float>, "launchAdamStep only supports T=half or T=float");
     }
@@ -97,6 +105,7 @@ template void launchAdamStep<half>(half *weightUpdate_d,
                                    float beta2,
                                    float epsilon,
                                    uint32_t length,
+                                   float inverseBatchSizeTimesInverseLossScale,
                                    Stream stream);
 
 template void launchAdamStep<float>(float *weightUpdate_d,
@@ -109,4 +118,5 @@ template void launchAdamStep<float>(float *weightUpdate_d,
                                     float beta2,
                                     float epsilon,
                                     uint32_t length,
+                                    float inverseBatchSizeTimesInverseLossScale,
                                     Stream stream);

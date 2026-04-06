@@ -1,136 +1,127 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
+#include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/FusedEquation.h"
 
 using namespace ThorImplementation;
 using namespace std;
 
-Sgd::Sgd(uint64_t id,
-         shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
-         float initialLearningRate,
-         float decay,
-         float momentum,
-         bool useNesterovMomentum,
-         uint64_t startResumeEpoch)
-    : Optimizer(id) {
-    this->trainableLayer = trainableLayer;
+Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch)
+    : Optimizer(id),
+      initialLearningRate(initialLearningRate),
+      decay(decay),
+      momentum(momentum),
+      useNesterovMomentum(useNesterovMomentum),
+      currentEpoch(startResumeEpoch),
+      currentBatch(0),
+      currentLearningRate(initialLearningRate) {}
 
-    this->initialLearningRate = initialLearningRate;
-    this->decay = decay;
-    this->momentum = momentum;
-    this->useNesterovMomentum = useNesterovMomentum;
-    this->epoch = startResumeEpoch;
+DynamicExpression Sgd::buildExpression() {
+    // FIXME: This can just be in compile() and does not need to be a DynamicExpression, but leave it here for now as a reference.
+    return DynamicExpression([this](const DynamicExpression::TensorMap &inputs, Stream &stream) -> StampedExecutionPlan {
+        const Tensor &wTensor = inputs.at("w");
+        const Tensor &gTensor = inputs.at("g");
+        const DataType weightsDType = wTensor.getDescriptor().getDataType();
+        const int32_t gpuNum = wTensor.getPlacement().getDeviceNum();
+        auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+        auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
+        auto step = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
+
+        unordered_map<string, Tensor> stampInputs;
+        unordered_map<string, Tensor> stampOutputs;
+        stampInputs["weights_in"] = wTensor;
+        stampInputs["gradient"] = gTensor;
+        stampOutputs["weights"] = wTensor;
+
+        std::optional<Outputs> outputs;
+        if (momentum > 0.0f) {
+            // Allocate momentum state once, same shape/dtype/device as parameters.
+            if (momentumBuffer.isEmpty()) {
+                momentumBuffer = wTensor.clone();
+                momentumBuffer.get().memsetAsync(stream, 0);
+            }
+
+            std::optional<Expression> vNext;
+            std::optional<Expression> wNext;
+            if (useNesterovMomentum) {
+                // Nesterov:
+                // v_{t+1} = mu * v_t - step * g
+                // w_{t+1} = w_t + mu * v_{t+1} - step * g
+                Expression v = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
+                vNext.emplace(Expression::constantScalar(momentum) * v - step * g);
+                wNext.emplace(w + Expression::constantScalar(momentum) * (*vNext) - step * g);
+            } else {
+                // Classical momentum:
+                // v_{t+1} = mu * v_t - step * g
+                // w_{t+1} = w_t + v_{t+1}
+                Expression v = Expression::input("velocity_in", DataType::FP32, DataType::FP32);
+                vNext.emplace(Expression::constantScalar(momentum) * v - step * g);
+                wNext.emplace(w + (*vNext));
+            }
+            outputs.emplace(Expression::outputs({
+                {"weights", *wNext},
+                {"velocity", *vNext},
+            }));
+            stampInputs["velocity_in"] = momentumBuffer;
+            stampOutputs["velocity"] = momentumBuffer;
+        } else {
+            if (momentumBuffer.isPresent())
+                momentumBuffer.clear();
+
+            // Plain SGD:
+            // w_{t+1} = w_t - step * g
+            auto wNext = (w - step * g).withOutputDType(weightsDType);
+            outputs.emplace(Expression::outputs({
+                {"weights", wNext},
+            }));
+        }
+        FusedEquation sgdUpdateEquation = FusedEquation::compile(outputs->physicalOutputs(), gpuNum);
+        return sgdUpdateEquation.stamp(stampInputs, stream, {}, stampOutputs);
+    });
 }
 
-void Sgd::compile() {
+void Sgd::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     assert(!compiled);
-
-    TensorPlacement layerPlacement = trainableLayer->getPlacement();
-    assert(layerPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    gpuNum = layerPlacement.getDeviceNum();
-    gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
-    assert(initialLearningRate > 0.0f);
-    assert(decay >= 0.0f);
-    assert(momentum >= 0.0f);
-    assert(gpuNum < (uint32_t)MachineEvaluator::instance().getNumGpus());
-
     assert(gradientUpdateStream.isInitialized());
+    assert(weights.isInitialized());
+    assert(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-    Tensor weights = trainableLayer->getWeights();
-    weightsGradient = weights.clone();
-    weightsUpdateDataType = weightsGradient.getDataType();
+    this->gradientUpdateStream = gradientUpdateStream;
+    this->weights = weights;
+    this->weightsGradient = weights.clone();
 
-    Optional<Tensor> biases = trainableLayer->getBiases();
-    if (biases.isPresent()) {
-        biasesGradient = biases.get().clone();
-    }
-
-    if (momentum > 0.0f) {
-        weightsUpdate = weightsGradient.clone();
-        weightsUpdate.memsetAsync(gradientUpdateStream, 0);
-        if (biases.isPresent()) {
-            assert(biasesGradient.isPresent());
-            biasesUpdate = biasesGradient.get().clone();
-            biasesUpdate.get().memsetAsync(gradientUpdateStream, 0);
-        }
-
-        if (useNesterovMomentum) {
-            projectedWeights = weights.clone();
-            if (biases.isPresent())
-                projectedBiases = biases.get().clone();
-            else
-                projectedBiases = Optional<Tensor>::empty();
-            this->trainableLayer->assignProjectedWeightsTensor(projectedWeights, projectedBiases);
-        }
-    }
+    DynamicExpression::TensorMap inputTensors;
+    inputTensors["w"] = weights;
+    inputTensors["g"] = weightsGradient;
+    DynamicExpression weightsUpdateExpression = buildExpression();
+    updateEquationStamped = make_unique<StampedExecutionPlan>(weightsUpdateExpression.stamp(inputTensors, gradientUpdateStream));
 
     compiled = true;
 }
 
-// This version takes in the pre-computed gradient directly, which is ready by the end of weightsGradientReadyStream.
-void Sgd::computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues) {
-    // Lazy compile on first use
-    if (!compiled)
-        compile();
+void Sgd::updateWeights(uint32_t batchSize) {
     assert(compiled);
- if (gradientUpdateStream != weightsGradientReadyStream)
-        gradientUpdateStream.waitEvent(weightsGradientReadyStream.putEvent());
-}
+    assert(weightsGradient.isPresent());
+    assert(weightsGradient.get().isInitialized());
+    assert(weightsGradient.get().getPlacement() == weights.getPlacement());
+    assert(updateEquationStamped != nullptr);
 
-// Now having the full gradient the weight update computation is completed in this function
-void Sgd::updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batchSize) {
-    assert(weights.getDataType() == TensorDescriptor::DataType::FP16 || weights.getDataType() == TensorDescriptor::DataType::FP32);
+    assert(batchSize > 0);
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    assert(lossScalingFactor > 0);
 
-    if (momentum > 0.0f) {
-        if (useNesterovMomentum) {
-            // WeightUpdate_t = momentum * weightUpdate_t-1 - (lr * gradient(weights_t + momentum * weightUpdate_t-1)) / batch_size
-
-            // Note that the gradients below are computed wrt the projected weights, computed further below
-            // (because infer uses the projected weights, which affects the errorInput value)
-            float alpha = momentum;
-            float beta = (-1.0f * currentLearningRate) / batchSize;
-            weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
-            if (biases.isPresent()) {
-                biasesUpdate.get().add(biasesUpdate, biasesGradient, alpha, beta, gradientUpdateStream);
-            }
-
-            // Next line increments t from these equations:
-            Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
-
-            // projectedWeights_t+1 = weights_t+1 + momentum * weightUpdate_t
-            // Note updateWeightsWithScale automatically applies the loss scaling factor, since I am projecting the update to the weights
-            // I need to apply to it the projection here.
-            projectedWeights.get().add(weights, weightsUpdate, 1.0f, momentum / Loss::getLossScalingFactor(), gradientUpdateStream);
-            if (projectedBiases.isPresent()) {
-                assert(biases.isPresent());
-                projectedBiases.get().add(biases, biasesUpdate, 1.0f, momentum / Loss::getLossScalingFactor(), gradientUpdateStream);
-            }
-        } else {
-            // WeightUpdate_t = WeightUpdate_t-1 * momentum - (lr * gradient_t) / batchSize
-            float alpha = momentum;
-            float beta = (-1.0f * currentLearningRate) / batchSize;
-
-            weightsUpdate.add(weightsUpdate, weightsGradient, alpha, beta, gradientUpdateStream);
-            if (biases.isPresent())
-                biasesUpdate.get().add(biasesUpdate, biasesGradient, alpha, beta, gradientUpdateStream);
-
-            Optimizer::updateWeightsWithScale(weights, biases, 1.0f);
-        }
-    } else {
-        // subtract the gradient, scaled by the learning rate, from the weights
-        // Note: learning rate is divided by batchSize because learning rate is the total update to the weights when
-        // processing a batch, and each item in the batch provides a share of that update.
-        float weightUpdateScalingFactor = (-1.0f * currentLearningRate) / batchSize;
-        weightsUpdate = weightsGradient;
-        biasesUpdate = biasesGradient;
-        Optimizer::updateWeightsWithScale(weights, biases, weightUpdateScalingFactor);
-    }
+    const float step = currentLearningRate / (static_cast<float>(batchSize) * lossScalingFactor);
+    updateEquationStamped->run({
+        {"step", step},
+    });
 }
 
 unordered_map<string, float> Sgd::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
     unordered_map<string, float> updatedParameters;
 
-    currentEpoch = epoch;
+    if (currentEpoch != epoch)
+        currentLearningRate = static_cast<float>(initialLearningRate * pow(1.0 - static_cast<double>(decay), static_cast<double>(epoch)));
 
-    currentLearningRate = initialLearningRate * pow(1.0 - (double)decay, (double)epoch);
+    currentEpoch = epoch;
 
     updatedParameters["currentLearningRate"] = currentLearningRate;
 
@@ -159,16 +150,12 @@ void Sgd::setMomentum(float momentum) {
 
 void Sgd::setUseNesterovMomentum(bool useNesterovMomentum) { this->useNesterovMomentum = useNesterovMomentum; }
 
-float Sgd::getInitialLearningRate() { return initialLearningRate; }
+float Sgd::getInitialLearningRate() const { return initialLearningRate; }
 
-float Sgd::getDecay() { return decay; }
+float Sgd::getDecay() const { return decay; }
 
-float Sgd::getMomentum() { return momentum; }
+float Sgd::getMomentum() const { return momentum; }
 
-bool Sgd::getUseNesterovMomentum() { return useNesterovMomentum; }
+bool Sgd::getUseNesterovMomentum() const { return useNesterovMomentum; }
 
-uint64_t Sgd::getEpoch() { return epoch; }
-
-Optional<Tensor> Sgd::getProjectedWeights() { return projectedWeights; }
-
-Optional<Tensor> Sgd::getProjectedBiases() { return projectedBiases; }
+uint64_t Sgd::getEpoch() const { return currentEpoch; }

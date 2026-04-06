@@ -234,8 +234,9 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
         if (!isInferenceOnly()) {
             assert(optimizer.isPresent());
 
+            // FIXME: Commented while API updates
             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
-            optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+            // optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
 
             // * grad stream is now running to compute weights update
 
@@ -245,10 +246,11 @@ class FullyConnected : public TrainableWeightsBiasesLayer {
             optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
             // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
 
+            // FIXME: Commented while API updates
             // Upon processing the last connection, schedule the update to the weights memory.
-            if (stillWaitingForErrorInputTensors.empty()) {
-                optimizer.get()->updateWeights(weights, biases, batchSize);
-            }
+            // if (stillWaitingForErrorInputTensors.empty()) {
+            //     optimizer.get()->updateWeights(weights, biases, batchSize);
+            // }
 
             // weights will be updated at the current end of the gradientUpdateStream
             // so Forward() must wait until gradientUpdateStream is finished.

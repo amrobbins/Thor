@@ -114,7 +114,7 @@ class StampedEquation {
     Tensor getOutputTensor() const {
         if (outputs.size() != 1)
             throw std::runtime_error("getOutputTensor called but there are " + std::to_string(outputs.size()) +
-                                     "outputs. This function is only valid for single output  equations.");
+                                     "outputs. This function is only valid for single output equations.");
         return outputs[0];
     }
 

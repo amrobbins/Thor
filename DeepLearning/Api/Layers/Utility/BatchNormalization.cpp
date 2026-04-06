@@ -84,7 +84,8 @@ json BatchNormalization::serialize(thor_file::TarWriter &archiveWriter,
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, batchNorm->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
+        j["optimizer"] = optimizer->serialize(
+            archiveWriter, stream, batchNorm->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
     }
 
     return j;
@@ -207,55 +208,55 @@ vector<Event> BatchNormalization::initialize(shared_ptr<ThorImplementation::Trai
 
         physicalBatchNorm->setCurrentExponentialRunningAverageFactor(exponentialRunningAverageFactor);
     } else {
-        // 3. Run an initializer to set the weights - on an untrained network
-        Optional<Event> initDoneEvent;
-
-        UniformRandom::Builder onesInitializerBuilder = UniformRandom::Builder().minValue(1.0).maxValue(1.0);
-
-        shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
-        shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
-        initDoneEvent = weightsInitializer->initialize(physicalBatchNorm->getWeights(), physicalBatchNorm.get());
-        if (initDoneEvent.isPresent())
-            initDoneEvents.push_back(initDoneEvent);
-
-        shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
-        shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
-        initDoneEvent =
-            resultRunningVarianceInitializer->initialize(physicalBatchNorm->getResultRunningVariance(), physicalBatchNorm.get());
-        if (initDoneEvent.isPresent())
-            initDoneEvents.push_back(initDoneEvent);
-
-        UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
-
-        assert(physicalBatchNorm->getBiases().isPresent());
-        shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
-        shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
-        initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getBiases(), physicalBatchNorm.get());
-        if (initDoneEvent.isPresent())
-            initDoneEvents.push_back(initDoneEvent);
-
-        shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
-        shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
-        initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getResultRunningMean(), physicalBatchNorm.get());
-        if (initDoneEvent.isPresent())
-            initDoneEvents.push_back(initDoneEvent);
-
-        // Start with the actual average until there are enough elements observed so that the running average
-        // is a larger divisor than the actual.
-        physicalBatchNorm->setCurrentExponentialRunningAverageFactor(1.0);
-
-        if (hasOptimizer()) {
-            // Initialize the optimizer - it will follow the same process as above.
-            shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalBatchNorm->getOptimizer();
-            shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
-                sisterPhysicalBatchNorm ? sisterPhysicalBatchNorm->getOptimizer() : nullptr;
-
-            vector<Event> optimizerInitDoneEvents =
-                optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
-            for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
-                initDoneEvents.push_back(optimizerInitDoneEvents[i]);
-        }
+        // FIXME: This needs to be updated to use Parameter's. It needs be moved to API Thor::TrainableLayer
+        // // 3. Run an initializer to set the weights - on an untrained network
+        // Optional<Event> initDoneEvent;
+        //
+        // UniformRandom::Builder onesInitializerBuilder = UniformRandom::Builder().minValue(1.0).maxValue(1.0);
+        //
+        // shared_ptr<Initializer::Builder> weightsInitializerBuilder = onesInitializerBuilder.clone();
+        // shared_ptr<Initializer> weightsInitializer = weightsInitializerBuilder->build();
+        // initDoneEvent = weightsInitializer->initialize(physicalBatchNorm->getWeights(), physicalBatchNorm.get());
+        // if (initDoneEvent.isPresent())
+        //     initDoneEvents.push_back(initDoneEvent);
+        //
+        // shared_ptr<Initializer::Builder> resultRunningVarianceBuilder = onesInitializerBuilder.clone();
+        // shared_ptr<Initializer> resultRunningVarianceInitializer = resultRunningVarianceBuilder->build();
+        // initDoneEvent =
+        //     resultRunningVarianceInitializer->initialize(physicalBatchNorm->getResultRunningVariance(), physicalBatchNorm.get());
+        // if (initDoneEvent.isPresent())
+        //     initDoneEvents.push_back(initDoneEvent);
+        //
+        // UniformRandom::Builder zerosInitializerBuilder = UniformRandom::Builder().minValue(0.0).maxValue(0.0);
+        //
+        // assert(physicalBatchNorm->getBiases().isPresent());
+        // shared_ptr<Initializer::Builder> biasInitializerBuilder = zerosInitializerBuilder.clone();
+        // shared_ptr<Initializer> biasInitializer = biasInitializerBuilder->build();
+        // initDoneEvent = biasInitializer->initialize(physicalBatchNorm->getBiases(), physicalBatchNorm.get());
+        // if (initDoneEvent.isPresent())
+        //     initDoneEvents.push_back(initDoneEvent);
+        //
+        // shared_ptr<Initializer::Builder> resultRunningMeanBuilder = zerosInitializerBuilder.clone();
+        // shared_ptr<Initializer> resultRunningMeanInitializer = resultRunningMeanBuilder->build();
+        // initDoneEvent = resultRunningMeanInitializer->initialize(physicalBatchNorm->getResultRunningMean(), physicalBatchNorm.get());
+        // if (initDoneEvent.isPresent())
+        //     initDoneEvents.push_back(initDoneEvent);
+        //
+        // // Start with the actual average until there are enough elements observed so that the running average
+        // // is a larger divisor than the actual.
+        // physicalBatchNorm->setCurrentExponentialRunningAverageFactor(1.0);
     }
+    // if (hasOptimizer()) {
+    //     // Initialize the optimizer - it will follow the same process as above.
+    //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalBatchNorm->getOptimizer();
+    //     shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+    //         sisterPhysicalBatchNorm ? sisterPhysicalBatchNorm->getOptimizer() : nullptr;
+    //
+    //     vector<Event> optimizerInitDoneEvents =
+    //         optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+    //     for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+    //         initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+    // }
 
     return initDoneEvents;
 }
