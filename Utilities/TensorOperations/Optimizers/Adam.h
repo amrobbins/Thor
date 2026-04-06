@@ -19,4 +19,5 @@ void launchAdamStep(T *weightUpdate_d,
                     float beta2,
                     float epsilon,
                     uint32_t length,
+                    float inverseBatchSizeTimesInverseLossScale,
                     Stream stream);

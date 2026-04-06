@@ -12,6 +12,6 @@ void bind_optimizers(nb::module_ &optimizers) {
     auto optimizer = nb::class_<Thor::Optimizer>(optimizers, "Optimizer");
     optimizer.attr("__module__") = "thor.optimizers";
 
-    bind_sgd(optimizers);
-    bind_adam(optimizers);
+    // bind_sgd(optimizers);
+    // bind_adam(optimizers);
 }

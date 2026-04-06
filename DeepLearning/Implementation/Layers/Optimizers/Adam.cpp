@@ -1,150 +1,190 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Adam.h"
+#include "Utilities/TensorMathFusion/Expression.h"
+#include "Utilities/TensorMathFusion/FusedEquation.h"
 
-using namespace ThorImplementation;
 using namespace std;
 
-Adam::Adam(uint64_t id, std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer, float alpha, float beta1, float beta2, float epsilon)
-    : Optimizer(id) {
-    this->alpha = alpha;
-    this->beta1 = beta1;
-    this->beta2 = beta2;
-    this->epsilon = epsilon;
-    this->t = 0.0f;
+namespace ThorImplementation {
 
-    this->trainableLayer = trainableLayer;
+Adam::Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon)
+    : Optimizer(id), alpha(alpha), beta1(beta1), beta2(beta2), epsilon(epsilon), t(0) {}
+
+DynamicExpression Adam::buildExpression() {
+    return DynamicExpression([this](const DynamicExpression::TensorMap &inputs, Stream &stream) -> StampedExecutionPlan {
+        const Tensor &wTensor = inputs.at("w");
+        const Tensor &gTensor = inputs.at("g");
+
+        const DataType weightsDType = wTensor.getDescriptor().getDataType();
+        const int32_t gpuNum = wTensor.getPlacement().getDeviceNum();
+
+        auto alphaT = Expression::runtimeScalar("alphaT", DataType::FP32, DataType::FP32);
+        auto invBatchLossScale = Expression::runtimeScalar("invBatchLossScale", DataType::FP32, DataType::FP32);
+
+        auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+        auto g = Expression::input("gradient", DataType::FP32, DataType::FP32) * invBatchLossScale;
+        auto m = Expression::input("m_in", DataType::FP32, DataType::FP32);
+        auto v = Expression::input("v_in", DataType::FP32, DataType::FP32);
+
+        unordered_map<string, Tensor> stampInputs;
+        unordered_map<string, Tensor> stampOutputs;
+        stampInputs["weights_in"] = wTensor;
+        stampInputs["gradient"] = gTensor;
+        stampOutputs["weights"] = wTensor;
+
+        // Allocate Adam state once, same shape/device as weights, moments always fp32.
+        if (mBuffer.isEmpty()) {
+            mBuffer = wTensor.clone(DataType::FP32);
+            mBuffer.get().memsetAsync(stream, 0);
+        }
+        if (vBuffer.isEmpty()) {
+            vBuffer = wTensor.clone(DataType::FP32);
+            vBuffer.get().memsetAsync(stream, 0);
+        }
+
+        stampInputs["m_in"] = mBuffer;
+        stampInputs["v_in"] = vBuffer;
+        stampOutputs["m"] = mBuffer;
+        stampOutputs["v"] = vBuffer;
+
+        // Regular Adam:
+        // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t
+        // v_{t+1} = beta2 * v_t + (1 - beta2) * g_t^2
+        // w_{t+1} = w_t - alphaT * m_{t+1} / (sqrt(v_{t+1}) + epsilon)
+        //
+        // alphaT is the bias-corrected learning rate computed on CPU and passed
+        // in as a runtime scalar.
+        Expression beta1Expr = Expression::constantScalar(beta1);
+        Expression beta2Expr = Expression::constantScalar(beta2);
+        Expression oneMinusBeta1Expr = Expression::constantScalar(1.0 - beta1);
+        Expression oneMinusBeta2Expr = Expression::constantScalar(1.0 - beta2);
+        Expression epsilonExpr = Expression::constantScalar(epsilon);
+
+        Expression mNext = beta1Expr * m + oneMinusBeta1Expr * g;
+        Expression vNext = beta2Expr * v + oneMinusBeta2Expr * g * g;
+        Expression wNext = (w - alphaT * mNext / (Expression::sqrt(vNext) + epsilonExpr)).withOutputDType(weightsDType);
+
+        auto outs = Expression::outputs({
+            {"weights", wNext},
+            {"m", mNext},
+            {"v", vNext},
+        });
+
+        FusedEquation adamUpdateEquation = FusedEquation::compile(outs.physicalOutputs(), gpuNum);
+        return adamUpdateEquation.stamp(stampInputs, stream, {}, stampOutputs);
+    });
 }
 
-void Adam::compile() {
+void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     assert(!compiled);
+    assert(gradientUpdateStream.isInitialized());
+    assert(weights.isInitialized());
+    assert(weights.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-    TensorPlacement layerPlacement = trainableLayer->getPlacement();
-    assert(layerPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    gpuNum = layerPlacement.getDeviceNum();
-    gradientUpdateStream = Stream::getNextGradientUpdateStream(gpuNum);
+    this->gradientUpdateStream = gradientUpdateStream;
+    this->weights = weights;
+    this->weightsGradient = weights.clone();
 
-    // FIXME: Trainable layer is not guaranteed to be available
-    // Allocate all params
-    Tensor weights = trainableLayer->getWeights();
-    weightsGradient = weights.clone();
-    Optional<Tensor> biases = trainableLayer->getBiases();
-    if (biases.isPresent())
-        biasesGradient = biases.get().clone();
+    // DynamicExpression::TensorMap inputTensors;
+    // inputTensors["w"] = weights;
+    // inputTensors["g"] = weightsGradient;
+    // DynamicExpression weightsUpdateExpression = buildExpression();
+    // updateEquationStamped = make_unique<StampedExecutionPlan>(weightsUpdateExpression.stamp(inputTensors, gradientUpdateStream));
 
-    weightsUpdate = weightsGradient.clone();
-    if (biasesGradient.isPresent())
-        biasesUpdate = biasesGradient.get().clone();
-    else
-        biasesUpdate = Optional<Tensor>::empty();
-    weightsUpdateDataType = weights.getDataType();
+    const DataType weightsDType = weights.getDescriptor().getDataType();
+    const int32_t gpuNum = weights.getPlacement().getDeviceNum();
 
-    m = weightsGradient.clone(TensorDescriptor::DataType::FP32);
-    v = weightsGradient.clone(TensorDescriptor::DataType::FP32);
-    if (biasesGradient.isPresent()) {
-        mBias = biasesGradient.get().clone(TensorDescriptor::DataType::FP32);
-        vBias = biasesGradient.get().clone(TensorDescriptor::DataType::FP32);
+    auto alphaT = Expression::runtimeScalar("alphaT", DataType::FP32, DataType::FP32);
+    auto invBatchLossScale = Expression::runtimeScalar("invBatchLossScale", DataType::FP32, DataType::FP32);
+
+    auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+    auto g = Expression::input("gradient", DataType::FP32, DataType::FP32) * invBatchLossScale;
+    auto m = Expression::input("m_in", DataType::FP32, DataType::FP32);
+    auto v = Expression::input("v_in", DataType::FP32, DataType::FP32);
+
+    unordered_map<string, Tensor> stampInputs;
+    unordered_map<string, Tensor> stampOutputs;
+    stampInputs["weights_in"] = weights;
+    stampInputs["gradient"] = weightsGradient;
+    stampOutputs["weights"] = weights;
+
+    // Allocate Adam state once, same shape/device as weights, moments always fp32.
+    if (mBuffer.isEmpty()) {
+        mBuffer = weights.clone(DataType::FP32);
+        mBuffer.get().memsetAsync(gradientUpdateStream, 0);
+    }
+    if (vBuffer.isEmpty()) {
+        vBuffer = weights.clone(DataType::FP32);
+        vBuffer.get().memsetAsync(gradientUpdateStream, 0);
     }
 
-    // The minimum strictly positive (subnormal) value of fp16 is 2^−24 ≈ 5.96 × 10^−8
-    // So the default value of epsilon (which prevents divide by zero) is set to no less than this when epsilon is FP16.
-    // https://en.wikipedia.org/wiki/Half-precision_floating-point_format
-    if (weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 && epsilon < MIN_FP16_EPSILON)
-        epsilon = MIN_FP16_EPSILON;
+    stampInputs["m_in"] = mBuffer;
+    stampInputs["v_in"] = vBuffer;
+    stampOutputs["m"] = mBuffer;
+    stampOutputs["v"] = vBuffer;
 
-    assert(weightsGradient.getDataType() == TensorDescriptor::DataType::FP16 ||
-           weightsGradient.getDataType() == TensorDescriptor::DataType::FP32);
+    // Regular Adam:
+    // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t
+    // v_{t+1} = beta2 * v_t + (1 - beta2) * g_t^2
+    // w_{t+1} = w_t - alphaT * m_{t+1} / (sqrt(v_{t+1}) + epsilon)
+    //
+    // alphaT is the bias-corrected learning rate computed on CPU and passed
+    // in as a runtime scalar.
+    Expression beta1Expr = Expression::constantScalar(beta1);
+    Expression beta2Expr = Expression::constantScalar(beta2);
+    Expression oneMinusBeta1Expr = Expression::constantScalar(1.0 - beta1);
+    Expression oneMinusBeta2Expr = Expression::constantScalar(1.0 - beta2);
+    Expression epsilonExpr = Expression::constantScalar(epsilon);
+
+    Expression mNext = beta1Expr * m + oneMinusBeta1Expr * g;
+    Expression vNext = beta2Expr * v + oneMinusBeta2Expr * g * g;
+    Expression wNext = (w - alphaT * mNext / (Expression::sqrt(vNext) + epsilonExpr)).withOutputDType(weightsDType);
+
+    auto outs = Expression::outputs({
+        {"weights", wNext},
+        {"m", mNext},
+        {"v", vNext},
+    });
+
+    FusedEquation adamUpdateEquation = FusedEquation::compile(outs.physicalOutputs(), gpuNum);
+    updateEquationStamped =
+        make_unique<StampedExecutionPlan>(adamUpdateEquation.stamp(stampInputs, gradientUpdateStream, {}, stampOutputs));
 
     compiled = true;
 }
 
-// This version takes in the pre-computed gradient directly, which is ready by the end of weightsGradientReadyStream.
-void Adam::computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues) {
-    // Lazy compile on first use
-    if (!compiled)
-        compile();
+void Adam::updateWeights(uint32_t batchSize) {
     assert(compiled);
+    assert(weightsGradient.isPresent());
+    assert(weightsGradient.get().isInitialized());
+    assert(weightsGradient.get().getPlacement() == weights.getPlacement());
+    assert(updateEquationStamped != nullptr);
 
-    if (gradientUpdateStream != weightsGradientReadyStream)
-        gradientUpdateStream.waitEvent(weightsGradientReadyStream.putEvent());
+    assert(batchSize > 0);
+    const float lossScalingFactor = Loss::getLossScalingFactor();
+    assert(lossScalingFactor > 0);
 
-    stepFromPrecomputedGradient(accumulateValues);
+    t += 1;
+    double alphaT64 = static_cast<double>(alpha) * std::sqrt(1.0 - std::pow(static_cast<double>(beta2), t)) /
+                      (1.0 - std::pow(static_cast<double>(beta1), t));
+    auto alphaT = static_cast<float>(alphaT64);
+    float invBatchLossScale = 1.0f / (static_cast<float>(batchSize) * lossScalingFactor);
+
+    updateEquationStamped->run({
+        {"alphaT", alphaT},
+        {"invBatchLossScale", invBatchLossScale},
+    });
 }
 
-void Adam::stepFromPrecomputedGradient(bool accumulateValues) {
-    // Only increment t when receiving the first errorInput, because when there are multiple stamps of a layer there will be
-    // multiple error inputs
-    if (!accumulateValues)
-        t += 1;
-    if (weightsUpdateDataType.get() == TensorDescriptor::DataType::FP16) {
-        launchAdamStep<half>(weightsUpdate.getMemPtr<half>(),
-                             weightsGradient.getMemPtr<half>(),
-                             m.getMemPtr<float>(),
-                             v.getMemPtr<float>(),
-                             t,
-                             alpha,
-                             beta1,
-                             beta2,
-                             epsilon,
-                             weightsGradient.getTotalNumElements(),
-                             gradientUpdateStream);
-        if (biasesGradient.isPresent()) {
-            assert(biasesUpdate.isPresent());
-            launchAdamStep<half>(biasesUpdate.get().getMemPtr<half>(),
-                                 biasesGradient.get().getMemPtr<half>(),
-                                 mBias.get().getMemPtr<float>(),
-                                 vBias.get().getMemPtr<float>(),
-                                 t,
-                                 alpha,
-                                 beta1,
-                                 beta2,
-                                 epsilon,
-                                 biasesGradient.get().getTotalNumElements(),
-                                 gradientUpdateStream);
-        }
-    } else if (weightsUpdateDataType.get() == TensorDescriptor::DataType::FP32) {
-        launchAdamStep<float>(weightsUpdate.getMemPtr<float>(),
-                              weightsGradient.getMemPtr<float>(),
-                              m.getMemPtr<float>(),
-                              v.getMemPtr<float>(),
-                              t,
-                              alpha,
-                              beta1,
-                              beta2,
-                              epsilon,
-                              weightsGradient.getTotalNumElements(),
-                              gradientUpdateStream);
-        if (biasesGradient.isPresent()) {
-            assert(biasesUpdate.isPresent());
-            launchAdamStep<float>(biasesUpdate.get().getMemPtr<float>(),
-                                  biasesGradient.get().getMemPtr<float>(),
-                                  mBias.get().getMemPtr<float>(),
-                                  vBias.get().getMemPtr<float>(),
-                                  t,
-                                  alpha,
-                                  beta1,
-                                  beta2,
-                                  epsilon,
-                                  biasesGradient.get().getTotalNumElements(),
-                                  gradientUpdateStream);
-        }
-    } else {
-        assert(false);
-    }
-}
-
-float Adam::getT() { return t; }
-float Adam::getAlpha() { return alpha; }
-float Adam::getBeta1() { return beta1; }
-float Adam::getBeta2() { return beta2; }
-float Adam::getEpsilon() { return epsilon; }
+float Adam::getT() const { return t; }
+float Adam::getAlpha() const { return alpha; }
+float Adam::getBeta1() const { return beta1; }
+float Adam::getBeta2() const { return beta2; }
+float Adam::getEpsilon() const { return epsilon; }
 
 void Adam::setT(float t) { this->t = t; }
-
 void Adam::setAlpha(float alpha) { this->alpha = alpha; }
-
 void Adam::setBeta1(float beta1) { this->beta1 = beta1; }
-
 void Adam::setBeta2(float beta2) { this->beta2 = beta2; }
-
 void Adam::setEpsilon(float epsilon) { this->epsilon = epsilon; }
 
 unordered_map<std::string, float> Adam::updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) {
@@ -153,74 +193,6 @@ unordered_map<std::string, float> Adam::updateHyperParameters(uint64_t epoch, ui
     unordered_map<string, float> hyperParameters;
     hyperParameters["t"] = t;
     return hyperParameters;
-}
-
-void Adam::dumpMToFile(std::string filename, Optional<Stream> stream) {
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (m.getAttachedFilename() != filename)
-        m.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
-    m.dumpToFile(stream);
-}
-
-void Adam::dumpVToFile(std::string filename, Optional<Stream> stream) {
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (v.getAttachedFilename() != filename)
-        v.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
-    v.dumpToFile(stream);
-}
-
-void Adam::dumpMBiasToFile(std::string filename, Optional<Stream> stream) {
-    assert(mBias.isPresent());
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (mBias.get().getAttachedFilename() != filename)
-        mBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
-    mBias.get().dumpToFile(stream);
-}
-
-void Adam::dumpVBiasToFile(std::string filename, Optional<Stream> stream) {
-    assert(vBias.isPresent());
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (vBias.get().getAttachedFilename() != filename)
-        vBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, true);
-    vBias.get().dumpToFile(stream);
-}
-
-void Adam::loadMFromFile(std::string filename, Optional<Stream> stream) {
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (m.getAttachedFilename() != filename)
-        m.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
-    m.loadFromFile(stream);
-}
-
-void Adam::loadVFromFile(std::string filename, Optional<Stream> stream) {
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (v.getAttachedFilename() != filename)
-        v.attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
-    v.loadFromFile(stream);
-}
-
-void Adam::loadMBiasFromFile(std::string filename, Optional<Stream> stream) {
-    assert(mBias.isPresent());
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (mBias.get().getAttachedFilename() != filename)
-        mBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
-    mBias.get().loadFromFile(stream);
-}
-
-void Adam::loadVBiasFromFile(std::string filename, Optional<Stream> stream) {
-    assert(vBias.isPresent());
-    if (stream.isEmpty())
-        stream = getGradientUpdateStream();
-    if (vBias.get().getAttachedFilename() != filename)
-        vBias.get().attachFile(filename, 0, Tensor::FileAccess::READ_WRITE, false);
-    vBias.get().loadFromFile(stream);
 }
 
 unordered_map<std::string, float> Adam::getAllHyperParameters() {
@@ -233,7 +205,4 @@ unordered_map<std::string, float> Adam::getAllHyperParameters() {
     return hyperParameters;
 }
 
-Tensor Adam::getM() { return m; }
-Tensor Adam::getV() { return v; }
-Optional<Tensor> Adam::getMBias() { return mBias; }
-Optional<Tensor> Adam::getVBias() { return vBias; }
+}  // namespace ThorImplementation

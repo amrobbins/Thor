@@ -12,12 +12,12 @@ class UniformRandom : public Initializer {
    public:
     class Builder;
 
-    UniformRandom(double minValue, double maxValue) : minValue(minValue), maxValue(maxValue) { initialized = true; }
+    UniformRandom(float minValue, float maxValue) : minValue(minValue), maxValue(maxValue) { initialized = true; }
 
     virtual ~UniformRandom() = default;
 
-    virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) {
-        layerThatOwnsTensor->setInitializer(tensorToInitialize, ThorImplementation::UniformRandom(maxValue, minValue).clone());
+    std::shared_ptr<ThorImplementation::Initializer> stamp() override {
+        return ThorImplementation::UniformRandom(maxValue, minValue).clone();
     }
 
     virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<UniformRandom>(*this); }
@@ -25,12 +25,12 @@ class UniformRandom : public Initializer {
     virtual nlohmann::json architectureJson() const;
     static std::shared_ptr<Initializer> deserialize(const nlohmann::json &j);
 
-    double getMinValue() const { return minValue; }
-    double getMaxValue() const { return maxValue; }
+    float getMinValue() const { return minValue; }
+    float getMaxValue() const { return maxValue; }
 
    protected:
-    const double minValue;
-    const double maxValue;
+    const float minValue;
+    const float maxValue;
 };
 
 class UniformRandom::Builder : public Initializer::Builder {
@@ -46,13 +46,13 @@ class UniformRandom::Builder : public Initializer::Builder {
         return uniformRandomInitializer.clone();
     }
 
-    virtual UniformRandom::Builder &minValue(double _minValue) {
+    virtual UniformRandom::Builder &minValue(float _minValue) {
         assert(!this->_minValue.isPresent());
         this->_minValue = _minValue;
         return *this;
     }
 
-    virtual UniformRandom::Builder &maxValue(double _maxValue) {
+    virtual UniformRandom::Builder &maxValue(float _maxValue) {
         assert(!this->_maxValue.isPresent());
         this->_maxValue = _maxValue;
         return *this;
@@ -61,8 +61,8 @@ class UniformRandom::Builder : public Initializer::Builder {
     virtual std::shared_ptr<Initializer::Builder> clone() { return std::make_shared<UniformRandom::Builder>(*this); }
 
    protected:
-    Optional<double> _minValue;
-    Optional<double> _maxValue;
+    Optional<float> _minValue;
+    Optional<float> _maxValue;
 };
 
 }  // namespace Thor

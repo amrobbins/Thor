@@ -194,6 +194,13 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
         if (!isInferenceOnly()) {
             assert(!featureInputs.empty());
         }
+
+        if (weightsInitializer != nullptr) {
+            weightsInitializer->compile(weights, Optional<Stream>::empty(), getFanIn(), getFanOut());
+        }
+        if (biasesInitializer != nullptr) {
+            weightsInitializer->compile(biases, Optional<Stream>::empty(), getFanIn(), getFanOut());
+        }
     }
 
     // errorInput must be ready on data stream when calling computeWeightsGradient
@@ -308,9 +315,9 @@ class TrainableWeightsBiasesLayer : public MultiConnectionLayer {
 
     virtual Event initializeTensor(Tensor target) {
         if (target == weights)
-            return weightsInitializer->initialize(this, weights);
+            return weightsInitializer->initialize();
         else if (hasBias && target == biases.get())
-            return biasesInitializer->initialize(this, biases.get());
+            return biasesInitializer->initialize();
         else
             assert(false);
     }

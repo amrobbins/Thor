@@ -9,8 +9,8 @@ using json = nlohmann::json;
 TEST(Initializers, UniformRandomBuilds) {
     srand(time(nullptr));
 
-    double minValue = 1.0 / double(1 + (rand() % 1000));
-    double maxValue = 3 + (1.0 / double(1 + (rand() % 1000)));
+    float minValue = 1.0f / float(1 + (rand() % 1000));
+    float maxValue = 3.0f + (1.0f / float(1 + (rand() % 1000)));
 
     shared_ptr<Initializer> initializer = UniformRandom::Builder().minValue(minValue).maxValue(maxValue).build();
 
@@ -31,8 +31,8 @@ TEST(Initializers, UniformRandomBuilds) {
 TEST(Initializers, UniformRandomSerializeDeserialize) {
     srand(time(nullptr));
 
-    double minValue = 1.0 / double(1 + (rand() % 1000));
-    double maxValue = 3 + (1.0 / double(1 + (rand() % 1000)));
+    float minValue = 1.0f / float(1 + (rand() % 1000));
+    float maxValue = 3.0f + (1.0f / float(1 + (rand() % 1000)));
 
     shared_ptr<Initializer> uniformRandom = UniformRandom::Builder().minValue(minValue).maxValue(maxValue).build();
 
@@ -44,8 +44,8 @@ TEST(Initializers, UniformRandomSerializeDeserialize) {
 
     ASSERT_EQ(uniformRandomJ.at("initializer_type").get<string>(), "uniform_random");
     ASSERT_EQ(uniformRandomJ.at("version").get<string>(), uniformRandom->getVersion());
-    ASSERT_EQ(uniformRandomJ.at("min_value").get<double>(), minValue);
-    ASSERT_EQ(uniformRandomJ.at("max_value").get<double>(), maxValue);
+    ASSERT_EQ(uniformRandomJ.at("min_value").get<float>(), minValue);
+    ASSERT_EQ(uniformRandomJ.at("max_value").get<float>(), maxValue);
 
     shared_ptr<Initializer> initializerDeserialized = Initializer::deserialize(uniformRandomJ);
     ASSERT_TRUE(initializerDeserialized->isInitialized());

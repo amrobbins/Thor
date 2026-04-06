@@ -210,8 +210,9 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
                 throw std::runtime_error("Convolution2d: compiled but optimizer is not present, and not in inference only mode.");
             }
 
+            // FIXME: Commented while API updates
             // backward() syncs gradient stream with data stream prior to calling this to ensure error in is ready at end of gradient stream
-            optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
+            // optimizer.get()->computeWeightsUpdate(dataIn, errorIn, accumulateGradient);
 
             // weights update cannot be applied to weights until errorOut has been computed since weights are part of that computation
             // so to enforce this gradientUpdateStream says that gradient is not ready to be applied until both errorOut and gradient are
@@ -219,10 +220,11 @@ class Convolution2d : public TrainableWeightsBiasesLayer {
             optimizer.get()->getGradientUpdateStream().waitEvent(dataStream.putEvent());
             // Now at the end of gradientUpdateStream errorOut and gradients are ready from the updates for this connection.
 
+            // FIXME: Commented while API updates
             // Upon processing the last connection, schedule the upate to the weights memory.
-            if (stillWaitingForErrorInputTensors.empty()) {
-                optimizer.get()->updateWeights(weights, biases, batchSize);
-            }
+            // if (stillWaitingForErrorInputTensors.empty()) {
+            //     optimizer.get()->updateWeights(weights, biases, batchSize);
+            // }
 
             // weights will be updated at the current end of the gradientUpdateStream
             // so Forward() must wait until gradientUpdateStream is finished.

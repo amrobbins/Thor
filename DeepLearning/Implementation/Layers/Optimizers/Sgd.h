@@ -2,52 +2,31 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
-#include "DeepLearning/Implementation/Layers/TrainableWeightsBiasesLayer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
-#include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/TensorOperations/DeepLearning/Add1dBias.h"
-#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 namespace ThorImplementation {
 
-class Sgd : public Optimizer {
+class Sgd final : public Optimizer {
    public:
-    Sgd(uint64_t id,
-        std::shared_ptr<TrainableWeightsBiasesLayer> trainableLayer,
-        float initialLearningRate,
-        float decay,
-        float momentum,
-        bool useNesterovMomentum,
-        uint64_t startResumeEpoch = 0);
+    Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bool useNesterovMomentum, uint64_t startResumeEpoch = 0);
 
-    using Optimizer::computeWeightsUpdate;
-    virtual void computeWeightsUpdate(Tensor weightsGradient, Stream weightsGradientReadyStream, bool accumulateValues);
-    virtual void updateWeights(Tensor weights, Optional<Tensor> biases, uint32_t batch_size);
+    void compile(const Tensor &weights, Stream &gradientUpdateStream) override;
+    void updateWeights(uint32_t batchSize) override;
 
-    virtual std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch);
-    virtual std::unordered_map<std::string, float> getAllHyperParameters();
-    virtual void setInitialLearningRate(float initaialLearningRate);
-    virtual void setDecay(float decay);
-    virtual void setMomentum(float momentum);
-    virtual void setUseNesterovMomentum(bool useNesterovMomentum);
+    std::unordered_map<std::string, float> updateHyperParameters(uint64_t epoch, uint64_t batch, uint64_t batchesPerEpoch) override;
+    std::unordered_map<std::string, float> getAllHyperParameters() override;
+    void setInitialLearningRate(float initaialLearningRate);
+    void setDecay(float decay);
+    void setMomentum(float momentum);
+    void setUseNesterovMomentum(bool useNesterovMomentum);
 
-    virtual float getInitialLearningRate();
-    virtual float getDecay();
-    virtual float getMomentum();
-    virtual bool getUseNesterovMomentum();
-    virtual uint64_t getEpoch();
-
-    Optional<Tensor> getProjectedWeights();
-    Optional<Tensor> getProjectedBiases();
-
-    virtual std::vector<Event> initialize(bool isFirstStamp,
-                                          std::shared_ptr<Optimizer> sisterOptimizer,
-                                          Optional<Event> sisterOptimizerLoadedEvent) {
-        return {};
-    }
-
-    virtual void compile();
+    float getInitialLearningRate() const;
+    float getDecay() const;
+    float getMomentum() const;
+    bool getUseNesterovMomentum() const;
+    uint64_t getEpoch() const;
 
    protected:
     float initialLearningRate;
@@ -55,17 +34,13 @@ class Sgd : public Optimizer {
     float momentum;
     bool useNesterovMomentum;
 
+    uint64_t currentEpoch = UINT64_MAX;
+    uint64_t currentBatch;
     float currentLearningRate;
 
-    uint32_t epoch;
+    Optional<Tensor> momentumBuffer;
 
-    uint32_t gpuNum;
-
-    uint32_t numInputFeatures;
-    uint32_t numOutputputFeatures;
-
-    Optional<Tensor> projectedWeights;
-    Optional<Tensor> projectedBiases;
+    DynamicExpression buildExpression() override;
 };
 
 }  // namespace ThorImplementation

@@ -167,7 +167,8 @@ json Convolution2d::serialize(thor_file::TarWriter &archiveWriter,
     }
 
     if (hasOptimizer()) {
-        j["optimizer"] = optimizer->serialize(archiveWriter, stream, twbLayer->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
+        j["optimizer"] =
+            optimizer->serialize(archiveWriter, stream, twbLayer->getOptimizer(), string("layer") + to_string(getId()), saveOptimizerState);
     }
 
     return j;
@@ -289,48 +290,49 @@ vector<Event> Convolution2d::initialize(shared_ptr<ThorImplementation::Trainable
         weightsFile = Optional<string>::empty();
         biasesFile = Optional<string>::empty();
     } else {
-        // 3. Run an initializer to set the weights - on an untrained network
-        assert(weightsInitializer != nullptr);
-        if (hasBias)
-            assert(biasInitializer != nullptr);
-
-        Optional<Event> initDoneEvent;
-
-        initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
-        if (initDoneEvent.isPresent())
-            initDoneEvents.push_back(initDoneEvent);
-
-        if (physicalLayer->getBiases().isPresent()) {
-            initDoneEvent = biasInitializer->initialize(physicalLayer->getBiases().get(), physicalLayer.get());
-            if (initDoneEvent.isPresent())
-                initDoneEvents.push_back(initDoneEvent);
-        }
+        // FIXME: This needs to be updated to use Parameter's. It should be moved to API Thor::TrainableLayer
+        //     // 3. Run an initializer to set the weights - on an untrained network
+        //     assert(weightsInitializer != nullptr);
+        //     if (hasBias)
+        //         assert(biasInitializer != nullptr);
+        //
+        //     Optional<Event> initDoneEvent;
+        //
+        //     initDoneEvent = weightsInitializer->initialize(physicalLayer->getWeights(), physicalLayer.get());
+        //     if (initDoneEvent.isPresent())
+        //         initDoneEvents.push_back(initDoneEvent);
+        //
+        //     if (physicalLayer->getBiases().isPresent()) {
+        //         initDoneEvent = biasInitializer->initialize(physicalLayer->getBiases().get(), physicalLayer.get());
+        //         if (initDoneEvent.isPresent())
+        //             initDoneEvents.push_back(initDoneEvent);
+        //     }
     }
 
-    if (physicalLayer->hasOptimizer()) {
-        // Initialize the optimizer - it will follow the same process as above.
-        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
-        shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
-            sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
-        assert(optimizer != nullptr);
-
-        vector<Event> optimizerInitDoneEvents =
-            optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
-        for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
-            initDoneEvents.push_back(optimizerInitDoneEvents[i]);
-    }
-
-    if (hasOptimizer()) {
-        // Initialize the optimizer - it will follow the same process as above.
-        shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
-        shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
-            sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
-
-        vector<Event> optimizerInitDoneEvents =
-            optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
-        for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
-            initDoneEvents.push_back(optimizerInitDoneEvents[i]);
-    }
+    // if (physicalLayer->hasOptimizer()) {
+    //     // Initialize the optimizer - it will follow the same process as above.
+    //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+    //     shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+    //         sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+    //     assert(optimizer != nullptr);
+    //
+    //     vector<Event> optimizerInitDoneEvents =
+    //         optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+    //     for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+    //         initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+    // }
+    //
+    // if (hasOptimizer()) {
+    //     // Initialize the optimizer - it will follow the same process as above.
+    //     shared_ptr<ThorImplementation::Optimizer> physicalOptimizer = physicalLayer->getOptimizer();
+    //     shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer =
+    //         sisterPhysicalLayer ? sisterPhysicalLayer->getOptimizer() : nullptr;
+    //
+    //     vector<Event> optimizerInitDoneEvents =
+    //         optimizer->initialize(physicalOptimizer, isFirstStamp, physicalSisterOptimizer, sisterPhysicalLayerLoadedEvent);
+    //     for (uint32_t i = 0; i < optimizerInitDoneEvents.size(); ++i)
+    //         initDoneEvents.push_back(optimizerInitDoneEvents[i]);
+    // }
 
     return initDoneEvents;
 }

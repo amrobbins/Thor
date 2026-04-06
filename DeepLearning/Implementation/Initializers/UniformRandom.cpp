@@ -4,32 +4,32 @@ using namespace std;
 
 namespace ThorImplementation {
 
-UniformRandom::UniformRandom(double maxValue, double minValue) : maxValue(maxValue), minValue(minValue) {
+UniformRandom::UniformRandom(float maxValue, float minValue) : maxValue(maxValue), minValue(minValue) {
     assert(isfinite(maxValue));
     assert(isfinite(minValue));
     assert(maxValue >= minValue);
 }
 
-Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize) { return Initializer::initialize(layer, tensorToInitialize); }
+Event UniformRandom::initialize() {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    const uint32_t weightsGpuNum = weights.getPlacement().getDeviceNum();
+    Stream initStream = stream.isPresent() ? stream.get() : Stream::getNextGradientUpdateStream(weightsGpuNum);
+    Tensor buffer = weights.clone(cpuPlacement);
 
-Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<Stream> streams) {
     bool constant = minValue == maxValue;
     if (constant) {
-        tensorToInitialize.fill(minValue, streams[0]);
-        return streams[0].putEvent();
+        weights.fill(minValue, initStream);
+        return initStream.putEvent();
     }
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Tensor buffer = tensorToInitialize.clone(cpuPlacement);
-    uint64_t totalNumWeights = tensorToInitialize.getDescriptor().getTotalNumElements();
-    int numProcessors = omp_get_num_procs();
+ uint64_t totalNumWeights = weights.getDescriptor().getTotalNumElements();
+    uint64_t numProcessors = omp_get_num_procs();
     if (numProcessors > 1)
         numProcessors -= 1;
-    int maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
+    uint64_t maxDesiredProcessors = (totalNumWeights + 99999) / 100000;
     if (numProcessors > maxDesiredProcessors)
         numProcessors = maxDesiredProcessors;
     assert(numProcessors >= 1);
-    omp_set_num_threads(numProcessors);
+    omp_set_num_threads(static_cast<int>(numProcessors));
     const uint64_t chunk = (totalNumWeights + (numProcessors - 1)) / numProcessors;
 #pragma omp parallel
     {
@@ -57,7 +57,8 @@ Event UniformRandom::initialize(Layer *layer, Tensor tensorToInitialize, vector<
         }
     }
 
-    Event tensorInitializedEvent = performCopy(buffer, tensorToInitialize, streams);
+    weights.copyFromAsync(buffer, initStream);
+    Event tensorInitializedEvent = initStream.putEvent();
     return tensorInitializedEvent;
 }
 

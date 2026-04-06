@@ -26,7 +26,14 @@ class Optimizer {
 
     virtual std::shared_ptr<ThorImplementation::Optimizer> stamp(
         std::shared_ptr<ThorImplementation::TrainableWeightsBiasesLayer> trainableLayer) = 0;
-    virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer) { physicalOptimizer->compile(); }
+    // FIXME: Update
+    // virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer) { physicalOptimizer->compile(); }
+    // virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer) { /*FIXME*/ }
+    virtual void compile(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
+                         ThorImplementation::Tensor weights,
+                         Stream gradientStream) {
+        physicalOptimizer->compile(weights, gradientStream);
+    }
     virtual std::vector<Event> initialize(std::shared_ptr<ThorImplementation::Optimizer> physicalOptimizer,
                                           bool isFirstStamp,
                                           std::shared_ptr<ThorImplementation::Optimizer> physicalSisterOptimizer,

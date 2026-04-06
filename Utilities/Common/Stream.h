@@ -60,7 +60,7 @@ class Stream : private ReferenceCounted {
         return *this;
     }
 
-    operator cudaStream_t() {
+    operator cudaStream_t() const {
         assert(!uninitialized());
         return cudaStream;
     }
@@ -71,7 +71,7 @@ class Stream : private ReferenceCounted {
             destroy();
     }
 
-    Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) {
+    Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const {
         assert(!uninitialized());
 
         ScopedGpu scopedGpu(gpuNum);
@@ -82,7 +82,7 @@ class Stream : private ReferenceCounted {
         return event;
     }
 
-    void waitEvent(Event event) {
+    void waitEvent(Event event) const {
         assert(!uninitialized());
 
         ScopedGpu scopedGpu(gpuNum);
@@ -91,7 +91,7 @@ class Stream : private ReferenceCounted {
         assert(cudaStatus == cudaSuccess);
     }
 
-    void synchronize() {
+    void synchronize() const {
         assert(!uninitialized());
 
         cudaError_t cudaStatus = cudaStreamSynchronize(cudaStream);
@@ -115,7 +115,7 @@ class Stream : private ReferenceCounted {
         launchCleanUpHostFunctionArgs(std::move(args));
     }
 
-    cudnnHandle_t getCudnnHandle() {
+    cudnnHandle_t getCudnnHandle() const {
         assert(!uninitialized());
         mtx->lock();
         if (cudnnHandle->isEmpty()) {
@@ -141,12 +141,12 @@ class Stream : private ReferenceCounted {
         return *cudnnHandle;
     }
 
-    cudaStream_t getStream() {
+    cudaStream_t getStream() const {
         assert(!uninitialized());
         return cudaStream;
     }
 
-    cublasHandle_t getCublasHandle() {
+    cublasHandle_t getCublasHandle() const {
         assert(!uninitialized());
         mtx->lock();
         if (cublasHandle->isEmpty()) {
@@ -175,9 +175,9 @@ class Stream : private ReferenceCounted {
         return gpuNum;
     }
 
-    bool isInitialized() { return !uninitialized(); }
+    bool isInitialized() const { return !uninitialized(); }
 
-    virtual std::string getObjectName() { return "Stream"; }
+    virtual std::string getObjectName() const { return "Stream"; }
 
     // It is too late to destroy the cuDNN handle when the destructor of a static string is called,
     // so just don't destroy the cuDNN handle of a static string.

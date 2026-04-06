@@ -15,9 +15,7 @@ class Glorot : public Initializer {
 
     virtual ~Glorot() = default;
 
-    virtual void stamp(ThorImplementation::Layer *layerThatOwnsTensor, ThorImplementation::Tensor tensorToInitialize) {
-        layerThatOwnsTensor->setInitializer(tensorToInitialize, ThorImplementation::Glorot(mode).clone());
-    }
+    std::shared_ptr<ThorImplementation::Initializer> stamp() override { return ThorImplementation::Glorot(mode).clone(); }
 
     virtual std::shared_ptr<Initializer> clone() const { return std::make_shared<Glorot>(*this); }
 
