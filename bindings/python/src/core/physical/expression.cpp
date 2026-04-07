@@ -23,6 +23,11 @@ using Outputs = ThorImplementation::Outputs;
 using NamedOutput = ThorImplementation::NamedOutput;
 using DynamicExpression = ThorImplementation::DynamicExpression;
 using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
+using PreparedDynamicExpression = ThorImplementation::PreparedDynamicExpression;
+using DynamicExpressionBuild = ThorImplementation::DynamicExpressionBuild;
+using DynamicTensorMap = std::unordered_map<std::string, Tensor>;
+using DynamicTensorScalarMap = std::unordered_map<std::string, TensorScalarBinding>;
+using DynamicShapeMap = std::unordered_map<std::string, std::vector<uint64_t>>;
 
 void bind_physical_expression(nb::module_& physical) {
     auto expr = nb::class_<Expression>(physical, "Expression");
@@ -1021,6 +1026,208 @@ Return a dict of named output tensor from a stamped multi-output execution plan.
 }
 
 void bind_dynamic_expression(nb::module_& physical) {
+    auto dynamic_expression_build = nb::class_<DynamicExpressionBuild>(physical, "DynamicExpressionBuild");
+    dynamic_expression_build.attr("__module__") = "thor.physical";
+
+    dynamic_expression_build.def(
+        "__init__",
+        [](DynamicExpressionBuild* self,
+           const std::shared_ptr<FusedEquation>& equation,
+           const DynamicTensorMap& stamp_inputs,
+           const DynamicTensorScalarMap& tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_outputs,
+           const DynamicShapeMap& requested_output_shapes) {
+            new (self) DynamicExpressionBuild{
+                equation,
+                stamp_inputs,
+                tensor_scalar_inputs,
+                preallocated_outputs,
+                requested_output_shapes,
+            };
+        },
+        "equation"_a,
+        "stamp_inputs"_a,
+        "tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_outputs"_a = DynamicTensorMap{},
+        "requested_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Describe a prepared dynamic-expression build result.
+
+Parameters
+----------
+equation : thor.physical.FusedEquation
+    The compiled equation to stamp.
+stamp_inputs : dict[str, PhysicalTensor]
+    Input tensors bound into the prepared expression.
+tensor_scalar_inputs : dict[str, thor.physical.TensorScalarBinding], optional
+    Tensor-backed scalar bindings.
+preallocated_outputs : dict[str, PhysicalTensor], optional
+    Output tensors to bind when stamping.
+requested_output_shapes : dict[str, list[int]], optional
+    Per-output requested shapes used when stamping.
+)nbdoc");
+
+    dynamic_expression_build.def_rw("equation", &DynamicExpressionBuild::equation);
+    dynamic_expression_build.def_rw("stamp_inputs", &DynamicExpressionBuild::stamp_inputs);
+    dynamic_expression_build.def_rw("tensor_scalar_inputs", &DynamicExpressionBuild::tensor_scalar_inputs);
+    dynamic_expression_build.def_rw("preallocated_outputs", &DynamicExpressionBuild::preallocated_outputs);
+    dynamic_expression_build.def_rw("requested_output_shapes", &DynamicExpressionBuild::requested_output_shapes);
+
+    auto prepared_dynamic_expression = nb::class_<PreparedDynamicExpression>(physical, "PreparedDynamicExpression");
+    prepared_dynamic_expression.attr("__module__") = "thor.physical";
+
+    prepared_dynamic_expression.def("stamp",
+                                    nb::overload_cast<>(&PreparedDynamicExpression::stamp, nb::const_),
+                                    R"nbdoc(
+Stamp the prepared dynamic expression using its bound inputs and any default
+preallocated outputs captured in the DynamicExpressionBuild.
+)nbdoc");
+
+    prepared_dynamic_expression.def(
+        "stamp",
+        nb::overload_cast<const DynamicTensorMap&, const DynamicShapeMap&>(&PreparedDynamicExpression::stamp, nb::const_),
+        "preallocated_outputs_override"_a,
+        "requested_output_shapes_override"_a = DynamicShapeMap{},
+        R"nbdoc(
+Stamp the prepared dynamic expression, overriding default preallocated outputs
+and/or requested output shapes for this stamp.
+)nbdoc");
+
+    prepared_dynamic_expression.def(
+        "compile_backward",
+        [](const PreparedDynamicExpression& self,
+           const std::vector<std::string>& wrt_names,
+           std::optional<std::string> upstream_input_name,
+           bool accumulate_grad_outputs,
+           const DynamicTensorMap& additional_inputs,
+           const DynamicTensorScalarMap& additional_tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_grad_outputs,
+           const DynamicShapeMap& requested_grad_output_shapes) {
+            return self.compileBackward(wrt_names,
+                                        upstream_input_name,
+                                        accumulate_grad_outputs,
+                                        additional_inputs,
+                                        additional_tensor_scalar_inputs,
+                                        preallocated_grad_outputs,
+                                        requested_grad_output_shapes);
+        },
+        "wrt_names"_a = std::vector<std::string>{},
+        "upstream_input_name"_a.none() = nb::none(),
+        "accumulate_grad_outputs"_a = false,
+        "additional_inputs"_a = DynamicTensorMap{},
+        "additional_tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_grad_outputs"_a = DynamicTensorMap{},
+        "requested_grad_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Prepare a backward dynamic expression for a single-output forward expression.
+)nbdoc");
+
+    prepared_dynamic_expression.def(
+        "compile_backward",
+        [](const PreparedDynamicExpression& self,
+           const std::vector<std::string>& wrt_names,
+           const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+           bool accumulate_grad_outputs,
+           const DynamicTensorMap& additional_inputs,
+           const DynamicTensorScalarMap& additional_tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_grad_outputs,
+           const DynamicShapeMap& requested_grad_output_shapes) {
+            return self.compileBackward(wrt_names,
+                                        upstream_input_names_by_output,
+                                        accumulate_grad_outputs,
+                                        additional_inputs,
+                                        additional_tensor_scalar_inputs,
+                                        preallocated_grad_outputs,
+                                        requested_grad_output_shapes);
+        },
+        "wrt_names"_a,
+        "upstream_input_names_by_output"_a,
+        "accumulate_grad_outputs"_a = false,
+        "additional_inputs"_a = DynamicTensorMap{},
+        "additional_tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_grad_outputs"_a = DynamicTensorMap{},
+        "requested_grad_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Prepare a backward dynamic expression for a multi-output forward expression.
+)nbdoc");
+
+    prepared_dynamic_expression.def(
+        "stamp_backward",
+        [](const PreparedDynamicExpression& self,
+           const std::vector<std::string>& wrt_names,
+           std::optional<std::string> upstream_input_name,
+           bool accumulate_grad_outputs,
+           const DynamicTensorMap& additional_inputs,
+           const DynamicTensorScalarMap& additional_tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_grad_outputs,
+           const DynamicShapeMap& requested_grad_output_shapes) {
+            return self.stampBackward(wrt_names,
+                                      upstream_input_name,
+                                      accumulate_grad_outputs,
+                                      additional_inputs,
+                                      additional_tensor_scalar_inputs,
+                                      preallocated_grad_outputs,
+                                      requested_grad_output_shapes);
+        },
+        "wrt_names"_a = std::vector<std::string>{},
+        "upstream_input_name"_a.none() = nb::none(),
+        "accumulate_grad_outputs"_a = false,
+        "additional_inputs"_a = DynamicTensorMap{},
+        "additional_tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_grad_outputs"_a = DynamicTensorMap{},
+        "requested_grad_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Stamp a backward execution plan for a single-output forward expression.
+)nbdoc");
+
+    prepared_dynamic_expression.def(
+        "stamp_backward",
+        [](const PreparedDynamicExpression& self,
+           const std::vector<std::string>& wrt_names,
+           const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+           bool accumulate_grad_outputs,
+           const DynamicTensorMap& additional_inputs,
+           const DynamicTensorScalarMap& additional_tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_grad_outputs,
+           const DynamicShapeMap& requested_grad_output_shapes) {
+            return self.stampBackward(wrt_names,
+                                      upstream_input_names_by_output,
+                                      accumulate_grad_outputs,
+                                      additional_inputs,
+                                      additional_tensor_scalar_inputs,
+                                      preallocated_grad_outputs,
+                                      requested_grad_output_shapes);
+        },
+        "wrt_names"_a,
+        "upstream_input_names_by_output"_a,
+        "accumulate_grad_outputs"_a = false,
+        "additional_inputs"_a = DynamicTensorMap{},
+        "additional_tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_grad_outputs"_a = DynamicTensorMap{},
+        "requested_grad_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Stamp a backward execution plan for a multi-output forward expression.
+)nbdoc");
+
+    prepared_dynamic_expression.def_prop_ro(
+        "equation",
+        [](PreparedDynamicExpression& self) -> FusedEquation& { return const_cast<FusedEquation&>(self.equation()); },
+        nb::rv_policy::reference_internal,
+        R"nbdoc(
+Return the compiled equation owned by this prepared dynamic expression.
+)nbdoc");
+
+    prepared_dynamic_expression.def_prop_ro("stamp_inputs", &PreparedDynamicExpression::stampInputs, nb::rv_policy::reference_internal);
+
+    prepared_dynamic_expression.def_prop_ro(
+        "tensor_scalar_inputs", &PreparedDynamicExpression::tensorScalarInputs, nb::rv_policy::reference_internal);
+
+    prepared_dynamic_expression.def_prop_ro(
+        "preallocated_outputs", &PreparedDynamicExpression::preallocatedOutputs, nb::rv_policy::reference_internal);
+
+    prepared_dynamic_expression.def_prop_ro(
+        "requested_output_shapes", &PreparedDynamicExpression::requestedOutputShapes, nb::rv_policy::reference_internal);
+
     auto dynamic_expression = nb::class_<DynamicExpression>(physical, "DynamicExpression");
     dynamic_expression.attr("__module__") = "thor.physical";
 
@@ -1031,32 +1238,113 @@ Create a dynamic expression from a Python callable.
 
 Parameters
 ----------
-builder : Callable[[dict[str, PhysicalTensor], thor.Stream], thor.physical.Equation]
+builder : Callable[[dict[str, PhysicalTensor], thor.Stream], thor.physical.DynamicExpressionBuild]
     A callable that receives a dict of bound input tensors and a stream, then
-    returns a stamped execution plan.
+    returns a DynamicExpressionBuild describing the compiled equation and any
+    default bindings to use when stamping.
 
 Notes
 -----
-The callable is invoked from C++ when ``stamp(...)`` is called.
+The callable is invoked from C++ when ``prepare(...)``, ``stamp(...)``, or
+``stamp_backward(...)`` is called.
 )nbdoc");
 
-    dynamic_expression.def("stamp",
-                           &DynamicExpression::stamp,
+    dynamic_expression.def("prepare",
+                           &DynamicExpression::prepare,
                            "inputs"_a,
                            "stream"_a,
                            R"nbdoc(
-Validate the provided tensors and stream, then invoke the stored builder.
+Validate the provided tensors and stream, then invoke the stored builder and
+return a PreparedDynamicExpression.
+)nbdoc");
 
-Parameters
-----------
-inputs : dict[str, PhysicalTensor]
-    Bound input tensors for the dynamic expression.
-stream : thor.Stream
-    Stream on which the returned stamped plan will execute.
+    dynamic_expression.def("stamp",
+                           nb::overload_cast<const DynamicTensorMap&, Stream&>(&DynamicExpression::stamp, nb::const_),
+                           "inputs"_a,
+                           "stream"_a,
+                           R"nbdoc(
+Validate the provided tensors and stream, then stamp the dynamic expression.
+)nbdoc");
 
-Returns
--------
-thor.physical.Equation
-    A stamped execution plan ready to run.
+    dynamic_expression.def("stamp",
+                           nb::overload_cast<const DynamicTensorMap&, Stream&, const DynamicTensorMap&, const DynamicShapeMap&>(
+                               &DynamicExpression::stamp, nb::const_),
+                           "inputs"_a,
+                           "stream"_a,
+                           "preallocated_outputs"_a,
+                           "requested_output_shapes"_a = DynamicShapeMap{},
+                           R"nbdoc(
+Validate the provided tensors and stream, then stamp the dynamic expression
+with output overrides.
+)nbdoc");
+
+    dynamic_expression.def(
+        "stamp_backward",
+        [](const DynamicExpression& self,
+           const DynamicTensorMap& inputs,
+           Stream& stream,
+           const std::vector<std::string>& wrt_names,
+           std::optional<std::string> upstream_input_name,
+           bool accumulate_grad_outputs,
+           const DynamicTensorMap& additional_inputs,
+           const DynamicTensorScalarMap& additional_tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_grad_outputs,
+           const DynamicShapeMap& requested_grad_output_shapes) {
+            return self.stampBackward(inputs,
+                                      stream,
+                                      wrt_names,
+                                      upstream_input_name,
+                                      accumulate_grad_outputs,
+                                      additional_inputs,
+                                      additional_tensor_scalar_inputs,
+                                      preallocated_grad_outputs,
+                                      requested_grad_output_shapes);
+        },
+        "inputs"_a,
+        "stream"_a,
+        "wrt_names"_a = std::vector<std::string>{},
+        "upstream_input_name"_a.none() = nb::none(),
+        "accumulate_grad_outputs"_a = false,
+        "additional_inputs"_a = DynamicTensorMap{},
+        "additional_tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_grad_outputs"_a = DynamicTensorMap{},
+        "requested_grad_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Prepare and stamp a backward execution plan for a single-output forward expression.
+)nbdoc");
+
+    dynamic_expression.def(
+        "stamp_backward",
+        [](const DynamicExpression& self,
+           const DynamicTensorMap& inputs,
+           Stream& stream,
+           const std::vector<std::string>& wrt_names,
+           const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+           bool accumulate_grad_outputs,
+           const DynamicTensorMap& additional_inputs,
+           const DynamicTensorScalarMap& additional_tensor_scalar_inputs,
+           const DynamicTensorMap& preallocated_grad_outputs,
+           const DynamicShapeMap& requested_grad_output_shapes) {
+            return self.stampBackward(inputs,
+                                      stream,
+                                      wrt_names,
+                                      upstream_input_names_by_output,
+                                      accumulate_grad_outputs,
+                                      additional_inputs,
+                                      additional_tensor_scalar_inputs,
+                                      preallocated_grad_outputs,
+                                      requested_grad_output_shapes);
+        },
+        "inputs"_a,
+        "stream"_a,
+        "wrt_names"_a,
+        "upstream_input_names_by_output"_a,
+        "accumulate_grad_outputs"_a = false,
+        "additional_inputs"_a = DynamicTensorMap{},
+        "additional_tensor_scalar_inputs"_a = DynamicTensorScalarMap{},
+        "preallocated_grad_outputs"_a = DynamicTensorMap{},
+        "requested_grad_output_shapes"_a = DynamicShapeMap{},
+        R"nbdoc(
+Prepare and stamp a backward execution plan for a multi-output forward expression.
 )nbdoc");
 }

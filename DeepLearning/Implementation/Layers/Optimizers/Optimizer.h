@@ -82,6 +82,8 @@ class Optimizer {
 
     virtual ~Optimizer() = default;
 
+    Optional<Tensor> getWeightsGradient() { return weightsGradient; }
+
    protected:
     Tensor weights;
     Stream gradientUpdateStream;

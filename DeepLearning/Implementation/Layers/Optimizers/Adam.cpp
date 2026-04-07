@@ -9,70 +9,70 @@ namespace ThorImplementation {
 Adam::Adam(uint64_t id, float alpha, float beta1, float beta2, float epsilon)
     : Optimizer(id), alpha(alpha), beta1(beta1), beta2(beta2), epsilon(epsilon), t(0) {}
 
-DynamicExpression Adam::buildExpression() {
-    return DynamicExpression([this](const DynamicExpression::TensorMap &inputs, Stream &stream) -> StampedExecutionPlan {
-        const Tensor &wTensor = inputs.at("w");
-        const Tensor &gTensor = inputs.at("g");
-
-        const DataType weightsDType = wTensor.getDescriptor().getDataType();
-        const int32_t gpuNum = wTensor.getPlacement().getDeviceNum();
-
-        auto alphaT = Expression::runtimeScalar("alphaT", DataType::FP32, DataType::FP32);
-        auto invBatchLossScale = Expression::runtimeScalar("invBatchLossScale", DataType::FP32, DataType::FP32);
-
-        auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
-        auto g = Expression::input("gradient", DataType::FP32, DataType::FP32) * invBatchLossScale;
-        auto m = Expression::input("m_in", DataType::FP32, DataType::FP32);
-        auto v = Expression::input("v_in", DataType::FP32, DataType::FP32);
-
-        unordered_map<string, Tensor> stampInputs;
-        unordered_map<string, Tensor> stampOutputs;
-        stampInputs["weights_in"] = wTensor;
-        stampInputs["gradient"] = gTensor;
-        stampOutputs["weights"] = wTensor;
-
-        // Allocate Adam state once, same shape/device as weights, moments always fp32.
-        if (mBuffer.isEmpty()) {
-            mBuffer = wTensor.clone(DataType::FP32);
-            mBuffer.get().memsetAsync(stream, 0);
-        }
-        if (vBuffer.isEmpty()) {
-            vBuffer = wTensor.clone(DataType::FP32);
-            vBuffer.get().memsetAsync(stream, 0);
-        }
-
-        stampInputs["m_in"] = mBuffer;
-        stampInputs["v_in"] = vBuffer;
-        stampOutputs["m"] = mBuffer;
-        stampOutputs["v"] = vBuffer;
-
-        // Regular Adam:
-        // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t
-        // v_{t+1} = beta2 * v_t + (1 - beta2) * g_t^2
-        // w_{t+1} = w_t - alphaT * m_{t+1} / (sqrt(v_{t+1}) + epsilon)
-        //
-        // alphaT is the bias-corrected learning rate computed on CPU and passed
-        // in as a runtime scalar.
-        Expression beta1Expr = Expression::constantScalar(beta1);
-        Expression beta2Expr = Expression::constantScalar(beta2);
-        Expression oneMinusBeta1Expr = Expression::constantScalar(1.0 - beta1);
-        Expression oneMinusBeta2Expr = Expression::constantScalar(1.0 - beta2);
-        Expression epsilonExpr = Expression::constantScalar(epsilon);
-
-        Expression mNext = beta1Expr * m + oneMinusBeta1Expr * g;
-        Expression vNext = beta2Expr * v + oneMinusBeta2Expr * g * g;
-        Expression wNext = (w - alphaT * mNext / (Expression::sqrt(vNext) + epsilonExpr)).withOutputDType(weightsDType);
-
-        auto outs = Expression::outputs({
-            {"weights", wNext},
-            {"m", mNext},
-            {"v", vNext},
-        });
-
-        FusedEquation adamUpdateEquation = FusedEquation::compile(outs.physicalOutputs(), gpuNum);
-        return adamUpdateEquation.stamp(stampInputs, stream, {}, stampOutputs);
-    });
-}
+// DynamicExpression Adam::buildExpression() {
+//     return DynamicExpression([this](const DynamicExpression::TensorMap &inputs, Stream &stream) -> StampedExecutionPlan {
+//         const Tensor &wTensor = inputs.at("w");
+//         const Tensor &gTensor = inputs.at("g");
+//
+//         const DataType weightsDType = wTensor.getDescriptor().getDataType();
+//         const int32_t gpuNum = wTensor.getPlacement().getDeviceNum();
+//
+//         auto alphaT = Expression::runtimeScalar("alphaT", DataType::FP32, DataType::FP32);
+//         auto invBatchLossScale = Expression::runtimeScalar("invBatchLossScale", DataType::FP32, DataType::FP32);
+//
+//         auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
+//         auto g = Expression::input("gradient", DataType::FP32, DataType::FP32) * invBatchLossScale;
+//         auto m = Expression::input("m_in", DataType::FP32, DataType::FP32);
+//         auto v = Expression::input("v_in", DataType::FP32, DataType::FP32);
+//
+//         unordered_map<string, Tensor> stampInputs;
+//         unordered_map<string, Tensor> stampOutputs;
+//         stampInputs["weights_in"] = wTensor;
+//         stampInputs["gradient"] = gTensor;
+//         stampOutputs["weights"] = wTensor;
+//
+//         // Allocate Adam state once, same shape/device as weights, moments always fp32.
+//         if (mBuffer.isEmpty()) {
+//             mBuffer = wTensor.clone(DataType::FP32);
+//             mBuffer.get().memsetAsync(stream, 0);
+//         }
+//         if (vBuffer.isEmpty()) {
+//             vBuffer = wTensor.clone(DataType::FP32);
+//             vBuffer.get().memsetAsync(stream, 0);
+//         }
+//
+//         stampInputs["m_in"] = mBuffer;
+//         stampInputs["v_in"] = vBuffer;
+//         stampOutputs["m"] = mBuffer;
+//         stampOutputs["v"] = vBuffer;
+//
+//         // Regular Adam:
+//         // m_{t+1} = beta1 * m_t + (1 - beta1) * g_t
+//         // v_{t+1} = beta2 * v_t + (1 - beta2) * g_t^2
+//         // w_{t+1} = w_t - alphaT * m_{t+1} / (sqrt(v_{t+1}) + epsilon)
+//         //
+//         // alphaT is the bias-corrected learning rate computed on CPU and passed
+//         // in as a runtime scalar.
+//         Expression beta1Expr = Expression::constantScalar(beta1);
+//         Expression beta2Expr = Expression::constantScalar(beta2);
+//         Expression oneMinusBeta1Expr = Expression::constantScalar(1.0 - beta1);
+//         Expression oneMinusBeta2Expr = Expression::constantScalar(1.0 - beta2);
+//         Expression epsilonExpr = Expression::constantScalar(epsilon);
+//
+//         Expression mNext = beta1Expr * m + oneMinusBeta1Expr * g;
+//         Expression vNext = beta2Expr * v + oneMinusBeta2Expr * g * g;
+//         Expression wNext = (w - alphaT * mNext / (Expression::sqrt(vNext) + epsilonExpr)).withOutputDType(weightsDType);
+//
+//         auto outs = Expression::outputs({
+//             {"weights", wNext},
+//             {"m", mNext},
+//             {"v", vNext},
+//         });
+//
+//         FusedEquation adamUpdateEquation = FusedEquation::compile(outs.physicalOutputs(), gpuNum);
+//         return adamUpdateEquation.stamp(stampInputs, stream, {}, stampOutputs);
+//     });
+// }
 
 void Adam::compile(const Tensor &weights, Stream &gradientUpdateStream) {
     assert(!compiled);

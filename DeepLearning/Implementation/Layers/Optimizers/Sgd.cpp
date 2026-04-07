@@ -15,22 +15,25 @@ Sgd::Sgd(uint64_t id, float initialLearningRate, float decay, float momentum, bo
       currentBatch(0),
       currentLearningRate(initialLearningRate) {}
 
+// FIXME: This can just be in compile() and does not need to be a DynamicExpression, but leave it here for now as a reference.
 DynamicExpression Sgd::buildExpression() {
-    // FIXME: This can just be in compile() and does not need to be a DynamicExpression, but leave it here for now as a reference.
-    return DynamicExpression([this](const DynamicExpression::TensorMap &inputs, Stream &stream) -> StampedExecutionPlan {
-        const Tensor &wTensor = inputs.at("w");
-        const Tensor &gTensor = inputs.at("g");
+    return DynamicExpression([this](const DynamicExpression::TensorMap& inputs, Stream& stream) -> DynamicExpressionBuild {
+        const Tensor& wTensor = inputs.at("w");
+        const Tensor& gTensor = inputs.at("g");
         const DataType weightsDType = wTensor.getDescriptor().getDataType();
         const int32_t gpuNum = wTensor.getPlacement().getDeviceNum();
+
         auto w = Expression::input("weights_in", DataType::FP32, DataType::FP32);
         auto g = Expression::input("gradient", DataType::FP32, DataType::FP32);
         auto step = Expression::runtimeScalar("step", DataType::FP32, DataType::FP32);
 
         unordered_map<string, Tensor> stampInputs;
-        unordered_map<string, Tensor> stampOutputs;
+        unordered_map<string, TensorScalarBinding> tensorScalarInputs;
+        unordered_map<string, Tensor> preallocatedOutputs;
+
         stampInputs["weights_in"] = wTensor;
         stampInputs["gradient"] = gTensor;
-        stampOutputs["weights"] = wTensor;
+        preallocatedOutputs["weights"] = wTensor;
 
         std::optional<Outputs> outputs;
         if (momentum > 0.0f) {
@@ -57,12 +60,14 @@ DynamicExpression Sgd::buildExpression() {
                 vNext.emplace(Expression::constantScalar(momentum) * v - step * g);
                 wNext.emplace(w + (*vNext));
             }
+
             outputs.emplace(Expression::outputs({
                 {"weights", *wNext},
                 {"velocity", *vNext},
             }));
+
             stampInputs["velocity_in"] = momentumBuffer;
-            stampOutputs["velocity"] = momentumBuffer;
+            preallocatedOutputs["velocity"] = momentumBuffer;
         } else {
             if (momentumBuffer.isPresent())
                 momentumBuffer.clear();
@@ -74,12 +79,18 @@ DynamicExpression Sgd::buildExpression() {
                 {"weights", wNext},
             }));
         }
-        FusedEquation sgdUpdateEquation = FusedEquation::compile(outputs->physicalOutputs(), gpuNum);
-        return sgdUpdateEquation.stamp(stampInputs, stream, {}, stampOutputs);
+
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(outputs->physicalOutputs(), gpuNum)),
+            std::move(stampInputs),
+            std::move(tensorScalarInputs),
+            std::move(preallocatedOutputs),
+            {},
+        };
     });
 }
 
-void Sgd::compile(const Tensor &weights, Stream &gradientUpdateStream) {
+void Sgd::compile(const Tensor& weights, Stream& gradientUpdateStream) {
     assert(!compiled);
     assert(gradientUpdateStream.isInitialized());
     assert(weights.isInitialized());
