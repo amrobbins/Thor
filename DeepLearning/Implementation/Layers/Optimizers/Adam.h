@@ -47,7 +47,7 @@ class Adam final : public Optimizer {
     Optional<std::string> mBiasFile;
     Optional<std::string> vBiasFile;
 
-    DynamicExpression buildExpression() override;
+    DynamicExpression buildExpression() override { assert(false); /*using compile not dynamic expression, fixme*/ };
 };
 
 }  // namespace ThorImplementation

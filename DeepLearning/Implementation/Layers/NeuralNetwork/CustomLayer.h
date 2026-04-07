@@ -21,7 +21,7 @@ class CustomLayer : public TrainableLayer {
     CustomLayer(DynamicExpression expr,
                 // V1 Assumption: Exactly 1 input. V2 could be multiple or none even. feature inputs would need to be a map string->tensor.
                 const std::string& inputName,
-                std::vector<std::shared_ptr<Parameter>> parameters,
+                const std::vector<std::shared_ptr<Parameter>>& parameters,
                 int deviceNum,
                 bool useFastMath,
                 int64_t stampedId = -1);
@@ -35,43 +35,22 @@ class CustomLayer : public TrainableLayer {
 
     // Error in is up-to-date by the end of the data stream.
     // Gradient update stream must wait for that.
-    void accumulateGradient(uint32_t connectionNumber, bool clearGradientFirst) override { /* NOP */ };
+    void accumulateGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     // Error in is up-to-date by the end of the data stream.
     Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
 
-    // TrainableWeightsBiasesLayer abstract methods
-    virtual void computeGradient(Optional<Tensor> weightsGradient,
-                                 Optional<Tensor> biasesGradient,
-                                 Optional<Tensor> featureIn,
-                                 Optional<Tensor> errorIn,
-                                 Stream gradientUpdateStream,
-                                 bool accumulateGradient) { /*NOP*/ }
-
-    virtual void infer(Optional<Tensor> inputTensor,
-                       Optional<Tensor> outputTensor,
-                       Stream stream,
-                       unsigned int connectionNumber,
-                       Tensor weights,
-                       Optional<Tensor> biases);
-
-    virtual void backProp(Optional<Tensor> dataIn,
-                          Optional<Tensor> errorIn,
-                          Optional<Tensor> errorOut,
-                          Stream dataStream,
-                          unsigned int connectionNumber,
-                          bool accumulateGradient);
-
     virtual Optional<Tensor> createFeatureOutputTensor();
-    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError);
+    virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber);
+
+    virtual std::string getLayerType() override { return "CustomLayer"; }
 
    private:
     void compileImpl() override;
-    virtual void stampForward(uint32_t connectionNumber, Tensor featureInput);
-    virtual void stampBackward(uint32_t connectionNumber, Tensor featureInput, Tensor errorInput);
+    virtual Optional<Tensor> stampForward(uint32_t connectionNumber);
+    virtual Optional<Tensor> stampBackward(uint32_t connectionNumber);
     std::unordered_map<std::string, Tensor> buildForwardInputs(const Tensor& dataIn);
-    std::unordered_map<std::string, Tensor> buildForwardOutputs(const Tensor& dataIn);
-    std::unordered_map<std::string, Tensor> buildBackwardInputs(const Tensor& dataIn, const Tensor& errorIn);
+    void validatePreparedExpressionInputs(const PreparedDynamicExpression& prepared);
 
    private:
     DynamicExpression layerDefinitionExpression;
@@ -92,6 +71,15 @@ class CustomLayer : public TrainableLayer {
     std::vector<std::unordered_map<std::string, Tensor>> forwardOutputs;
     std::vector<std::unordered_map<std::string, Tensor>> backwardInputs;
     std::vector<std::unordered_map<std::string, Tensor>> backwardOutputs;
+
+    std::vector<std::unordered_map<std::string, Tensor>> forwardInputsByConnection;
+    std::vector<std::shared_ptr<PreparedDynamicExpression>> forwardPreparedByConnection;
+    std::vector<std::shared_ptr<StampedExecutionPlan>> forwardStampedByConnection;
+
+    std::vector<std::shared_ptr<StampedExecutionPlan>> backwardErrorStampedByConnection;
+    std::vector<std::shared_ptr<StampedExecutionPlan>> backwardWeightsClearStampedByConnection;
+    std::vector<std::shared_ptr<StampedExecutionPlan>> backwardWeightsAccumulateStampedByConnection;
+    std::vector<std::unordered_map<std::string, Tensor>> backwardOutputsByConnection;
 
     const std::string RESERVED_GRAD_PREFIX = "__grad_";
     const std::string featureInName;
