@@ -78,6 +78,14 @@ class TrainableLayer : public Parameterizable {
         }
         return Optional<Tensor>::empty();
     }
+    static unsigned int numPresentTensors(std::vector<Optional<Tensor>> tensors) {
+        unsigned int numPresent = 0;
+        for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
+            if (it->isPresent())
+                numPresent += 1;
+        }
+        return numPresent;
+    }
     // FIXME: Temporarily moved here from layer
 
     // compute the fan in for one element of a batch
@@ -179,7 +187,7 @@ class TrainableLayer : public Parameterizable {
         }
 
         // Accumulate gradient for the weights per this connection
-        accumulateGradient(connectionNumber, clearGradientFirst);
+        accumulateWeightsGradient(connectionNumber, clearGradientFirst);
 
         numBackwardConnectionsMade += 1;
         bool gradientComplete = false;
@@ -230,7 +238,7 @@ class TrainableLayer : public Parameterizable {
 
     // Error in is up-to-date by the end of the data stream.
     // Gradient update stream must wait for that.
-    virtual void accumulateGradient(uint32_t connectionNumber, bool clearGradientFirst) = 0;
+    virtual void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) = 0;
 
     // Error in is up-to-date by the end of the data stream.
     virtual Optional<Event> computeErrorOut(uint32_t connectionNumber) = 0;
