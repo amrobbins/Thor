@@ -45,8 +45,6 @@ class CustomLayer : public TrainableLayer {
 
     std::string getLayerType() override { return "CustomLayer"; }
 
-    bool canFuseBackwardEoutWgrad() const;
-
    private:
     void compileImpl() override;
     virtual Optional<Tensor> stampForward(uint32_t connectionNumber);
@@ -89,8 +87,6 @@ class CustomLayer : public TrainableLayer {
     const std::string errorInName = RESERVED_GRAD_PREFIX + featureOutName;
     const std::string errorOutName;
     std::vector<Event> gradientAccumAvailableEvents;
-
-    bool fuseBackwardEoutWgrad = false;
 };
 
 }  // namespace ThorImplementation

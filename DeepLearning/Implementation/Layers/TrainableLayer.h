@@ -1,6 +1,5 @@
 #pragma once
 
-#include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Layers/Optimizers/Optimizer.h"
@@ -26,7 +25,17 @@ class TrainableLayer : public Parameterizable {
     virtual void compileImpl() {
         // MultiConnectionLayer::compileImpl();
 
+        // Ensure state is clear
+        isStartOfForward = true;
+        isStartOfBackward = false;
+        numBackwardConnectionsMade = 0;
+        errorOutHasBeenComputedEvents.clear();
+        weightsAreUpToDateEvent.clear();
+        // It is assumed gradient update streams are best distributed via round-robin on first compile,
+        // so once one is assigned, never clear it.
+
         std::unordered_set<uint64_t> dataStreamsSet;
+        uniqueDataStreams.clear();
         for (Stream dataStream : streams) {
             uint64_t dataStreamId = dataStream.getId();
             auto [it, inserted] = dataStreamsSet.insert(dataStreamId);
@@ -63,7 +72,7 @@ class TrainableLayer : public Parameterizable {
     bool inferenceOnly = false;
     virtual bool isInferenceOnly() { return inferenceOnly; }
     bool running = true;
-    static bool isBackPropStub() { return false; }
+    virtual bool isBackPropStub() { return false; }
     std::vector<Optional<Tensor>> featureInputs;
     std::vector<Optional<Tensor>> featureOutputs;
     std::vector<Optional<Tensor>> errorInputs;
@@ -71,14 +80,14 @@ class TrainableLayer : public Parameterizable {
     std::vector<Stream> streams;
     std::vector<Optional<Layer *>> nextLayers;
     std::vector<Optional<Layer *>> previousLayers;
-    static Optional<Tensor> getFirstPresentTensor(std::vector<Optional<Tensor>> tensors) {
+    static Optional<Tensor> getFirstPresentTensor(const std::vector<Optional<Tensor>> &tensors) {
         for (auto it = tensors.begin(); it != tensors.end(); ++it) {
             if (it->isPresent())
                 return *it;
         }
         return Optional<Tensor>::empty();
     }
-    static unsigned int numPresentTensors(std::vector<Optional<Tensor>> tensors) {
+    static unsigned int numPresentTensors(const std::vector<Optional<Tensor>> &tensors) {
         unsigned int numPresent = 0;
         for (auto it = tensors.rbegin(); it != tensors.rend(); ++it) {
             if (it->isPresent())
@@ -107,15 +116,6 @@ class TrainableLayer : public Parameterizable {
             totalFanIn = 1;
         }
         return totalFanIn;
-
-        Optional<Tensor> anyFeatureInput = getFirstPresentTensor(featureInputs);
-        assert(anyFeatureInput.isPresent());
-        std::vector<uint64_t> inputDimensions = anyFeatureInput.get().getDescriptor().getDimensions();
-        uint64_t fanIn = 1;
-        for (uint32_t i = 1; i < inputDimensions.size(); ++i) {
-            fanIn *= inputDimensions[i];
-        }
-        return fanIn;
     }
 
     // compute the fan out for one element of a batch
@@ -156,11 +156,11 @@ class TrainableLayer : public Parameterizable {
             isStartOfBackward = true;
         }
 
-        if (nextLayers[connectionNumber].isEmpty())
-            return;
-
         // Compute feature output on the data stream
         computeFeatureOut(connectionNumber);
+
+        if (nextLayers[connectionNumber].isEmpty())
+            return;
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
         // FIXME: Put back
@@ -180,11 +180,14 @@ class TrainableLayer : public Parameterizable {
         }
 
         // Compute output error gradient using current weights, on the data stream
-        if (!isBackPropStub() && previousLayers[connectionNumber].isPresent()) {
+        if ((!isBackPropStub() && previousLayers[connectionNumber].isPresent()) || wGradFusedWithEOutGrad) {
             Optional<Event> errorOutHasBeenComputedEvent = computeErrorOut(connectionNumber);
             if (errorOutHasBeenComputedEvent.isPresent())
                 errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent);
         }
+
+        if (!errorInputs[connectionNumber].isPresent())
+            return;
 
         // Accumulate gradient for the weights per this connection
         accumulateWeightsGradient(connectionNumber, clearGradientFirst);
@@ -230,8 +233,8 @@ class TrainableLayer : public Parameterizable {
         if (previousLayers[connectionNumber].isEmpty())
             return;
 
-        // Propagate output error gradient to the previous layer, on the data stream.        // Expecting to get tail-recursion optimization
-        // of -O3 so that stack space does not build up here.
+        // Propagate output error gradient to the previous layer, on the data stream.
+        // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
         // FIXME: put back
         // previousLayers[connectionNumber].get()->backward(connectionNumber);
     }
@@ -320,6 +323,8 @@ class TrainableLayer : public Parameterizable {
 
     uint32_t numBackwardConnectionsMade = 0;
     uint32_t numBackwardConnections = 0;
+
+    bool wGradFusedWithEOutGrad = false;
 
    private:
     // stampedId is used to identify which layers correspond to which other layers across multiple stamps of the same network.

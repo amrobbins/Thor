@@ -12,26 +12,56 @@ static void validateUserInputName(const std::string& name) {
     }
 }
 
-Stream& Expression::getNextHelperStream(uint32_t gpu_num) {
-    static std::vector<std::vector<Stream>> runnerHelperStreams;
-    static std::vector<uint32_t> nextHelperStreamIndex;
-    constexpr uint32_t MAX_HELPER_STREAMS_PER_GPU = 7;
-    if (runnerHelperStreams.empty()) {
-        runnerHelperStreams.reserve(MAX_HELPER_STREAMS_PER_GPU);
-        nextHelperStreamIndex.reserve(MAX_HELPER_STREAMS_PER_GPU);
-        runnerHelperStreams = std::vector<std::vector<Stream>>(MachineEvaluator::instance().getNumGpus(), std::vector<Stream>());
-        nextHelperStreamIndex = std::vector<uint32_t>(MachineEvaluator::instance().getNumGpus(), 0);
+namespace {
+
+class HelperStreamPool {
+   public:
+    static constexpr uint32_t MAX_HELPER_STREAMS_PER_GPU = 8;
+    static_assert((MAX_HELPER_STREAMS_PER_GPU & (MAX_HELPER_STREAMS_PER_GPU - 1)) == 0,
+                  "MAX_HELPER_STREAMS_PER_GPU must be a power of two");
+    static constexpr uint32_t HELPER_STREAM_MASK = MAX_HELPER_STREAMS_PER_GPU - 1;
+
+    struct PerGpuHelperStreams {
+        std::array<Stream, MAX_HELPER_STREAMS_PER_GPU> streams;
+        std::atomic<uint32_t> next_index{0};
+
+        explicit PerGpuHelperStreams(uint32_t gpu)
+            : streams{Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu), Stream(gpu)} {
+            for (Stream& stream : streams) {
+                stream.informIsStatic();
+            }
+        }
+    };
+
+    Stream& getNextHelperStream(uint32_t gpu_num) {
+        ensureInitialized();
+        assert(gpu_num < per_gpu_.size());
+
+        PerGpuHelperStreams& state = *per_gpu_[gpu_num];
+        const uint32_t idx = state.next_index.fetch_add(1, std::memory_order_relaxed) & HELPER_STREAM_MASK;
+        return state.streams[idx];
     }
-    uint32_t cur_index = nextHelperStreamIndex[gpu_num];
-    if (cur_index == MAX_HELPER_STREAMS_PER_GPU)
-        cur_index = 0;
-    nextHelperStreamIndex[gpu_num] = cur_index + 1;
 
-    if (cur_index >= runnerHelperStreams[gpu_num].size())
-        runnerHelperStreams[gpu_num].emplace_back(gpu_num);
+   private:
+    void ensureInitialized() {
+        std::call_once(init_once_, [this]() {
+            const uint32_t num_gpus = MachineEvaluator::instance().getNumGpus();
+            per_gpu_.reserve(num_gpus);
+            for (uint32_t g = 0; g < num_gpus; ++g) {
+                per_gpu_.push_back(std::make_unique<PerGpuHelperStreams>(g));
+            }
+        });
+    }
 
-    return runnerHelperStreams[gpu_num][cur_index];
-}
+    std::once_flag init_once_;
+    std::vector<std::unique_ptr<PerGpuHelperStreams>> per_gpu_;
+};
+
+HelperStreamPool helperStreamPool;
+
+}  // namespace
+
+Stream& Expression::getNextHelperStream(uint32_t gpu_num) { return helperStreamPool.getNextHelperStream(gpu_num); }
 
 std::set<std::string> Expression::getInputNames() const {
     if (expr == nullptr)
