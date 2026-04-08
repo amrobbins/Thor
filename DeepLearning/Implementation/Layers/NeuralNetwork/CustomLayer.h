@@ -35,7 +35,7 @@ class CustomLayer : public TrainableLayer {
 
     // Error in is up-to-date by the end of the data stream.
     // Gradient update stream must wait for that.
-    void accumulateGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
+    void accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) override;
 
     // Error in is up-to-date by the end of the data stream.
     Optional<Event> computeErrorOut(uint32_t connectionNumber) override;
@@ -43,7 +43,9 @@ class CustomLayer : public TrainableLayer {
     virtual Optional<Tensor> createFeatureOutputTensor();
     virtual Optional<Tensor> createErrorOutputTensor(bool backPropagateError, uint32_t connectionNumber);
 
-    virtual std::string getLayerType() override { return "CustomLayer"; }
+    std::string getLayerType() override { return "CustomLayer"; }
+
+    bool canFuseBackwardEoutWgrad() const;
 
    private:
     void compileImpl() override;
@@ -87,6 +89,8 @@ class CustomLayer : public TrainableLayer {
     const std::string errorInName = RESERVED_GRAD_PREFIX + featureOutName;
     const std::string errorOutName;
     std::vector<Event> gradientAccumAvailableEvents;
+
+    bool fuseBackwardEoutWgrad = false;
 };
 
 }  // namespace ThorImplementation

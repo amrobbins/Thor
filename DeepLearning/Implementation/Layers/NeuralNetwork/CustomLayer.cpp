@@ -38,6 +38,8 @@ CustomLayer::CustomLayer(DynamicExpression expr,
     }
 }
 
+bool CustomLayer::canFuseBackwardEoutWgrad() const { return numPresentTensors(errorInputs) == 1; }
+
 void CustomLayer::compileImpl() {
     TrainableLayer::compileImpl();
 
@@ -50,14 +52,15 @@ void CustomLayer::compileImpl() {
     backwardWeightsAccumulateStampedByConnection.clear();
     backwardOutputsByConnection.clear();
 
+    fuseBackwardEoutWgrad = canFuseBackwardEoutWgrad();
+
     // Forward stamps: require both input and output tensors for the connection.
     const uint32_t numForwardConnections = static_cast<uint32_t>(featureInputs.size());
     for (uint32_t connectionNumber = 0; connectionNumber < numForwardConnections; ++connectionNumber) {
-        if (featureInputs[connectionNumber].isPresent() &&
-            featureOutputs.size() > connectionNumber &&
+        if (featureInputs[connectionNumber].isPresent() && featureOutputs.size() > connectionNumber &&
             featureOutputs[connectionNumber].isPresent()) {
             stampForward(connectionNumber);
-            }
+        }
     }
 
     if (isInferenceOnly() || isBackPropStub()) {
@@ -73,10 +76,8 @@ void CustomLayer::compileImpl() {
             continue;
         }
 
-        const bool hasErrorInput =
-            errorInputs.size() > connectionNumber && errorInputs[connectionNumber].isPresent();
-        const bool hasErrorOutput =
-            errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].isPresent();
+        const bool hasErrorInput = errorInputs.size() > connectionNumber && errorInputs[connectionNumber].isPresent();
+        const bool hasErrorOutput = errorOutputs.size() > connectionNumber && errorOutputs[connectionNumber].isPresent();
 
         if (hasErrorInput || hasErrorOutput) {
             stampBackward(connectionNumber);
@@ -196,6 +197,8 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
         backwardAdditionalInputs[errorInName] = errorInput.get();
     }
 
+    // Transient shape/materialization path for createErrorOutputTensor().
+    // This path is only used to obtain the error output tensor, so keep it minimal.
     if (connectionNumber == UINT32_MAX) {
         StampedExecutionPlan backwardErrorStamped = preparedBackwardSource->stampBackward(errorTargets,
                                                                                           upstreamInputNamesByOutput,
@@ -212,51 +215,110 @@ Optional<Tensor> CustomLayer::stampBackward(uint32_t connectionNumber) {
         backwardOutputsByConnection.resize(connectionNumber + 1);
     }
 
-    if (errorOutput.isPresent()) {
-        if (errorInput.isPresent()) {
-            PreparedDynamicExpression::TensorMap backwardErrorPreallocatedOutputs;
-            backwardErrorPreallocatedOutputs[errorOutName] = errorOutput.get();
+    auto& backwardOutputs = backwardOutputsByConnection[connectionNumber];
+    backwardOutputs.clear();
+
+    if (fuseBackwardEoutWgrad) {
+        // Main backward stamp:
+        //   - computes error out when errorOutput is present
+        //   - computes clear-first parameter grads when trainable params exist
+        if (errorInput.isPresent() && (errorOutput.isPresent() || !parameterTargets.empty())) {
+            std::vector<std::string> mainTargets;
+
+            if (errorOutput.isPresent()) {
+                mainTargets.push_back(inputName);
+            }
+
+            for (const std::string& parameterTarget : parameterTargets) {
+                mainTargets.push_back(parameterTarget);
+            }
+
+            PreparedDynamicExpression::TensorMap backwardMainPreallocatedOutputs;
+            if (errorOutput.isPresent()) {
+                backwardMainPreallocatedOutputs[errorOutName] = errorOutput.get();
+            }
 
             backwardErrorStampedByConnection[connectionNumber] =
-                std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(errorTargets,
+                std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(mainTargets,
                                                                                              upstreamInputNamesByOutput,
                                                                                              /*accumulate_grad_outputs=*/false,
                                                                                              backwardAdditionalInputs,
                                                                                              {},
-                                                                                             backwardErrorPreallocatedOutputs));
+                                                                                             backwardMainPreallocatedOutputs));
+
+            for (const std::string& parameterTarget : parameterTargets) {
+                const std::string gradName = parameterTarget + "_grad";
+                backwardOutputs[gradName] = backwardErrorStampedByConnection[connectionNumber]->output(gradName);
+            }
         } else {
-            errorOutput.get().memsetAsync(streams[connectionNumber], 0);
+            if (errorOutput.isPresent()) {
+                errorOutput.get().memsetAsync(streams[connectionNumber], 0);
+            }
             backwardErrorStampedByConnection[connectionNumber] = nullptr;
         }
+
+        // Clear-first parameter grad computation is fused into the main backward stamp.
+        backwardWeightsClearStampedByConnection[connectionNumber] = nullptr;
+
+        // Separate accumulate-only stamp for later additive contributions to weight grads.
+        if (!parameterTargets.empty() && errorInput.isPresent()) {
+            backwardWeightsAccumulateStampedByConnection[connectionNumber] =
+                std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(parameterTargets,
+                                                                                             upstreamInputNamesByOutput,
+                                                                                             /*accumulate_grad_outputs=*/true,
+                                                                                             backwardAdditionalInputs,
+                                                                                             {},
+                                                                                             backwardOutputs));
+        } else {
+            backwardWeightsAccumulateStampedByConnection[connectionNumber] = nullptr;
+        }
     } else {
-        backwardErrorStampedByConnection[connectionNumber] = nullptr;
-    }
+        // Legacy behavior:
+        //   - backwardErrorStampedByConnection handles only error out
+        //   - clear/accumulate weight-grad stamps are separate
+        if (errorOutput.isPresent()) {
+            if (errorInput.isPresent()) {
+                PreparedDynamicExpression::TensorMap backwardErrorPreallocatedOutputs;
+                backwardErrorPreallocatedOutputs[errorOutName] = errorOutput.get();
 
-    auto& backwardOutputs = backwardOutputsByConnection[connectionNumber];
-    backwardOutputs.clear();
-
-    if (!parameterTargets.empty() && errorInput.isPresent()) {
-        backwardWeightsClearStampedByConnection[connectionNumber] =
-            std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(parameterTargets,
-                                                                                         upstreamInputNamesByOutput,
-                                                                                         /*accumulate_grad_outputs=*/false,
-                                                                                         backwardAdditionalInputs));
-
-        for (const std::string& parameterTarget : parameterTargets) {
-            const std::string gradName = parameterTarget + "_grad";
-            backwardOutputs[gradName] = backwardWeightsClearStampedByConnection[connectionNumber]->output(gradName);
+                backwardErrorStampedByConnection[connectionNumber] =
+                    std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(errorTargets,
+                                                                                                 upstreamInputNamesByOutput,
+                                                                                                 /*accumulate_grad_outputs=*/false,
+                                                                                                 backwardAdditionalInputs,
+                                                                                                 {},
+                                                                                                 backwardErrorPreallocatedOutputs));
+            } else {
+                errorOutput.get().memsetAsync(streams[connectionNumber], 0);
+                backwardErrorStampedByConnection[connectionNumber] = nullptr;
+            }
+        } else {
+            backwardErrorStampedByConnection[connectionNumber] = nullptr;
         }
 
-        backwardWeightsAccumulateStampedByConnection[connectionNumber] =
-            std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(parameterTargets,
-                                                                                         upstreamInputNamesByOutput,
-                                                                                         /*accumulate_grad_outputs=*/true,
-                                                                                         backwardAdditionalInputs,
-                                                                                         {},
-                                                                                         backwardOutputs));
-    } else {
-        backwardWeightsClearStampedByConnection[connectionNumber] = nullptr;
-        backwardWeightsAccumulateStampedByConnection[connectionNumber] = nullptr;
+        if (!parameterTargets.empty() && errorInput.isPresent()) {
+            backwardWeightsClearStampedByConnection[connectionNumber] =
+                std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(parameterTargets,
+                                                                                             upstreamInputNamesByOutput,
+                                                                                             /*accumulate_grad_outputs=*/false,
+                                                                                             backwardAdditionalInputs));
+
+            for (const std::string& parameterTarget : parameterTargets) {
+                const std::string gradName = parameterTarget + "_grad";
+                backwardOutputs[gradName] = backwardWeightsClearStampedByConnection[connectionNumber]->output(gradName);
+            }
+
+            backwardWeightsAccumulateStampedByConnection[connectionNumber] =
+                std::make_shared<StampedExecutionPlan>(preparedBackwardSource->stampBackward(parameterTargets,
+                                                                                             upstreamInputNamesByOutput,
+                                                                                             /*accumulate_grad_outputs=*/true,
+                                                                                             backwardAdditionalInputs,
+                                                                                             {},
+                                                                                             backwardOutputs));
+        } else {
+            backwardWeightsClearStampedByConnection[connectionNumber] = nullptr;
+            backwardWeightsAccumulateStampedByConnection[connectionNumber] = nullptr;
+        }
     }
 
     return Optional<Tensor>::empty();
@@ -320,16 +382,22 @@ void CustomLayer::computeFeatureOut(uint32_t connectionNumber) {
 
 // Error in is up-to-date by the end of the data stream.
 Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
+    assert(connectionNumber < errorInputs.size());
+    assert(connectionNumber < errorOutputs.size());
     if (errorInputs[connectionNumber].isEmpty()) {
         // No incoming gradient, potentially a StopGradientLayer was put there.
-        // In this case the errorOutput was set to 0 during stamp time and not updated since.
-        return Optional<Event>::empty();
-    }
-    if (errorOutputs[connectionNumber].isEmpty()) {
-        // No outgoing gradient, potentially backprop pruning or StopGradient.
+        // In that case there is no backward work to run for this connection.
         return Optional<Event>::empty();
     }
 
+    if (errorOutputs[connectionNumber].isEmpty() && !fuseBackwardEoutWgrad) {
+        // If the main backward stamp is not fused with clear-first weight grad computation,
+        // and there is no outgoing error tensor, then there is nothing to run here.
+        return Optional<Event>::empty();
+    }
+
+    // If for some reason we do not have the stamp for this backward connection,
+    // then the contract is that it was decided that this backward connection is a no-op.
     if (connectionNumber >= backwardErrorStampedByConnection.size()) {
         return Optional<Event>::empty();
     }
@@ -337,16 +405,28 @@ Optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
         return Optional<Event>::empty();
     }
 
+    // Run the main backward stamp, which computes error-out gradients and,
+    // when fused, also performs the clear-first weight-gradient computation.
     backwardErrorStampedByConnection[connectionNumber]->run();
+    assert(connectionNumber < streams.size());
     return streams[connectionNumber].putEvent();
 }
 
 // Error in is up-to-date by the end of the data stream.
 // Gradient update stream must wait for that.
-void CustomLayer::accumulateGradient(uint32_t connectionNumber, bool clearGradientFirst) {
+void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
+    if (clearGradientFirst && fuseBackwardEoutWgrad) {
+        // The initial non-accumulating weight-grad write is now done by the
+        // main backward stamp in computeErrorOut().
+        if (gradientUpdateStream.isPresent() && connectionNumber < streams.size())
+            gradientUpdateStream.get().waitEvent(streams[connectionNumber].putEvent());
+        return;
+    }
+
+    assert(connectionNumber < errorInputs.size());
     if (errorInputs[connectionNumber].isEmpty()) {
         // No incoming gradient, potentially a StopGradientLayer was put there.
-        // In this case the errorOutput was set to 0 during stamp time and not updated since.
+        // So there is no gradient work to be done for this connection.
         return;
     }
 
@@ -373,6 +453,7 @@ void CustomLayer::accumulateGradient(uint32_t connectionNumber, bool clearGradie
     }
 
     assert(gradientUpdateStream.isPresent());
+    assert(connectionNumber < streams.size());
     gradientUpdateStream.get().waitEvent(streams[connectionNumber].putEvent());
     if (clearGradientFirst)
         backwardWeightsClearStampedByConnection[connectionNumber]->run();
