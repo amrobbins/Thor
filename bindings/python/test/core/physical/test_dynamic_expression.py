@@ -3,7 +3,7 @@ import pytest
 
 import thor
 from thor.physical import DeviceType, Placement
-from thor.physical import DynamicExpression
+from thor.physical import DynamicExpression, DynamicExpressionBuild
 from thor.physical import Expression as ex
 from thor.physical import PhysicalTensor, Stream
 
@@ -104,7 +104,10 @@ def test_dynamic_expression_single_output_numerical(dtype: thor.DataType):
         y = ex.input("y")
         expr = ex.sqrt((x + 1.5) * (y + 2.0))
         fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
-        return fused_equation.stamp(inputs, stream)
+        return DynamicExpressionBuild(
+            equation=fused_equation,
+            stamp_inputs=inputs,
+        )
 
     dyn = DynamicExpression(builder)
 
@@ -152,16 +155,22 @@ def test_dynamic_expression_runtime_scalar_override_numerical(dtype: thor.DataTy
         scale = ex.runtime_scalar("scale")
         expr = x + scale * y
         fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
-        return fused_equation.stamp(inputs, stream)
+        return DynamicExpressionBuild(
+            equation=fused_equation,
+            stamp_inputs=inputs,
+        )
 
     dyn = DynamicExpression(builder)
-    stamped = dyn.stamp({
-        "x": x_gpu,
-        "y": y_gpu
-    }, stream)
+    stamped = dyn.stamp(
+        {
+            "x": x_gpu,
+            "y": y_gpu,
+        },
+        stream,
+    )
 
     stamped.run({
-        "scale": 0.25
+        "scale": 0.25,
     })
     out_np = _copy_gpu_to_cpu_numpy(stamped.output(), dtype, stream)
 
@@ -174,7 +183,7 @@ def test_dynamic_expression_runtime_scalar_override_numerical(dtype: thor.DataTy
     np.testing.assert_allclose(out_np, expected, rtol=rtol, atol=atol)
 
     stamped.run({
-        "scale": 2.0
+        "scale": 2.0,
     })
     out_np = _copy_gpu_to_cpu_numpy(stamped.output(), dtype, stream)
 
@@ -211,13 +220,19 @@ def test_dynamic_expression_multi_output_numerical(dtype: thor.DataType):
             "prod": x * y,
         })
         fused_equation = ex.compile(outs, device_num=gpu_num, use_fast_math=False)
-        return fused_equation.stamp(inputs, stream)
+        return DynamicExpressionBuild(
+            equation=fused_equation,
+            stamp_inputs=inputs,
+        )
 
     dyn = DynamicExpression(builder)
-    stamped = dyn.stamp({
-        "x": x_gpu,
-        "y": y_gpu
-    }, stream)
+    stamped = dyn.stamp(
+        {
+            "x": x_gpu,
+            "y": y_gpu,
+        },
+        stream,
+    )
     stamped.run()
 
     compute_np_dtype = _numpy_compute_dtype(dtype)
@@ -234,7 +249,6 @@ def test_dynamic_expression_multi_output_numerical(dtype: thor.DataType):
     np.testing.assert_allclose(sum_np, expected_sum, rtol=rtol, atol=atol)
     np.testing.assert_allclose(prod_np, expected_prod, rtol=rtol, atol=atol)
 
-    print(stamped.output_names())
     assert set(stamped.output_names()) == {"sum", "prod"}
 
 
@@ -253,7 +267,7 @@ def test_dynamic_expression_builder_receives_validated_inputs(dtype: thor.DataTy
     seen = {
         "called": False,
         "keys": None,
-        "gpu_num": None
+        "gpu_num": None,
     }
 
     def builder(inputs, stream):
@@ -263,13 +277,19 @@ def test_dynamic_expression_builder_receives_validated_inputs(dtype: thor.DataTy
 
         expr = ex.input("x") - ex.input("y")
         fused_equation = ex.compile(expr, device_num=gpu_num, use_fast_math=False)
-        return fused_equation.stamp(inputs, stream)
+        return DynamicExpressionBuild(
+            equation=fused_equation,
+            stamp_inputs=inputs,
+        )
 
     dyn = DynamicExpression(builder)
-    stamped = dyn.stamp({
-        "x": x_gpu,
-        "y": y_gpu
-    }, stream)
+    stamped = dyn.stamp(
+        {
+            "x": x_gpu,
+            "y": y_gpu,
+        },
+        stream,
+    )
     stamped.run()
 
     assert seen["called"] is True
