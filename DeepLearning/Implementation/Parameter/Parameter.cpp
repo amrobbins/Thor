@@ -11,14 +11,7 @@ Parameter::Parameter(string name, bool trainable, bool trainingEnabled)
     assert(!(trainable == false && trainingEnabled));
 }
 
-// Remember this is called by API layer so that will hand over the optimizer
-// 1. Create storage given featureInput 2. Compile the optimizer
-void Parameter::compile(const Tensor &featureInput,
-                        const Tensor &featureOutput,
-                        const Optional<Stream> &gradientUpdateStream,
-                        bool inferenceOnly,
-                        uint64_t explicitFanIn,
-                        uint64_t explicitFanOut) {
+void Parameter::compileStorageAndOptimizer(const Tensor& featureInput, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly) {
     assert(featureInput.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
     createStorage(featureInput, featureInput.getPlacement().getDeviceNum());
 
@@ -27,32 +20,34 @@ void Parameter::compile(const Tensor &featureInput,
         assert(gradientUpdateStream.isPresent());
         optimizer->compile(storage, gradientUpdateStream.get());
     }
+}
 
-    if (hasInitializer()) {
-        uint64_t fanIn;
-        if (explicitFanIn == 0)
-            fanIn = 1;
-        else
-            fanIn = explicitFanIn;
+void Parameter::compileInitializer(const std::vector<uint64_t>& outputDims,
+                                   const Optional<Stream>& gradientUpdateStream,
+                                   uint64_t explicitFanIn,
+                                   uint64_t explicitFanOut) {
+    if (!hasInitializer()) {
+        return;
+    }
 
-        uint64_t fanOut;
-        if (explicitFanOut == 0) {
-            uint64_t outputNumelPerExample = 1;
-            const auto outputDims = featureOutput.getDimensions();
-            for (uint32_t i = 1; i < outputDims.size(); ++i) {
-                outputNumelPerExample *= outputDims[i];
-            }
-            fanOut = max<uint64_t>(1, outputNumelPerExample / storage.get().getTotalNumElements());
-        } else {
-            fanOut = explicitFanOut;
+    const uint64_t fanIn = (explicitFanIn == 0) ? 1 : explicitFanIn;
+
+    uint64_t fanOut = explicitFanOut;
+    if (fanOut == 0) {
+        uint64_t outputNumelPerExample = 1;
+        for (uint32_t i = 1; i < outputDims.size(); ++i) {
+            outputNumelPerExample *= outputDims[i];
         }
 
-        Stream initStream = gradientUpdateStream.isPresent()
-                                ? gradientUpdateStream.get()
-                                : Stream::getMostRecentGradientUpdateStream(storage.get().getPlacement().getDeviceNum());
-
-        initializer->compile(storage, initStream, fanIn, fanOut);
+        const uint64_t paramNumel = storage.get().getTotalNumElements();
+        fanOut = (paramNumel == 0) ? 1 : std::max<uint64_t>(1, outputNumelPerExample / paramNumel);
     }
+
+    Stream initStream = gradientUpdateStream.isPresent()
+                            ? gradientUpdateStream.get()
+                            : Stream::getMostRecentGradientUpdateStream(storage.get().getPlacement().getDeviceNum());
+
+    initializer->compile(storage, initStream, fanIn, fanOut);
 }
 
 void Parameter::createStorage(std::unordered_map<std::string, Tensor> featureInput, uint32_t gpuId) {

@@ -53,6 +53,19 @@ void CustomLayer::compileImpl() {
     backwardWeightsAccumulateStampedByConnection.clear();
     backwardOutputsByConnection.clear();
 
+    Optional<Tensor> aFeatureInput = getFirstPresentTensor(featureInputs);
+    assert(aFeatureInput.isPresent());
+
+    for (const auto& parameter : parameters) {
+        if (!parameter->isTrainable())
+            continue;
+        assert(gradientUpdateStream.isPresent());
+    }
+
+    for (const auto& parameter : parameters) {
+        parameter->compileStorageAndOptimizer(aFeatureInput.get(), gradientUpdateStream, isInferenceOnly());
+    }
+
     // Forward stamps: require both input and output tensors for the connection.
     const uint32_t numForwardConnections = static_cast<uint32_t>(featureInputs.size());
     for (uint32_t connectionNumber = 0; connectionNumber < numForwardConnections; ++connectionNumber) {
@@ -123,6 +136,22 @@ Optional<Tensor> CustomLayer::stampForward(uint32_t connectionNumber) {
 
         forwardPreparedByConnection.push_back(
             std::make_shared<PreparedDynamicExpression>(layerDefinitionExpression.prepare(forwardInputsByConnection.back(), stream)));
+
+        std::unordered_set<std::string> parameterNames;
+        for (const auto& parameter : parameters) {
+            parameterNames.insert(parameter->getName());
+        }
+        const auto parameterFanOverrides = forwardPreparedByConnection.front()->getParameterFanOverrides(parameterNames);
+
+        const auto outputDims = featureOutput.get().getDescriptor().getDimensions();
+        for (const auto& parameter : parameters) {
+            auto it = parameterFanOverrides.find(parameter->getName());
+            if (it != parameterFanOverrides.end()) {
+                parameter->compileInitializer(outputDims, gradientUpdateStream, it->second.fan_in, it->second.fan_out);
+            } else {
+                parameter->compileInitializer(outputDims, gradientUpdateStream);
+            }
+        }
 
         std::unordered_map<std::string, Tensor> forwardPreallocatedOutputs;
         forwardPreallocatedOutputs[featureOutName] = featureOutput.get();

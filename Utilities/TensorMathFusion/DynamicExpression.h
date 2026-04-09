@@ -148,6 +148,12 @@ class PreparedDynamicExpression {
 
     [[nodiscard]] const ShapeMap& requestedOutputShapes() const { return build_.requested_output_shapes; }
 
+    [[nodiscard]] FusedEquation::ParameterFanOverrideMap getParameterFanOverrides(
+        const std::unordered_set<std::string>& parameter_names) const {
+        return build_.equation->getParameterFanOverrides(
+            build_.stamp_inputs, parameter_names, build_.tensor_scalar_inputs, build_.requested_output_shapes);
+    }
+
    private:
     static void validateTensorMap(const TensorMap& tensors, const Stream& stream, bool require_non_empty, const std::string& what) {
         if (require_non_empty && tensors.empty()) {

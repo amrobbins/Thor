@@ -15,19 +15,20 @@ class Parameter {
 
     // Remember this is called by API layer so that will hand over the optimizer
     // 1. Create storage given featureInput 2. Compile the optimizer
-    virtual void compile(const Tensor &featureInput,
-                         const Tensor &featureOutput,
-                         const Optional<Stream> &gradientUpdateStream,
-                         bool inferenceOnly,
-                         uint64_t explicitFanIn = 0,
-                         uint64_t explicitFanOut = 0);
+    virtual void compileStorageAndOptimizer(const Tensor& featureInput, const Optional<Stream>& gradientUpdateStream, bool inferenceOnly);
 
-    virtual void compile(std::unordered_map<std::string, Tensor> featureInput,
-                         std::unordered_map<std::string, Tensor> featureOutput,
-                         const Optional<Stream> &gradientUpdateStream,
-                         bool inferenceOnly) {
-        assert(false);
-    }
+    virtual void compileInitializer(const std::vector<uint64_t>& outputDims,
+                                    const Optional<Stream>& gradientUpdateStream,
+                                    uint64_t explicitFanIn = 0,
+                                    uint64_t explicitFanOut = 0);
+
+    //  Maybe something like this later, but two stage anyway.
+    // virtual void compile(std::unordered_map<std::string, Tensor> featureInput,
+    //                      std::unordered_map<std::string, Tensor> featureOutput,
+    //                      const Optional<Stream>& gradientUpdateStream,
+    //                      bool inferenceOnly) {
+    //     assert(false);
+    // }
 
     virtual void createStorage(Tensor featureInput, uint32_t gpuId) = 0;
     virtual void createStorage(std::unordered_map<std::string, Tensor> featureInput, uint32_t gpuId);

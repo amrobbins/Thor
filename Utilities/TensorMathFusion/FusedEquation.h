@@ -20,6 +20,12 @@ struct CompiledStageOutput {
     uint32_t value_id = UINT32_MAX;
 };
 
+struct ParameterFanOverride {
+    std::string input_name;
+    uint64_t fan_in = 0;
+    uint64_t fan_out = 0;
+};
+
 struct CompiledExecutionStage {
     enum class Kind { FusedKernel, Reduction, ArgMinMax, ReduceMinMaxBackward };
     static std::string kindToString(const Kind kind) {
@@ -48,29 +54,49 @@ struct CompiledExecutionStage {
     const std::vector<uint32_t> input_value_ids;
     const std::vector<CompiledStageOutput> outputs;
 
+    const std::vector<ParameterFanOverride> parameter_fan_overrides;
+
     CompiledExecutionStage(const PhysicalExpression& expr,
                            const std::shared_ptr<CompiledEquation>& flat,
                            std::vector<uint32_t> input_value_ids,
-                           std::vector<CompiledStageOutput> outputs)
-        : kind(Kind::FusedKernel), expr(expr), flat(flat), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::FusedKernel),
+          expr(expr),
+          flat(flat),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 
     CompiledExecutionStage(const std::shared_ptr<CompiledReduction>& reduction,
                            std::vector<uint32_t> input_value_ids,
-                           std::vector<CompiledStageOutput> outputs)
-        : kind(Kind::Reduction), reduction(reduction), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::Reduction),
+          reduction(reduction),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 
     CompiledExecutionStage(const std::shared_ptr<CompiledArgMinMax>& arg_minmax,
                            std::vector<uint32_t> input_value_ids,
-                           std::vector<CompiledStageOutput> outputs)
-        : kind(Kind::ArgMinMax), arg_minmax(arg_minmax), input_value_ids(std::move(input_value_ids)), outputs(std::move(outputs)) {}
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::ArgMinMax),
+          arg_minmax(arg_minmax),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 
     CompiledExecutionStage(const std::shared_ptr<CompiledReduceMinMaxBackward>& reduce_minmax_backward,
                            std::vector<uint32_t> input_value_ids,
-                           std::vector<CompiledStageOutput> outputs)
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::ReduceMinMaxBackward),
           reduce_minmax_backward(reduce_minmax_backward),
           input_value_ids(std::move(input_value_ids)),
-          outputs(std::move(outputs)) {}
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 };
 
 struct CompiledOutputs {
@@ -193,6 +219,14 @@ class FusedEquation {
     std::unordered_map<std::string, std::vector<uint64_t>> getOutputShapes(const std::unordered_map<std::string, Tensor>& inputs) const;
 
     static bool resolveLayout(std::vector<Tensor>& inputs, std::vector<uint64_t>& outputDimensions);
+
+    using ParameterFanOverrideMap = std::unordered_map<std::string, ParameterFanOverride>;
+
+    [[nodiscard]] ParameterFanOverrideMap getParameterFanOverrides(
+        const std::unordered_map<std::string, Tensor>& named_inputs,
+        const std::unordered_set<std::string>& parameter_names,
+        const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
+        const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes = {}) const;
 
    private:
     explicit FusedEquation(PhysicalOutputs outputs_template,
