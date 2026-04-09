@@ -58,9 +58,9 @@ class TrainableLayer : public Parameterizable {
                 break;
             }
         }
-        for (const auto &parameter : parameters) {
-            parameter->compile(aFeatureInput, aFeatureOutput, gradientUpdateStream, isInferenceOnly(), getFanIn(), getFanOut());
-        }
+        // for (const auto &parameter : parameters) {
+        //     parameter->compile(aFeatureInput, aFeatureOutput, gradientUpdateStream, isInferenceOnly(), getFanIn(), getFanOut());
+        // }
 
         numBackwardConnections = 0;
         for (const auto &errorInput : errorInputs) {

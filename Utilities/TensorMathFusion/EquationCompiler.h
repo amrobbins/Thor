@@ -29,6 +29,7 @@ struct PhysicalExecutionStage {
     PhysicalExpression expr;
     std::vector<uint32_t> input_value_ids;
     std::vector<CompiledStageOutput> outputs;
+    std::vector<ParameterFanOverride> parameter_fan_overrides;
 };
 
 class EquationCompiler {

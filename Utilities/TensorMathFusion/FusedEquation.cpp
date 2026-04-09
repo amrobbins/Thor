@@ -2720,4 +2720,37 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         stream.waitEvent(helper_stream.putEvent());
     }
 }
+
+FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
+    const std::unordered_map<std::string, Tensor>& named_inputs,
+    const std::unordered_set<std::string>& parameter_names,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) const {
+    ParameterFanOverrideMap result;
+
+    const auto root_values = bindRootInputsForCompilation(named_inputs, {}, tensor_scalar_inputs, requested_output_shapes);
+    const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
+
+    for (const CompiledExecutionStage& stage : compiled_outputs->stages) {
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            continue;
+        }
+
+        for (const ParameterFanOverride& hint : stage.parameter_fan_overrides) {
+            if (!parameter_names.contains(hint.input_name)) {
+                continue;
+            }
+
+            auto [it, inserted] = result.emplace(hint.input_name, hint);
+            if (!inserted) {
+                it->second.input_name = hint.input_name;
+                it->second.fan_in = std::max(it->second.fan_in, hint.fan_in);
+                it->second.fan_out = std::max(it->second.fan_out, hint.fan_out);
+            }
+        }
+    }
+
+    return result;
+}
+
 }  // namespace ThorImplementation

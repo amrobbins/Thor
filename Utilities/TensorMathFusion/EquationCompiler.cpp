@@ -1641,20 +1641,20 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
         switch (stage.kind) {
             case PhysicalExecutionStage::Kind::FusedKernel:
                 flat = compileFusedStage(stage, sig);
-                compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs);
+                compiled->stages.emplace_back(stage.expr, flat, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             case PhysicalExecutionStage::Kind::Reduction:
                 reduction = compileReduction(stage.expr);
-                compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs);
+                compiled->stages.emplace_back(reduction, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             case PhysicalExecutionStage::Kind::ArgMinMax: {
                 std::shared_ptr<CompiledArgMinMax> arg_minmax = compileArgMinMax(stage.expr);
-                compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs);
+                compiled->stages.emplace_back(arg_minmax, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::ReduceMinMaxBackward: {
                 std::shared_ptr<CompiledReduceMinMaxBackward> reduce_minmax_backward = compileReduceMinMaxBackward(stage.expr);
-                compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs);
+                compiled->stages.emplace_back(reduce_minmax_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             default:
